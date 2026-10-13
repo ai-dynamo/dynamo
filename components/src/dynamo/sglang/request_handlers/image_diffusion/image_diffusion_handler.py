@@ -18,11 +18,15 @@ from dynamo._core import Context
 from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.protocols.image_protocol import ImageNvExt
+from dynamo.common.protocols.image_protocol import (
+    ImageData,
+    ImageNvExt,
+    NvCreateImageRequest,
+    NvImagesResponse,
+)
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
@@ -31,12 +35,7 @@ logger = logging.getLogger(__name__)
 MAX_NUM_INFERENCE_STEPS = 50
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 7.5
-# Bounds for the OpenAI `n` request field, matching the TRT-LLM image
-# handler (num_images_per_prompt in [1, 10]) and the OpenAI API limit. The
-# engine generates one image per call, so `n` is served as sequential
-# generations; the bound keeps a single request from monopolizing the
-# worker.
-MAX_IMAGES_PER_REQUEST = 10
+DEFAULT_RESPONSE_FORMAT = "url"
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -113,7 +112,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # events on the response stream (Annotated::from_err); the frontend
         # folds those into a non-200 HTTP response. Expected validation
         # failures (InvalidArgument) become 400s without traceback noise.
-        req = CreateImageRequest(**request)
+        req = NvCreateImageRequest(**request)
 
         nvext = req.nvext or ImageNvExt()
 
@@ -129,11 +128,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         width, height = self._parse_size(req.size)
 
-        num_images = req.n
-        if not 1 <= num_images <= MAX_IMAGES_PER_REQUEST:
-            raise InvalidArgument(
-                f"n must be in [1, {MAX_IMAGES_PER_REQUEST}], got {num_images}"
-            )
+        # The shared model bounds `n` to 1..10 as the frontend does, and
+        # carries no default: an absent `n` means one image.
+        num_images = 1 if req.n is None else req.n
 
         # The engine produces one image per call, so serve OpenAI `n`
         # semantics as n sequential generations. With an explicit seed use
@@ -164,12 +161,13 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         context_id = context.id()
         assert context_id is not None
         user_id = req.user or context_id
+        response_format = req.response_format or DEFAULT_RESPONSE_FORMAT
         image_data = []
         uploaded_paths: list[str] = []
         try:
             for img in images:
                 # uploading or encoding the image
-                if req.response_format == "url":
+                if response_format == "url":
                     url, storage_path = await self._upload_to_fs(
                         img, user_id, context_id
                     )
@@ -184,7 +182,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             await self._cleanup_uploads(uploaded_paths)
             raise
 
-        response = ImagesResponse(created=int(time.time()), data=image_data)
+        response = NvImagesResponse(created=int(time.time()), data=image_data)
 
         yield response.model_dump()
 

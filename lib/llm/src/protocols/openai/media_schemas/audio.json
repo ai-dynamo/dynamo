@@ -1,0 +1,263 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Dynamo media protocol",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "AudioData": {
+        "type": "object",
+        "description": "Audio data in response",
+        "required": [
+          "output_format"
+        ],
+        "properties": {
+          "output_format": {
+            "type": "string",
+            "description": "Actual codec used for this audio: \"wav\", \"mp3\", \"pcm\", \"flac\", \"aac\", \"opus\""
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL of the generated audio (if data_source is \"url\")"
+          },
+          "b64_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64-encoded audio data (if data_source is \"b64_json\")"
+          }
+        }
+      },
+      "AudioNvExt": {
+        "type": "object",
+        "description": "NVIDIA extensions to the Audio Speech API",
+        "properties": {
+          "annotations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Annotations for SSE stream events"
+          },
+          "frontend_accepts_audio_chunks": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Internal frontend-to-worker compatibility signal.\n\nNew frontends set this before forwarding `/v1/audio/speech`. When absent\nor false, workers must return one aggregated response so older frontends\ndo not decode only the first chunk during rolling upgrades.\n\nTODO(v1.7): Remove after v1.4 leaves the N-2 compatibility window."
+          },
+          "cfg_scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Classifier-free guidance scale (Audex only, hence an extension rather\nthan a top-level OpenAI field). Unset or 1.0 decodes unguided; higher\nvalues follow the prompt more closely. Declared here because serde drops\nunknown `nvext` keys, so without the field the client's value never\nreaches the worker and guidance is silently never applied."
+          }
+        }
+      },
+      "MediaDelivery": {
+        "type": "string",
+        "description": "Delivery mode of generated media: a URL to the file, or the bytes as\nbase64 text.\n\nThe set has two values. A request with an unknown value fails to parse.",
+        "enum": [
+          "url",
+          "b64_json"
+        ]
+      },
+      "NvAudioSpeechResponse": {
+        "type": "object",
+        "description": "Response structure for audio speech generation",
+        "required": [
+          "id",
+          "model",
+          "created"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the response"
+          },
+          "object": {
+            "type": "string",
+            "description": "Object type (always \"audio.speech\")",
+            "default": "audio.speech"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model used for generation"
+          },
+          "status": {
+            "type": "string",
+            "description": "Status of the generation (\"completed\", \"failed\", etc.)",
+            "default": "completed"
+          },
+          "progress": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Progress percentage (0-100)",
+            "default": 100
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp of creation"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AudioData"
+            },
+            "description": "Generated audio data",
+            "default": []
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Error message if generation failed"
+          },
+          "inference_time_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Inference time in seconds"
+          }
+        }
+      },
+      "NvCreateAudioSpeechRequest": {
+        "type": "object",
+        "description": "Request for audio speech generation (/v1/audio/speech endpoint).\n\nFollows vLLM-Omni's OpenAICreateSpeechRequest format with TTS-specific\nparameters as top-level fields.",
+        "required": [
+          "input"
+        ],
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "The text to synthesize into speech (required)"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The TTS model to use"
+          },
+          "voice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Voice/speaker name (e.g., \"vivian\", \"ryan\", \"aiden\")"
+          },
+          "data_source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MediaDelivery",
+                "description": "Delivery mode of the generated audio. Absent means [`MediaDelivery::B64Json`].\nImage and video generation use `response_format` for this choice. The\nOpenAI audio API uses `response_format` for the codec. Audio uses a\nseparate field for the delivery mode."
+              }
+            ]
+          },
+          "response_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Output codec: \"wav\", \"mp3\", \"pcm\", \"flac\", \"aac\", \"opus\" (default: \"wav\")"
+          },
+          "speed": {
+            "type": "number",
+            "format": "double",
+            "description": "Speed factor, 0.25 to 4.0. The frontend fills in 1.0 when the client\nsends none and rejects a value outside the range, so a worker always\nreceives a valid speed.",
+            "default": 1.0,
+            "maximum": 4,
+            "minimum": 0.25
+          },
+          "task_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "TTS task type: \"CustomVoice\", \"VoiceDesign\", or \"Base\""
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Language: \"Auto\", \"Chinese\", \"English\", \"Japanese\", etc."
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Voice style/emotion instructions (for VoiceDesign)"
+          },
+          "ref_audio": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reference audio URL or base64 (for voice cloning with Base task)"
+          },
+          "ref_text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reference transcript (for voice cloning with Base task)"
+          },
+          "max_new_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum tokens to generate (default: 2048)"
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional user identifier"
+          },
+          "nvext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioNvExt",
+                "description": "NVIDIA extensions (reserved for future use)"
+              }
+            ]
+          },
+          "extra_args": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Worker-boundary passthrough. The frontend nests unknown top-level request fields (an OpenAI client's extra_body) under the \"media_passthrough\" key.",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  }
+}

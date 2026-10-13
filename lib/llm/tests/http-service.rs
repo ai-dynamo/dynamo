@@ -3366,6 +3366,7 @@ async fn test_pooling_family_validation_errors_are_metered() {
 // =============================================================================
 
 use dynamo_llm::protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+use dynamo_llm::protocols::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
 use dynamo_llm::types::openai::images::OpenAIImagesStreamingEngine;
 
 /// Images engine whose stream carries a single error annotation, emulating a
@@ -3433,6 +3434,128 @@ async fn post_images_generation(port: u16) -> reqwest::Response {
         .send()
         .await
         .unwrap()
+}
+
+/// Images engine that must not receive a request. The frontend rejects the
+/// request before dispatch. A call to `generate` is a test failure.
+struct UncalledImagesEngine {}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesResponse>>, Error>
+    for UncalledImagesEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateImageRequest>,
+    ) -> Result<ManyOut<Annotated<NvImagesResponse>>, Error> {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+/// The frontend owns the `n` range rule (1 to 10). A value outside the range
+/// returns a 400 that states the rule. The engine does not see the request.
+#[tokio::test]
+async fn test_images_n_out_of_range_returns_400() {
+    let (port, token, task) = start_images_service(Arc::new(UncalledImagesEngine {})).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{}/v1/images/generations", port))
+        .json(&serde_json::json!({
+            "model": "image-model",
+            "prompt": "a red apple",
+            "n": 0,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an n outside 1-10 must return HTTP 400; got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("n must be between 1 and 10"),
+        "expected the validation message to state the rule; got: {text}"
+    );
+
+    token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Videos engine that must not receive a request. The frontend rejects the
+/// request before dispatch. A call to `generate` is a test failure.
+struct UncalledVideosEngine {}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosResponse>>, Error>
+    for UncalledVideosEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateVideoRequest>,
+    ) -> Result<ManyOut<Annotated<NvVideosResponse>>, Error> {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+/// The frontend owns the `seconds` and `nvext.fps` lower bounds. A value
+/// below 1 returns a 400 that states the rule. The engine does not see the
+/// request.
+#[tokio::test]
+async fn test_videos_non_positive_counts_return_400() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Videos, true)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("video-model");
+    service
+        .state_clone()
+        .manager()
+        .add_videos_model(
+            "video-model",
+            card.mdcsum(),
+            Arc::new(UncalledVideosEngine {}),
+        )
+        .unwrap();
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+
+    for (body, rule) in [
+        (
+            serde_json::json!({"model": "video-model", "prompt": "cat", "seconds": 0}),
+            "seconds must be at least 1",
+        ),
+        (
+            serde_json::json!({"model": "video-model", "prompt": "cat", "nvext": {"fps": 0}}),
+            "fps must be at least 1",
+        ),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://localhost:{}/v1/videos", port))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{body} must return HTTP 400; got {status}, body: {text}"
+        );
+        assert!(
+            text.contains(rule),
+            "expected the validation message to state the rule; got: {text}"
+        );
+    }
+
+    token.cancel();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
