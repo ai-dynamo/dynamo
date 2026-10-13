@@ -344,6 +344,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
         };
 
         Ok(NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: request.model_name,

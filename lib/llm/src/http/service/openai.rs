@@ -8336,6 +8336,7 @@ mod tests {
     fn test_bad_base_request_for_completion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
@@ -8362,6 +8363,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
@@ -8387,6 +8389,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
@@ -8412,6 +8415,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
@@ -8437,6 +8441,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
@@ -8464,6 +8469,7 @@ mod tests {
 
         // Logprobs: Should be a positive integer between 0 and 5
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
@@ -8494,6 +8500,7 @@ mod tests {
 
         // Test metadata field with nested object
         let request = NvCreateCompletionRequest {
+            response_format: None,
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),

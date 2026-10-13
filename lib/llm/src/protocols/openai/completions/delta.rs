@@ -335,6 +335,7 @@ mod tests {
             .expect("completion request");
 
         NvCreateCompletionRequest {
+            response_format: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -397,6 +398,7 @@ mod tests {
             .expect("completion request");
 
         NvCreateCompletionRequest {
+            response_format: None,
             inner,
             common: Default::default(),
             nvext: Some(

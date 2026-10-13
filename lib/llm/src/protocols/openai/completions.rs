@@ -14,7 +14,8 @@ use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
+    structured_outputs::{StructuredOutputs, invalid},
     validate,
 };
 use crate::protocols::common::extensions::{
@@ -27,6 +28,119 @@ mod delta;
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
+/// Completion-specific response constraint, including vLLM's structural tags.
+///
+/// The HTTP frontend owns shape/selection validation and override precedence;
+/// the worker owns grammar compilation and constrained decoding. This is not
+/// the chat response_format type, whose existing contract is unchanged.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompletionResponseFormat {
+    Text {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        json_schema: Option<CompletionJsonSchema>,
+    },
+    JsonObject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        json_schema: Option<CompletionJsonSchema>,
+    },
+    JsonSchema {
+        json_schema: CompletionJsonSchema,
+    },
+    StructuralTag {
+        #[serde(flatten)]
+        specification: CompletionStructuralTag,
+    },
+}
+
+/// JSON-schema metadata accepted on completions. Name is required; a missing or
+/// null schema clears the matching nested JSON constraint before validation.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+pub struct CompletionJsonSchema {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub schema: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub strict: Option<bool>,
+}
+
+/// Modern structural-tag grammar or the legacy trigger/structure representation.
+/// Both forms are preserved for the backend compiler, not interpreted as JSON
+/// schemas by the frontend. Modern format may be any JSON value, but is required.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum CompletionStructuralTag {
+    Modern {
+        #[serde(deserialize_with = "serde_json::Value::deserialize")]
+        format: serde_json::Value,
+        /// Preserve backend grammar members, including overlapping legacy fields.
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
+    Legacy {
+        structures: Vec<CompletionLegacyTag>,
+        triggers: Vec<String>,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl utoipa::PartialSchema for CompletionStructuralTag {
+    /// Describe overlapping input forms with anyOf. Both representations can be
+    /// present and reach the backend; the derive's oneOf rejects that valid overlap.
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        use utoipa::openapi::schema::{AnyOfBuilder, ArrayBuilder, ObjectBuilder};
+        AnyOfBuilder::new()
+            .item(
+                ObjectBuilder::new()
+                    .property(
+                        "format",
+                        <serde_json::Value as utoipa::PartialSchema>::schema(),
+                    )
+                    .required("format"),
+            )
+            .item(
+                ObjectBuilder::new()
+                    .property(
+                        "structures",
+                        ArrayBuilder::new().items(utoipa::openapi::Ref::from_schema_name(
+                            CompletionLegacyTag::name(),
+                        )),
+                    )
+                    .property("triggers", <Vec<String> as utoipa::PartialSchema>::schema())
+                    .required("structures")
+                    .required("triggers"),
+            )
+            .into()
+    }
+}
+
+impl ToSchema for CompletionStructuralTag {
+    /// Register the legacy element referenced by the hand-written union schema.
+    fn schemas(schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::Schema>)>) {
+        schemas.push((
+            CompletionLegacyTag::name().into_owned(),
+            <CompletionLegacyTag as utoipa::PartialSchema>::schema(),
+        ));
+        CompletionLegacyTag::schemas(schemas);
+    }
+}
+
+/// A legacy structural tag constrains content between begin/end delimiters once
+/// its trigger is emitted; accepting the tag does not force the model to emit it.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+pub struct CompletionLegacyTag {
+    pub begin: String,
+    #[serde(default)]
+    pub schema: Option<serde_json::Map<String, serde_json::Value>>,
+    pub end: String,
+    /// Backend grammar extensions must survive the HTTP-to-worker boundary.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
@@ -34,6 +148,12 @@ pub struct NvCreateCompletionRequest {
 
     #[serde(flatten)]
     pub common: CommonExt,
+
+    /// Replace the matching structured_outputs constraint. Null/text leave it
+    /// unchanged; a different active constraint conflicts. Legacy guided_* fields
+    /// cannot be combined with a non-text format. Grammar validity is backend-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<CompletionResponseFormat>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
@@ -236,6 +356,49 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
 impl CommonExtProvider for NvCreateCompletionRequest {
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.common)
+    }
+
+    /// Apply completion format precedence using the shared constraint validator.
+    ///
+    /// Null/text preserve legacy behavior. Other formats replace only their own
+    /// nested member, preserving modifiers and rejecting competing constraints.
+    /// Legacy guided_* mixtures remain unsupported. See CommonExtProvider for
+    /// return/error semantics; this method does not compile backend grammars.
+    fn resolve_guided_decoding(&self) -> anyhow::Result<Option<common::GuidedDecodingOptions>> {
+        let Some(format) = &self.response_format else {
+            return extract_guided_decoding_options(self);
+        };
+        if matches!(format, CompletionResponseFormat::Text { .. }) {
+            return extract_guided_decoding_options(self);
+        }
+        if self.common.guided_json.is_some()
+            || self.common.guided_regex.is_some()
+            || self.common.guided_choice.is_some()
+            || self.common.guided_grammar.is_some()
+            || self.common.guided_decoding_backend.is_some()
+            || self.common.guided_whitespace_pattern.is_some()
+        {
+            return Err(invalid(
+                "completion response_format cannot be combined with legacy guided_* fields",
+            ));
+        }
+        let mut effective = if let Some(nested) = &self.common.structured_outputs {
+            nested.validate_selection()?;
+            nested.clone()
+        } else {
+            StructuredOutputs::default()
+        };
+        match format {
+            CompletionResponseFormat::Text { .. } => unreachable!("text handled above"),
+            CompletionResponseFormat::JsonObject { .. } => effective.json_object = Some(true),
+            CompletionResponseFormat::JsonSchema { json_schema } => {
+                effective.json = json_schema.schema.clone().map(serde_json::Value::Object);
+            }
+            CompletionResponseFormat::StructuralTag { .. } => {
+                effective.structural_tag = Some(serde_json::to_string(format)?);
+            }
+        }
+        effective.into_guided().map(Some)
     }
 
     /// Guided Decoding Options
@@ -606,6 +769,135 @@ mod tests {
     use crate::protocols::common::OutputOptionsProvider;
     use base64::Engine;
     use serde_json::json;
+
+    /// Parse and validate a completion fragment, then return exactly the worker
+    /// constraint produced by sampling extraction. Panics on unexpected rejection.
+    fn completion_constraint(fields: serde_json::Value) -> Option<serde_json::Value> {
+        let mut value = json!({"model": "test", "prompt": "hello"});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let request: NvCreateCompletionRequest = serde_json::from_value(value).unwrap();
+        ValidateRequest::validate(&request).unwrap();
+        request
+            .extract_sampling_options()
+            .unwrap()
+            .guided_decoding
+            .map(|options| serde_json::to_value(options).unwrap())
+    }
+
+    /// Completion formats must reach worker sampling, not merely leave the
+    /// unsupported-field map. Both structural-tag representations survive intact.
+    #[test]
+    fn completion_response_format_delivers_each_constraint() {
+        for (format, member, expected) in [
+            (
+                json!({"type":"json_schema", "json_schema":{"name":"answer", "schema":{"const":"violet"}}}),
+                "json",
+                json!({"const":"violet"}),
+            ),
+            (
+                json!({"type":"json_object"}),
+                "json",
+                json!({"type":"object"}),
+            ),
+            (
+                json!({"type":"structural_tag", "format":{"type":"const_string", "value":"violet"}}),
+                "structural_tag",
+                serde_json::Value::Null,
+            ),
+            (
+                json!({"type":"structural_tag", "structures":[{"begin":"<a>", "schema":{"const":"violet"}, "end":"</a>"}], "triggers":["<a>"]}),
+                "structural_tag",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let constraint = completion_constraint(json!({"response_format":format})).unwrap();
+            if member == "structural_tag" {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(constraint[member].as_str().unwrap())
+                        .unwrap(),
+                    format
+                );
+            } else {
+                assert_eq!(constraint[member], expected);
+            }
+        }
+    }
+
+    /// Same-kind formats replace malformed nested content before content validation;
+    /// text/null preserve constraints, while null JSON schemas may erase only JSON.
+    #[test]
+    fn completion_response_format_overrides_only_its_matching_member() {
+        let format = json!({"type":"json_schema", "json_schema":{"name":"answer", "schema":{"const":"violet"}}});
+        let options = completion_constraint(json!({
+            "response_format":format,
+            "structured_outputs":{"json":"{", "disable_any_whitespace":true}
+        }))
+        .unwrap();
+        assert_eq!(options["json"], json!({"const":"violet"}));
+        assert_eq!(options["disable_any_whitespace"], true);
+        assert_eq!(completion_constraint(json!({"response_format":{"type":"json_object"}, "structured_outputs":{"json_object":false}})).unwrap()["json"], json!({"type":"object"}));
+        for format in [
+            serde_json::Value::Null,
+            json!({"type":"text"}),
+            json!({"type":"json_schema", "json_schema":{"name":"answer", "schema":null}}),
+        ] {
+            assert_eq!(
+                completion_constraint(
+                    json!({"response_format":format, "structured_outputs":{"regex":"violet"}})
+                )
+                .unwrap()["regex"],
+                "violet"
+            );
+        }
+        for format in [serde_json::Value::Null, json!({"type":"text"})] {
+            assert!(completion_constraint(json!({"response_format":format})).is_none());
+            assert_eq!(
+                completion_constraint(json!({"response_format":format, "guided_regex":"violet"}))
+                    .unwrap()["regex"],
+                "violet"
+            );
+        }
+    }
+
+    /// Invalid wire shapes fail parsing; missing/competing effective constraints
+    /// fail admission and sampling consistently, without invoking an engine.
+    #[test]
+    fn completion_response_format_rejects_invalid_or_conflicting_constraints() {
+        for format in [
+            json!({"type":"unknown"}),
+            json!({"type":"json_schema"}),
+            json!({"type":"json_schema", "json_schema":{"schema":{}}}),
+            json!({"type":"json_schema", "json_schema":{"name":"x", "schema":true}}),
+            json!({"type":"structural_tag"}),
+            json!({"type":"structural_tag", "structures":[], "triggers":1}),
+        ] {
+            assert!(
+                serde_json::from_value::<NvCreateCompletionRequest>(
+                    json!({"model":"test", "prompt":"hello", "response_format":format})
+                )
+                .is_err()
+            );
+        }
+        for fields in [
+            json!({"response_format":{"type":"json_schema", "json_schema":{"name":"x"}}}),
+            json!({"response_format":{"type":"json_object"}, "structured_outputs":{"regex":"violet"}}),
+            json!({"response_format":{"type":"json_object"}, "structured_outputs":{}}),
+            json!({"response_format":{"type":"json_object"}, "guided_regex":"violet"}),
+            json!({"response_format":{"type":"structural_tag", "format":{}}, "structured_outputs":{"json":{}}}),
+        ] {
+            let mut value = json!({"model":"test", "prompt":"hello"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request: NvCreateCompletionRequest = serde_json::from_value(value).unwrap();
+            assert!(ValidateRequest::validate(&request).is_err());
+            assert!(request.extract_sampling_options().is_err());
+        }
+    }
 
     #[test]
     fn test_conflicting_guided_decoding_options_fail_request_validation() {
