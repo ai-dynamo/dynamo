@@ -1944,6 +1944,41 @@ mod reclamation_tests {
     }
 
     #[test]
+    fn a_full_queue_drains_before_taking_a_split_born_leaf() {
+        let index = manual_index();
+        let mut lane0 = direct_lookup();
+        let mut lane1 = direct_lookup();
+        // Fill lane 0's queue to one short of its limit with entries the drain skips.
+        let placeholder = || CleanupEdge {
+            parent: std::sync::Weak::new(),
+            key: LocalBlockHash(0),
+            child: std::sync::Weak::new(),
+        };
+        lane0
+            .pending_unlinks
+            .extend((1..PENDING_UNLINK_LIMIT).map(|_| placeholder()));
+        // As in the split-born test above, worker 0's store leaves the suffix [9] dead from
+        // birth, and queuing it fills the queue.
+        apply(&index, &mut lane1, make_store_event(1, &[1, 9]));
+        apply(
+            &index,
+            &mut lane1,
+            make_remove_event_with_parent(1, &[1], &[9]),
+        );
+        apply(&index, &mut lane0, make_store_event(0, &[1, 2, 3]));
+        // The oldest quarter drained at once; the suffix is still queued.
+        assert_eq!(
+            lane0.pending_unlinks.len(),
+            PENDING_UNLINK_LIMIT - PENDING_UNLINK_LIMIT / 4
+        );
+        assert_eq!(dead_node_count(&index), 1);
+
+        index.drain_pending_unlinks(&mut lane0, None);
+        assert!(lane0.pending_unlinks.is_empty());
+        assert_eq!(dead_node_count(&index), 0);
+    }
+
+    #[test]
     fn the_sweep_waits_for_enough_deaths_or_its_longest_interval() {
         // One death, never drained: the lane's queue goes with its lookup.
         fn index_with_a_dead_leaf(

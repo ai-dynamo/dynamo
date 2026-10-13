@@ -98,12 +98,12 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     #[cfg(feature = "bench")]
     observation_active: AtomicBool,
 
-    /// The backend's maintenance thread, if it asked for one.
-    maintenance: Option<MaintenanceThread>,
+    /// The backend's maintenance thread, if it asked for one and it hasn't been stopped.
+    maintenance: Mutex<Option<MaintenanceThread>>,
 }
 
-/// A thread that runs the backend's maintenance off the event lanes. `Drop` stops and
-/// joins it before the lanes.
+/// A thread that runs the backend's maintenance off the event lanes. `shutdown` and
+/// `Drop` stop and join it before the lanes.
 struct MaintenanceThread {
     /// Dropping this stops the thread.
     stop: flume::Sender<()>,
@@ -372,7 +372,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             approximate_lru_enabled,
             #[cfg(feature = "bench")]
             observation_active: AtomicBool::new(false),
-            maintenance,
+            maintenance: Mutex::new(maintenance),
         }
     }
 
@@ -491,6 +491,18 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// itself.
     pub fn backend_arc(&self) -> Arc<T> {
         Arc::clone(&self.backend)
+    }
+
+    /// Stops and joins the maintenance thread, if it is still running.
+    fn stop_maintenance(&self) {
+        let maintenance = self
+            .maintenance
+            .lock()
+            .expect("maintenance mutex poisoned")
+            .take();
+        if let Some(maintenance) = maintenance {
+            maintenance.stop_and_join();
+        }
     }
 
     #[cfg(feature = "bench")]
@@ -1239,9 +1251,7 @@ impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
             prune_manager.shutdown();
         }
 
-        if let Some(maintenance) = self.maintenance.take() {
-            maintenance.stop_and_join();
-        }
+        self.stop_maintenance();
 
         // Send Terminate to all worker threads so they exit their recv loops
         // and drop their Arc<T> clones. Then join the threads to ensure the
@@ -1379,6 +1389,8 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.shutdown();
         }
+
+        self.stop_maintenance();
 
         // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {
@@ -1614,6 +1626,14 @@ mod tests {
             .await;
         indexer.flush().await;
         assert_score(&indexer, &[30], rank1, 1).await;
+    }
+
+    #[test]
+    fn shutdown_stops_the_maintenance_thread() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        assert!(indexer.maintenance.lock().unwrap().is_some());
+        indexer.shutdown();
+        assert!(indexer.maintenance.lock().unwrap().is_none());
     }
 
     #[cfg(feature = "bench")]

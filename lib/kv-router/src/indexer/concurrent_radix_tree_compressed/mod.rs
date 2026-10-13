@@ -68,6 +68,8 @@ const SWEEP_MAX_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Most queued dead leaves an idle event lane unlinks before it checks for new events.
 const IDLE_UNLINK_LIMIT: usize = 256;
+/// Dead leaves an event lane queues before it drains some without waiting to go idle.
+const PENDING_UNLINK_LIMIT: usize = 4096;
 
 /// When the background maintenance thread sweeps stale leaves.
 struct SweepSchedule {

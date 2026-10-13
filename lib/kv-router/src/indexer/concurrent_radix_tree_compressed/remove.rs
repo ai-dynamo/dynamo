@@ -79,27 +79,34 @@ impl ConcurrentRadixTreeCompressed {
         removed
     }
 
-    /// Queues a leaf this lane's removal just killed for the lane's next idle drain,
-    /// draining part of the queue at once if it is full. A leaf whose parent cannot be
-    /// resolved is left to the sweep.
+    /// Queues a leaf this lane's removal just killed for the lane's next idle drain. A
+    /// leaf whose parent cannot be resolved is left to the sweep.
     fn queue_dead_leaf(
         &self,
         lookup: &mut LaneLookup,
         worker: WorkerWithDpRank,
         node: &SharedNode,
     ) {
-        const PENDING_UNLINK_LIMIT: usize = 4096;
         let Some((key, parent_tail)) = node.dead_leaf_key_and_tail() else {
             return;
         };
         let Some(parent) = self.dead_leaf_parent(lookup, worker, node, key, parent_tail) else {
             return;
         };
-        lookup.pending_unlinks.push(CleanupEdge {
-            parent: Arc::downgrade(&parent),
-            key,
-            child: Arc::downgrade(node),
-        });
+        self.push_pending_unlink(
+            lookup,
+            CleanupEdge {
+                parent: Arc::downgrade(&parent),
+                key,
+                child: Arc::downgrade(node),
+            },
+        );
+    }
+
+    /// Queues a dead leaf on this lane, draining the oldest quarter of the queue at once
+    /// if it is full.
+    fn push_pending_unlink(&self, lookup: &mut LaneLookup, edge: CleanupEdge) {
+        lookup.pending_unlinks.push(edge);
         if lookup.pending_unlinks.len() >= PENDING_UNLINK_LIMIT {
             self.drain_pending_unlinks(lookup, Some(PENDING_UNLINK_LIMIT / 4));
         }
@@ -141,11 +148,14 @@ impl ConcurrentRadixTreeCompressed {
             return;
         };
         self.note_death();
-        lookup.pending_unlinks.push(CleanupEdge {
-            parent: Arc::downgrade(prefix),
-            key,
-            child: Arc::downgrade(suffix),
-        });
+        self.push_pending_unlink(
+            lookup,
+            CleanupEdge {
+                parent: Arc::downgrade(prefix),
+                key,
+                child: Arc::downgrade(suffix),
+            },
+        );
     }
 
     /// Unlinks up to `limit` of this lane's oldest queued dead leaves, or all of them for
