@@ -310,9 +310,12 @@ func TestGeneratedDGDRV1Beta2RequestSchema(t *testing.T) {
 
 		spec := object["spec"].(map[string]interface{})
 		require.NotContains(t, spec, "hardware")
-		require.NotContains(t, spec, "objective")
 		require.NotContains(t, spec, "aisimulate")
 		require.Equal(t, []interface{}{"vllm", "sglang", "trtllm"}, spec["backends"])
+		require.Equal(t, "Optimize", spec["objective"].(map[string]interface{})["mode"])
+		require.NotContains(t, spec["objective"].(map[string]interface{}), "metric")
+		require.EqualValues(t, 2000, spec["objective"].(map[string]interface{})["sla"].(map[string]interface{})["ttftMs"])
+		require.EqualValues(t, 30, spec["objective"].(map[string]interface{})["sla"].(map[string]interface{})["itlMs"])
 		require.EqualValues(t, 1, spec["recommendation"].(map[string]interface{})["maxCandidates"])
 		requireDefaultOptionAWorkload(t, spec)
 	})

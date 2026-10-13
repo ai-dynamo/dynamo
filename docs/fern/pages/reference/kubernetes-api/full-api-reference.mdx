@@ -4550,7 +4550,7 @@ See [Backend](#backend).
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search.
+Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4561,8 +4561,8 @@ See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search.
+<ParamField path="objective" type="ObjectiveSpec" default="\{ \}">
+Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4739,13 +4739,13 @@ GPUHardwareSpec describes accelerator identity and the maximum allocation per ca
 **Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
 
 <ParamField path="sku" type="string">
-SKU identifies the accelerator using the AISimulate hardware catalog name.
-**Validation:** MinLength: 1
+SKU identifies the accelerator using the AISimulate hardware catalog name. When omitted, admission discovers the accelerator from the cluster.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="budget" type="integer">
-Budget is the maximum total number of GPUs one candidate may use.
-**Validation:** Minimum: 1
+Budget is the maximum total number of GPUs one candidate may use. When omitted, admission derives the available GPU budget from the cluster.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4757,8 +4757,9 @@ HardwareSpec bounds the accelerator configurations evaluated by the search.
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
 
 <ParamField path="gpu" type="GPUHardwareSpec">
-GPU describes accelerator identity and the maximum allocation per candidate.
+GPU describes accelerator identity and the maximum allocation per candidate. Omitted fields are resolved independently by admission.
 See [GPUHardwareSpec](#gpuhardwarespec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4849,7 +4850,7 @@ See [ObjectiveMode](#objectivemode).
 </ParamField>
 
 <ParamField path="metric" type="ObjectiveMetric">
-Metric is the scalar target when mode is Optimize.
+Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
 </ParamField>

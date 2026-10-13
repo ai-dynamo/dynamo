@@ -43,18 +43,24 @@ const (
 // GPUHardwareSpec describes accelerator identity and the maximum allocation per candidate.
 type GPUHardwareSpec struct {
 	// SKU identifies the accelerator using the AISimulate hardware catalog name.
+	// When omitted, admission discovers the accelerator from the cluster.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	SKU string `json:"sku"`
+	SKU *string `json:"sku,omitempty"`
 
 	// Budget is the maximum total number of GPUs one candidate may use.
+	// When omitted, admission derives the available GPU budget from the cluster.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
-	Budget int32 `json:"budget"`
+	Budget *int32 `json:"budget,omitempty"`
 }
 
 // HardwareSpec bounds the accelerator configurations evaluated by the search.
 type HardwareSpec struct {
 	// GPU describes accelerator identity and the maximum allocation per candidate.
-	GPU GPUHardwareSpec `json:"gpu"`
+	// Omitted fields are resolved independently by admission.
+	// +optional
+	GPU *GPUHardwareSpec `json:"gpu,omitempty"`
 }
 
 // KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
@@ -148,7 +154,7 @@ type ObjectiveSLASpec struct {
 }
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
-// +kubebuilder:validation:XValidation:rule="(self.mode == 'Optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize requires metric; Pareto requires metrics"
+// +kubebuilder:validation:XValidation:rule="(self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize accepts only metric; Pareto requires metrics"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
 type ObjectiveSpec struct {
@@ -158,6 +164,7 @@ type ObjectiveSpec struct {
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
 	// Metric is the scalar target when mode is Optimize.
+	// When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
@@ -219,6 +226,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
+	// Admission discovers any omitted hardware values from the cluster.
 	// +optional
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
@@ -228,7 +236,10 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.
+	// When omitted, the schema supplies the default Optimize mode and SLA;
+	// admission supplies the conditional scalar metric.
 	// +optional
+	// +kubebuilder:default={}
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
 	// AISimulate selects the execution artifact and supplies native AISimulate input.
