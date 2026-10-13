@@ -15,12 +15,12 @@
 #   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
 #   - Group 1 (general):     dynamo runtime, planner, frontend,
 #                            operator, snapshot, power-agent  (cuda13.0 base)
-#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa      (cuda13.1 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa, Triton (cuda13.1 base)
 #
 # Groups follow the dynamo_base image tag, not the framework: that is where the
 # rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
-# runtime_wheel_builder are shared by every build kind. TRT-LLM is the only
-# build on a different base, so it gets its own group. vLLM and SGLang share
+# runtime_wheel_builder are shared by every build kind. TRT-LLM and Triton share
+# the cuda13.1 base, so they use one group. vLLM and SGLang share
 # one because their build filters differ, and a dedicated pool for either would
 # idle whenever only the other changed.
 #
