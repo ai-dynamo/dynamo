@@ -18,14 +18,37 @@ types. Legacy completions use the same response type in both modes.
             schema:
               $ref: "#/components/schemas/NvCreateChatCompletionResponse"
           text/event-stream:
-            schema:
-              $ref: "#/components/schemas/NvCreateChatCompletionStreamResponse"
+            itemSchema:
+              anyOf:
+                - type: object
+                  required: [data]
+                  properties:
+                    event:
+                      type: string
+                      const: message
+                    data:
+                      type: string
+                      anyOf:
+                        - const: "[DONE]"
+                        - contentMediaType: application/json
+                          contentSchema:
+                            $ref: "#/components/schemas/NvCreateChatCompletionStreamResponse"
+                        - contentMediaType: application/json
+                          contentSchema:
+                            type: object
+                            required: [error]
+                            properties:
+                              error:
+                                $ref: "#/components/schemas/ErrorMessage"
 ```
 
-The stream schema describes the JSON following `data:`, not the entire SSE
-stream. It does not include the literal `[DONE]` marker, error/annotation events,
-ordering constraints, or rules about when usage and finish reasons appear.
-Those require separate protocol/behavioral checks. Other endpoint families and
+The OpenAPI 3.2 `itemSchema` describes a parsed SSE event, not the raw byte
+stream. Its `data` property remains a string: `contentSchema` describes the JSON
+obtained after decoding that string. The alternatives distinguish JSON chunks,
+structured errors, and the literal `[DONE]` marker. Chat also declares optional
+named dispatch events. Comment-only annotations, keep-alives, ordering,
+termination, and rules about when usage and finish reasons appear require
+separate protocol and behavioral checks. Other endpoint families and non-stream
 error response bodies are outside this change.
 
 ## Complete dependency imports before comparing
@@ -81,7 +104,8 @@ Do not update a source checksum merely to bypass a failed correction guard.
 Shared fixtures are checked by Rust serialization and JSON Schema validation:
 
 ```bash
-cargo test --locked -p dynamo-llm --no-default-features --test openapi_response_schema
+cargo test --locked -p dynamo-llm --no-default-features \
+  --test protocols openapi_response_schema::
 python -m scripts.protocol_compatibility.tests.composition.response_fidelity \
   --spec /absolute/path/to/new-response-export/openapi.composed.json
 ```
