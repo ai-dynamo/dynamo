@@ -544,7 +544,7 @@ class MultimodalRequestProcessor:
 
         # Handle multimodal data if present
         if multi_modal_data and isinstance(multi_modal_data, dict):
-            processed_mm_data = {}
+            processed_mm_data: Dict[str, List[Any]] = {}
             loaded_embeddings: list[torch.Tensor] = []
 
             # Process images and embedding paths from image_url field
