@@ -628,7 +628,11 @@ func releaseFencesFor(
 		if record.Current != nil {
 			capacityRefs = slices.Clone(record.Current.CapacityRefs)
 		} else {
-			capacityRefs = slices.Clone(record.History[len(record.History)-1].Incarnation.CapacityRefs)
+			historical := record.History[len(record.History)-1].Incarnation
+			if !MembershipMatchesIncarnation(membership, historical) {
+				return nil, fmt.Errorf("retiring replica %q historical incarnation differs from base membership", replicaID)
+			}
+			capacityRefs = slices.Clone(historical.CapacityRefs)
 		}
 		fences = append(fences, ReleaseFence{
 			TransitionID:                  transitionID,

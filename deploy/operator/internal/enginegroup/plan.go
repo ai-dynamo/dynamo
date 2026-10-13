@@ -36,6 +36,8 @@ type planResolution struct {
 }
 
 // NewGroupStatus validates and captures one already-running Engine Group as the initial durable status.
+// Allocated replicas and admitted processes must match committed membership; inactive processes may remain
+// inside an allocation, and terminal drain tombstones may remain in traffic observations.
 func NewGroupStatus(
 	topology MembershipTopology,
 	capacity CapacityObservation,
@@ -49,6 +51,14 @@ func NewGroupStatus(
 	}
 	if err := validateTrafficObservation(traffic); err != nil {
 		return GroupStatus{}, fmt.Errorf("validate initial traffic: %w", err)
+	}
+
+	// Adoption has no convergence targets, so only an already-coherent world can become the initial authority.
+	if len(capacity.Allocations) != len(topology.Replicas) {
+		return GroupStatus{}, errors.New("initial capacity allocation set differs from committed replicas")
+	}
+	if !sameMemberships(traffic.Admitted, topology.Replicas) || len(traffic.Draining) != 0 {
+		return GroupStatus{}, errors.New("initial traffic does not exactly admit committed membership without ongoing drains")
 	}
 
 	// Every committed member receives one canonical registry record backed by the same observed incarnation.
@@ -799,6 +809,7 @@ func validateMembershipIdentitySet(memberships []ReplicaMembership) error {
 
 func validateReleaseFences(fences []ReleaseFence) error {
 	seen := make(map[ReplicaID]struct{}, len(fences))
+	podUIDs := make(map[PodUID]struct{})
 	for _, fence := range fences {
 		if fence.TransitionID == "" || fence.AuthorizingTopologyGeneration <= 0 ||
 			fence.ReplicaID == "" || fence.SlotID == "" || len(fence.CapacityRefs) == 0 {
@@ -811,6 +822,10 @@ func validateReleaseFences(fences []ReleaseFence) error {
 			if capacityRef.Name == "" || capacityRef.UID == "" {
 				return fmt.Errorf("release fence for replica %q has an incomplete Pod identity", fence.ReplicaID)
 			}
+			if _, duplicate := podUIDs[capacityRef.UID]; duplicate {
+				return fmt.Errorf("release fences repeat Pod UID %q", capacityRef.UID)
+			}
+			podUIDs[capacityRef.UID] = struct{}{}
 		}
 		seen[fence.ReplicaID] = struct{}{}
 	}

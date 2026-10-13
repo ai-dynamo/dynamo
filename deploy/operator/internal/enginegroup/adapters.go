@@ -76,7 +76,10 @@ type CapacityObservation struct {
 	// AppliedRevision is the last target revision durably accepted by the adapter, whether or not it has converged.
 	AppliedRevision int64
 	Allocations     []CapacityAllocation
-	ReleaseFences   []ReleaseFence
+
+	// ReleaseFences are adapter-owned durable acknowledgments of applied exact release fences.
+	// Physical absence is observed separately; unapplied controller targets are not release evidence.
+	ReleaseFences []ReleaseFence
 }
 
 // TrafficTarget is one durable, group-ordered absolute routing projection.

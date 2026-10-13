@@ -40,11 +40,20 @@ func ValidateGroupStatus(status GroupStatus) error {
 	if err := validateTrafficObservation(status.Traffic.Observed); err != nil {
 		return fmt.Errorf("validate durable traffic observation: %w", err)
 	}
+	if err := validateObservedRevisions(status); err != nil {
+		return fmt.Errorf("validate durable observed revisions: %w", err)
+	}
 	if err := validateCapacityTarget(status.ControlRevision, status.Capacity.Desired); err != nil {
 		return err
 	}
 	if err := validateCapacityTarget(status.ControlRevision, status.Capacity.Accepted); err != nil {
 		return fmt.Errorf("validate accepted capacity target: %w", err)
+	}
+	if err := validateCanonicalReleaseFences(status, status.Capacity.Desired); err != nil {
+		return fmt.Errorf("validate desired release authority: %w", err)
+	}
+	if err := validateCanonicalReleaseFences(status, status.Capacity.Accepted); err != nil {
+		return fmt.Errorf("validate accepted release authority: %w", err)
 	}
 	if err := validateTrafficTarget(status.ControlRevision, status.Traffic.Desired); err != nil {
 		return err
@@ -504,7 +513,7 @@ func validateTransition(status GroupStatus) error {
 	if err := validateTransitionPreflights(status); err != nil {
 		return err
 	}
-	if err := validateTransitionCapacityEvidence(status); err != nil {
+	if err := validateTransitionCapacityEvidence(status, base, resolution); err != nil {
 		return err
 	}
 	if err := validateTransitionMembership(status, resolution); err != nil {
@@ -571,8 +580,18 @@ func validateTerminalTargetsAccepted(status GroupStatus) error {
 	return nil
 }
 
-func validateTransitionCapacityEvidence(status GroupStatus) error {
-	target := status.Capacity.Desired
+func validateTransitionCapacityEvidence(status GroupStatus, base MembershipTopology, resolution planResolution) error {
+	// Desired and accepted projections may differ; independently validate every replayable current-transition target.
+	for _, target := range []*CapacityTarget{status.Capacity.Desired, status.Capacity.Accepted} {
+		if err := validateTransitionCapacityTarget(status, base, resolution, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A nil target means that this subsystem has not yet acquired a desired or accepted projection.
+func validateTransitionCapacityTarget(status GroupStatus, base MembershipTopology, resolution planResolution, target *CapacityTarget) error {
 	transition := status.Transition
 	if target == nil || target.TransitionID != transition.Spec.ID {
 		return nil
@@ -591,12 +610,106 @@ func validateTransitionCapacityEvidence(status GroupStatus) error {
 			)
 		}
 	}
+	if len(target.ReleaseFences) == 0 {
+		return nil
+	}
+
+	// Reconstruct authority from the immutable plan and independent allocation evidence, never from the stored fence.
+	expected, err := expectedReleaseFences(status, base, resolution, target.ControlRevision)
+	if err != nil {
+		return fmt.Errorf("derive canonical release fences: %w", err)
+	}
+	if !sameReleaseFences(expected, target.ReleaseFences) {
+		return errors.New("release fences do not match the transition's canonical allocation authority")
+	}
+	return nil
+}
+
+func expectedReleaseFences(status GroupStatus, base MembershipTopology, resolution planResolution, targetRevision int64) ([]ReleaseFence, error) {
+	// Committed retirement binds the exact selected allocations to this transition's immutable result generation.
+	if membershipCommitConverged(status) {
+		return releaseFencesFor(status.Transition.Spec.ID,
+			status.Membership.Observed.Transition.ResultTopology.Generation, base, status.Registry, resolution.retiringReplicaIDs)
+	}
+	if status.Transition.Outcome != TransitionOutcomeReverting &&
+		status.Transition.Outcome != TransitionOutcomeRolledBack &&
+		status.Transition.Outcome != TransitionOutcomeBlocked {
+		return nil, errors.New("capacity release precedes committed retirement or definitive rollback")
+	}
+	if !membershipProvablyUncommitted(status) || !sameTopologyWithCurrent(status.Topologies, base) {
+		return nil, errors.New("rollback release lacks an unchanged, provably uncommitted base topology")
+	}
+
+	// Rollback can release only this plan's uncommitted joiners, including partially allocated startup failures.
+	rollback, err := buildRollbackCapacityTarget(status, base, resolution)
+	if err != nil {
+		return nil, err
+	}
+	fences := rollback.ReleaseFences
+	for _, joining := range resolution.joiningTargets {
+		if _, allocated := allocationByID(status.Capacity.Observed, joining.ReplicaID); allocated {
+			continue
+		}
+		if targetRevision > status.Capacity.Observed.AppliedRevision {
+			continue
+		}
+		for _, receipt := range status.Capacity.Observed.ReleaseFences {
+			if receipt.TransitionID != status.Transition.Spec.ID || receipt.ReplicaID != joining.ReplicaID ||
+				receipt.SlotID != joining.SlotID || receipt.AuthorizingTopologyGeneration != base.Generation {
+				continue
+			}
+			// Released joiners may already have left the registry; their durable adapter receipt keeps replay verifiable.
+			present := false
+			for _, fence := range fences {
+				present = present || fence.ReplicaID == receipt.ReplicaID
+			}
+			if !present {
+				fences = append(fences, receipt)
+			}
+		}
+	}
+	return normalizeReleaseFences(fences), nil
+}
+
+// A nil target means that no physical-capacity projection needs validation.
+func validateCanonicalReleaseFences(status GroupStatus, target *CapacityTarget) error {
+	if target == nil {
+		return nil
+	}
 	for _, fence := range target.ReleaseFences {
-		if _, found := status.Topologies.Snapshot(fence.AuthorizingTopologyGeneration); !found {
-			return fmt.Errorf(
-				"release fence for replica %q refers to an unknown authorizing topology",
-				fence.ReplicaID,
-			)
+		// The previous transition may have been compacted; only an independently observed receipt permits its replay.
+		if status.Transition == nil {
+			return errors.New("release authority has no durable transition")
+		}
+		if target.TransitionID != status.Transition.Spec.ID {
+			receipted := false
+			for _, receipt := range status.Capacity.Observed.ReleaseFences {
+				receipted = receipted || sameReleaseFences([]ReleaseFence{receipt}, []ReleaseFence{fence})
+			}
+			if target.ControlRevision > status.Capacity.Observed.AppliedRevision || !receipted {
+				return errors.New("previous transition release authority lacks its applied receipt")
+			}
+		}
+
+		// Canonical current and historical allocations bind a stable slot to exact concrete Pod names and UIDs.
+		matched := false
+		if record, found := status.Registry.Find(fence.ReplicaID); found && record.SlotID == fence.SlotID {
+			matched = record.Current != nil && sameCapacityRefs(record.Current.CapacityRefs, fence.CapacityRefs)
+			for _, history := range record.History {
+				matched = matched || sameCapacityRefs(history.Incarnation.CapacityRefs, fence.CapacityRefs)
+			}
+		}
+		if allocation, found := allocationByID(status.Capacity.Observed, fence.ReplicaID); found {
+			matched = matched || (allocation.Incarnation.SlotID == fence.SlotID &&
+				sameCapacityRefs(allocation.Incarnation.CapacityRefs, fence.CapacityRefs))
+		} else if target.ControlRevision <= status.Capacity.Observed.AppliedRevision {
+			// A fully released rollback allocation has no registry record; only its independent exact receipt is valid.
+			for _, receipt := range status.Capacity.Observed.ReleaseFences {
+				matched = matched || sameReleaseFences([]ReleaseFence{receipt}, []ReleaseFence{fence})
+			}
+		}
+		if !matched {
+			return fmt.Errorf("release fence for replica %q differs from its canonical allocation", fence.ReplicaID)
 		}
 	}
 	return nil
