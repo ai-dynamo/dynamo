@@ -492,6 +492,7 @@ def test_marker():
 
 @pytest.mark.timeout(180)
 def test_stage_deadline_kills_running_tree_and_skips_queued(tmp_path, monkeypatch):
+    """Check that the deadline kills detached descendants and leaves work queued."""
     # The generated tests live outside the repository, with their own
     # pytest.ini as rootdir, so the children do not load tests/conftest.py.
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
@@ -579,6 +580,7 @@ _ORPHAN_TREE = (
 
 
 def _wait_for(cond, timeout_s: float = 15) -> None:
+    """Wait for process readiness, failing if the condition stays false."""
     deadline = time.monotonic() + timeout_s
     while not cond():
         assert time.monotonic() < deadline, "timed out waiting for test processes"
@@ -587,6 +589,7 @@ def _wait_for(cond, timeout_s: float = 15) -> None:
 
 @pytest.mark.timeout(60)
 def test_kill_process_trees_shares_one_wait(tmp_path):
+    """Check that four trees share the grace period after ignoring SIGTERM."""
     # Each process ignores SIGTERM, so each tree needs the full grace period.
     # Killing them one at a time would take at least four grace periods.
     script = tmp_path / "ignore_term.py"
@@ -625,6 +628,7 @@ def test_kill_process_trees_shares_one_wait(tmp_path):
 )
 @pytest.mark.timeout(60)
 def test_kill_process_trees_kills_adopted_orphan(tmp_path):
+    """Check that cleanup kills a descendant after its middle process exits."""
     script = tmp_path / "orphan_tree.py"
     script.write_text(_ORPHAN_TREE)
     pid_file = tmp_path / "orphan.pid"
@@ -654,6 +658,7 @@ def test_kill_process_trees_kills_adopted_orphan(tmp_path):
 
 
 def _kill_if_alive(pid: int) -> None:
+    """Kill a test process if it has not already exited."""
     try:
         psutil.Process(pid).kill()
     except psutil.NoSuchProcess:
@@ -661,6 +666,7 @@ def _kill_if_alive(pid: int) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Return whether a PID still identifies a process that is not a zombie."""
     # An orphan killed inside a container may stay a zombie when PID 1 does
     # not reap; it holds no resources, so count it as gone.
     try:
@@ -671,12 +677,14 @@ def _pid_alive(pid: int) -> bool:
 
 @pytest.mark.parametrize("raw", ["soon", "nan", "inf"])
 def test_stage_deadline_rejects_invalid_values(monkeypatch, raw):
+    """Reject malformed and non-finite deadlines instead of disabling the limit."""
     monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", raw)
     with pytest.raises(ValueError):
         pytest_parallel_gpu._stage_deadline()
 
 
 def test_stage_deadline_unset_or_valid(monkeypatch):
+    """Accept an unset deadline or a finite epoch value with whitespace."""
     monkeypatch.delenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", raising=False)
     assert pytest_parallel_gpu._stage_deadline() is None
     monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", " 1700000000.5 ")

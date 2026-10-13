@@ -316,6 +316,7 @@ def _set_child_subreaper(enabled: bool) -> bool:
 
 
 def _signal_all(procs, kill: bool) -> None:
+    """Signal each process, tolerating exits and denied access."""
     for proc in procs:
         try:
             proc.kill() if kill else proc.terminate()
@@ -324,6 +325,7 @@ def _signal_all(procs, kill: bool) -> None:
 
 
 def _tree(pid: int) -> list[psutil.Process]:
+    """Return a process and its descendants, or no entries if lookup fails."""
     try:
         root = psutil.Process(pid)
         return [root, *root.children(recursive=True)]
