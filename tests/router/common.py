@@ -931,6 +931,7 @@ def _test_remote_indexer_decisions(
         raise TimeoutError("Timed out waiting for served indexer endpoints to register")
 
     async def run_test(runtimes):
+        """Seed worker prefixes and check routing through the remote indexers."""
         endpoint_path = (
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -1056,8 +1057,12 @@ def _test_remote_indexer_decisions(
         }
 
         async def wait_for_serving_indexers(i: int, token_ids: list[int]) -> None:
-            # Remote queries round-robin across serving routers, so every replica
-            # must have ingested the pinned requests' KV events before scoring.
+            """Wait for every replica to report the expected overlap for request i.
+
+            Remote queries round-robin across serving routers. Each replica must
+            ingest the pinned requests' KV events before scoring. All replicas
+            share a ten-second deadline; a persistent mismatch names the router.
+            """
             deadline = time.monotonic() + 10
             for idx, serving_router in enumerate(serving_routers):
                 while True:
