@@ -49,6 +49,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	ptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -4996,6 +4997,42 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		default:
 			t.Errorf("GenerateGrovePodCliqueSet() clique = %v, want %v", clique.Name, "frontend or planner")
 		}
+	}
+}
+
+func Test_GeneratePodCliqueSetLongDynamoNamespace(t *testing.T) {
+	// From DYN-4887: these valid names join into a 64-byte Dynamo namespace,
+	// which Grove rejected as a clique label value.
+	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Namespace: "dgdr16-ab-length-20261013-abcdefghij",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Planner": {
+					ComponentType: commonconsts.ComponentTypePlanner,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	converted := betaDGD(t, dynamoDeployment)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 2)
+
+	for _, clique := range got.Spec.Template.Cliques {
+		label := clique.Labels[commonconsts.KubeLabelDynamoNamespace]
+		assert.Empty(t, validation.IsValidLabelValue(label), "clique %s label %q is not a valid label value", clique.Name, label)
+		// The label and DYN_NAMESPACE must stay equal: pod selectors match the
+		// label against the runtime namespace.
+		assertDYNNamespace(t, clique.Spec.PodSpec, label)
 	}
 }
 

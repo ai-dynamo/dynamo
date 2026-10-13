@@ -18,6 +18,8 @@
 package v1beta1
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -456,17 +458,43 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
+// maxDynamoNamespaceLength is the Kubernetes label value limit. The Dynamo
+// namespace is written to the nvidia.com/dynamo-namespace label, so it must fit.
+const maxDynamoNamespaceLength = 63
+
+// dynamoNamespaceHashLength is the number of hex characters of the SHA-256
+// suffix used when a Dynamo namespace has to be shortened.
+const dynamoNamespaceHashLength = 8
+
 // ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
 // When `globalDynamoNamespace` is true, returns the global namespace constant.
 // Otherwise returns `{k8sNamespace}-{dgdName}` with dots in `dgdName` replaced
 // by hyphens so that the namespace can safely form the first segment of
 // endpoint paths.
+//
+// The result is also used as a label value, so it is capped at 63 bytes. Values
+// of 63 bytes or less are returned unchanged. Longer values keep a prefix and
+// end in `-` plus a short SHA-256 hash of the full value, so the result stays
+// deterministic and distinct for names that share a long prefix.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
 	sanitized := strings.ReplaceAll(dgdName, ".", "-")
-	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
+	return shortenDynamoNamespace(fmt.Sprintf("%s-%s", k8sNamespace, sanitized))
+}
+
+// shortenDynamoNamespace returns value unchanged when it fits in a label value,
+// otherwise a prefix of value, `-`, and a hash of the full value.
+func shortenDynamoNamespace(value string) string {
+	if len(value) <= maxDynamoNamespaceLength {
+		return value
+	}
+	sum := sha256.Sum256([]byte(value))
+	hash := hex.EncodeToString(sum[:])[:dynamoNamespaceHashLength]
+	// Trim trailing hyphens so the prefix and hash are joined by exactly one.
+	prefix := strings.TrimRight(value[:maxDynamoNamespaceLength-dynamoNamespaceHashLength-1], "-")
+	return prefix + "-" + hash
 }
 
 // GetSpec returns the spec as an interface, used by generic resource helpers.
