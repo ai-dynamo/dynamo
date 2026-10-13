@@ -2995,7 +2995,7 @@ from dynamo.llm import run_input
 ```
 
 ```python
-run_input(distributed_runtime: DistributedRuntime, input: str, engine_config: EngineConfig, frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None) -> None
+run_input(distributed_runtime: DistributedRuntime, input: str, engine_config: EngineConfig, frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None) -> asyncio.Future[None]
 ```
 
 ``frontend_route_extensions`` supplies additional HTTP routes to the
