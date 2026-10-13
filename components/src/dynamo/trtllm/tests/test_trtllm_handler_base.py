@@ -1360,11 +1360,8 @@ class TestGenerateLocally:
         assert kwargs["streaming"] is False
 
     @pytest.mark.asyncio
-    async def test_prefill_does_not_force_ignore_eos_when_not_requested(self):
-        # Negative case: a request that doesn't ask to ignore EOS or expose a
-        # visible stop token must not have ignore_eos forced on during
-        # prefill. min_tokens and the hidden stop token are still preserved,
-        # same as the positive case -- only ignore_eos differs here.
+    @pytest.mark.parametrize("no_stop_trim", [False, True])
+    async def test_prefill_stop_consumption_respects_no_stop_trim(self, no_stop_trim):
         handler = self._make_handler()
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         handler.disagg_machine_id = 0
@@ -1387,6 +1384,7 @@ class TestGenerateLocally:
                 "stop_token_ids_hidden": [100],
             },
             "sampling_options": {},
+            "output_options": {"no_stop_trim": no_stop_trim},
         }
 
         chunks = [
@@ -1399,7 +1397,7 @@ class TestGenerateLocally:
         sampling_params = kwargs["sampling_params"]
         assert sampling_params.max_tokens == 1
         assert sampling_params.min_tokens == 8
-        assert sampling_params.ignore_eos is False
+        assert sampling_params.ignore_eos is no_stop_trim
         assert set(sampling_params.stop_token_ids) == {100, 300}
         assert kwargs["streaming"] is False
 

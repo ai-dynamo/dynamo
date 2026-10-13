@@ -57,7 +57,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1094b6ace0f8145ce60b8d1e71a7ea3ee7c6bf673df14357f204ae49fa4ddd48
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
@@ -339,7 +338,7 @@ spec:
           containers:
           - args:
             - --draft-endpoint
-            - test-lpu-cyborg-specdec/backend/generate
+            - $(DYN_NAMESPACE)/backend/generate
             command:
             - python
             - -m

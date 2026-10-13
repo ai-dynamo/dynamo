@@ -84,8 +84,10 @@ STUB_MODULES = [
     "yarl",
     "pytest_asyncio",
     "tabulate",
+    "tqdm",
     "prometheus_api_client",
     "huggingface_hub",
+    "huggingface_hub.constants",
     "huggingface_hub.model_info",
     "jinja2",
     "jinja2.exceptions",
@@ -108,6 +110,29 @@ STUB_MODULES = [
     "requests",
     "numpy",
     "aisimulate",
+    "aisimulate.capacity",
+    "aisimulate.config",
+    "aisimulate.config.cli",
+    "aisimulate.config.common",
+    "aisimulate.config_adapter",
+    "aisimulate.generator.api",
+    "aisimulate.generator.enumerate",
+    "aisimulate.generator.module_bridge",
+    "aisimulate.output_adapter",
+    "aisimulate.runner",
+    "aisimulate.sdk.picking",
+    "aisimulate.sweeper",
+    "aisimulate.sweeper.config",
+    "aisimulate.sweeper.deploy",
+    "aisimulate.sweeper.kv_estimate",
+    "aisimulate.sweeper.provider",
+    "aisimulate.sweeper.replay",
+    "aisimulate.sweeper.result",
+    "aisimulate.sweeper.sample",
+    "aisimulate.sweeper.sampler",
+    "aisimulate.sweeper.score",
+    "aisimulate.sweeper.search",
+    "aisimulate.sweeper.search_space",
     "aisimulate_core",
     "boto3",
     "boto3.exceptions",
@@ -164,6 +189,9 @@ STUB_MODULES = [
     "fsspec.implementations.dirfs",
     "sglang",
     "sglang.srt",
+    "sglang.srt.constrained",
+    "sglang.srt.constrained.reasoner_grammar_backend",
+    "sglang.srt.constrained.xgrammar_backend",
     "sglang.srt.entrypoints",
     "sglang.srt.entrypoints.openai",
     "sglang.srt.entrypoints.openai.protocol",
@@ -190,6 +218,7 @@ STUB_MODULES = [
     "sglang.srt.disaggregation.utils",
     "sglang.srt.server_args",
     "sglang.srt.server_args_config_parser",
+    "xgrammar",
     "vllm",
     "vllm.config",
     "vllm.distributed",
@@ -212,6 +241,7 @@ STUB_MODULES = [
     "vllm.entrypoints.pooling",
     "vllm.entrypoints.pooling.embed",
     "vllm.entrypoints.pooling.embed.protocol",
+    "vllm.envs",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
@@ -381,6 +411,9 @@ def _make_stub_class(name: str) -> type:
     def _init_subclass(cls, **kwargs):  # type: ignore[no-untyped-def]
         pass
 
+    def _class_getitem(cls, item):  # type: ignore[no-untyped-def]
+        return cls
+
     def _getattr(self, attr):  # type: ignore[no-untyped-def]
         if attr.startswith("__") and attr.endswith("__"):
             raise AttributeError(attr)
@@ -403,6 +436,7 @@ def _make_stub_class(name: str) -> type:
         {
             "__init__": _init,
             "__init_subclass__": classmethod(_init_subclass),
+            "__class_getitem__": classmethod(_class_getitem),
             "__getattr__": _getattr,
             "__call__": _call,
             "__get_pydantic_core_schema__": classmethod(_get_schema),

@@ -30,6 +30,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--model <name>] [vLLM engine options...]"
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  EC_SHARED_STORAGE_PATH       Existing shared EC directory; otherwise a temporary directory is created"
             echo "  DYN_HTTP_PORT                Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1/2/3         Encode/decode/prefill system ports (defaults: 8081/8082/8083)"
@@ -48,6 +49,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 EC_STORAGE_OWNED=false
 if [[ -z "${EC_SHARED_STORAGE_PATH:-}" ]]; then
@@ -108,6 +111,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_ENCODER_HTTP_PORT" \
     --grpc-port "$VLLM_ENCODER_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --mm-encoder-only \
     --enforce-eager \
@@ -126,6 +130,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_PREFILL_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -143,6 +148,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_DECODE_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -151,17 +157,17 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_ENCODER_GRPC_PORT}" \
     --disaggregation-mode encode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --disaggregation-mode prefill \
     --route-to-encoder &
