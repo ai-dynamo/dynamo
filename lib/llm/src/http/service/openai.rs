@@ -5050,7 +5050,7 @@ fn get_model_retrieve(
 /// continue to describe worker topology; the top-level ready/reason also
 /// account for local frontend serving state. Unknown models remain 404.
 /// No inference request is dispatched by this check.
-fn get_model_readiness(
+pub(super) fn get_model_readiness(
     state: &Arc<service_v2::State>,
     model_id: &str,
 ) -> Result<Response, ErrorResponse> {
