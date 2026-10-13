@@ -162,7 +162,7 @@ class ArtifactRuntime:
             stored = await operator.read(
                 key, offset=0, size=len(data), **version_options
             )
-        except Exception:  # noqa: BLE001 -- native provider errors can contain credentials
+        except Exception:  # noqa: BLE001 -- sanitize provider errors
             raise ValueError("stored object verification unavailable") from None
         if len(stored) != len(data):
             raise ValueError("stored object exceeded verification bound")
