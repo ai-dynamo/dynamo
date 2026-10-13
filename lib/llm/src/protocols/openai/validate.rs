@@ -1091,6 +1091,8 @@ mod tests {
 
     use super::*;
 
+    /// Token IDs at both ends of the `u32` range are valid; malformed IDs name
+    /// the rejected key and accepted range in the validation error.
     #[test]
     fn test_validate_logit_bias_keys() {
         let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
@@ -1108,6 +1110,8 @@ mod tests {
         }
     }
 
+    /// A valid token ID must still reach the numeric and range checks for its
+    /// bias value, rather than letting key validation mask a missing value check.
     #[test]
     fn test_validate_logit_bias_values_with_valid_key() {
         for (value, expected_error) in [

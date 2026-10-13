@@ -885,6 +885,8 @@ async fn anthropic_handler_errors_record_classification_with_response() {
     .await;
 }
 
+/// Invalid keys must produce HTTP 400 before generation, including before HTTP
+/// 200 streaming headers can be committed for a streaming request.
 #[tokio::test]
 #[serial]
 async fn chat_completions_reject_invalid_logit_bias_keys() {
