@@ -16,12 +16,12 @@ opendal = pytest.importorskip("opendal")
 fernet = pytest.importorskip("cryptography.fernet")
 Fernet = fernet.Fernet
 
-from dynamo.artifacts.runtime import (
+from dynamo.artifacts.runtime import (  # noqa: E402 -- optional dependency guards
     ArtifactRuntime,
     close_configured_artifact_runtime,
     configured_artifact_runtime,
 )
-from dynamo.artifacts.storage import (
+from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guards
     ArtifactStorageError,
     ManagedProfile,
 )
