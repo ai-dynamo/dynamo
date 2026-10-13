@@ -384,9 +384,6 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
-            // Hoisted: `stopped()` is an async-trait method, so re-creating it per
-            // streamed chunk costs a boxed future and a waker registration on every
-            // token.
             let stopped_ctx = ctx.inner_arc();
             let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
             let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });

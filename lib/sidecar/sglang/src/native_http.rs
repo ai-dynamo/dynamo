@@ -246,9 +246,6 @@ impl NativeHttp {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
             let mut prefill_handoff = request.prefill_handoff;
-            // Hoisted: `stopped()` is an async-trait method, so re-creating it per
-            // streamed line costs a boxed future and a waker registration on every
-            // token.
             let stopped_ctx = ctx.inner_arc();
             let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
             let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
