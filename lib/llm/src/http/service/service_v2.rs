@@ -140,6 +140,7 @@ pub struct State {
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
+    responses_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -152,6 +153,7 @@ pub struct State {
 struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    responses_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -553,6 +555,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            responses_api_enabled: config.responses_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
         }
@@ -593,6 +596,14 @@ impl State {
     pub(crate) fn model_http_routes_ready(&self, model: &crate::discovery::Model) -> bool {
         let routes = [
             (model.has_chat_engine(), EndpointType::Chat),
+            (
+                model.has_chat_engine() && self.responses_api_enabled,
+                EndpointType::Responses,
+            ),
+            (
+                model.has_chat_engine() && self.anthropic_api_enabled(),
+                EndpointType::AnthropicMessages,
+            ),
             (model.has_completions_engine(), EndpointType::Completion),
             (model.has_embeddings_engine(), EndpointType::Embedding),
             (model.has_classify_engine(), EndpointType::Classify),
@@ -1329,6 +1340,7 @@ impl HttpServiceConfigBuilder {
             StateConfig {
                 metrics_config,
                 frontend_api_config,
+                responses_api_enabled: config.enable_responses_endpoints,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
@@ -2182,6 +2194,130 @@ mod tests {
             client.get(&url).send().await.unwrap().status(),
             reqwest::StatusCode::SERVICE_UNAVAILABLE
         );
+        handle.abort();
+    }
+
+    async fn spawn_derived_route_readiness_service(
+        responses: bool,
+        anthropic: bool,
+    ) -> (HttpService, u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .enable_responses_endpoints(responses)
+            .enable_anthropic_endpoints(anthropic)
+            .build()
+            .unwrap();
+        service
+            .model_manager()
+            .add_chat_completions_model("derived-chat", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        let running = service.clone();
+        let handle = tokio::spawn(async move {
+            running
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        (service, port, handle)
+    }
+
+    #[tokio::test]
+    async fn model_readiness_requires_configured_responses_route() {
+        for configured in [false, true] {
+            let (service, port, handle) =
+                spawn_derived_route_readiness_service(configured, false).await;
+            let path = "/v1/models/derived-chat/ready";
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            service
+                .enable_model_endpoint(EndpointType::Responses, false)
+                .unwrap();
+            assert_eq!(
+                get_status(port, path).await,
+                if configured {
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    reqwest::StatusCode::OK
+                }
+            );
+            assert!(service.model_endpoint_enabled(EndpointType::Chat));
+            service
+                .enable_model_endpoint(EndpointType::Responses, true)
+                .unwrap();
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn model_readiness_requires_configured_anthropic_route() {
+        for configured in [false, true] {
+            let (service, port, handle) =
+                spawn_derived_route_readiness_service(true, configured).await;
+            let path = "/v1/models/derived-chat/ready";
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            service
+                .enable_model_endpoint(EndpointType::AnthropicMessages, false)
+                .unwrap();
+            assert_eq!(
+                get_status(port, path).await,
+                if configured {
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    reqwest::StatusCode::OK
+                }
+            );
+            assert!(service.model_endpoint_enabled(EndpointType::Chat));
+            service
+                .enable_model_endpoint(EndpointType::AnthropicMessages, true)
+                .unwrap();
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn model_readiness_anthropic_preserves_exact_model_precedence() {
+        let (service, port, handle) = spawn_derived_route_readiness_service(true, true).await;
+        service
+            .model_manager()
+            .add_chat_completions_model(
+                "derived-chat/ready",
+                "worker",
+                Arc::new(ReadinessOnlyEngine),
+            )
+            .unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/derived-chat/ready");
+        let response = client
+            .get(&url)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["id"], "derived-chat/ready");
+        assert_eq!(body["type"], "model");
+        assert!(body.get("ready").is_none());
+        service
+            .model_manager()
+            .remove_chat_completions_model("derived-chat/ready")
+            .unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["ready"],
+            true
+        );
+        service.state().start_draining();
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["reason"], "frontend is draining");
         handle.abort();
     }
 
