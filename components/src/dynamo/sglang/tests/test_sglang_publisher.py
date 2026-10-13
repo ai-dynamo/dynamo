@@ -1082,35 +1082,32 @@ async def test_run_to_completion_propagates_a_body_failure():
 
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch):
+async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch, caplog):
     """A caller cancelling faster than the warn interval must still get the
     "teardown is taking a while" warning."""
-    started = asyncio.Event()
     release = asyncio.Event()
-    warned = asyncio.Event()
+    ticked = asyncio.Event()
     now = [0.0]
 
+    def fake_monotonic():
+        ticked.set()
+        return now[0]
+
     monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 10.0)
-    monkeypatch.setattr(publisher_mod, "monotonic", lambda: now[0])
+    monkeypatch.setattr(publisher_mod, "monotonic", fake_monotonic)
 
-    def record_warning(*args, **kwargs):
-        warned.set()
-
-    monkeypatch.setattr(publisher_mod.logging, "warning", record_warning)
-
-    async def body():
-        started.set()
-        await release.wait()
-
-    outer = asyncio.create_task(run_to_completion(body()))
-    await started.wait()
-
-    now[0] = 10.1
-    outer.cancel()
-    await warned.wait()
+    outer = asyncio.create_task(run_to_completion(release.wait()))
+    # Each cancel lands under the 10s interval; only the elapsed total crosses it.
+    for t in (6.0, 12.0):
+        await ticked.wait()
+        ticked.clear()
+        now[0] = t
+        outer.cancel()
+    await ticked.wait()
     release.set()
 
     assert await outer is True
+    assert "Worker teardown still running" in caplog.text
 
 
 @pytest.mark.timeout(5)

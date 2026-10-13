@@ -2209,19 +2209,16 @@ def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
     return sglang_main
 
 
-def test_main_treats_cancellation_as_clean_exit(monkeypatch):
+def test_main_propagates_cancellation(monkeypatch):
     sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
-    messages = []
-    monkeypatch.setattr(sglang_main.logger, "info", messages.append)
 
     async def cancelled_worker():
         raise asyncio.CancelledError
 
     monkeypatch.setattr(sglang_main, "worker", cancelled_worker)
 
-    sglang_main.main()
-
-    assert messages == ["Worker cancelled; shutdown complete"]
+    with pytest.raises(asyncio.CancelledError):
+        sglang_main.main()
 
 
 def test_main_preserves_worker_failure(monkeypatch):
