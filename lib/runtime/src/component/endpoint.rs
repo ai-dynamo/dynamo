@@ -522,7 +522,7 @@ impl Endpoint {
 mod tests {
     use super::*;
 
-    use crate::test_utils::NoopHandler;
+    use crate::endpoint_test_utils::NoopHandler;
 
     #[tokio::test]
     async fn cancelled_startup_before_discovery_cleans_handler_and_tracker() {

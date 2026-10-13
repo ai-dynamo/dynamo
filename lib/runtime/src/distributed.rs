@@ -122,8 +122,8 @@ mod unit_tests {
         }
         use super::*;
         use crate::discovery::{MockDiscovery, SharedMockRegistry};
+        use crate::endpoint_test_utils::{NoopHandler, UnavailableUnregisterDiscovery};
         use crate::pipeline::network::PushWorkHandler;
-        use crate::test_utils::{NoopHandler, UnavailableUnregisterDiscovery};
 
         tokio::time::timeout(Duration::from_secs(20), async {
             for full_shutdown in [false, true] {

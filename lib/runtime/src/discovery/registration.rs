@@ -295,7 +295,7 @@ mod tests {
         }
     }
 
-    use crate::test_utils::UnavailableUnregisterDiscovery;
+    use crate::endpoint_test_utils::UnavailableUnregisterDiscovery;
 
     #[tokio::test]
     async fn runtime_shutdown_bounds_failed_and_hanging_discovery_release() {
