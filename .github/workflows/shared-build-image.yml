@@ -303,10 +303,7 @@ jobs:
         id: calculate-builder-flavor
         shell: bash
         run: |
-          # Triton shares trtllm's base_image_tag (container/context.yaml), so it builds on the trtllm pool.
-          if [[ ${{ inputs.framework }} == triton ]]; then
-            echo "builder_flavor=trtllm" >> $GITHUB_OUTPUT
-          elif [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm|triton) ]]; then
             echo "builder_flavor=general" >> $GITHUB_OUTPUT
           else
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT

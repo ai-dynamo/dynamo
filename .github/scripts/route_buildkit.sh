@@ -59,7 +59,7 @@ set -e
 ARCH_INPUT=""
 FLAVOR_INPUT=""
 CUDA_VERSION=""
-ALL_FLAVORS=("vllm" "trtllm" "sglang" "general")
+ALL_FLAVORS=("vllm" "trtllm" "sglang" "triton" "general")
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <13.0|13.1>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|triton|general|all> [--cuda <13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -88,7 +88,7 @@ if [ -z "$ARCH_INPUT" ]; then
 fi
 
 if [ -z "$FLAVOR_INPUT" ]; then
-  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|general|all>."
+  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|triton|general|all>."
   exit 1
 fi
 
@@ -117,9 +117,9 @@ esac
 
 # Validate flavor input
 case $FLAVOR_INPUT in
-  vllm|trtllm|sglang|general|all) ;;
+  vllm|trtllm|sglang|triton|general|all) ;;
   *)
-    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, general, or all."
+    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, triton, general, or all."
     exit 1
     ;;
 esac
@@ -204,7 +204,7 @@ flavor_to_group() {
   local flavor=$1
   case "$flavor" in
     vllm|sglang) echo 0 ;;
-    trtllm) echo 2 ;;
+    trtllm|triton) echo 2 ;;
     general|*) echo 1 ;;
   esac
 }
