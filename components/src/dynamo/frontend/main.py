@@ -261,6 +261,15 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
+    if config.chat_processor != "dynamo" and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        mode_flag = "--interactive" if config.interactive else "--kserve-grpc-server"
+        parser.error(
+            f"--dyn-chat-processor {config.chat_processor} is only supported by the "
+            f"HTTP frontend, so it cannot be combined with {mode_flag}"
+        )
+
     vllm_flags = None
     sglang_flags = None
 
