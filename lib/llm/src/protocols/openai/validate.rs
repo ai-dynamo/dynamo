@@ -11,8 +11,10 @@ use dynamo_runtime::config::{
 };
 use serde_json::Value;
 
-use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
-use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+use super::{
+    common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
+    tools::{ToolChoiceError, validate_openai_tool_choice},
+};
 
 //
 // Hyperparameter Contraints
@@ -249,6 +251,34 @@ pub fn validate_response_format(
             Ok(())
         }
     }
+}
+
+/// Reject multiple independent constraints on assistant output.
+pub fn validate_response_format_conflicts(
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
+    common: &CommonExt,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ResponseFormat;
+
+    let has_response_format_constraint = response_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, ResponseFormat::Text));
+    let has_explicit_guided_decoding = common.guided_json.is_some()
+        || common.guided_regex.is_some()
+        || common
+            .guided_choice
+            .as_ref()
+            .is_some_and(|choices| !choices.is_empty())
+        || common.guided_grammar.is_some();
+
+    if has_response_format_constraint && has_explicit_guided_decoding {
+        anyhow::bail!(
+            "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+             `guided_choice`, or `guided_grammar`"
+        );
+    }
+
+    Ok(())
 }
 
 /// Validates the temperature parameter
@@ -558,6 +588,8 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
+/// Merges and validates request tools and tools declared in system messages.
+/// An explicitly empty request list is invalid unless system messages supply tools.
 pub(crate) fn validated_effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
@@ -566,6 +598,13 @@ pub(crate) fn validated_effective_tools(
         .enumerate()
         .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Check the request field, not the merged slice below: an omitted `tools`
+    // field also produces an empty slice and must stay valid. System-message
+    // tools still make an explicit `tools: []` usable.
+    if dynamic_tools.is_empty() && request.tools.as_ref().is_some_and(|tools| tools.is_empty()) {
+        anyhow::bail!("tools array cannot be empty; omit the field entirely to disable tool use");
+    }
 
     let tools = if dynamic_tools.is_empty() {
         Cow::Borrowed(request.tools.as_deref().unwrap_or_default())
@@ -705,6 +744,7 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        super::strict_schema::validate_strict_function(&tool.function)?;
     }
     Ok(())
 }
@@ -1054,6 +1094,61 @@ mod tests {
 
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    fn explicit_guided_decoding_options() -> Vec<CommonExt> {
+        vec![
+            CommonExt {
+                guided_json: Some(json!({"type": "object"})),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_regex: Some("[a-z]+".to_string()),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_choice: Some(vec!["yes".to_string(), "no".to_string()]),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_grammar: Some("root ::= 'yes'".to_string()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn structured_response_format_rejects_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+
+        for common in explicit_guided_decoding_options() {
+            let error = validate_response_format_conflicts(&response_format, &common).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+                 `guided_choice`, or `guided_grammar`"
+            );
+        }
+    }
+
+    #[test]
+    fn text_response_format_allows_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::Text);
+
+        for common in explicit_guided_decoding_options() {
+            validate_response_format_conflicts(&response_format, &common).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_guided_choice_does_not_conflict_with_response_format() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+        let common = CommonExt {
+            guided_choice: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        validate_response_format_conflicts(&response_format, &common).unwrap();
     }
 
     #[test]
