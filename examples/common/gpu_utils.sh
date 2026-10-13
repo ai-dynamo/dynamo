@@ -19,12 +19,42 @@
 #
 #       Note: TensorRT-LLM uses build_trtllm_override_args_with_mem() instead (requires JSON merging)
 #
+#   visible_gpu <index>
+#       Logical GPU index → entry of the inherited CUDA_VISIBLE_DEVICES
+#
 # Usage:
 #   GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 #   python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
 #
 #   GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 #   python -m dynamo.vllm --model "$MODEL" $GPU_MEM_ARGS &
+
+
+# ---------------------------------------------------------------------------
+# visible_gpu <index>
+#   Map a logical GPU index through the inherited CUDA_VISIBLE_DEVICES, so a
+#   per-worker CUDA_VISIBLE_DEVICES stays inside the caller's assignment (e.g.
+#   a test scheduler's). With CUDA_VISIBLE_DEVICES unset, returns the index.
+#   Bash twin of tests/utils/gpu_args.py:map_cuda_visible_devices.
+# ---------------------------------------------------------------------------
+visible_gpu() {
+    local index="$1"
+    if [[ ! "${index}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid GPU index: ${index:-<unset>}" >&2
+        return 1
+    fi
+    if [[ -z "${CUDA_VISIBLE_DEVICES+set}" ]]; then
+        printf '%s\n' "${index}"
+        return 0
+    fi
+    local -a visible
+    IFS=',' read -ra visible <<< "${CUDA_VISIBLE_DEVICES// /}"
+    if (( 10#${index} >= ${#visible[@]} )); then
+        echo "GPU ${index} is not in CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" >&2
+        return 1
+    fi
+    printf '%s\n' "${visible[10#${index}]}"
+}
 
 
 # ---------------------------------------------------------------------------
