@@ -60,7 +60,14 @@ fn event_plane_host_from_env() -> Result<IpAddr> {
 
 fn event_plane_host_from_env_with_resolver<R: IpResolver>(resolver: &R) -> Result<IpAddr> {
     let Some(host) = host_override_from_env(DYN_EVENT_PLANE_HOST)? else {
-        return Ok(resolve_local_host(resolver)?.advertise_ip());
+        let resolved = resolve_local_host(resolver)?;
+        if resolved.used_loopback_fallback() {
+            tracing::warn!(
+                address = %resolved.advertise_ip(),
+                "No usable non-loopback IP address found; set DYN_EVENT_PLANE_HOST to an address reachable by subscribers"
+            );
+        }
+        return Ok(resolved.advertise_ip());
     };
 
     resolve_host_or_interface(&host, resolver)
@@ -494,6 +501,11 @@ impl EventPublisher {
                                 .context("Failed to create Tokio runtime for ZMQ")?;
 
                             rt.block_on(ZmqPubTransport::bind(bind_endpoint, &topic))
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to bind direct ZMQ publisher at {bind_endpoint} for advertised address {advertised_host}; check DYN_EVENT_PLANE_HOST and host IP support"
+                                    )
+                                })
                         }
                     })
                     .join()
@@ -963,7 +975,7 @@ mod tests {
     use crate::utils::ip_resolver::test_support::StubResolver;
 
     #[test]
-    fn direct_zmq_automatic_host_prefers_non_loopback_then_ipv4() {
+    fn direct_zmq_automatic_host_selection() {
         let mut resolver = StubResolver::not_found();
         resolver.interfaces = vec![
             ("lo", "127.0.0.1".parse().unwrap()),
@@ -990,40 +1002,13 @@ mod tests {
         );
     }
 
-    struct EventPlaneHostResolver {
-        ipv4: Option<std::net::IpAddr>,
-        ipv6: Option<std::net::IpAddr>,
-        interfaces: Vec<(String, std::net::IpAddr)>,
-    }
-
-    impl IpResolver for EventPlaneHostResolver {
-        fn local_ip(&self) -> std::result::Result<std::net::IpAddr, local_ip_address::Error> {
-            self.ipv4
-                .ok_or(local_ip_address::Error::LocalIpAddressNotFound)
-        }
-
-        fn local_ipv6(&self) -> std::result::Result<std::net::IpAddr, local_ip_address::Error> {
-            self.ipv6
-                .ok_or(local_ip_address::Error::LocalIpAddressNotFound)
-        }
-
-        fn list_afinet_netifas(
-            &self,
-        ) -> std::result::Result<Vec<(String, std::net::IpAddr)>, local_ip_address::Error> {
-            Ok(self.interfaces.clone())
-        }
-    }
-
     #[test]
     fn direct_zmq_advertise_host_from_env_resolves_ips_and_interfaces() {
-        let resolver = EventPlaneHostResolver {
-            ipv4: Some("192.0.2.1".parse().unwrap()),
-            ipv6: None,
-            interfaces: vec![
-                ("ib0".to_string(), "192.0.2.20".parse().unwrap()),
-                ("ib6".to_string(), "2001:db8::20".parse().unwrap()),
-            ],
-        };
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("ib0", "192.0.2.20".parse().unwrap()),
+            ("ib6", "2001:db8::20".parse().unwrap()),
+        ];
 
         assert_eq!(
             temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some(" 192.0.2.10 "))], || {
@@ -1059,11 +1044,8 @@ mod tests {
 
     #[test]
     fn direct_zmq_advertise_host_falls_back_to_ipv6_and_rejects_wildcards() {
-        let resolver = EventPlaneHostResolver {
-            ipv4: None,
-            ipv6: Some("2001:db8::1".parse().unwrap()),
-            interfaces: vec![("eth0".to_string(), "2001:db8::1".parse().unwrap())],
-        };
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![("eth0", "2001:db8::1".parse().unwrap())];
         assert_eq!(
             temp_env::with_vars([(DYN_EVENT_PLANE_HOST, None::<&str>)], || {
                 event_plane_host_from_env_with_resolver(&resolver)
@@ -1117,6 +1099,12 @@ mod tests {
     #[case("[::1]")]
     #[tokio::test]
     async fn direct_zmq_publisher_serves_advertised_endpoint(#[case] host: &str) {
+        if host == "[::1]"
+            && let Err(error) = std::net::TcpListener::bind("[::1]:0")
+        {
+            eprintln!("Skipping IPv6 publisher test: {error}");
+            return;
+        }
         temp_env::async_with_vars(
             [
                 (DYN_EVENT_PLANE_HOST, Some(host)),

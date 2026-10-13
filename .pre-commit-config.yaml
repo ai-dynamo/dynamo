@@ -14,7 +14,7 @@
 # limitations under the License.
 
 default_install_hook_types: [pre-commit, commit-msg]
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/trtllm/proto/trtllm_service\.proto$)
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/trtllm/proto/openengine/v1/.*\.proto$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
@@ -139,13 +139,15 @@ repos:
       files: ^docs/fern/scripts/check_published_styles\.py$
       pass_filenames: false
     - id: gen-llms-tables
-      name: Test the generated docs tables (gen_llms_tables.py)
-      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py
+      name: Test the generated docs tables (gen_llms_tables.py, gen_nightly_selector.py)
+      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py docs/fern/scripts/test_gen_nightly_selector.py
       language: python
-      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
+      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables|gen_nightly_selector|test_gen_nightly_selector)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
       pass_filenames: false
       additional_dependencies:
         - pytest
+        # gen_nightly_selector.py imports yaml at module level.
+        - pyyaml
     - id: gen-llms-tables-check
       name: Check the generated docs tables are current
       entry: python3 docs/fern/scripts/gen_llms_tables.py --check
@@ -220,6 +222,20 @@ repos:
       language: system
       files: ^scripts/check_action_pins\.py$
       pass_filenames: false
+    - id: pynvvideocodec-spec
+      name: Check the PyNvVideoCodec spec is consistent
+      entry: python3 tests/dependencies/test_pynvvideocodec_spec.py
+      language: python
+      additional_dependencies: [packaging, pytest]
+      pass_filenames: false
+      always_run: true
+    - id: ffmpeg-version-consistency
+      name: Check the in-tree FFmpeg version is declared consistently
+      entry: python3 tests/dependencies/test_ffmpeg_version_consistency.py
+      language: python
+      additional_dependencies: [pytest, pyyaml]
+      pass_filenames: false
+      always_run: true
     - id: validate-agent-instructions
       name: Validate AGENTS.md and CLAUDE.md pairs
       entry: python3 scripts/validate_agent_instructions.py

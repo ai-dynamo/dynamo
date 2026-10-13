@@ -2836,6 +2836,83 @@ async fn test_audio_speech_disconnect_before_first_chunk_cancels_engine() {
     task.await.unwrap().unwrap();
 }
 
+/// Audio engine that must not receive a request. The frontend rejects the
+/// request before dispatch. A call to `generate` is a test failure.
+struct UncalledAudiosEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for UncalledAudiosEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+/// The frontend owns the `speed` range rule (0.25 to 4.0). A value outside
+/// the range returns a 400 that names the field. The engine does not see the
+/// request.
+#[tokio::test]
+async fn test_audio_speech_speed_out_of_range_returns_400() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("tts-model");
+    manager
+        .add_audios_model(
+            "tts-model",
+            card.mdcsum(),
+            Arc::new(UncalledAudiosEngine {}),
+        )
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/audio/speech"))
+        .json(&serde_json::json!({
+            "model": "tts-model",
+            "input": "The quick brown fox jumps over the lazy dog.",
+            "speed": 99.0,
+        }))
+        .send()
+        .await
+        .expect("POST /v1/audio/speech");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a speed outside 0.25-4.0 must return HTTP 400; got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("speed"),
+        "expected the validation message to name the offending field; got: {text}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 /// Audio engine whose only response frame is a `Backend(InvalidArgument)`
 /// error — models a worker rejecting the request during deserialization
 /// (e.g. a `task_type` value outside the backend's accepted set).

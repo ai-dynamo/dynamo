@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
-use super::timing::RequestTracker;
+use super::llm_backend::DecoderCheckpoint;
+use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
@@ -272,14 +273,87 @@ pub struct MmRoutingInfo {
     pub expanded_prompt_len: usize,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// Media carried between the frontend and backend.
+///
+/// A `Url` wire value can deserialize as either `Url` or `RawUrl` when parsing
+/// is unnecessary. Consumers must handle both representations of URL input.
+#[derive(Serialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    /// URL text without a parsed URL object; not all values have been validated.
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
+}
+
+impl<'de> Deserialize<'de> for MultimodalData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        use std::borrow::Cow;
+
+        // Keep the existing names and variant order for old and new senders.
+        #[derive(Deserialize)]
+        enum WireData<'a> {
+            Url(#[serde(borrow)] Cow<'a, str>),
+            RawUrl(String),
+            Decoded(RdmaMediaDataDescriptor),
+            UuidOnly(String),
+        }
+
+        match WireData::deserialize(deserializer)? {
+            WireData::Url(value) if is_plain_base64_data_uri(&value) => {
+                Ok(Self::RawUrl(value.into_owned()))
+            }
+            WireData::Url(value) => {
+                url::Url::deserialize(value.as_ref().into_deserializer()).map(Self::Url)
+            }
+            WireData::RawUrl(value) => Ok(Self::RawUrl(value)),
+            WireData::Decoded(value) => Ok(Self::Decoded(value)),
+            WireData::UuidOnly(value) => Ok(Self::UuidOnly(value)),
+        }
+    }
+}
+
+/// Check complete blocks without a per-byte early exit so LLVM can vectorize.
+fn is_base64_payload(payload: &[u8]) -> bool {
+    fn allowed(b: u8) -> bool {
+        (b.wrapping_sub(b'A') <= 25)
+            | (b.wrapping_sub(b'a') <= 25)
+            | (b.wrapping_sub(b'0') <= 9)
+            | (b == b'+')
+            | (b == b'/')
+            | (b == b'=')
+    }
+    let (blocks, tail) = payload.as_chunks::<32>();
+    for block in blocks {
+        let mut valid = true;
+        for &byte in block {
+            valid &= allowed(byte);
+        }
+        if !valid {
+            return false;
+        }
+    }
+    tail.iter().copied().all(allowed)
+}
+
+/// Recognize data URIs whose bytes, and therefore cache keys, need no normalization.
+fn is_plain_base64_data_uri(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return false;
+    };
+    let Some((header, payload)) = rest.split_once(',') else {
+        return false;
+    };
+    value.len() <= u32::MAX as usize
+        && !header.starts_with('/')
+        && header.ends_with(";base64")
+        && header
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'?' && b != b'#')
+        && is_base64_payload(payload.as_bytes())
 }
 
 // multimodal map containing {mm_part_type: [data...]}
@@ -325,6 +399,10 @@ pub struct PreprocessedRequest {
     /// immutable prompt behind `Arc` makes cloning the token storage constant-time;
     /// paths that append generated tokens use `Arc::make_mut`.
     #[builder(setter(into))]
+    #[serde(
+        serialize_with = "serialize_token_ids",
+        deserialize_with = "deserialize_token_ids"
+    )]
     pub token_ids: Arc<Vec<TokenIdType>>,
 
     /// Base64-encoded PyTorch tensor containing pre-computed embeddings
@@ -416,19 +494,14 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
-    /// Text withheld by the previous attempt's decoder as a possible (but
-    /// unresolved) prefix of a hidden stop sequence, carried into a migration
-    /// retry so the new attempt's decoder does not silently drop it and can
-    /// still complete the match if the continuation supplies the rest of the
-    /// sequence. Set by the migration `RetryManager` (in-process, on its own
-    /// in-memory `PreprocessedRequest`) from the last successfully processed
-    /// response before a retry, and consumed once by `Backend` -- also
-    /// in-process, one hop later in the same pipeline -- when seeding the
-    /// retry's decoder. `#[serde(skip)]` keeps it that way: it never needs to,
-    /// and must not, reach a remote worker over the wire.
+    /// Decoder state from the previous attempt, carried into a migration retry so the
+    /// fresh decoder can restore withheld stop-filter text and replay any token IDs still
+    /// buffered by incremental detokenization. `RetryManager` sets it and `Backend`
+    /// consumes it in the same frontend process; `#[serde(skip)]` prevents it from reaching
+    /// a remote worker.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) jail_seed: Option<String>,
+    pub(crate) jail_seed: Option<DecoderCheckpoint>,
 
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
@@ -517,6 +590,105 @@ pub struct PreprocessedRequest {
     pub is_probe: bool,
 }
 
+/// `DYN_TOKEN_IDS_AS_BYTES=1`: put `token_ids` on the request plane as one packed
+/// little-endian int32 blob instead of a sequence. On a binary codec (msgpack) the
+/// Python worker then receives `bytes` and never allocates one Python int per
+/// token; the TRT-LLM handler turns it into an int32 array. Human-readable codecs
+/// (JSON) keep the sequence form. Deserialization accepts both forms.
+/// Enable only when every msgpack worker runs a release with this reader: an older
+/// worker decodes the blob through rmp-serde's `deserialize_seq`, one token per
+/// byte, with no error.
+static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::request_plane::DYN_TOKEN_IDS_AS_BYTES,
+    )
+});
+
+/// Readers decode the packed form as signed int32 (the engines' token type), so
+/// ids above `i32::MAX` keep the sequence form.
+fn token_ids_fit_i32(ids: &[TokenIdType]) -> bool {
+    ids.iter().all(|&id| id <= i32::MAX as TokenIdType)
+}
+
+/// Upper bound on the capacity reserved from a sequence size hint; a MessagePack
+/// array header can claim any length before supplying the elements.
+const TOKEN_IDS_PREALLOC_CAP: usize = 1 << 20;
+
+fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_token_ids_with(ids, serializer, *TOKEN_IDS_AS_BYTES)
+}
+
+fn serialize_token_ids_with<S>(
+    ids: &[TokenIdType],
+    serializer: S,
+    packed: bool,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if packed && !serializer.is_human_readable() && token_ids_fit_i32(ids) {
+        let mut buf = Vec::with_capacity(ids.len() * 4);
+        for id in ids {
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        return serializer.serialize_bytes(&buf);
+    }
+    ids.serialize(serializer)
+}
+
+fn deserialize_token_ids<'de, D>(deserializer: D) -> Result<Arc<Vec<TokenIdType>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TokenIdsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TokenIdsVisitor {
+        type Value = Vec<TokenIdType>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a sequence of token ids or packed little-endian int32 bytes")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out =
+                Vec::with_capacity(seq.size_hint().unwrap_or(0).min(TOKEN_IDS_PREALLOC_CAP));
+            while let Some(id) = seq.next_element::<TokenIdType>()? {
+                out.push(id);
+            }
+            Ok(out)
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if !v.len().is_multiple_of(4) {
+                return Err(E::custom(
+                    "packed token_ids byte length is not a multiple of 4",
+                ));
+            }
+            Ok(v.chunks_exact(4)
+                .map(|c| TokenIdType::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect())
+        }
+
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_bytes(&v)
+        }
+    }
+
+    deserializer.deserialize_any(TokenIdsVisitor).map(Arc::new)
+}
+
 /// Enforce the object-only `encoder_result` contract at the serde boundary.
 /// The handoff payload is engine-opaque but must be a JSON object at every hop;
 /// reject arrays/scalars here so a non-conforming (e.g. cross-language)
@@ -539,6 +711,13 @@ where
 }
 
 impl PreprocessedRequest {
+    pub fn phase(&self) -> RequestPhase {
+        self.tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or_default()
+    }
+
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
     }
@@ -629,6 +808,274 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_blocks_match_scalar_for_all_bytes_and_tails() {
+        for length in [0, 1, 31, 32, 33, 63, 64, 65] {
+            let mut payload = vec![b'A'; length];
+            assert!(is_base64_payload(&payload));
+            for offset in 0..length {
+                for byte in 0..=255 {
+                    payload[offset] = byte;
+                    let expected = payload
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+                    assert_eq!(
+                        is_base64_payload(&payload),
+                        expected,
+                        "{length}/{offset}/{byte}"
+                    );
+                }
+                payload[offset] = b'A';
+            }
+        }
+    }
+
+    #[test]
+    fn multimodal_uri_wire_compatibility_and_order() {
+        #[derive(Serialize, Deserialize, Debug)]
+        enum OldData {
+            Url(url::Url),
+            #[serde(rename(serialize = "Url"))]
+            RawUrl(String),
+            Decoded(RdmaMediaDataDescriptor),
+            UuidOnly(String),
+        }
+        let values = [
+            ("data:image/jpeg;base64,/9j/AA==", true),
+            (" data:image/jpeg;base64,AA==\n", false),
+            ("DATA:image/jpeg;base64,AA==", false),
+            ("data:/image/../jpeg;base64,AA==", false),
+            ("data:image/jpeg;base64,A%41==", false),
+            ("data:image/jpeg;base64,AA==#fragment", false),
+            ("https://EXAMPLE.com/a/../image.jpg", false),
+        ];
+        for (value, fast) in values {
+            let wire = serde_json::json!({"Url": value});
+            let decoded: MultimodalData = serde_json::from_value(wire).unwrap();
+            let expected = url::Url::parse(value).unwrap();
+            assert_eq!(
+                matches!(decoded, MultimodalData::RawUrl(_)),
+                fast,
+                "{value}"
+            );
+            // A new public variant must update this compatibility test too.
+            let legacy = match decoded {
+                MultimodalData::Url(value) => OldData::Url(value),
+                MultimodalData::RawUrl(value) => OldData::RawUrl(value),
+                MultimodalData::Decoded(value) => OldData::Decoded(value),
+                MultimodalData::UuidOnly(value) => OldData::UuidOnly(value),
+            };
+            assert_eq!(
+                serde_json::to_value(legacy).unwrap(),
+                serde_json::json!({"Url": expected})
+            );
+        }
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "nixl_metadata": "test-metadata",
+            "nixl_descriptor": {"addr": 0, "size": 3, "mem_type": "Dram", "device_id": 0},
+            "shape": [1, 1, 3], "dtype": "UINT8", "metadata": null,
+            "content_hash": "0123456789abcdef"
+        }))
+        .unwrap();
+        let old = vec![
+            OldData::Url(url::Url::parse(values[0].0).unwrap()),
+            OldData::RawUrl(values[0].0.into()),
+            OldData::Url(url::Url::parse("https://example.com/image.jpg").unwrap()),
+            OldData::Decoded(descriptor),
+            OldData::UuidOnly("cache-id".into()),
+        ];
+        let json = serde_json::to_vec(&old).unwrap();
+        let new: Vec<MultimodalData> = serde_json::from_slice(&json).unwrap();
+        let back = serde_json::to_vec(&new).unwrap();
+        assert_eq!(back, json);
+        let _: Vec<OldData> = serde_json::from_slice(&back).unwrap();
+        for (packed, named) in [
+            (rmp_serde::to_vec(&old).unwrap(), false),
+            (rmp_serde::to_vec_named(&old).unwrap(), true),
+        ] {
+            let decoded: Vec<MultimodalData> = rmp_serde::from_slice(&packed).unwrap();
+            let back = if named {
+                rmp_serde::to_vec_named(&decoded)
+            } else {
+                rmp_serde::to_vec(&decoded)
+            }
+            .unwrap();
+            let legacy: Vec<OldData> = rmp_serde::from_slice(&back).unwrap();
+            assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+        }
+        let invalid = serde_json::json!({"Url": "relative"});
+        assert_eq!(
+            serde_json::from_value::<MultimodalData>(invalid.clone())
+                .unwrap_err()
+                .to_string(),
+            serde_json::from_value::<OldData>(invalid)
+                .unwrap_err()
+                .to_string()
+        );
+        let malformed = serde_json::json!({"Url": "http://[invalid"});
+        assert!(
+            serde_json::from_slice::<MultimodalData>(&serde_json::to_vec(&malformed).unwrap())
+                .is_err()
+        );
+        assert!(
+            rmp_serde::from_slice::<MultimodalData>(&rmp_serde::to_vec_named(&malformed).unwrap())
+                .is_err()
+        );
+        assert!(matches!(
+            serde_json::from_value::<MultimodalData>(serde_json::json!({"RawUrl":"raw"})).unwrap(),
+            MultimodalData::RawUrl(_)
+        ));
+    }
+
+    #[test]
+    fn multimodal_uri_header_matches_url_parser() {
+        let cases = (0u8..=127)
+            .map(char::from)
+            .chain(['é', '💡'])
+            .map(|c| format!("data:image/{c};base64,AA=="))
+            .chain(["data://[invalid;base64,AA==".to_string()]);
+        for value in cases {
+            let expected = url::Url::parse(&value);
+            let actual =
+                serde_json::from_value::<MultimodalData>(serde_json::json!({"Url": value}));
+            assert_eq!(actual.is_ok(), expected.is_ok(), "{value:?}");
+            if let Ok(expected) = expected {
+                assert_eq!(
+                    serde_json::to_value(actual.unwrap()).unwrap(),
+                    serde_json::json!({"Url": expected}),
+                    "{value:?}"
+                );
+            }
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TokenIdsOnly {
+        #[serde(deserialize_with = "deserialize_token_ids")]
+        token_ids: Arc<Vec<TokenIdType>>,
+    }
+
+    struct Bytes<'a>(&'a [u8]);
+
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    struct PackedTokenIds<'a>(&'a [u8]);
+
+    impl serde::Serialize for PackedTokenIds<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field("token_ids", &Bytes(self.0))?;
+            st.end()
+        }
+    }
+
+    fn le_bytes(ids: &[TokenIdType]) -> Vec<u8> {
+        ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn packed_token_ids_deserialize_from_msgpack_bytes() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&le_bytes(&ids))).unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_token_ids_reject_odd_byte_length() {
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&[1, 0, 0])).unwrap();
+        assert!(rmp_serde::from_slice::<TokenIdsOnly>(&payload).is_err());
+    }
+
+    #[test]
+    fn sequence_token_ids_still_deserialize() {
+        #[derive(serde::Serialize)]
+        struct Seq {
+            token_ids: Vec<TokenIdType>,
+        }
+        let ids = vec![7u32, 8, 9];
+        let payload = rmp_serde::to_vec_named(&Seq {
+            token_ids: ids.clone(),
+        })
+        .unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    struct TokenIdsField<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for TokenIdsField<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serialize_token_ids_with(self.ids, serializer, self.packed)
+        }
+    }
+
+    struct Request<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for Request<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field(
+                "token_ids",
+                &TokenIdsField {
+                    ids: self.ids,
+                    packed: self.packed,
+                },
+            )?;
+            st.end()
+        }
+    }
+
+    fn encode(ids: &[TokenIdType], packed: bool) -> Vec<u8> {
+        rmp_serde::to_vec_named(&Request { ids, packed }).unwrap()
+    }
+
+    // fixmap(1) + fixstr header + the 9 key bytes precede the `token_ids` value.
+    const VALUE_OFFSET: usize = 1 + 1 + "token_ids".len();
+
+    #[test]
+    fn packed_serialization_emits_int32_bytes_that_round_trip() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0xc4, "msgpack bin8 marker");
+        assert_eq!(&payload[VALUE_OFFSET + 2..], le_bytes(&ids).as_slice());
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn ids_above_i32_max_keep_the_sequence_form() {
+        let ids = vec![7u32, i32::MAX as u32 + 1];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0x92, "msgpack fixarray(2), not bin");
+        assert_eq!(payload, encode(&ids, false));
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_flag_leaves_json_as_a_sequence() {
+        let ids = vec![1u32, 2];
+        let json = serde_json::to_string(&Request {
+            ids: &ids,
+            packed: true,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"token_ids":[1,2]}"#);
+    }
 
     fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -771,6 +1218,29 @@ mod tests {
         assert_eq!(guided["require_reasoning"], true);
         let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
         assert!(back.require_reasoning);
+    }
+
+    #[test]
+    fn disabled_reasoning_with_thinking_budget_serde_round_trip() {
+        let req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions {
+                max_thinking_tokens: Some(0),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .require_reasoning(false)
+            .build()
+            .unwrap();
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(value.get("require_reasoning").is_none());
+        assert_eq!(value["stop_conditions"]["max_thinking_tokens"], 0);
+        let back: PreprocessedRequest = serde_json::from_value(value).unwrap();
+        assert!(!back.require_reasoning);
+        assert_eq!(back.stop_conditions.max_thinking_tokens, Some(0));
     }
 
     /// Canary payloads carry only engine-relevant fields. All other required

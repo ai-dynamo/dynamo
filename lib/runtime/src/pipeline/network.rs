@@ -386,9 +386,9 @@ impl Drop for Cleanup {
     }
 }
 
-/// Awaitable handle for a stream sender or receiver. Drop without calling
-/// `into_parts()` runs the optional cleanup closure, removing the
-/// registration from the stream server's maps.
+/// Awaitable handle for a stream sender or receiver. Dropping the handle without
+/// a successful `wait()` or a call to `into_parts()` runs the optional cleanup
+/// closure, removing the registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
@@ -442,6 +442,21 @@ impl<T> RegisteredStream<T> {
         } = self;
         cleanup.0.take();
         (connection_info, stream_provider)
+    }
+
+    /// Await the stream provider, keeping registration cleanup armed until success.
+    ///
+    /// An error or a dropped future removes the registration from the transport.
+    /// Once the stream is established, cleanup is disarmed and the transport owns
+    /// the stream's remaining lifecycle.
+    pub async fn wait(
+        mut self,
+    ) -> Result<Result<T, StreamPrologueError>, tokio::sync::oneshot::error::RecvError> {
+        let result = (&mut self.stream_provider).await;
+        if matches!(result, Ok(Ok(_))) {
+            self.cleanup.0.take();
+        }
+        result
     }
 }
 
@@ -520,6 +535,58 @@ mod registered_stream_tests {
         assert!(
             !flag.load(Ordering::SeqCst),
             "into_parts() must disarm the cleanup closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_wait_disarms_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        tx.send(Ok(42)).unwrap();
+        assert_eq!(stream.wait().await.unwrap().unwrap(), 42);
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "successful wait must disarm cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_prologue_wait_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+        let error = StreamPrologueError::from_message("worker rejected request");
+
+        tx.send(Err(error.clone())).unwrap();
+        assert_eq!(stream.wait().await.unwrap().unwrap_err(), error);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "failed prologue must run cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_provider_wait_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        drop(tx);
+        assert!(stream.wait().await.is_err());
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "closed provider must run cleanup"
         );
     }
 
@@ -659,6 +726,10 @@ pub struct StreamOptions {
     /// Register with the server that this connection will have a server-side Receiver
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
+
+    /// Preserve guarded dispatch setup until the worker sends its prologue.
+    #[builder(default)]
+    pub defer_cancellation_until_prologue: bool,
 
     /// The number of frames buffered between the data-plane socket task and the
     /// engine consumer/producer before backpressure kicks in. Drives the mpsc
@@ -1191,6 +1262,8 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Resolved response transport of the bound endpoint's runtime.
+    response_plane: OnceLock<ResponsePlaneMode>,
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
@@ -1237,6 +1310,7 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            response_plane: OnceLock::new(),
             quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
@@ -1348,7 +1422,8 @@ where
             .copied()
     }
 
-    fn bind_lifecycle_endpoint(&self, endpoint: &crate::component::Endpoint) {
+    fn bind_endpoint_config(&self, endpoint: &crate::component::Endpoint) {
+        let _ = self.response_plane.set(endpoint.drt().response_plane());
         // Keep an explicitly constructed ingress role; otherwise observe model
         // registration even when it happens after the endpoint starts serving.
         let _ = self

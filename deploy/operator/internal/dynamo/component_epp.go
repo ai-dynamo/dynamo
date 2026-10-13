@@ -10,6 +10,7 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -134,6 +135,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
 		container.VolumeMounts = append(container.VolumeMounts, volumeMount)
 	} else {
+		if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+				Value: "true",
+			})
+		}
+
 		// Native Rust EPP: configured through DYN_* env vars, serves
 		// ext_proc/health on fixed ports, takes no CLI flags, and reads no
 		// config file. Leave Args empty and let the image ENTRYPOINT run.
