@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.deploy.api_checks import check_deployment_api
+from tests.deploy.api_checks import check_chat_api, check_embedding_api
 from tests.deploy.dgd_utils import ManagedDeployment
 from tests.deploy.n2_utils import (
     DEFAULT_RELEASE_LINE,
@@ -21,7 +21,7 @@ from tests.deploy.n2_utils import (
     version_matrix,
 )
 from tests.utils.client import wait_for_model_availability
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
@@ -119,11 +119,5 @@ async def test_n2_compatibility(mixed_deployment, scenario):
         logger,
         payload=payload,
     ), f"Model {model} did not become available"
-    await asyncio.to_thread(
-        check_deployment_api,
-        base,
-        model,
-        scenario,
-        output / "responses",
-        endpoint=endpoint,
-    )
+    check_api = check_embedding_api if scenario == "embedding" else check_chat_api
+    await asyncio.to_thread(check_api, base + endpoint, model, output / "responses")

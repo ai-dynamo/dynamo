@@ -17,10 +17,13 @@ import json
 import logging
 import math
 import os
+import re
+from copy import deepcopy
+from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional, Protocol
-from urllib.parse import parse_qsl
+from typing import Any, Dict, Literal, Optional, Protocol, cast
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from pydantic import (
@@ -28,17 +31,38 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     field_validator,
     model_validator,
 )
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
+from dynamo.planner.config.batch_policy_config import BatchSchedulingPolicyConfig
 from dynamo.planner.config.defaults import SLAPlannerDefaults
-from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
 from dynamo.planner.plugins.types import HoldPolicy
 
 logger = logging.getLogger(__name__)
+
+_PROMETHEUS_LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_http_url(value: str, *, field_name: str) -> str:
+    """Validate a service URL without normalizing its path or trailing slash."""
+
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{field_name} must be an absolute http(s) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            f"{field_name} must not contain credentials; use a mounted secret"
+        )
+    return value
+
+
+def _batch_redis_url_default() -> SecretStr | None:
+    value = os.environ.get("DYN_PLANNER_BATCH_REDIS_URL")
+    return SecretStr(value) if value else None
 
 
 class MinimumEndpointConfig(Protocol):
@@ -96,29 +120,49 @@ class PlannerPreDeploymentSweepMode(str, Enum):
     Thorough = "thorough"
 
 
-class AICPerfModelSpec(BaseModel):
-    """Native AIC model identity used by Planner performance modeling.
+class AISPerfModelSpec(BaseModel):
+    """Role-indexed AISimulate canonical configurations.
 
-    Unlike ``AICInterpolationSpec``, this does not describe an AIC sweep.
-    It is the forward-pass model/backend/parallelism identity used for
-    real-time queries through the aiconfigurator-core wheel. Unsupported
-    native AIC configs are allowed: the AIC model falls back to FPM regression
-    and can still tune from observations.
+    The SDK owns the estimator schema. Dynamo binds each configuration to
+    its deployment role.
     """
 
-    hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
-    system: str = Field(description="AIC system identifier, e.g. h200_sxm")
-    backend: Literal["trtllm", "vllm", "sglang"]
-    backend_version: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
 
-    prefill_pick: Optional[PickedParallelConfig] = None
-    decode_pick: Optional[PickedParallelConfig] = None
+    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]]
 
-    model_arch: Optional[str] = None
-    weight_dtype: Optional[str] = None
-    moe_dtype: Optional[str] = None
-    activation_dtype: Optional[str] = None
-    kv_cache_dtype: Optional[str] = None
+    @field_validator("roles")
+    @classmethod
+    def validate_role_identity(
+        cls, roles: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        # Operator schema generation imports this module without the optional
+        # estimator runtime. Require AIS only when validating an AIS config.
+        # The package root loads native APIs lazily and types them as object;
+        # import the typed native module directly.
+        from aisimulate_core._native import RustForwardPassPerfModel
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+        result = {}
+        for role, config in roles.items():
+            config = deepcopy(config)
+            if config.get("worker_type", role) != role:
+                raise ValueError(f"AIS role {role!r} conflicts with worker_type")
+            config["worker_type"] = role
+            try:
+                # Use the installed SDK's fields/defaults; never duplicate its
+                # expanding schema or discard an unrecognized input field.
+                request = ForwardPassPerfModelConfig(**config)
+                # AISimulate exposes native APIs lazily through module __getattr__.
+                cast(Any, RustForwardPassPerfModel).normalize_config(
+                    json.dumps(request.to_dict())
+                )
+                # Keep authored roots portable and controls explicit; to_dict()
+                # resolves package/env roots on the machine doing validation.
+                result[role] = asdict(request)
+            except TypeError as error:
+                raise ValueError(f"invalid AIS config for {role}: {error}") from error
+        return result
 
 
 class ExternalPluginEntry(BaseModel):
@@ -367,6 +411,297 @@ class SchedulingConfig(BaseModel):
     )
 
 
+class BatchGatewaySourceConfig(BaseModel):
+    """Batch Gateway API settings for native batch-demand observation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(
+        ...,
+        min_length=1,
+        description="Base URL of the OpenAI-compatible Batch Gateway API.",
+    )
+    tenant: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Dedicated Batch Gateway tenant observed by this single-pool POC. "
+            "Sent as the X-MaaS-Username header."
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-request timeout for Batch Gateway API calls.",
+    )
+    page_size: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+        description="Batch list page size accepted by the Gateway API.",
+    )
+    max_pages: int = Field(
+        default=100,
+        ge=1,
+        le=10_000,
+        description=(
+            "Maximum list pages scanned per observation. Reaching the bound "
+            "fails the observation instead of returning a partial job set."
+        ),
+    )
+    max_jobs: int = Field(
+        default=10_000,
+        ge=1,
+        le=10_000,
+        description=(
+            "Maximum listed jobs retained per observation (hard-capped at "
+            "10,000 for bounded in-process memory). Reaching the bound while "
+            "more jobs may exist fails closed."
+        ),
+    )
+    collection_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Aggregate deadline for one complete Gateway observation.",
+    )
+    detail_concurrency: int = Field(
+        default=16,
+        ge=1,
+        le=100,
+        description="Maximum concurrent nonterminal batch detail requests.",
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="batch gateway base_url")
+
+
+class BatchMetricsConfig(BaseModel):
+    """Direct OpenMetrics scrape endpoints used by batch-aware planning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    frontend_metrics_url: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Direct /metrics URL for the Dynamo frontend serving the shared pool."
+        ),
+    )
+    dispatcher_metrics_url: str = Field(
+        ...,
+        min_length=1,
+        description="Direct /metrics URL for the llm-d Async dispatcher.",
+    )
+    online_match_labels: dict[str, str] = Field(
+        ...,
+        description=(
+            "Exact frontend metric labels selecting online traffic. The POC "
+            "uses streaming requests for online traffic and unary requests for "
+            "batch traffic. A model label is required so the corresponding "
+            "per-model active-request gauge can be selected safely."
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-scrape timeout for both direct OpenMetrics endpoints.",
+    )
+
+    @field_validator("frontend_metrics_url")
+    @classmethod
+    def _validate_frontend_metrics_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="frontend_metrics_url")
+
+    @field_validator("dispatcher_metrics_url")
+    @classmethod
+    def _validate_dispatcher_metrics_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="dispatcher_metrics_url")
+
+    @field_validator("online_match_labels")
+    @classmethod
+    def _validate_online_match_labels(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError(
+                "online_match_labels must explicitly distinguish online traffic"
+            )
+        if "model" not in value:
+            raise ValueError(
+                "online_match_labels must include the frontend model label"
+            )
+        for label_name, label_value in value.items():
+            if not _PROMETHEUS_LABEL_NAME.fullmatch(label_name):
+                raise ValueError(
+                    f"online_match_labels contains invalid label name {label_name!r}"
+                )
+            if not label_value:
+                raise ValueError("online_match_labels values must be non-empty strings")
+        return dict(value)
+
+
+class BatchRedisActuatorConfig(BaseModel):
+    """Redis connection and key used to publish leased drain limits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: SecretStr | None = Field(
+        default_factory=_batch_redis_url_default,
+        validate_default=True,
+        exclude=True,
+        description=(
+            "Redis URL loaded from DYN_PLANNER_BATCH_REDIS_URL by default. "
+            "Excluded from serialized Planner config."
+        ),
+    )
+    control_key: str = Field(
+        ...,
+        min_length=1,
+        description="Exact llm-d Async Redis hash key for the configured pool.",
+    )
+    connect_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Redis connection timeout.",
+    )
+    socket_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Redis command read/write timeout.",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _validate_redis_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw_url = value.get_secret_value()
+        parsed = urlsplit(raw_url)
+        if parsed.scheme not in ("redis", "rediss") or not parsed.netloc:
+            raise ValueError("batch Redis url must be an absolute redis(s) URL")
+        return value
+
+
+class BatchPoolConfig(BaseModel):
+    """Capacity and deadline assumptions for the aggregate batch pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pool_id: str = Field(..., min_length=1)
+    work_class: str = Field(..., min_length=1)
+    safe_rps_per_ready_replica: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    cold_start_margin_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    finalization_margin_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    max_observation_age_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    drain_lease_duration_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=("Lifetime of each fail-closed llm-d Async drain-limit lease."),
+    )
+    min_replicas: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum replica floor while batch work is active and exact warm "
+            "replica target after all batch, online, and dispatcher work is "
+            "authoritatively idle."
+        ),
+    )
+    max_replicas: int = Field(..., ge=0)
+    scale_from_zero_replicas: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Replica floor requested when a fresh, valid active batch job is "
+            "observed while the pool has zero ready replicas."
+        ),
+    )
+    max_batch_admission_rps: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def _validate_replica_range(self) -> "BatchPoolConfig":
+        if self.max_replicas < self.min_replicas:
+            raise ValueError("max_replicas must be >= min_replicas")
+        if self.scale_from_zero_replicas > self.max_replicas:
+            raise ValueError("scale_from_zero_replicas must be <= max_replicas")
+        return self
+
+
+class BatchSchedulingConfig(BaseModel):
+    """Opt-in native Planner integration for one aggregate batch pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    gateway: BatchGatewaySourceConfig | None = None
+    metrics: BatchMetricsConfig | None = None
+    redis: BatchRedisActuatorConfig | None = None
+    pool: BatchPoolConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_enabled_dependencies(self) -> "BatchSchedulingConfig":
+        if not self.enabled:
+            return self
+
+        missing = [
+            field_name
+            for field_name in ("gateway", "metrics", "pool")
+            if getattr(self, field_name) is None
+        ]
+        if missing:
+            raise ValueError(
+                "batch_scheduling.enabled=True requires: " + ", ".join(missing)
+            )
+        return self
+
+    def to_policy_config(self) -> "BatchSchedulingPolicyConfig":
+        """Translate validated Planner config into the pure policy contract."""
+
+        if not self.enabled or self.pool is None:
+            raise ValueError("batch scheduling must be enabled and configured")
+
+        pool = self.pool
+        return BatchSchedulingPolicyConfig(
+            pool_id=pool.pool_id,
+            work_class=pool.work_class,
+            safe_rps_per_ready_replica=pool.safe_rps_per_ready_replica,
+            cold_start_margin_s=pool.cold_start_margin_seconds,
+            finalization_margin_s=pool.finalization_margin_seconds,
+            max_observation_age_s=pool.max_observation_age_seconds,
+            drain_lease_duration_s=pool.drain_lease_duration_seconds,
+            min_replicas=pool.min_replicas,
+            max_replicas=pool.max_replicas,
+            scale_from_zero_replicas=pool.scale_from_zero_replicas,
+            max_batch_admission_rps=pool.max_batch_admission_rps,
+        )
+
+
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
@@ -401,7 +736,7 @@ class PlannerConfig(BaseModel):
             "depth and KV cache utilization — no SLA targets or profiling needed. "
             "'load' uses user-defined prefill queue token and decode KV "
             "utilization thresholds. "
-            "'sla' uses the AIC core performance model to target specific "
+            "'sla' uses the AISimulate performance model to target specific "
             "ttft_ms/itl_ms values."
         ),
     )
@@ -493,16 +828,24 @@ class PlannerConfig(BaseModel):
             "the legacy profile_results_dir file loader)."
         ),
     )
-    aic_perf_model: Optional[AICPerfModelSpec] = Field(
+    ais_perf_model: Optional[AISPerfModelSpec] = Field(
         default=None,
         description=(
-            "Native AIC forward-pass perf model identity for the Planner "
-            "engine-query layer. This enables real-time AIC estimates plus online "
-            "correction; unsupported native configs automatically fall back to "
-            "FPM regression in the AIC core wheel. This field does not trigger AIC "
-            "interpolation sweeps."
+            "Role-indexed AISimulate ForwardPassPerfModelConfig mappings. "
+            "The SDK owns estimator selection, tuning, and validation; "
+            "new configs default to auto selection with fallback denied."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_perf_model_config(cls, values):
+        if isinstance(values, dict) and "aic_perf_model" in values:
+            raise ValueError(
+                "aic_perf_model is no longer supported; use ais_perf_model.roles "
+                "with canonical AISimulate configurations"
+            )
+        return values
 
     ttft_ms: float = Field(
         default=SLAPlannerDefaults.ttft_ms,
@@ -514,9 +857,13 @@ class PlannerConfig(BaseModel):
     )
 
     # Load predictor settings
-    load_predictor: str = SLAPlannerDefaults.load_predictor
+    load_predictor: Literal[
+        "constant", "arima", "prophet", "kalman"
+    ] = SLAPlannerDefaults.load_predictor
     load_predictor_log1p: bool = SLAPlannerDefaults.load_predictor_log1p
-    prophet_window_size: int = SLAPlannerDefaults.prophet_window_size
+    prophet_window_size: int = Field(
+        default=SLAPlannerDefaults.prophet_window_size, gt=0
+    )
     load_predictor_warmup_trace: Optional[str] = None
 
     # Kalman filter settings
@@ -646,13 +993,17 @@ class PlannerConfig(BaseModel):
             "scaling decisions. Even when only throughput-based scaling is enabled, "
             "live FPM observations are fed into the perf model at this interval to "
             "keep the performance model accurate. Must be shorter than "
-            "throughput_adjustment_interval_seconds."
+            "throughput_adjustment_interval_seconds when both scaling modes are enabled."
         ),
     )
-    max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
-    fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
-    load_scaling_down_sensitivity: int = (
-        SLAPlannerDefaults.load_scaling_down_sensitivity
+    max_num_fpm_samples: int = Field(
+        default=SLAPlannerDefaults.max_num_fpm_samples, gt=0
+    )
+    fpm_sample_bucket_size: int = Field(
+        default=SLAPlannerDefaults.fpm_sample_bucket_size, gt=0
+    )
+    load_scaling_down_sensitivity: int = Field(
+        default=SLAPlannerDefaults.load_scaling_down_sensitivity, ge=0, le=100
     )
     prefill_scale_up_queue_tokens: Optional[int] = Field(
         default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
@@ -708,16 +1059,16 @@ class PlannerConfig(BaseModel):
     # Per-GPU caps are NOT configured here. They are authored on each worker
     # component's ``podTemplate.metadata.annotations``
     # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
-    # and enforced by the Power Agent. The planner reads those caps from the DGD
-    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # and enforced by the Power Agent. The operator projects those caps into
+    # component status; the Planner combines them with ``total_gpu_power_limit`` to project and clamp a
     # power budget. It never writes per-GPU caps. These inputs are
     # process-static; changing the total budget requires a Planner restart.
     enable_power_awareness: bool = Field(
         default=False,
         description=(
             "Enable power-aware budget projection and budget-gated replica "
-            "scaling. Per-GPU caps are read from DGD worker podTemplate "
-            "annotations; this planner combines them with total_gpu_power_limit "
+            "scaling. Per-GPU caps are read from operator-projected DGD component "
+            "status; this planner combines them with total_gpu_power_limit "
             "to publish power-budget gauges and clamp scale-up. Requires "
             "total_gpu_power_limit, environment='kubernetes', and "
             "mode in ('disagg', 'prefill', 'decode'). Not supported for "
@@ -780,6 +1131,13 @@ class PlannerConfig(BaseModel):
         default_factory=SchedulingConfig,
         description=(
             "Plugin-pipeline scheduling config — see ``SchedulingConfig`` docstring."
+        ),
+    )
+
+    batch_scheduling: BatchSchedulingConfig = Field(
+        default_factory=BatchSchedulingConfig,
+        description=(
+            "Opt-in native batch scheduling for one Kubernetes aggregate pool."
         ),
     )
 
@@ -875,6 +1233,74 @@ class PlannerConfig(BaseModel):
                 "when mode='agg'; use min_endpoint"
             )
 
+        if self.batch_scheduling.enabled:
+            if self.environment != "kubernetes":
+                raise ValueError(
+                    "batch_scheduling.enabled=True requires environment='kubernetes'"
+                )
+            if self.mode != "agg":
+                raise ValueError("batch_scheduling.enabled=True requires mode='agg'")
+
+            pool = self.batch_scheduling.pool
+            if pool is None:
+                raise ValueError("batch_scheduling.enabled=True requires: pool")
+            gateway = self.batch_scheduling.gateway
+            if gateway is None:
+                raise ValueError("batch_scheduling.enabled=True requires: gateway")
+            metrics = self.batch_scheduling.metrics
+            if metrics is None:
+                raise ValueError("batch_scheduling.enabled=True requires: metrics")
+            if not self.advisory:
+                redis_config = self.batch_scheduling.redis
+                if redis_config is None:
+                    raise ValueError(
+                        "batch_scheduling.enabled=True requires: redis unless "
+                        "Planner advisory mode is enabled"
+                    )
+                if redis_config.url is None:
+                    raise ValueError(
+                        "non-advisory batch scheduling requires redis.url or "
+                        "DYN_PLANNER_BATCH_REDIS_URL"
+                    )
+            if pool.max_replicas < self.effective_decode_min_endpoint:
+                raise ValueError(
+                    "batch_scheduling.pool.max_replicas must be >= the effective "
+                    f"aggregate endpoint minimum ({self.effective_decode_min_endpoint})"
+                )
+            if self.advisory:
+                minimum_lease_s = 0.0
+            else:
+                redis_config = self.batch_scheduling.redis
+                if redis_config is None:
+                    raise ValueError(
+                        "non-advisory batch scheduling requires Redis timing config"
+                    )
+                observation_budget_s = max(
+                    gateway.collection_timeout_seconds,
+                    metrics.request_timeout_seconds,
+                )
+                redis_actuation_budget_s = 2.0 * (
+                    redis_config.connect_timeout_seconds
+                    + redis_config.socket_timeout_seconds
+                )
+                minimum_lease_s = (
+                    observation_budget_s
+                    + 2.0 * self.scheduling.tick_max_duration_seconds
+                    + self.scheduling.scale_interval_seconds
+                    + 2.0 * redis_actuation_budget_s
+                )
+            if (
+                not self.advisory
+                and pool.drain_lease_duration_seconds < minimum_lease_s
+            ):
+                raise ValueError(
+                    "batch_scheduling.pool.drain_lease_duration_seconds must be "
+                    "at least max(gateway collection timeout, metrics request "
+                    "timeout) + 2 * tick maximum duration + scale cadence + "
+                    "two bounded Redis applications (two attempts each) "
+                    f"({minimum_lease_s}s)"
+                )
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)
@@ -891,9 +1317,9 @@ class PlannerConfig(BaseModel):
                 f"got {self.fpm_sample_bucket_size}"
             )
 
-        # Power-awareness validation. Per-GPU caps come from DGD worker
-        # podTemplate annotations, not this config, so the only required knob
-        # is the total budget — and a Kubernetes connector to read the DGD.
+        # Power-awareness validation. Per-GPU caps come from operator-projected
+        # DGD component status, not this config, so the only required knob is
+        # the total budget — and a Kubernetes connector to read the DGD.
         if self.enable_power_awareness:
             if self.total_gpu_power_limit is None:
                 raise ValueError(
@@ -905,8 +1331,8 @@ class PlannerConfig(BaseModel):
             if self.environment != "kubernetes":
                 raise ValueError(
                     "enable_power_awareness=True requires environment='kubernetes'. "
-                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
-                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "Per-GPU caps are read from DGD component status, which only "
+                    "the Kubernetes connector resolves; virtual/replay and "
                     "global-planner modes have no DGD with authoritative caps."
                 )
             if self.mode == "agg":
@@ -993,8 +1419,8 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode is 'none' or unset while "
-                    "throughput scaling is enabled; the AIC core performance model "
-                    "will start from native AIC estimates when available or "
+                    "throughput scaling is enabled; the AISimulate performance model "
+                    "will start from native AISimulate estimates when available or "
                     "from live FPM regression after enough observations."
                 )
             if (
@@ -1003,28 +1429,23 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
-                    "is not set; planner will use aic_perf_model, live FPM "
+                    "is not set; planner will use ais_perf_model, live FPM "
                     "tuning, or profile_results_dir files if the "
                     "get_perf_metrics endpoint is unavailable."
                 )
 
-        if self.aic_perf_model is not None:
-            if (
-                self.mode in ("disagg", "prefill")
-                and self.aic_perf_model.prefill_pick is None
-            ):
-                raise ValueError(
-                    "aic_perf_model.prefill_pick is required for prefill "
-                    f"perf queries in mode={self.mode!r}"
-                )
-            if (
-                self.mode in ("disagg", "decode", "agg")
-                and self.aic_perf_model.decode_pick is None
-            ):
-                raise ValueError(
-                    "aic_perf_model.decode_pick is required for decode/agg "
-                    f"perf queries in mode={self.mode!r}"
-                )
+        if self.ais_perf_model is not None:
+            required_roles = {
+                "disagg": ("prefill", "decode"),
+                "prefill": ("prefill",),
+                "decode": ("decode",),
+                "agg": ("aggregated",),
+            }[self.mode]
+            for role in required_roles:
+                if role not in self.ais_perf_model.roles:
+                    raise ValueError(
+                        f"ais_perf_model.roles.{role} is required for mode={self.mode!r}"
+                    )
 
         intervals = [float(self.load_adjustment_interval_seconds)]
         if self.enable_throughput_scaling:

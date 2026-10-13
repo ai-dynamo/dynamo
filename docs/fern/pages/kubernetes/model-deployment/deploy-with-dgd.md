@@ -221,21 +221,21 @@ The worker in the previous step runs **vLLM**. Dynamo also supports **SGLang** a
 <Tab title="vLLM" language="vllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
 ```
 
 </Tab>
 <Tab title="SGLang" language="sglang">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
 ```
 
 </Tab>
 <Tab title="TensorRT-LLM" language="trtllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
 ```
 
 </Tab>
@@ -313,7 +313,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
   - name: decode
     type: decode
     sharedMemorySize: 16Gi
@@ -328,7 +328,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
 
 </Tab>
@@ -459,7 +459,7 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 
 **Mixture-of-Experts.** MoE models — DeepSeek-R1, Qwen3-235B, Kimi-K2 — add **expert parallelism (EP)** on top of the knobs above, and expose it as **two** sizes: how experts are split (EP) and how the non-expert (attention) weights are split (a tensor-parallel size for the MoE layers). In vLLM, enable EP with `--enable-expert-parallel`, typically alongside `--data-parallel-size` for the attention layers. In SGLang, use `--ep-size` with `--enable-dp-attention`. In TensorRT-LLM, set both `moe_expert_parallel_size` and `moe_tensor_parallel_size` in the engine config. Wide-EP deployments usually pair this with multinode and a fast all-to-all backend (for example `VLLM_ALL2ALL_BACKEND=deepep_low_latency`). For a worked multinode wide-EP example, see the [DeepSeek-R1 recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/vllm/disagg/deploy_hopper_16gpu.yaml).
 
-**Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. See [Multinode Deployments](../installation/multinode-orchestration.md) and the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
+**Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. To use different images, resources, placement, or commands for the leader and workers, provide [Role-Specific Pod Templates](../installation/multinode-orchestration.md#role-specific-pod-templates). New multinode components expose provider-independent `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` aliases for custom commands. See [Multinode Deployments](../installation/multinode-orchestration.md) and its [Portable Topology Environment Variables](../installation/multinode-orchestration.md#portable-topology-environment-variables) section, plus the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
 
 > [!WARNING]
 > **Leave room for the KV cache.** The weights are only part of GPU memory — the KV cache grows with context length and concurrency, and if it has no room the worker OOMs at load or under traffic. Each engine caps the fraction of GPU memory it will use: `--gpu-memory-utilization` (vLLM, default 0.90), `--mem-fraction-static` (SGLang), or `free_gpu_memory_fraction` in the engine config (TensorRT-LLM). If you hit OOM, lower the fraction, add a GPU (raise TP), or reduce max context length.
@@ -718,6 +718,45 @@ spec:
 
 
 This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations above — disaggregated, multinode, MoE expert-parallel, cached, KV-routed, or offloaded — apply the change from that step or the matching page below.
+
+## Before updating a Grove deployment
+
+Grove uses RollingRecreate by default for every DGD. To opt into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. New Grove DGDs created by operator 1.6.0 or later default provider-native `minAvailable` to `1` unless the manifest uses a deprecated component minimum. Existing DGDs retain their persisted legacy minima. Moving those minima to provider overrides preserves their effective values and does not select Coherent.
+
+For deployments that explicitly select Coherent, review the [known recovery limitation](https://github.com/ai-dynamo/grove/issues/873) and complete these checks before changing worker images or pod templates:
+
+1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
+2. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
+3. Plan with existing capacity: Grove has no surge support in alpha.14, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
+4. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
+
+See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#coherent-capacity-and-disruption) for budget semantics and examples. Coherent coordination applies within one PCS and does not guarantee zero downtime.
+
+### Recover from a stalled Coherent update
+
+If an update stalls because already-unavailable replicas exhaust the disruption budget, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change. See [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873).
+
+> [!WARNING]
+> Recreating the DGD stops its workloads and interrupts serving. Plan downtime or move traffic to another deployment before using this reset path.
+
+1. Prepare a replacement manifest, such as `deployment.yaml`, with the same DGD name and namespace. Remove `metadata.annotations["nvidia.com/grove-update-strategy"]` to use RollingRecreate.
+2. Delete the DGD and wait for its owned resources to be removed. Replace the example name and namespace with those from your manifest:
+
+   ```bash
+   DGD_NAME="my-dgd"
+   DEPLOY_NAMESPACE="default"
+   kubectl delete dynamographdeployment "$DGD_NAME" -n "$DEPLOY_NAMESPACE" --cascade=foreground --wait=true
+   ```
+
+3. Recreate the deployment from the prepared manifest:
+
+   ```bash
+   kubectl apply -f deployment.yaml
+   ```
+
+   Verify that the components become Ready and inference succeeds before restoring traffic.
+
+For PodCliqueScalingGroup (PCSG) components, deleting stuck member pods does not unblock this failure: Grove refills them at the old revision. For a standalone PodClique, deleting the stuck pod is a proposed workaround that has not been verified on a running cluster; do not rely on it as a confirmed recovery procedure.
 
 ## Optional next steps
 

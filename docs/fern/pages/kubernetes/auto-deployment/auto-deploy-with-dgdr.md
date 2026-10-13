@@ -271,7 +271,7 @@ deploy the reviewed snapshot, enable `autoApply`:
 
 ```bash
 kubectl patch dgdr my-model -n <namespace> --type=merge \
-  -p '{"spec":{"runtimeVersionOverride":"1.4.0"}}'
+  -p '{"spec":{"runtimeVersionOverride":"1.5.0"}}'
 kubectl patch dgdr my-model -n <namespace> --type=merge \
   -p '{"spec":{"autoApply":true}}'
 ```

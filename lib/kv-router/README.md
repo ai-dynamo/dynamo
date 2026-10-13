@@ -5,7 +5,7 @@ by Dynamo to steer requests toward workers with the best cache overlap.
 
 ## What This Crate Provides
 
-- `RadixTree` and `ConcurrentRadixTree` for prefix-overlap indexing
+- `RadixTree` and `ConcurrentRadixTreeCompressed` for prefix-overlap indexing
 - `ThreadPoolIndexer` and `PositionalIndexer` for higher-throughput index backends
 - `KvRouterConfig`, `RouterQueuePolicy`, and `LocalScheduler` for request routing
 - Protocol and hashing helpers such as `RouterEvent`, `WorkerId`,

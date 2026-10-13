@@ -25,7 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
-from dynamo.common.model_fetch import fetch_model
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -51,10 +51,16 @@ from dynamo.llm import (
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
+from .args import (
+    Config,
+    _uses_dynamo_connector,
+    configure_rl_logprobs_mode,
+    parse_args_with_model_fetch,
+)
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -62,6 +68,7 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .constants import MX_LOAD_FORMATS
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -99,7 +106,6 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
-MX_LOAD_FORMATS = {"modelexpress", "mx"}
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -152,8 +158,8 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     local dir lets `register_model` take its `fs::exists` shortcut.
 
     Temporary vLLM-only workaround until `hub.rs` learns object-storage routing.
-    Falls back to `config.model` whenever vLLM did not pull (HF id, local path,
-    or older vLLM without `model_weights`).
+    Otherwise preserve the original source so NGC identity is independent of
+    each worker's local cache directory.
     """
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
@@ -163,7 +169,7 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
 async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
-    config = parse_args(argv)
+    config = await parse_args_with_model_fetch(argv)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
@@ -192,13 +198,15 @@ async def worker(argv: list[str] | None = None) -> None:
     # When vLLM uses the ModelExpress plugin, the plugin owns acquisition through
     # P2P, ModelStreamer, GDS, or vLLM's native fallback.
     #
-    # We don't set `config.engine_args.model` to the local path fetch_model returns
-    # because vllm will send that name to its Ray pipeline-parallel workers, which
-    # may not have the local path.
+    # For HF names we don't set `config.engine_args.model` to the local path
+    # fetch_model returns, because vllm will send that name to its Ray
+    # pipeline-parallel workers, which may not have the local path.
     # vllm will attempt to download the model again, but find it in the HF cache.
-    # For non-HF models use a path instead of an HF name, and ensure all workers have
-    # that path (ideally via a shared folder).
-    if not embedding_process_child and should_prefetch_model(config):
+    # NGC metadata was resolved before constructing engine_args; fetch weights
+    # after validation even with ModelExpress so its native fallback can load them.
+    if needs_local_model_path(config.model):
+        config.engine_args.model = await fetch_model(config.model)
+    elif not embedding_process_child and should_prefetch_model(config):
         await fetch_model(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
@@ -635,6 +643,8 @@ def setup_vllm_engine(
 
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    # Before EngineCore spawns: a false NIXL_TELEMETRY_ENABLE vetoes capture.
+    allow_nixl_telemetry_capture()
 
     engine_args = config.engine_args
 
@@ -911,11 +921,7 @@ async def register_vllm_model(
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
-    runtime_config.set_structural_tag_mode(
-        "on" if config.dyn_enable_structural_tag else "off"
-    )
-    runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
-    runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
+    runtime_config.set_structural_tag(config.structural_tag)
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding

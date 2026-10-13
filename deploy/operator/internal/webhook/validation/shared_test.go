@@ -171,6 +171,53 @@ func TestRuntimeVersionImageAbsenceRatcheting(t *testing.T) {
 	})
 }
 
+func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
+	roleTemplate := func(image string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  consts.MainContainerName,
+			Image: image,
+		}}}}
+	}
+
+	t.Run("v1beta1 unchanged legacy images remain valid", func(t *testing.T) {
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+		}}
+		newSpec := oldSpec.DeepCopy()
+		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}
+
+		errs := validation.validateRolePodTemplateRuntimeVersionUpdate(newSpec, oldSpec, field.NewPath("spec"))
+		assertFieldPaths(t, errs, nil)
+	})
+
+	t.Run("v1beta1 changed legacy image requires override", func(t *testing.T) {
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+		}}
+		newSpec := oldSpec.DeepCopy()
+		newSpec.Roles[1].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
+		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}
+
+		errs := validation.validateRolePodTemplateRuntimeVersionUpdate(newSpec, oldSpec, field.NewPath("spec"))
+		assertFieldPaths(t, errs, []string{"spec.runtimeVersionOverride"})
+	})
+
+	t.Run("v1alpha1 changed legacy image requires override", func(t *testing.T) {
+		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
+			{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+		}}
+		newSpec := oldSpec.DeepCopy()
+		newSpec.Roles[0].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
+		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Alpha1}
+
+		errs := validation.validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(newSpec, oldSpec, field.NewPath("spec"))
+		assertFieldPaths(t, errs, []string{"spec.runtimeVersionOverride"})
+	})
+}
+
 func assertWebhookErrors(t *testing.T, err error, want []string) {
 	t.Helper()
 	if len(want) == 0 {
@@ -339,8 +386,10 @@ func TestValidateComponentRoleSpecPodTemplateCapability(t *testing.T) {
 	validation := &sharedValidation{ctx: context.Background()}
 	rolePath := field.NewPath("spec", "components").Index(0).Child("roles").Index(0)
 	role := &nvidiacomv1beta1.ComponentRoleSpec{
-		Name:        nvidiacomv1beta1.ComponentRoleLeader,
-		PodTemplate: &corev1.PodTemplateSpec{},
+		Name: nvidiacomv1beta1.ComponentRoleLeader,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: consts.MainContainerName, Image: "leader:1.6.0",
+		}}}},
 	}
 
 	t.Log("Reject role PodTemplates unless the enclosing role schema opts in")
@@ -350,6 +399,135 @@ func TestValidateComponentRoleSpecPodTemplateCapability(t *testing.T) {
 	t.Log("Allow a component-specific role schema to opt in without changing the shared validator")
 	errs = validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{podTemplateAllowed: true})
 	assertFieldPaths(t, errs, nil)
+}
+
+func TestValidateComponentRolePodTemplateModes(t *testing.T) {
+	completeTemplate := func(image string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: consts.MainContainerName, Image: image,
+		}}}}
+	}
+	component := func() *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+		return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+			Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+			Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+				{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: completeTemplate("leader:1.5.0")},
+				{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: completeTemplate("worker:1.5.0")},
+			},
+		}
+	}
+	validation := &sharedValidation{ctx: context.Background()}
+	fldPath := field.NewPath("spec", "components").Index(0)
+	options := dynamoComponentDeploymentSharedSpecValidationOptions{}
+
+	t.Run("complete role templates", func(t *testing.T) {
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(component(), fldPath, options)
+		assertFieldPaths(t, errs, nil)
+	})
+
+	t.Run("component and role template sources cannot be mixed", func(t *testing.T) {
+		candidate := component()
+		candidate.PodTemplate = completeTemplate("global:1.5.0")
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(candidate, fldPath, options)
+		assertFieldPaths(t, errs, []string{"spec.components[0].podTemplate"})
+	})
+
+	t.Run("every required role needs a template", func(t *testing.T) {
+		candidate := component()
+		candidate.Roles[1].PodTemplate = nil
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(candidate, fldPath, options)
+		assertFieldPaths(t, errs, []string{"spec.components[0].roles[1].podTemplate"})
+	})
+
+	t.Run("role power annotations are rejected until the planner is role-aware", func(t *testing.T) {
+		candidate := component()
+		candidate.Roles[0].PodTemplate.Annotations = map[string]string{
+			consts.KubeAnnotationGPUPowerLimit: "300",
+		}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(candidate, fldPath, options)
+		assertFieldPaths(t, errs, []string{
+			"spec.components[0].roles[0].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]",
+		})
+	})
+
+	t.Run("role backend annotations use the component validation contract", func(t *testing.T) {
+		candidate := component()
+		candidate.Roles[0].PodTemplate.Annotations = map[string]string{
+			consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+		}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(candidate, fldPath, options)
+		assertFieldPaths(t, errs, []string{
+			"spec.components[0].roles[0].podTemplate.metadata.annotations[nvidia.com/vllm-distributed-executor-backend]",
+		})
+	})
+
+	t.Run("role sidecars and init containers require images", func(t *testing.T) {
+		candidate := component()
+		candidate.Roles[0].PodTemplate.Spec.Containers = append(
+			candidate.Roles[0].PodTemplate.Spec.Containers,
+			corev1.Container{Name: "sidecar"},
+		)
+		candidate.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "prepare"}}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(candidate, fldPath, options)
+		assertFieldPaths(t, errs, []string{
+			"spec.components[0].roles[0].podTemplate.spec.containers[1].image",
+			"spec.components[0].roles[0].podTemplate.spec.initContainers[0].image",
+		})
+	})
+
+	t.Run("role template launch ownership rejects GMS and failover", func(t *testing.T) {
+		candidate := component()
+		for i := range candidate.Roles {
+			candidate.Roles[i].PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+				corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+			}
+		}
+		candidate.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+			Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+		}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(candidate, fldPath, options)
+		assertFieldPaths(t, errs, []string{
+			"spec.components[0].experimental.gpuMemoryService",
+			"spec.components[0].experimental.failover",
+		})
+	})
+}
+
+func TestValidateComponentRolesUpdateAllowsRoleTemplateRollout(t *testing.T) {
+	oldComponent := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: consts.MainContainerName, Image: "global:1.5.0",
+		}}}},
+	}
+	newComponent := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{
+				Name: nvidiacomv1beta1.ComponentRoleLeader,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: consts.MainContainerName, Image: "leader:1.5.0",
+				}}}},
+			},
+			{
+				Name: nvidiacomv1beta1.ComponentRoleWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: consts.MainContainerName, Image: "worker:1.5.0",
+				}}}},
+			},
+		},
+	}
+
+	t.Log("Allow the template-source change because the resolved role cardinality is unchanged")
+	errs := validateComponentRolesUpdate(newComponent, oldComponent, field.NewPath("spec", "roles"))
+	assertFieldPaths(t, errs, nil)
+
+	t.Log("Keep role provider identity out of the same representation transition")
+	newComponent.Roles[1].ProviderOverride = &nvidiacomv1beta1.ProviderOverride{}
+	errs = validateComponentRolesUpdate(newComponent, oldComponent, field.NewPath("spec", "roles"))
+	assertFieldPaths(t, errs, []string{"spec.roles"})
 }
 
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {

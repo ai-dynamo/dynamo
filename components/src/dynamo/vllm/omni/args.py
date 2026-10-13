@@ -30,6 +30,7 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    parse_bool,
 )
 from dynamo.common.constants import DisaggregationMode
 
@@ -46,19 +47,20 @@ class OmniDiffusionKwargs:
     passthrough in base_handler is automatic.
     """
 
-    enable_layerwise_offload: bool = False
-    layerwise_num_gpu_layers: int = 1
-    vae_use_slicing: bool = False
-    vae_use_tiling: bool = False
-    boundary_ratio: float = 0.875
+    enable_layerwise_offload: Optional[bool] = None
+    layerwise_num_gpu_layers: Optional[int] = None
+    vae_use_slicing: Optional[bool] = None
+    vae_use_tiling: Optional[bool] = None
+    boundary_ratio: Optional[float] = None
     flow_shift: Optional[float] = None
     cache_backend: Optional[str] = None
     cache_config: Optional[str] = None
-    enable_cache_dit_summary: bool = False
-    enable_cpu_offload: bool = False
+    enable_cache_dit_summary: Optional[bool] = None
+    enable_cpu_offload: Optional[bool] = None
     task_type: Optional[str] = None
     lora_path: Optional[list[str]] = None
     diffusion_attention_backend: Optional[str] = None
+    fastvideo_vsa_topk: Optional[int] = None
     enforce_eager: bool = False
 
 
@@ -117,40 +119,46 @@ class OmniArgGroup(ArgGroup):
             g,
             flag_name="--enable-layerwise-offload",
             env_var="DYN_OMNI_ENABLE_LAYERWISE_OFFLOAD",
-            default=False,
+            default=None,
+            env_value_type=parse_bool,
             help="Enable layerwise (blockwise) offloading on DiT modules to reduce GPU memory.",
         )
         add_argument(
             g,
             flag_name="--layerwise-num-gpu-layers",
             env_var="DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS",
-            default=1,
+            default=None,
             arg_type=int,
-            help="Number of ready layers (blocks) to keep on GPU during generation.",
+            help=(
+                "Unsupported legacy option. Remove it and use "
+                "--enable-layerwise-offload without a layer-count override."
+            ),
         )
         add_negatable_bool_argument(
             g,
             flag_name="--vae-use-slicing",
             env_var="DYN_OMNI_VAE_USE_SLICING",
-            default=False,
+            default=None,
+            env_value_type=parse_bool,
             help="Enable VAE slicing for memory optimization in diffusion models.",
         )
         add_negatable_bool_argument(
             g,
             flag_name="--vae-use-tiling",
             env_var="DYN_OMNI_VAE_USE_TILING",
-            default=False,
+            default=None,
+            env_value_type=parse_bool,
             help="Enable VAE tiling for memory optimization in diffusion models.",
         )
         add_argument(
             g,
             flag_name="--boundary-ratio",
             env_var="DYN_OMNI_BOUNDARY_RATIO",
-            default=0.875,
+            default=None,
             arg_type=float,
             help=(
                 "Boundary split ratio for low/high DiT transformers. "
-                "Default 0.875 uses both transformers for best quality. "
+                "When omitted, the model pipeline selects its default. "
                 "Set to 1.0 to load only the low-noise transformer (saves memory)."
             ),
         )
@@ -185,14 +193,16 @@ class OmniArgGroup(ArgGroup):
             g,
             flag_name="--enable-cache-dit-summary",
             env_var="DYN_OMNI_ENABLE_CACHE_DIT_SUMMARY",
-            default=False,
+            default=None,
+            env_value_type=parse_bool,
             help="Enable cache-dit summary logging after diffusion forward passes.",
         )
         add_negatable_bool_argument(
             g,
             flag_name="--enable-cpu-offload",
             env_var="DYN_OMNI_ENABLE_CPU_OFFLOAD",
-            default=False,
+            default=None,
+            env_value_type=parse_bool,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
         )
         add_argument(
@@ -220,6 +230,17 @@ class OmniArgGroup(ArgGroup):
             env_var="DYN_OMNI_DIFFUSION_ATTENTION_BACKEND",
             default=None,
             help="vLLM-Omni diffusion attention backend.",
+        )
+        add_argument(
+            g,
+            flag_name="--fastvideo-vsa-topk",
+            env_var="DYN_OMNI_FASTVIDEO_VSA_TOPK",
+            default=None,
+            arg_type=int,
+            help=(
+                "Key/value blocks retained per query block by the "
+                "FASTVIDEO_VSA diffusion attention backend."
+            ),
         )
         add_negatable_bool_argument(
             g,
@@ -472,6 +493,12 @@ class OmniConfig(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        if self.diffusion.layerwise_num_gpu_layers is not None:
+            raise ValueError(
+                "--layerwise-num-gpu-layers is no longer supported by vLLM-Omni. "
+                "Remove it or unset DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS; use "
+                "--enable-layerwise-offload without a layer-count override."
+            )
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
         if self.parallel.ulysses_degree <= 0:
@@ -482,8 +509,15 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--allgather-degree must be > 0")
         if self.parallel.text_encoder_tp_size <= 0:
             raise ValueError("--text-encoder-tp-size must be > 0")
-        if not (0 < self.diffusion.boundary_ratio <= 1):
+        if self.diffusion.boundary_ratio is not None and not (
+            0 < self.diffusion.boundary_ratio <= 1
+        ):
             raise ValueError("--boundary-ratio must be in (0, 1]")
+        if (
+            self.diffusion.fastvideo_vsa_topk is not None
+            and self.diffusion.fastvideo_vsa_topk <= 0
+        ):
+            raise ValueError("--fastvideo-vsa-topk must be > 0")
         if self.stage_configs_path is None:
             if self.stage_id is not None:
                 raise ValueError("--stage-id requires --stage-configs-path")

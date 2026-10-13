@@ -15,6 +15,7 @@ import os
 import subprocess
 import time
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ import requests
 import yaml
 from kubernetes_asyncio.client.exceptions import ApiException
 
-from tests.deploy.api_checks import check_deployment_api
+from tests.deploy.api_checks import check_chat_api, check_embedding_api
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
     DEFAULT_MAX_TOKENS,
@@ -37,8 +38,8 @@ from tests.deploy.dgd_utils import (
     _get_workspace_dir,
     validate_chat_response,
 )
-from tests.utils.client import wait_for_model_availability
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.output_paths import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -220,15 +221,15 @@ async def test_deployment(
             base_url = f"http://localhost:{port_forward.local_port}"
             logger.info(f"Port forwarding established: {base_url}")
 
-            scenario = "embedding" if profile == "agg_embed" else "chat"
-            endpoint = (
-                "/v1/embeddings"
-                if scenario == "embedding"
-                else deployment_spec.endpoint
-            )
-            ready_payload = (
-                {"model": model, "input": "test"} if scenario == "embedding" else None
-            )
+            if profile == "agg_embed":
+                endpoint = "/v1/embeddings"
+                ready_payload = {"model": model, "input": "test"}
+                check_api = check_embedding_api
+            else:
+                endpoint = deployment_spec.endpoint
+                ready_payload = None
+                check_api = check_chat_api
+            url = base_url + endpoint
             model_ready = await asyncio.to_thread(
                 wait_for_model_availability,
                 base_url,
@@ -244,13 +245,29 @@ async def test_deployment(
                 if validate_agg_logging
                 else 0
             )
+
+            def send_with_retry(url, payload, *, timeout, method, stream):
+                nonlocal port_forward
+                (
+                    response,
+                    port_forward,
+                ) = deployment.send_request_with_port_forward_retry(
+                    pod=frontend_pod,
+                    remote_port=port,
+                    endpoint=endpoint,
+                    payload=payload,
+                    timeout=timeout,
+                    port_forward=port_forward,
+                    request_sender=partial(send_request, stream=stream),
+                )
+                return response
+
             await asyncio.to_thread(
-                check_deployment_api,
-                base_url,
+                check_api,
+                url,
                 model,
-                scenario,
                 Path(resolve_test_output_path(request.node.name)) / "responses",
-                endpoint=endpoint,
+                request_sender=send_with_retry,
             )
 
             if validate_agg_logging:

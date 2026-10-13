@@ -15,8 +15,9 @@ fails setup instead of silently shrinking coverage.
 `test_dgd.py` owns current/current coverage. PR and nightly workflows require the
 ordinary SGLang deployment job to succeed before running this suite; skipped
 controls do not satisfy the dependency. Manual dispatch invokes the same ordinary
-chat and embedding tests first. Both suites call `check_deployment_api` for unary,
-streaming, token limits, stop behavior and embedding default/float/batch responses.
+chat and embedding tests first. Both suites call the shared `check_chat_api` and
+`check_embedding_api` helpers for unary, streaming, token limits, stop behavior,
+and embedding formats, dimensions, batch contents and usage.
 
 Deployments load the chat or embedding YAML from
 `examples/backends/sglang/deploy/`, then patch component images, runtime versions

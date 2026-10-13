@@ -9,11 +9,14 @@ subtitle: Run a backend-neutral sweep with an injected replay runtime
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
-Install AISimulate:
+From the Dynamo checkout root, install the AISimulate dependency declared by that checkout:
 
 ```bash
-python3 -m pip install "aisimulate==0.12.0"
+python3 -m pip install -r container/deps/requirements.aisimulate.txt
 ```
+
+If you use the Dynamo replay runner, complete [Dynamo Sweeper Integration](dynamo-integration.md#install)
+to build bindings against the matching AISimulate Rust crate.
 
 Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:
 

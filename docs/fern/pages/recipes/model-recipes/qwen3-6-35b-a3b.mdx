@@ -15,12 +15,12 @@ These aggregated recipes serve the agentic workload with `nvidia/Qwen3.6-35B-A3B
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
 <input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
 <label htmlFor="recipe-sku-b200">B200</label>
 <input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
 <label htmlFor="recipe-sku-gb200">GB200</label>
-<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
-<label htmlFor="recipe-sku-h200">H200</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200">
 <span><b>Checkpoint</b> nvidia/Qwen3.6-35B-A3B-NVFP4</span>

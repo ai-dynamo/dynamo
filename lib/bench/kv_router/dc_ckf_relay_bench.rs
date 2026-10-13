@@ -992,7 +992,7 @@ async fn drive_phase(
     tokio::task::spawn_blocking(move || {
         let ready = Arc::new(Barrier::new(issuer_count + 1));
         let start = Arc::new(Barrier::new(issuer_count + 1));
-        let started = Arc::new(OnceLock::new());
+        let started = Arc::new(OnceLock::<Instant>::new());
         let (elapsed, outputs) = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(issuer_count);
             for (issuer, shard) in shards.into_iter().enumerate() {
