@@ -138,9 +138,9 @@ The command writes `<session>/bundle/` with `manifest.json`, `bundle.json`
 (file hashes and separate profiler/lifecycle coverage),
 `lifecycle/traces.otlp.jsonl` (selected traces in collector export-batch form),
 `lifecycle/trace-index.json`, `control/events.jsonl`, and `timeline.json.gz`
-for Perfetto, and packages it as `<session>/bundle.tar.gz`. Native profiles stay
-in place and are referenced by path and hash; `--include-profiles` also copies
-them into the archive under `profiles/<target>/`.
+for Perfetto, and packages it with the raw native traces (Kineto rank traces,
+Nsight `.nsys-rep` reports and their SQLite exports) under `profiles/<target>/`
+as `<session>/bundle.tar.gz` with a `.sha256` sidecar.
 
 A request is selected when its `worker.operation.*` span ran on a captured
 target during that target's recording interval, or when the plan names its

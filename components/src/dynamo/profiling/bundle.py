@@ -7,8 +7,8 @@ Run outside the serving frontend:
 
     python -m dynamo.profiling.bundle <session-dir> --otel-jsonl <collector.jsonl>
 
-writes <session>/bundle/ and <session>/bundle.tar.gz; --include-profiles also
-packs the native Kineto/Nsight files, which are otherwise referenced by hash.
+writes <session>/bundle/ and <session>/bundle.tar.gz (with a .sha256 sidecar); the
+archive carries the raw native Kineto/Nsight traces under profiles/<target>/.
 
 A request is selected when its `worker.operation.<phase>` span ran on a captured
 target during that target's recording interval, or when the plan named its
@@ -664,18 +664,17 @@ def build(session: Path, otel_paths: list[Path], output: Path) -> dict:
     return summary
 
 
-def archive(output: Path, summary: dict, include_profiles: bool) -> Path:
-    """Package the bundle directory, optionally with the native profiles."""
+def archive(output: Path, summary: dict) -> Path:
+    """Package the bundle with the raw native Kineto/Nsight traces as one tar.gz."""
     path = output.parent / f"{output.name}.tar.gz"
     with tarfile.open(path, "w:gz", compresslevel=1) as tar:
         tar.add(output, arcname=output.name)
-        if include_profiles:
-            for profile in summary["native_profiles"]:
-                source = Path(profile["location"])
-                tar.add(
-                    source,
-                    arcname=f"{output.name}/profiles/{profile['target_id']}/{source.name}",
-                )
+        for profile in summary["native_profiles"]:
+            source = Path(profile["location"])
+            tar.add(
+                source,
+                arcname=f"{output.name}/profiles/{profile['target_id']}/{source.name}",
+            )
     path.with_name(path.name + ".sha256").write_text(f"{sha256(path)}  {path.name}\n")
     return path
 
@@ -697,15 +696,10 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, help="bundle directory (default: <session>/bundle)"
     )
-    parser.add_argument(
-        "--include-profiles",
-        action="store_true",
-        help="copy native profiles into the archive instead of referencing them",
-    )
     args = parser.parse_args()
     output = args.output or args.session / "bundle"
     summary = build(args.session, args.otel_jsonl, output)
-    path = archive(output, summary, args.include_profiles)
+    path = archive(output, summary)
     print(json.dumps(summary["coverage"], indent=2))
     print(f"archive: {path} ({path.stat().st_size} bytes, sha256 {sha256(path)})")
 
