@@ -252,12 +252,7 @@ impl<'a> RoutingEligibility<'a> {
                 return (dp_start..dp_end).contains(&dp_rank)
                     && predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config);
             }
-            for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config) {
-                    return true;
-                }
-            }
-            return false;
+            return any_worker_rank(target.worker_id, config, &mut predicate);
         }
 
         let inclusion = match (self.allowed_worker_ids, self.available_worker_ids) {
@@ -270,6 +265,8 @@ impl<'a> RoutingEligibility<'a> {
             }
             (allowed, available) => allowed.or(available),
         };
+        // Hash iteration scans capacity, not length. The half-capacity cutoff
+        // is a conservative heuristic for the extra worker lookups.
         if let Some(inclusion) = inclusion.filter(|ids| ids.capacity() < workers.capacity() / 2) {
             for &worker_id in inclusion {
                 let Some(config) = workers.get(&worker_id) else {
@@ -278,12 +275,8 @@ impl<'a> RoutingEligibility<'a> {
                 if !self.allows_worker(worker_id, config) {
                     continue;
                 }
-                let dp_start = config.data_parallel_start_rank();
-                let dp_end = dp_start + config.data_parallel_size();
-                for dp_rank in dp_start..dp_end {
-                    if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
-                        return true;
-                    }
+                if any_worker_rank(worker_id, config, &mut predicate) {
+                    return true;
                 }
             }
             return false;
@@ -294,12 +287,8 @@ impl<'a> RoutingEligibility<'a> {
                 continue;
             }
 
-            let dp_start = config.data_parallel_start_rank();
-            let dp_end = dp_start + config.data_parallel_size();
-            for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
-                    return true;
-                }
+            if any_worker_rank(worker_id, config, &mut predicate) {
+                return true;
             }
         }
 
@@ -349,6 +338,17 @@ impl<'a> RoutingEligibility<'a> {
             worker_id: pinned_worker.worker_id,
         })
     }
+}
+
+#[inline]
+fn any_worker_rank<C, F>(worker_id: WorkerId, config: &C, predicate: &mut F) -> bool
+where
+    C: WorkerConfigLike,
+    F: FnMut(WorkerWithDpRank, &C) -> bool,
+{
+    let dp_start = config.data_parallel_start_rank();
+    let dp_end = dp_start + config.data_parallel_size();
+    (dp_start..dp_end).any(|dp_rank| predicate(WorkerWithDpRank::new(worker_id, dp_rank), config))
 }
 
 pub(super) fn worker_config_for_rank<C: WorkerConfigLike>(
