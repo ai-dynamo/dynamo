@@ -20,8 +20,8 @@ pytest.importorskip(
     reason="AISimulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config.cli import CorePredictionConfig
-from aisimulate.config.common import split_config_sections
+from aisimulate.config.cli import CorePredictionConfig  # noqa: E402
+from aisimulate.config.common import split_config_sections  # noqa: E402
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -53,6 +53,7 @@ _SUPERVISOR_BUDGETS = (
 
 
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+    """Run AISimulate with CI supervisor budgets and assert a successful exit."""
     result = subprocess.run(
         [sys.executable, "-m", "aisimulate", *args, *_SUPERVISOR_BUDGETS],
         cwd=_REPO_ROOT,
