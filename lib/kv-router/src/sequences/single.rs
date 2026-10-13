@@ -803,7 +803,7 @@ mod tests {
             seq_manager
                 .prefill
                 .prefill_order
-                .iter()
+                .values()
                 .cloned()
                 .collect::<VecDeque<_>>(),
             VecDeque::from(vec!["r1".to_string(), "r2".to_string()])
@@ -816,7 +816,7 @@ mod tests {
             seq_manager
                 .prefill
                 .prefill_order
-                .iter()
+                .values()
                 .cloned()
                 .collect::<VecDeque<_>>(),
             VecDeque::from(vec!["r2".to_string()])
@@ -829,7 +829,7 @@ mod tests {
             seq_manager
                 .prefill
                 .prefill_order
-                .iter()
+                .values()
                 .cloned()
                 .collect::<VecDeque<_>>(),
             VecDeque::from(vec!["r2".to_string()])
