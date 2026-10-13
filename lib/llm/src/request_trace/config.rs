@@ -103,6 +103,9 @@ pub struct RequestTracePolicy {
     pub s3_prefix: Option<String>,
     pub s3_roll_uncompressed_bytes: u64,
     pub s3_flush_interval_ms: u64,
+    /// Redact media request parts before snapshotting (`DYN_REQUEST_TRACE_REDACT_MEDIA`).
+    /// Defaults to `false`: media is recorded verbatim unless explicitly opted in.
+    pub redact_media: bool,
 }
 
 impl RequestTracePolicy {
@@ -223,6 +226,9 @@ fn load_from_env() -> RequestTracePolicy {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_TOOL_EVENTS_TOPIC.to_string())
     });
+    // Off by default: enabling request-trace payload records must not silently change
+    // what those records contain for existing deployments.
+    let redact_media = env_is_truthy(env_request_trace::DYN_REQUEST_TRACE_REDACT_MEDIA);
     let s3_bucket = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_S3_BUCKET);
     let s3_region = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_S3_REGION);
     let s3_prefix = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_S3_PREFIX);
@@ -256,6 +262,7 @@ fn load_from_env() -> RequestTracePolicy {
         s3_prefix,
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
+        redact_media,
     }
 }
 
@@ -442,6 +449,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
         env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+        env_request_trace::DYN_REQUEST_TRACE_REDACT_MEDIA,
         env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
         env_request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
@@ -510,7 +518,55 @@ mod tests {
                 policy.otel_max_payload_bytes,
                 DEFAULT_OTEL_MAX_PAYLOAD_BYTES
             );
+            assert!(!policy.redact_media);
         });
+    }
+
+    /// Media redaction is opt-in. Turning request tracing on must not, by itself,
+    /// change what the records contain for deployments already consuming them.
+    #[test]
+    #[serial_test::serial]
+    fn media_redaction_is_off_unless_explicitly_enabled() {
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            assert!(
+                !load_from_env().redact_media,
+                "media redaction must default to off"
+            );
+        });
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (env_request_trace::DYN_REQUEST_TRACE_REDACT_MEDIA, "1"),
+            ],
+            || assert!(load_from_env().redact_media),
+        );
+    }
+
+    /// A falsey value must leave redaction OFF. This is the footgun worth pinning:
+    /// under a presence-only check (`env::var(..).is_ok()`), writing
+    /// `DYN_REQUEST_TRACE_REDACT_MEDIA=0` would turn redaction ON -- the opposite of
+    /// what the operator wrote, and silently so.
+    ///
+    /// The full accepted-spelling matrix belongs to `lib/truthy` (which also carries a
+    /// workspace test forbidding hand-rolled bool parsers); this only pins that this
+    /// flag routes through it rather than testing presence.
+    #[test]
+    #[serial_test::serial]
+    fn media_redaction_stays_off_for_falsey_values() {
+        for value in ["0", "false", "off", "no", ""] {
+            with_request_trace_env(
+                &[
+                    (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                    (env_request_trace::DYN_REQUEST_TRACE_REDACT_MEDIA, value),
+                ],
+                || {
+                    assert!(
+                        !load_from_env().redact_media,
+                        "redaction enabled by falsey value {value:?}"
+                    )
+                },
+            );
+        }
     }
 
     #[test]
