@@ -18,8 +18,8 @@ from tests.router.common import (
 from tests.router.helper import generate_random_suffix, managed_runtime
 from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import DynamoPortRange
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_ports, deallocate_ports
-from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 

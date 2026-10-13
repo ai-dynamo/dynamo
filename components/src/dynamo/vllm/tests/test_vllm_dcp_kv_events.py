@@ -27,7 +27,6 @@ from dynamo.llm import (  # noqa: E402
     register_model,
 )
 from dynamo.runtime import DistributedRuntime  # noqa: E402
-from dynamo.vllm import kv_cache_metadata_compat  # noqa: E402
 from dynamo.vllm.cache_info import configure_kv_event_block_size  # noqa: E402
 
 pytestmark = [
@@ -54,8 +53,8 @@ async def runtime(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
-    if Version(version("vllm")).public != "0.30.0":
-        pytest.skip("The cache-metadata compatibility patch targets vLLM 0.30.0")
+    if Version(version("vllm")).release < (0, 31):
+        pytest.skip("Native effective cache-group metadata requires vLLM 0.31+")
 
     from vllm.distributed.kv_events import KVEventBatch
     from vllm.sampling_params import SamplingParams
@@ -71,15 +70,6 @@ async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
     from vllm.v1.request import Request
 
     monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
-    monkeypatch.setenv(kv_cache_metadata_compat._ACTIVATION_ENV, "1")
-    monkeypatch.setattr(
-        EngineCore,
-        "get_kv_cache_group_metadata",
-        getattr(EngineCore, "get_kv_cache_group_metadata", None),
-        raising=False,
-    )
-    monkeypatch.delattr(EngineCore, "get_kv_cache_group_metadata")
-    kv_cache_metadata_compat.register()
     monkeypatch.setattr(
         kv_cache_utils,
         "NONE_HASH",

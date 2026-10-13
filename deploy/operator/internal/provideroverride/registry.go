@@ -106,7 +106,7 @@ func ExpectedTarget(
 		if component == nil {
 			return "", fmt.Errorf("component context is required for scope %q", scope)
 		}
-		if component.UsesPCSG() {
+		if component.UsesPCSG() || component.IsLPX() {
 			return TargetPodCliqueScalingGroupConfig, nil
 		}
 		return TargetPodCliqueTemplateSpec, nil
@@ -163,7 +163,7 @@ func ValidateValue(target string, raw []byte) []ValueError {
 	case TargetPodCliqueSet:
 		return validatePodCliqueSetValue(root)
 	case TargetPodCliqueTemplateSpec, TargetPodCliqueScalingGroupConfig:
-		return validateTopologyOwner(root, "")
+		return validateComponentValue(root, target)
 	default:
 		return []ValueError{{Detail: fmt.Sprintf("target %q has no registered ownership policy", target)}}
 	}
@@ -318,4 +318,50 @@ func joinPath(parent, child string) string {
 		return child
 	}
 	return parent + "." + child
+}
+
+// validateComponentValue permits topology and the component's native availability field.
+func validateComponentValue(root map[string]json.RawMessage, target string) []ValueError {
+	// Standalone cliques own availability inside spec; scaling groups own it directly.
+	availabilityKey := "minAvailable"
+	availability := root
+	availabilityPath := "minAvailable"
+	if target == TargetPodCliqueTemplateSpec {
+		availabilityKey = "spec"
+		availabilityPath = "spec.minAvailable"
+	}
+	errs := rejectUnknown(root, "", "topologyConstraint", availabilityKey)
+	if _, exists := root["topologyConstraint"]; exists {
+		_, valueErr := requiredObject(root, "topologyConstraint", "topologyConstraint")
+		if valueErr != nil {
+			errs = append(errs, *valueErr)
+		}
+	}
+
+	// Keep sparse topology-only fragments valid, but reject empty fragments.
+	_, hasAvailability := root[availabilityKey]
+	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability {
+		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint or minAvailable is required"})
+	}
+	if !hasAvailability {
+		return errs
+	}
+	if target == TargetPodCliqueTemplateSpec {
+		var valueErr *ValueError
+		availability, valueErr = requiredObject(root, "spec", "spec")
+		if valueErr != nil {
+			return append(errs, *valueErr)
+		}
+		errs = append(errs, rejectUnknown(availability, "spec", "minAvailable")...)
+	}
+
+	// Validate the native field before any effective default can hide malformed intent.
+	var minimum int32
+	raw, exists := availability["minAvailable"]
+	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		errs = append(errs, ValueError{Path: availabilityPath, Detail: "is required"})
+	} else if err := json.Unmarshal(raw, &minimum); err != nil || minimum < 1 {
+		errs = append(errs, ValueError{Path: availabilityPath, Detail: "must be a positive 32-bit integer"})
+	}
+	return errs
 }

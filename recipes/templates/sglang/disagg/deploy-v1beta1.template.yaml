@@ -30,7 +30,7 @@
 #   The namespace-local PVC must exist with pre-populated data unless a cluster
 #   Kustomization replaces the reference; keep all cache references and the
 #   /shared-model-cache path synchronized.
-# Derived from: recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml.
+# Derived from: https://github.com/ai-dynamo/dynamo/blob/9ab57d7ecefdd2a2af2e2a2c889724a157457cd6/recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml (GLM-5.2 era, pinned).
 # Validation status: static catalog validation only; verify admission,
 # readiness, and runtime behavior on the target cluster.
 # To change the transfer backend, set SGLANG_DISAGGREGATION_NIXL_BACKEND on

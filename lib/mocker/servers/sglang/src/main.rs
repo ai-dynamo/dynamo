@@ -6,9 +6,8 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-#[cfg(test)]
 use dynamo_mocker::common::protocols::EngineType;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::proto::sglang_service_server::SglangServiceServer;
 use serde_json::{Map, Value};
@@ -56,7 +55,7 @@ struct Args {
     extra_engine_args: Option<String>,
 }
 
-fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
+fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockerConfig> {
     let mut object = match value {
         None => Map::new(),
         Some(value) if value.trim_start().starts_with('{') => serde_json::from_str::<Value>(value)
@@ -74,22 +73,19 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
         .context("--extra-engine-args must be a JSON object")?,
     };
 
-    match object.get("engine_type") {
-        None => {
-            object.insert(
-                "engine_type".to_string(),
-                Value::String("sglang".to_string()),
-            );
-        }
-        Some(Value::String(engine_type)) if engine_type.eq_ignore_ascii_case("sglang") => {}
-        Some(engine_type) => {
-            bail!("--extra-engine-args engine_type must be sglang, got {engine_type}")
-        }
+    let rank = object
+        .entry("engine")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("engine must be a JSON object")?;
+    rank.entry("backend")
+        .or_insert_with(|| Value::String("sglang".to_owned()));
+    let args = MockerConfig::from_value(Value::Object(object))
+        .context("invalid Mocker engine arguments")?;
+    if args.backend != EngineType::Sglang {
+        bail!("--extra-engine-args backend must be sglang");
     }
-
-    MockEngineArgs::from_json_str(&Value::Object(object).to_string())
-        .map_err(anyhow::Error::msg)
-        .context("invalid Mocker engine arguments")
+    Ok(args)
 }
 
 #[tokio::main]
@@ -137,8 +133,8 @@ mod tests {
 
     #[test]
     fn engine_loader_defaults_to_sglang() {
-        let args = load_engine_args(Some(r#"{"block_size":4}"#)).unwrap();
-        assert_eq!(args.engine_type, EngineType::Sglang);
+        let args = load_engine_args(Some(r#"{"engine":{"block_size":4}}"#)).unwrap();
+        assert_eq!(args.backend, EngineType::Sglang);
         assert_eq!(args.block_size, 4);
     }
 }

@@ -139,13 +139,15 @@ repos:
       files: ^docs/fern/scripts/check_published_styles\.py$
       pass_filenames: false
     - id: gen-llms-tables
-      name: Test the generated docs tables (gen_llms_tables.py)
-      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py
+      name: Test the generated docs tables (gen_llms_tables.py, gen_nightly_selector.py)
+      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py docs/fern/scripts/test_gen_nightly_selector.py
       language: python
-      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
+      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables|gen_nightly_selector|test_gen_nightly_selector)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
       pass_filenames: false
       additional_dependencies:
         - pytest
+        # gen_nightly_selector.py imports yaml at module level.
+        - pyyaml
     - id: gen-llms-tables-check
       name: Check the generated docs tables are current
       entry: python3 docs/fern/scripts/gen_llms_tables.py --check
