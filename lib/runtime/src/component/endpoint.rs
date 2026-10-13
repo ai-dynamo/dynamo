@@ -296,6 +296,8 @@ impl EndpointConfigBuilder {
         let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let startup_cancellation = startup_guard.cancellation.clone();
+        // Unlike endpoint_shutdown_token, this is not cancelled by StartedEndpoint::shutdown.
+        let runtime_shutdown = endpoint.drt().child_token();
         let (registration_tx, registration_rx) =
             tokio::sync::oneshot::channel::<crate::discovery::EndpointRegistrationLease>();
 
@@ -312,7 +314,7 @@ impl EndpointConfigBuilder {
                 _ = startup_cancellation.cancelled() => {}
             }
             let release_result = match registration_lease {
-                Some(lease) => lease.release().await,
+                Some(lease) => lease.release_on_shutdown(runtime_shutdown).await,
                 None => Ok(()),
             };
 

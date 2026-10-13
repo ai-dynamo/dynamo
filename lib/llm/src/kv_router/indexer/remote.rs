@@ -270,7 +270,7 @@ struct ServedIndexerService {
     // Set under the bindings lock and never cleared.
     retired: AtomicBool,
     endpoints: Arc<parking_lot::Mutex<Vec<StartedEndpoint>>>,
-    endpoint_retirement: parking_lot::Mutex<Option<Shared<BoxFuture<'static, HashSet<u64>>>>>,
+    endpoint_retirement: parking_lot::Mutex<Option<Shared<BoxFuture<'static, ()>>>>,
 }
 
 struct EndpointStartup {
@@ -356,23 +356,20 @@ impl ServedIndexerService {
 
     // Store the shared completion future before awaiting it so cancellation of a caller cannot
     // lose ownership of an in-flight retirement or permit a replacement to start early.
-    async fn stop_endpoints(&self) -> HashSet<u64> {
+    async fn stop_endpoints(&self) {
         let retirement = {
             let mut retirement = self.endpoint_retirement.lock();
             retirement
                 .get_or_insert_with(|| {
                     let endpoints = Arc::clone(&self.endpoints);
                     async move {
-                        let mut instance_ids = HashSet::new();
                         loop {
                             let endpoint = endpoints.lock().pop();
                             let Some(endpoint) = endpoint else {
                                 break;
                             };
-                            instance_ids.insert(endpoint.instance().instance_id);
                             shutdown_endpoint(endpoint).await;
                         }
-                        instance_ids
                     }
                     .boxed()
                     .shared()
@@ -497,45 +494,46 @@ async fn get_or_start_service(
     tokio::spawn(async move {
         let _guard = guard;
         let result = start_service_locked(component, mode, key.clone()).await;
-        if let Err(Ok(service)) = result_tx.send(result)
+        if let Err(Ok((service, true))) = result_tx.send(result)
             && service.retire_if_unused()
         {
             service.stop_endpoints().await;
-            // Keep the retired entry and its instance IDs for the next topology check.
-            // Discovery watch caches can still contain the endpoints we just stopped.
+            SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &service));
         }
     });
     result_rx
         .await
         .map_err(|error| anyhow::anyhow!("served indexer startup task failed: {error}"))?
+        .map(|(service, _)| service)
 }
 
 async fn start_service_locked(
     component: Component,
     mode: ServedIndexerMode,
     key: ServiceKey,
-) -> Result<Arc<ServedIndexerService>> {
-    let mut ignored_instance_ids = HashSet::new();
+) -> Result<(Arc<ServedIndexerService>, bool)> {
     if let Some(existing) = cached_service(&key) {
         if existing.mode == mode && !existing.is_retired() {
-            return Ok(existing);
+            return Ok((existing, false));
         }
 
         // Replace only entries without live bindings.
         if !existing.retire_if_unused() {
-            return Ok(existing);
+            return Ok((existing, false));
         }
 
-        ignored_instance_ids = existing.stop_endpoints().await;
-        // Retain retirement information if replacement fails. A successful insertion below
-        // replaces this entry; runtime teardown still evicts it if there is no retry.
+        existing.stop_endpoints().await;
+        SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &existing));
     }
 
+    // This key is locked and any previous endpoints have finished cleanup. Discovery caches
+    // may still show this runtime's records, including after a failed first record startup.
+    let ignored_instance_ids = HashSet::from([component.drt().connection_id()]);
     let service =
         ServedIndexerService::start(component.clone(), mode, &ignored_instance_ids).await?;
     SERVED_INDEXER_SERVICES.insert(key.clone(), service.clone());
     spawn_teardown_eviction(&component, key, &service);
-    Ok(service)
+    Ok((service, true))
 }
 
 fn cached_service(key: &ServiceKey) -> Option<Arc<ServedIndexerService>> {
@@ -1029,6 +1027,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_waiter_does_not_retire_another_callers_service() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (drt, component) = registry_test_component("cancelled-waiter").await;
+            let key = service_key(&component);
+            let lock = service_creation_lock(&key);
+            let guard = lock.lock().await;
+            let mut creator = Box::pin(get_or_start_service(
+                component.clone(),
+                ServedIndexerMode::EventDriven,
+            ));
+            let mut waiter = Box::pin(get_or_start_service(
+                component.clone(),
+                ServedIndexerMode::EventDriven,
+            ));
+            assert!(futures::poll!(creator.as_mut()).is_pending());
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+            drop(guard);
+            // The creator has received the service but has not bound a model yet.
+            let service = creator.await.unwrap();
+            assert!(service.bindings.read().is_empty());
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+            drop(waiter);
+            // Joining the lock waits for the cancelled waiter's detached task to finish.
+            let guard = lock.lock().await;
+            assert!(!service.is_retired());
+            assert!(Arc::ptr_eq(&cached_service(&key).unwrap(), &service));
+            drop(guard);
+            let handle = ensure_served_indexer_service(
+                component,
+                ServedIndexerMode::EventDriven,
+                "model-a".to_string(),
+                Indexer::None,
+            )
+            .await
+            .unwrap();
+            assert!(Arc::ptr_eq(&handle.service, &service));
+            drop(handle);
+            shutdown_and_settle(drt).await;
+        })
+        .await
+        .expect("cancelled waiter retired another caller's service");
+    }
+
+    #[tokio::test]
     async fn failed_record_startup_waits_for_query_cleanup() {
         let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1064,6 +1107,16 @@ mod tests {
                 "startup returned before query cleanup"
             );
             assert!(service_creation_lock(&key).try_lock().is_err());
+            let stale_query = drt
+                .discovery()
+                .list(DiscoveryQuery::Endpoint {
+                    namespace: component.namespace().name(),
+                    component: component.name().to_string(),
+                    endpoint: KV_INDEXER_QUERY_ENDPOINT.to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(stale_query.len(), 1);
             cleanup_release.send(()).unwrap();
             assert!(startup.await.unwrap().is_err());
 
@@ -1082,6 +1135,7 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+            STALE_TOPOLOGY.lock().insert(key.clone(), stale_query);
             let handle = ensure_served_indexer_service(
                 component,
                 ServedIndexerMode::Approximate,
@@ -1090,6 +1144,7 @@ mod tests {
             )
             .await
             .expect("startup must be immediately retryable after cleanup");
+            STALE_TOPOLOGY.lock().remove(&key);
             assert_eq!(drt.discovery().list(query).await.unwrap().len(), 2);
             drop(handle);
             shutdown_and_settle(drt).await;

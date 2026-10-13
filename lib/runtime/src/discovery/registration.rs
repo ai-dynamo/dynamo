@@ -8,10 +8,7 @@ use dashmap::{DashMap, DashSet, mapref::entry::Entry as DashEntry};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    Discovery, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoverySpec,
-    EndpointInstanceId,
-};
+use super::{Discovery, DiscoveryInstance, DiscoveryInstanceId, DiscoverySpec, EndpointInstanceId};
 
 struct RegistrationEntry {
     instance: DiscoveryInstance,
@@ -85,16 +82,7 @@ impl EndpointRegistrationManager {
             if self.retired.contains(&id) {
                 return Ok((self.discovery.register(spec).await?, true));
             }
-            let existing = self
-                .discovery
-                .list(DiscoveryQuery::Endpoint {
-                    namespace: id.namespace.clone(),
-                    component: id.component.clone(),
-                    endpoint: id.endpoint.clone(),
-                })
-                .await?
-                .into_iter()
-                .find(|instance| instance.id() == DiscoveryInstanceId::Endpoint(id.clone()));
+            let existing = self.discovery.get_endpoint(&id).await?;
             match existing {
                 Some(existing) => {
                     anyhow::ensure!(
@@ -139,11 +127,11 @@ impl EndpointRegistrationManager {
         if registration.owned {
             let mut retry_delay = Duration::from_millis(50);
             loop {
-                match self
-                    .discovery
-                    .unregister(registration.instance.clone())
-                    .await
-                {
+                let result = tokio::select! {
+                    result = self.discovery.unregister(registration.instance.clone()) => result,
+                    _ = self.cancellation.cancelled() => return,
+                };
+                match result {
                     Ok(()) => break,
                     // Runtime shutdown may have already deleted the file-store record.
                     Err(error)
@@ -199,6 +187,20 @@ impl EndpointRegistrationLease {
         }
     }
 
+    /// Keep normal replacement ordered, but do not hold runtime shutdown on discovery failure.
+    pub(crate) async fn release_on_shutdown(self, shutdown: CancellationToken) -> Result<()> {
+        let release = self.release();
+        tokio::pin!(release);
+        tokio::select! {
+            result = &mut release => result,
+            _ = shutdown.cancelled() => {
+                tokio::time::timeout(Duration::from_secs(1), release)
+                    .await
+                    .context("endpoint discovery release timed out during runtime shutdown")?
+            }
+        }
+    }
+
     /// Wait for release while allowing cleanup to finish if the caller is cancelled.
     pub(crate) async fn release(mut self) -> Result<()> {
         if let Some(id) = self.id.take() {
@@ -239,7 +241,7 @@ mod tests {
     use super::*;
     use crate::{
         component::TransportType,
-        discovery::{DiscoveryStream, MockDiscovery, SharedMockRegistry},
+        discovery::{DiscoveryQuery, DiscoveryStream, MockDiscovery, SharedMockRegistry},
     };
     use async_trait::async_trait;
 
@@ -277,6 +279,84 @@ mod tests {
         ) -> Result<DiscoveryStream> {
             self.inner.list_and_watch(query, cancel_token).await
         }
+    }
+
+    struct UnavailableUnregisterDiscovery {
+        inner: MockDiscovery,
+        hanging: bool,
+        attempted: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl Discovery for UnavailableUnregisterDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, _instance: DiscoveryInstance) -> Result<()> {
+            self.attempted.notify_one();
+            if self.hanging {
+                std::future::pending().await
+            } else {
+                anyhow::bail!("discovery unavailable")
+            }
+        }
+
+        async fn get_endpoint(&self, id: &EndpointInstanceId) -> Result<Option<DiscoveryInstance>> {
+            self.inner.get_endpoint(id).await
+        }
+
+        async fn list(&self, _query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            anyhow::bail!("endpoint lease acquisition must use a point lookup")
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            self.inner.list_and_watch(query, cancel_token).await
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_bounds_failed_and_hanging_discovery_release() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for hanging in [false, true] {
+                let discovery = Arc::new(UnavailableUnregisterDiscovery {
+                    inner: MockDiscovery::new(Some(7), SharedMockRegistry::new()),
+                    hanging,
+                    attempted: tokio::sync::Notify::new(),
+                });
+                let primary = CancellationToken::new();
+                let _cancel_on_drop = primary.clone().drop_guard();
+                let shutdown = CancellationToken::new();
+                let manager = EndpointRegistrationManager::new(
+                    discovery.clone(),
+                    tokio::runtime::Handle::current(),
+                    primary.clone(),
+                );
+                let lease = manager.register(endpoint_spec()).await.unwrap();
+                let mut release = Box::pin(lease.release_on_shutdown(shutdown.clone()));
+                assert!(futures::poll!(release.as_mut()).is_pending());
+                discovery.attempted.notified().await;
+                assert!(futures::poll!(release.as_mut()).is_pending());
+                shutdown.cancel();
+                let error = tokio::time::timeout(Duration::from_secs(3), release)
+                    .await
+                    .expect("release blocked runtime shutdown")
+                    .unwrap_err();
+                assert!(error.to_string().contains("timed out"));
+                assert!(!primary.is_cancelled());
+                primary.cancel();
+            }
+        })
+        .await
+        .expect("discovery release regression test timed out");
     }
 
     struct StaleListDiscovery {
