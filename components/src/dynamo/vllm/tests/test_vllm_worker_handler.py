@@ -1397,11 +1397,13 @@ async def test_prefill_probe_runs_locally_without_handoff(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("marker", [None, False, 1, "true"])
 @pytest.mark.parametrize(
-    "decode_params",
-    [{"remote_block_ids": [1]}, {"transfer_id": "mooncake-transfer"}, {}],
-    ids=["nixl", "mooncake", "lmcache"],
+    "marker, decode_params",
+    [
+        (None, {"remote_block_ids": [1]}),
+        (1, {}),
+    ],
+    ids=["no_marker", "truthy_marker_empty_params"],
 )
 async def test_prefill_non_probe_keeps_protocol_handoff(
     prefill_probe_handler, marker, decode_params

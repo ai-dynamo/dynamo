@@ -4296,7 +4296,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
-        local_probe = is_probe(request)
+        is_local_probe = is_probe(request)
         prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
             request_id,
@@ -4333,7 +4333,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
 
         kv_protocol: KvConnectorProtocol | None = None
-        if local_probe:
+        if is_local_probe:
             # A health probe has no decode worker, so it must not ask for a
             # KV handoff. Drop a client-supplied value too.
             if sampling_params.extra_args is not None:
