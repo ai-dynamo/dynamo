@@ -89,6 +89,31 @@ rejected on updates.
 
 #### Operator behavior breaking changes
 
+##### Native sidecar backend inference
+
+**Change:** Backend inference reads the `runtime` init container in native sidecar mode
+and recognizes the literal `dynamo-vllm-sidecar` executable. The inferred framework is
+included in generated component specs and the graph-wide worker-generation hash.
+
+**Affected:** Existing sidecar DGDs with an omitted `spec.backendFramework` whose runtime
+launch now identifies a backend that the engine's `main` launch did not identify. For
+example, a `vllm-rs` engine with `dynamo-vllm-sidecar` changes from an undetected backend to
+`vllm`. The vLLM reference manifests already set `backendFramework: vllm` and are unaffected
+by this inference change.
+
+**Action:** Plan for a one-time worker rollout when upgrading to v1.6.0. To perform the
+migration before the operator upgrade, set `spec.backendFramework: vllm` on affected vLLM
+DGDs and complete that manifest-driven rollout first. This moves the migration earlier;
+it does not eliminate the rollout. Verify that explicit frameworks match the runtime
+launch, which now supplies backend validation.
+
+**Existing deployments:** Reconciliation can start a new worker generation without any
+manifest change, rolling all workers in the affected graph. With `compilationCache` and
+an explicit `mountPath`, the engine also gains `VLLM_CACHE_ROOT` pointing to that path.
+Standalone DCDs with the same newly inferred backend receive these cache environment
+defaults on reconciliation and can roll when their pod template changes. Deployments
+whose effective backend was already correct retain their backend and cache defaults.
+
 ##### Frontend sidecar identity in container discovery mode
 
 **Change:** The operator now sets `CONTAINER_NAME` to the container selected by

@@ -247,6 +247,8 @@ func countServingEndpoints(endpoints []v1alpha1.EndpointInfo) int {
 	return countReadyEndpoints(endpoints) + countLoRAFallbackCoveredEndpoints(endpoints)
 }
 
+// withPodIdentity adds workload identity and prefill LoRA classification without
+// mutating the candidate or Pod. The Pod must be non-nil.
 func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelendpoint.Candidate {
 	identified := candidate
 	identified.KubernetesReady = false
@@ -278,23 +280,24 @@ func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelen
 	if componentType != consts.ComponentTypePrefill {
 		return identified
 	}
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		if container.Name != consts.MainContainerName {
-			continue
-		}
-		backend, err := dynamo.DetectBackendFrameworkFromArgs(container.Command, container.Args)
-		if err != nil || backend != dynamo.BackendFrameworkVLLM {
-			return identified
-		}
-		if identified.GraphDeploymentName != "" {
-			identified.LoRAFallbackGroup = "graph:" + identified.GraphDeploymentName
-		} else if identified.WorkloadName != "" {
-			identified.LoRAFallbackGroup = "workload:" + identified.WorkloadName
-		}
-		identified.AllowLoRAManagementUnavailable = identified.LoRAFallbackGroup != ""
+
+	// Classify the Dynamo launch rather than the independently managed engine.
+	container := dynamo.GetDynamoContainerFromPodSpec(&pod.Spec)
+	if container == nil {
 		return identified
 	}
+	backend, err := dynamo.DetectBackendFrameworkFromArgs(container.Command, container.Args)
+	if err != nil || backend != dynamo.BackendFrameworkVLLM {
+		return identified
+	}
+
+	// Scope fallback coverage to the same graph or standalone workload.
+	if identified.GraphDeploymentName != "" {
+		identified.LoRAFallbackGroup = "graph:" + identified.GraphDeploymentName
+	} else if identified.WorkloadName != "" {
+		identified.LoRAFallbackGroup = "workload:" + identified.WorkloadName
+	}
+	identified.AllowLoRAManagementUnavailable = identified.LoRAFallbackGroup != ""
 	return identified
 }
 

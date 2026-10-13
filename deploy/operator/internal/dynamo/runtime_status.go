@@ -27,23 +27,35 @@ type ComponentRuntimeStatus struct {
 
 // ResolveComponentRuntimeStatus projects Planner-relevant runtime facts from
 // the fully rendered serving Pod without exposing PodTemplate structure to the
-// Planner.
+// Planner. A nil PodSpec has no runtime identity; nil annotations have no power limit.
 func ResolveComponentRuntimeStatus(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
 ) ComponentRuntimeStatus {
 	status := ComponentRuntimeStatus{}
-	main := mainContainerFromPodSpec(podSpec)
-	if main != nil {
-		tokens := shellCommandLineTokens(main.Command, main.Args)
-		status.ServedModelName = firstFlagValue(
-			tokens,
-			"--served-model-name",
-			"--model-name",
-			"--model",
-			"--model-path",
-		)
-		if endpoint := firstFlagValue(tokens, "--endpoint"); endpoint != "" {
+
+	// Runtime identity belongs to the sidecar when the engine runs independently.
+	runtime := GetDynamoContainerFromPodSpec(podSpec)
+	if runtime != nil {
+		tokens := shellCommandLineTokens(runtime.Command, runtime.Args)
+		modelFlags := []string{"--served-model-name", "--model-name", "--model", "--model-path"}
+		status.ServedModelName = firstFlagValue(tokens, modelFlags...)
+
+		// Native sidecars discover models over gRPC. Preserve any model identity
+		// explicitly configured on the engine until registered metadata is projected.
+		if status.ServedModelName == "" && runtime.Name == commonconsts.RuntimeContainerName {
+			for _, container := range podSpec.Containers {
+				if container.Name == commonconsts.MainContainerName {
+					status.ServedModelName = firstFlagValue(shellCommandLineTokens(container.Command, container.Args), modelFlags...)
+					break
+				}
+			}
+		}
+
+		// Native endpoints are bare names; Python backends use qualified endpoints.
+		if runtime.Name == commonconsts.RuntimeContainerName && hasExecutableToken(tokens, "dynamo-vllm-sidecar") {
+			status.RuntimeComponentName = nativeSidecarComponent(runtime, tokens)
+		} else if endpoint := firstFlagValue(tokens, "--endpoint"); endpoint != "" {
 			if componentName, ok := runtimeComponentFromEndpoint(endpoint); ok {
 				status.RuntimeComponentName = componentName
 			}
@@ -56,6 +68,51 @@ func ResolveComponentRuntimeStatus(
 		}
 	}
 	return status
+}
+
+// nativeSidecarComponent follows CommonArgs in lib/backend-common/src/args.rs
+// and WorkerConfig in lib/sidecar/vllm/src/engine.rs. container must not be nil.
+func nativeSidecarComponent(container *corev1.Container, tokens []string) string {
+	// CLI flags override environment values; unknown modes cannot supply identity.
+	mode := firstFlagValue(tokens, "--disaggregation-mode")
+	if mode == "" {
+		var known bool
+		mode, known = literalContainerEnv(container, "DYN_DISAGGREGATION_MODE")
+		if !known {
+			return ""
+		}
+	}
+	if mode != "" && mode != "agg" && mode != "aggregated" {
+		return ""
+	}
+
+	// Only aggregated mode honors component overrides. Other modes use fixed
+	// names from lib/backend-common/src/disagg.rs, matching Planner's defaults.
+	if component := firstFlagValue(tokens, "--component"); component != "" {
+		if strings.Contains(component, "$(") {
+			return ""
+		}
+		return component
+	}
+	component, _ := literalContainerEnv(container, commonconsts.DynamoComponentEnvVar)
+	return component
+}
+
+// literalContainerEnv returns the last literal value, or unknown for unresolved
+// sources or Kubernetes substitutions. Explicit env overrides envFrom; container must not be nil.
+func literalContainerEnv(container *corev1.Container, name string) (value string, known bool) {
+	// An absent entry is known only when no external source can supply it.
+	known = len(container.EnvFrom) == 0
+	for _, env := range container.Env {
+		if env.Name == name {
+			value = env.Value
+			known = env.ValueFrom == nil && !strings.Contains(env.Value, "$(")
+		}
+	}
+	if !known {
+		return "", false
+	}
+	return value, true
 }
 
 // ResolveGroveComponentRuntimeStatuses selects each component's semantic
@@ -91,18 +148,6 @@ func ResolveGroveComponentRuntimeStatuses(
 		)
 	}
 	return statuses
-}
-
-func mainContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
-	}
-	return nil
 }
 
 func shellCommandLineTokens(command, args []string) []string {

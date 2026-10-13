@@ -170,12 +170,36 @@ func GetDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 }
 
 // GetDynamoContainer returns the container hosting the Dynamo runtime, or nil
-// when its template entry is absent. A nil component is treated as absent.
+// when its template entry is absent. A nil component or pod template is absent.
 func GetDynamoContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
-	if runtime := GetDynamoSidecar(component); runtime != nil {
-		return runtime
+	if component == nil || component.PodTemplate == nil {
+		return nil
 	}
-	return GetMainContainer(component)
+	return GetDynamoContainerFromPodSpec(&component.PodTemplate.Spec)
+}
+
+// GetDynamoContainerFromPodSpec selects the runtime init container in sidecar
+// mode and main otherwise. A nil PodSpec or missing selected container returns nil.
+// The returned container belongs to podSpec; selecting it does not mutate the Pod.
+func GetDynamoContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+
+	// Native sidecars own Dynamo identity independently of the engine container.
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
+			return &podSpec.InitContainers[i]
+		}
+	}
+
+	// Combined deployments keep the Dynamo runtime in main.
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i]
+		}
+	}
+	return nil
 }
 
 // GetMainContainerResources returns the main container resources, or an empty
