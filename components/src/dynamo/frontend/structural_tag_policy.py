@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 ToolChoiceKind = Literal["none", "auto", "required", "named", "other"]
 
@@ -26,6 +29,46 @@ def runtime_structural_tag_options(
         runtime_config.get("structural_tag_scope", "auto"),
         runtime_config.get("structural_tag_schema", "auto"),
     )
+
+
+# Published by the vLLM worker (dynamo.vllm.main.publish_vllm_structural_tag_reasoning_policy)
+# and read by the Rust preprocessor (lib/llm/src/preprocessor/structural_tag.rs).
+TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
+    "tool_call_structural_tag_excludes_reasoning"
+)
+
+
+def runtime_structural_tag_excludes_reasoning(runtime_config: Any) -> bool:
+    """Whether tool-call structural tags must leave reasoning to the backend.
+
+    Mirrors ``resolve_reasoning_boundary`` in the Rust preprocessor: the
+    canonical ``structural_tag.reasoning_boundary`` setting (``auto`` by
+    default) decides, and ``auto`` follows the vLLM worker's published
+    ``tool_call_structural_tag_excludes_reasoning`` flag. Missing or invalid
+    worker metadata keeps the compatibility behavior (the tag models reasoning).
+    """
+    if not isinstance(runtime_config, dict):
+        return False
+    runtime_data = runtime_config.get("runtime_data")
+    backend_excludes = (
+        isinstance(runtime_data, dict)
+        and runtime_data.get(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+        is True
+    )
+    config = runtime_config.get("structural_tag")
+    boundary = (
+        config.get("reasoning_boundary", "auto") if isinstance(config, dict) else "auto"
+    )
+    if boundary == "backend":
+        return True
+    if boundary == "structural_tag" and backend_excludes:
+        # Rust rejects this pairing at startup; follow the backend, which
+        # consumes the reasoning block before the grammar sees any token.
+        logger.warning(
+            "structural_tag.reasoning_boundary=structural_tag conflicts with the "
+            "backend's reasoning-aware guided-decoding policy; using 'backend'"
+        )
+    return backend_excludes
 
 
 def should_attempt_structural_tag(
