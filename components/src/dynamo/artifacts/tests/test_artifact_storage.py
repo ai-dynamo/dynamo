@@ -3,6 +3,7 @@
 
 import asyncio
 import hashlib
+import re
 import socket
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,7 @@ from yarl import URL
 
 opendal = pytest.importorskip("opendal")
 
-from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guard
+from dynamo.artifacts.storage import (
     ArtifactStorageError,
     ManagedProfile,
     ManagedStoreTarget,
@@ -91,6 +92,9 @@ async def test_managed_conditional_write_and_local_receipt():
     assert receipt.sha256 == hashlib.sha256(data).hexdigest()
     assert receipt.outcome == "acknowledged"
     assert receipt.provider_identity is None
+    assert re.fullmatch(r"obj_[0-9a-f]{32}", receipt.object_id)
+    assert "approved" not in receipt.object_id
+    assert "runs/a" not in receipt.object_id
 
 
 @pytest.mark.asyncio
@@ -324,6 +328,10 @@ async def test_managed_timeout_settles_write_and_requires_reconciliation():
         "https://objects.example/%zz",
         "https://objects.example:invalid/a",
         "https://objects.example/\r\nb",
+        "https://objects.example/raw space",
+        "https://objects.example/raw\\backslash",
+        "https://objects.example/raw{brace}",
+        'https://objects.example/raw"quote',
         "ftp://objects.example/a",
         " https://objects.example/a",
     ],
