@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,12 +16,12 @@ opendal = pytest.importorskip("opendal")
 fernet = pytest.importorskip("cryptography.fernet")
 Fernet = fernet.Fernet
 
-from dynamo.artifacts.runtime import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.runtime import (
     ArtifactRuntime,
     close_configured_artifact_runtime,
     configured_artifact_runtime,
 )
-from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.storage import (
     ArtifactStorageError,
     ManagedProfile,
 )
@@ -202,7 +203,12 @@ async def test_real_memory_operator_transfer_verify_and_ready(runtime, managed):
     assert terminal["state"] == "ready"
     assert terminal["actual_bytes"] == len(data)
     assert terminal["sha256"] == hashlib.sha256(data).hexdigest()
-    assert terminal["object_id"] == "approved/artifacts/result"
+    assert re.fullmatch(r"obj_[0-9a-f]{64}", terminal["object_id"])
+    assert "approved" not in terminal["object_id"]
+    assert "artifacts/result" not in terminal["object_id"]
+    assert (await runtime._verify(data, managed, {}))["object_id"] == terminal[
+        "object_id"
+    ]
     assert await runtime.profiles["approved"].operator.read("artifacts/result") == data
     assert runtime.store.grant(result["operation_id"]) is None
 
@@ -212,6 +218,7 @@ async def test_transfer_receipt_does_not_expose_outcome_as_ready(runtime, manage
     receipt = await runtime._transfer(b"opaque", managed)
     assert set(receipt) == {"actual_bytes", "sha256", "object_id", "provider_identity"}
     assert receipt["actual_bytes"] == 6
+    assert re.fullmatch(r"obj_[0-9a-f]{32}", receipt["object_id"])
     assert "state" not in receipt
 
 

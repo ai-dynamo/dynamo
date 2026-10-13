@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from dataclasses import asdict
@@ -38,7 +39,7 @@ class ArtifactRuntime:
         self._admission_lock = asyncio.Lock()
         try:
             self._initialize(config, capability_key)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- sanitize configuration failures
             if self._authority_file is not None:
                 self._authority_file.close()
             raise ValueError("artifact authority configuration is invalid") from None
@@ -46,6 +47,9 @@ class ArtifactRuntime:
     def _initialize(self, config, capability_key):
         import opendal
 
+        self._object_id_key = hmac.digest(
+            capability_key, b"dynamo-artifact-object-id-v1", "sha256"
+        )
         self.owner = config["owner"]
         if not isinstance(self.owner, str) or not 1 <= len(self.owner) <= 128:
             raise ValueError("invalid artifact authority owner")
@@ -106,6 +110,16 @@ class ArtifactRuntime:
             raise ValueError("verifier registration does not bind this PUT grant")
         return registration["profile"], registration["object_key"]
 
+    def _managed_object_id(self, profile, key):
+        return (
+            "obj_"
+            + hmac.new(
+                self._object_id_key,
+                f"{profile}\0{key}".encode(),
+                hashlib.sha256,
+            ).hexdigest()
+        )
+
     def validate(self, settings, mode):
         if self._closing:
             raise ValueError("artifact authority is closed")
@@ -148,15 +162,17 @@ class ArtifactRuntime:
             stored = await operator.read(
                 key, offset=0, size=len(data), **version_options
             )
-        except (
-            Exception
-        ):  # noqa: BLE001 -- native provider errors can contain credentials.
+        except Exception:  # noqa: BLE001 -- native provider errors can contain credentials
             raise ValueError("stored object verification unavailable") from None
         if len(stored) != len(data):
             raise ValueError("stored object exceeded verification bound")
         # The certified immutable profile binds this exact object key; provider
         # versions may supply a stronger receipt, but ETag is not a digest.
-        identity = f"{profile}/{key}"
+        identity = (
+            settings["object_id"]
+            if settings["kind"] == "presigned_http_put"
+            else self._managed_object_id(profile, key)
+        )
         return {
             "actual_bytes": len(stored),
             "sha256": hashlib.sha256(stored).hexdigest(),
@@ -191,7 +207,7 @@ def configured_artifact_runtime():
         config = json.loads(Path(path).read_text())
         key = os.environ["DYNAMO_ARTIFACT_CAPABILITY_KEY"].encode()
         return ArtifactRuntime(config, key)
-    except Exception:
+    except Exception:  # noqa: BLE001 -- sanitize authority configuration failures
         raise ValueError("artifact authority configuration is invalid") from None
 
 
