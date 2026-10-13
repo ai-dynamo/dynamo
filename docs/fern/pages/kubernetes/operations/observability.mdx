@@ -456,6 +456,46 @@ Multinode deployments adjust probes by backend and node role. Review
 [Multinode Orchestration](../installation/multinode-orchestration.md) before overriding probes on a
 multinode worker.
 
+### Use Model-Specific Frontend Readiness
+
+For a runtime that supports serving-aware model readiness, set the frontend's readiness probe to
+`/v1/models/<model>/ready`. Replace `org/model-name` below with the exact served model name; model
+names containing slashes are supported. Apply this override to the frontend component of your DGD:
+
+```yaml
+spec:
+  components:
+  - name: frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          readinessProbe:
+            httpGet:
+              path: /v1/models/org/model-name/ready
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+```
+
+Keep the existing startup and liveness probes independent of model readiness. The model probe
+returns `503` until the known model's required worker topology, serving engine, and HTTP routes are
+ready; it returns `404` before the frontend knows the model. Kubernetes keeps the frontend out of
+Ready Service endpoints while those probes fail. It does not gate inference requests arriving over
+existing connections.
+
+To inspect the endpoint manually, retain the response body on non-success statuses:
+
+```bash
+curl -i 'http://<frontend-service>:8000/v1/models/org/model-name/ready'
+```
+
+Diagnostic clients must read both `200` and `503` JSON responses. See
+[Model-Specific Serving Readiness](../../reference/observability/health-checks.mdx#model-specific-serving-readiness)
+for the status-code migration and the distinction between discovering a worker and being ready to serve.
+
 See [Health Checks](../../reference/observability/health-checks.mdx) for endpoint paths, responses,
 status codes, and active worker checks.
 
