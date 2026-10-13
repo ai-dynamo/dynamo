@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       recipe:
-        description: 'Kustomize overlay: kimi-k25-agg, deepseek-v4-pro-agg, or deepseek-v4-pro-disagg'
+        description: 'Kustomize overlay: kimi-k25-agg, kimi-k25-disagg, deepseek-v4-pro-agg, or deepseek-v4-pro-disagg'
         type: string
         required: true
       source_ref:
@@ -28,7 +28,7 @@ jobs:
     name: ${{ inputs.recipe }}
     runs-on: prod-deploy-tester-v1
     # Allow model loading and cleanup around each recipe's AIPerf run.
-    timeout-minutes: ${{ inputs.recipe == 'kimi-k25-agg' && 180 || 960 }}
+    timeout-minutes: ${{ startsWith(inputs.recipe, 'kimi-k25-') && 180 || 960 }}
     defaults:
       run:
         shell: bash
@@ -59,6 +59,13 @@ jobs:
               dgd=kimi-k25-agg-kv-eagle
               workers=agg
               benchmark=kimi-k25-agg-kv-eagle-bench
+              container=perf
+              resources=dgd,job,configmap,computedomain
+              ;;
+            kimi-k25-disagg)
+              dgd=kimi-k25-disagg-kv-eagle
+              workers=prefill,decode
+              benchmark=kimi-k25-disagg-kv-eagle-bench
               container=perf
               resources=dgd,job,configmap,computedomain
               ;;
@@ -120,7 +127,7 @@ jobs:
             (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
-          if [[ "$RECIPE" == kimi-k25-agg ]]; then
+          if [[ "$RECIPE" == kimi-k25-agg || "$RECIPE" == kimi-k25-disagg ]]; then
             yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
               (.spec.template.spec.containers[].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
           elif [[ "$RECIPE" == deepseek-v4-pro-agg || "$RECIPE" == deepseek-v4-pro-disagg ]]; then
@@ -258,7 +265,7 @@ jobs:
         timeout-minutes: 5
         run: |
           concurrencies=$(yq -er '.spec.template.spec.containers[] | select(.name == strenv(PERF_CONTAINER)).env[] | select(.name == "CONCURRENCIES").value' "$ARTIFACTS/perf.yaml")
-          if [[ "$RECIPE" == kimi-k25-agg ]]; then
+          if [[ "$RECIPE" == kimi-k25-agg || "$RECIPE" == kimi-k25-disagg ]]; then
             [[ "$concurrencies" =~ ^[1-9][0-9]*$ ]]
             shopt -s nullglob
             profiles=("$ARTIFACTS"/perf/*/*_trace_c"$concurrencies"_*/profile_export_aiperf.json)
