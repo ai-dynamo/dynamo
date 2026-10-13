@@ -9650,6 +9650,7 @@ spec:
                           - Goodput
                           - GoodputPerGPU
                         type: string
+                      maxItems: 7
                       minItems: 2
                       type: array
                       x-kubernetes-list-type: set
@@ -9688,7 +9689,7 @@ spec:
                   type: object
                   x-kubernetes-validations:
                     - message: Optimize accepts only metric; Pareto requires metrics
-                      rule: (self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))
+                      rule: '!has(self.mode) || (self.mode == ''Optimize'' && !has(self.metrics)) || (self.mode == ''Pareto'' && !has(self.metric) && has(self.metrics))'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                     - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound

@@ -4858,7 +4858,7 @@ See [ObjectiveMetric](#objectivemetric).
 <ParamField path="metrics" type="ObjectiveMetric array">
 Metrics lists two or more distinct scalar targets when mode is Pareto.
 See [ObjectiveMetric](#objectivemetric).
-**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MinItems: 2  Optional: \&#123;\&#125;
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 7  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="sla" type="ObjectiveSLASpec" default="\{ itlMs:30 ttftMs:2000 \}">

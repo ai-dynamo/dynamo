@@ -154,7 +154,7 @@ type ObjectiveSLASpec struct {
 }
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
-// +kubebuilder:validation:XValidation:rule="(self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize accepts only metric; Pareto requires metrics"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || (self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize accepts only metric; Pareto requires metrics"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
 type ObjectiveSpec struct {
@@ -171,6 +171,7 @@ type ObjectiveSpec struct {
 	// Metrics lists two or more distinct scalar targets when mode is Pareto.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=7
 	// +listType=set
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
