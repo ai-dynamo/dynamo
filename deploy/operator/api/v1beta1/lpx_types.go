@@ -28,6 +28,15 @@ type LPXExperimentalSpec struct {
 	// local. Omission runs every partition on LPUs.
 	// +optional
 	LocalPartitions *LPXLocalPartitions `json:"localPartitions,omitempty"`
+
+	// checkpoint overrides the checkpoint that a hybrid build's GBuild manifest
+	// names for the Cyborg conductor. Model Express downloads the selected
+	// checkpoint to model storage before the workload starts, and the operator
+	// sets `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot
+	// directory. Requires a hybrid build and a configured Model Express URL.
+	// Omission uses the manifest's checkpoint, if any.
+	// +optional
+	Checkpoint *LPXCheckpoint `json:"checkpoint,omitempty"`
 }
 
 // LocalPartitions returns the experimental local-partition selection, or nil
@@ -37,6 +46,15 @@ func (c *LPXConfig) LocalPartitions() *LPXLocalPartitions {
 		return nil
 	}
 	return c.Experimental.LocalPartitions
+}
+
+// CheckpointOverride returns the experimental checkpoint override, or nil when
+// none is set. The receiver may be nil.
+func (c *LPXConfig) CheckpointOverride() *LPXCheckpoint {
+	if c == nil || c.Experimental == nil {
+		return nil
+	}
+	return c.Experimental.Checkpoint
 }
 
 // LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.
@@ -68,6 +86,40 @@ type LPXLocalPartitions struct {
 	// +kubebuilder:validation:items:Minimum=0
 	// +kubebuilder:validation:items:Maximum=4294967295
 	IDs []int64 `json:"ids,omitempty"`
+}
+
+// LPXCheckpointProvider identifies the source of an LPX checkpoint.
+// +kubebuilder:validation:Enum=HuggingFace
+type LPXCheckpointProvider string
+
+const (
+	// LPXCheckpointProviderHuggingFace downloads a Hugging Face Hub model repository.
+	LPXCheckpointProviderHuggingFace LPXCheckpointProvider = "HuggingFace"
+)
+
+// LPXCheckpoint identifies one immutable model checkpoint.
+type LPXCheckpoint struct {
+	// provider selects the checkpoint source. Only `HuggingFace` is supported.
+	// +required
+	Provider LPXCheckpointProvider `json:"provider"`
+
+	// model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+	// It follows the Hub's repository-ID rules: an optional namespace and a
+	// name, each at most 96 characters and starting and ending with a letter,
+	// digit, or underscore.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=193
+	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$`
+	// +kubebuilder:validation:XValidation:rule="!self.contains('--') && !self.contains('..')",message="model must not contain '--' or '..'"
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith('.git')",message="model must not end with '.git'"
+	Model string `json:"model"`
+
+	// revision is the full 40-character commit SHA of the repository snapshot.
+	// Branches and tags are not accepted because they can move.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	Revision string `json:"revision"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.

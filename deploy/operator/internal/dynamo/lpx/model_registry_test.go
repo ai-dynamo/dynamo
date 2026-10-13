@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
@@ -564,4 +565,85 @@ func TestRegistryEnsureDownloadedPropagatesTransportFailures(t *testing.T) {
 			require.False(t, ready)
 		})
 	}
+}
+
+func TestRegistryEnsureCheckpointDownloaded(t *testing.T) {
+	const revision = "6cee5e81ee83917806bbde320786a8fb61efebee"
+	t.Log("Define first Model Express statuses for a pinned checkpoint")
+	tests := []struct {
+		name           string
+		status         modelpb.ModelStatus
+		message        string
+		resolved       *string
+		wantDownloaded bool
+		wantErr        string
+	}{
+		{name: "downloaded", status: modelpb.ModelStatus_DOWNLOADED, resolved: ptr.To(revision), wantDownloaded: true},
+		{name: "downloading", status: modelpb.ModelStatus_DOWNLOADING, resolved: ptr.To(revision)},
+		{name: "error", status: modelpb.ModelStatus_ERROR, message: "repository not found", wantErr: "repository not found"},
+		{
+			name:    "server without revision support",
+			status:  modelpb.ModelStatus_DOWNLOADED,
+			wantErr: "checkpoint downloads require Model Express 0.6.0 or later",
+		},
+		{
+			name:     "different resolved revision",
+			status:   modelpb.ModelStatus_DOWNLOADED,
+			resolved: ptr.To("0000000000000000000000000000000000000000"),
+			wantErr:  `resolved "openai/gpt-oss-20b" to revision "0000000000000000000000000000000000000000", want "` + revision + `"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Construct the selected first-status Model Express stream")
+			client := &fakeModelServiceClient{
+				stream: &fakeModelDownloadStream{
+					update: &modelpb.ModelStatusUpdate{
+						Status:           tt.status,
+						Message:          ptr.To(tt.message),
+						ResolvedRevision: tt.resolved,
+					},
+				},
+			}
+			registry := &defaultModelRegistry{mxClient: client}
+			checkpoint := &dynamov1beta1.LPXCheckpoint{
+				Provider: dynamov1beta1.LPXCheckpointProviderHuggingFace,
+				Model:    "openai/gpt-oss-20b",
+				Revision: revision,
+			}
+
+			t.Log("Request the pinned Hugging Face revision with weights")
+			downloaded, err := registry.EnsureCheckpointDownloaded(t.Context(), checkpoint)
+			require.NotNil(t, client.request)
+			require.Equal(t, "openai/gpt-oss-20b", client.request.GetModelName())
+			require.Equal(t, modelpb.ModelProvider_HUGGING_FACE, client.request.GetProvider())
+			require.Equal(t, revision, client.request.GetRevision())
+			require.False(t, client.request.GetIgnoreWeights())
+
+			t.Log("Accept only the requested revision")
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tt.wantDownloaded, downloaded)
+		})
+	}
+}
+
+func TestRegistryEnsureCheckpointDownloadedRequiresModelExpress(t *testing.T) {
+	t.Log("Construct a registry without Model Express")
+	registry, err := NewModelRegistry("", nil)
+	require.NoError(t, err)
+
+	t.Log("Reject the checkpoint with the missing operator setting")
+	downloaded, err := registry.EnsureCheckpointDownloaded(t.Context(), &dynamov1beta1.LPXCheckpoint{
+		Provider: dynamov1beta1.LPXCheckpointProviderHuggingFace,
+		Model:    "openai/gpt-oss-20b",
+		Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+	})
+	require.EqualError(t, err,
+		`checkpoint "openai/gpt-oss-20b@6cee5e81ee83917806bbde320786a8fb61efebee" requires Model Express; configure infrastructure.modelExpressURL`)
+	require.False(t, downloaded)
 }

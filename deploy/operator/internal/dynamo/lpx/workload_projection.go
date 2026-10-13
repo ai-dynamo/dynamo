@@ -39,6 +39,19 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	if err != nil {
 		return nil, err
 	}
+
+	// An override needs a Cyborg conductor; LPU-only builds ignore their manifest checkpoint.
+	checkpoint := intent.CheckpointOverride
+	if checkpoint != nil && intent.Pipeline != PipelineLPX {
+		return nil, fmt.Errorf("%w: experimental.checkpoint requires a hybrid build with a Cyborg conductor", ErrUnsupportedRuntime)
+	}
+	if checkpoint == nil && intent.Pipeline == PipelineLPX {
+		checkpoint = intent.BuildSnapshot.build.Checkpoint
+	}
+	for _, projection := range projections[len(dst):] {
+		projection.checkpoint = checkpoint
+	}
+
 	// Bound the component's physical build before runtime expansion and request publication.
 	projection := projections[len(dst)]
 	boundedPartitions := len(projection.partitions)
