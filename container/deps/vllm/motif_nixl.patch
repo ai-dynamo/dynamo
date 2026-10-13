@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+diff --git a/distributed/kv_transfer/kv_connector/utils.py b/distributed/kv_transfer/kv_connector/utils.py
+--- a/distributed/kv_transfer/kv_connector/utils.py
++++ b/distributed/kv_transfer/kv_connector/utils.py
+@@ -438,7 +438,9 @@
+             )
+-            if not self.is_mla:
+-                assert len(kv_cache_shape) == 4, (
+-                    "Attention KV cache layout must be standardized as "
+-                    "[num_blocks, num_kv_heads, block_size, content_size], "
+-                    f"got shape {kv_cache_shape}."
++            # Motif mixes MLA and GQA: model-wide is_mla is False.
++            # Layout belongs to this backend; global replication stays unchanged.
++            expected_rank = 3 if attn_backend.is_mla() else 4
++            if len(kv_cache_shape) != expected_rank:
++                raise ValueError(
++                    f"Unexpected {attn_backend.get_name()} KV cache rank: "
++                    f"expected {expected_rank}, got shape {kv_cache_shape}."
+                 )
+diff --git a/distributed/kv_transfer/kv_connector/v1/nixl/connector.py b/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
+--- a/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
++++ b/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
+@@ -145,6 +145,11 @@
+                 "Fallback to default kv cache layout."
+             )
+             return None
++        if vllm_config.model_config.hf_config.model_type == "Motif":
++            # The pinned Motif cute-dsl / DiffKV kernels use NHD in aggregate.
++            # Equal TP transfers complete blocks and needs no HND head slicing.
++            logger.info_once("Motif NIXL compatibility: retaining NHD cache layout")
++            return "NHD"
+         use_mla = vllm_config.model_config.use_mla
+         if use_mla:
+             # return None when we have mla
