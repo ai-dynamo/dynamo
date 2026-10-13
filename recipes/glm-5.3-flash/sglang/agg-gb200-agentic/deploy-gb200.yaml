@@ -79,6 +79,7 @@ spec:
           - dynamo.sglang
           - --enable-multimodal
           - --frontend-decoding
+          - --mm-enable-dp-encoder
           - --model-path
           - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision

@@ -53,7 +53,7 @@ spec:
             value: /shared-model-cache
           - name: DYN_ROUTER_MODE
             value: round-robin
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -82,6 +82,7 @@ spec:
           - dynamo.sglang
           - --enable-multimodal
           - --frontend-decoding
+          - --mm-enable-dp-encoder
           - --model-path
           - RadixArk/GLM-5.3-Flash-NVFP4
           - --revision
@@ -150,6 +151,8 @@ spec:
           env:
           - name: HF_HOME
             value: /shared-model-cache
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "300"
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -164,15 +167,15 @@ spec:
             value: "1"
           - name: NCCL_P2P_LEVEL
             value: NVL
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
           imagePullPolicy: IfNotPresent
           livenessProbe:
-            failureThreshold: 12
+            failureThreshold: 60
             httpGet:
               path: /live
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
+              port: system
+            periodSeconds: 5
+            timeoutSeconds: 4
           name: main
           ports:
           - containerPort: 9090
