@@ -5,10 +5,18 @@ package lpx
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
+	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -16,12 +24,27 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	lpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-const deploymentUIDLabel = "lpx.nvidia.com/deployment-uid"
+const (
+	deploymentUIDLabel = "lpx.nvidia.com/deployment-uid"
+	// clientCertAnnotation publishes an agent Pod's client certificate, base64 DER.
+	clientCertAnnotation = "lpx.nvidia.com/client-cert"
+	// clientIdentityAnnotation names a scaling group's identity Secret. Under OnDelete the layout
+	// check compares group annotations, so adopting the identity replaces the PCS whole instead of
+	// mixing Pods that hold different SSH keys.
+	clientIdentityAnnotation = "lpx.nvidia.com/client-identity"
+)
 
 // resolveWorkloads resolves every component group and finalizes its resource names.
 // deployment and dgd must be non-nil; dgd must have passed admission.
@@ -146,15 +169,23 @@ func (r *graphReconciler) renderPodCliqueSet(
 
 	stampDeploymentIdentity(deployment, pcs, resources)
 
-	// Enforce the aggregate size budget after identity and discovery metadata are final.
-	serialized, err := json.Marshal(pcs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("serializing selected LPX PodCliqueSet: %w", err)
-	}
-	if len(serialized) > lpx.MaxRenderedPodCliqueSetBytes {
-		return nil, nil, fmt.Errorf("rendered LPX PodCliqueSet is %d bytes; maximum is %d", len(serialized), lpx.MaxRenderedPodCliqueSetBytes)
+	// Enforce the aggregate size budget after identity and discovery metadata are final;
+	// stampClientIdentity checks it again after adding the client identity.
+	if err := checkPodCliqueSetSize(pcs); err != nil {
+		return nil, nil, err
 	}
 	return pcs, resources, nil
+}
+
+func checkPodCliqueSetSize(pcs *grovev1alpha1.PodCliqueSet) error {
+	serialized, err := json.Marshal(pcs)
+	if err != nil {
+		return fmt.Errorf("serializing selected LPX PodCliqueSet: %w", err)
+	}
+	if len(serialized) > lpx.MaxRenderedPodCliqueSetBytes {
+		return fmt.Errorf("rendered LPX PodCliqueSet is %d bytes; maximum is %d", len(serialized), lpx.MaxRenderedPodCliqueSetBytes)
+	}
+	return nil
 }
 
 // stampDeploymentIdentity propagates stable ownership labels and annotations, never DGD revision.
@@ -187,4 +218,136 @@ func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grove
 		resource.SetAnnotations(annotations)
 		stampOwnerLabel(resource)
 	}
+}
+
+// stampClientIdentity gives every LPX Pod its DGD's UID label, and gives agent Pods the DGD's client
+// key and certificate from Secret lpx-id-<DGD UID> plus the optional lpx-server-ca bundle. The
+// Secret is created once, never rewritten and never adopted. Agent Pods also publish the
+// certificate in an annotation, so node-side software can authenticate them. Secret references to
+// the cluster-wide MPI SSH Secret in LPX Pods get the DGD's own SSH key pair instead, under the same
+// key names, so one DGD's key no longer opens another DGD's Pods.
+func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, pcs *grovev1alpha1.PodCliqueSet) error {
+	name := "lpx-id-" + string(dgd.UID)
+	identity := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: name}, identity)
+	if apierrors.IsNotFound(err) {
+		if identity, err = newClientIdentitySecret(dgd.Namespace, name); err == nil {
+			if err = controllerutil.SetControllerReference(dgd, identity, r.Scheme()); err == nil {
+				err = r.Create(ctx, identity)
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("LPX client identity Secret %s/%s: %w", dgd.Namespace, name, err)
+	}
+	block, _ := pem.Decode(identity.Data["client.pem"])
+	if !metav1.IsControlledBy(identity, dgd) || block == nil {
+		return fmt.Errorf("LPX client identity Secret %s/%s is not controlled by this DGD or holds no certificate", dgd.Namespace, name)
+	}
+
+	// Template items keep resolving; without items, only the SSH keys are projected.
+	sshItems := func(items []corev1.KeyToPath) []corev1.KeyToPath {
+		if len(items) > 0 {
+			return items
+		}
+		return []corev1.KeyToPath{{Key: "private.key", Path: "private.key"}, {Key: "private.key.pub", Path: "private.key.pub"}}
+	}
+	for i := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		group := &pcs.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		if group.Annotations == nil {
+			group.Annotations = make(map[string]string)
+		}
+		group.Annotations[clientIdentityAnnotation] = name
+	}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Labels == nil {
+			clique.Labels = make(map[string]string)
+		}
+		clique.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
+		for i := range clique.Spec.PodSpec.Volumes {
+			volume := &clique.Spec.PodSpec.Volumes[i]
+			if volume.Secret != nil && volume.Secret.SecretName == r.config.MPI.SSHSecretName {
+				volume.Secret.SecretName, volume.Secret.Items = name, sshItems(volume.Secret.Items)
+			}
+			for _, source := range ptr.Deref(volume.Projected, corev1.ProjectedVolumeSource{}).Sources {
+				if source.Secret != nil && source.Secret.Name == r.config.MPI.SSHSecretName {
+					source.Secret.Name, source.Secret.Items = name, sshItems(source.Secret.Items)
+				}
+			}
+		}
+		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleAgent {
+			continue
+		}
+		clique.Annotations[clientCertAnnotation] = base64.StdEncoding.EncodeToString(block.Bytes)
+		spec := &clique.Spec.PodSpec
+		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "lpx-identity", VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{DefaultMode: ptr.To(int32(0o440)), Sources: []corev1.VolumeProjection{
+				{Secret: &corev1.SecretProjection{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					Items:                []corev1.KeyToPath{{Key: "client.pem", Path: "client.pem"}, {Key: "client.key", Path: "client.key"}},
+				}},
+				// Optional, so Pods start where the platform has not published it.
+				{Secret: &corev1.SecretProjection{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "lpx-server-ca"},
+					Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.pem"}},
+					Optional:             ptr.To(true),
+				}},
+			}},
+		}})
+		for i := range spec.Containers {
+			if spec.Containers[i].Name == v1beta1.ComponentRoleLPXAgent {
+				spec.Containers[i].VolumeMounts = append(spec.Containers[i].VolumeMounts,
+					corev1.VolumeMount{Name: "lpx-identity", MountPath: "/etc/lpx/identity", ReadOnly: true})
+			}
+		}
+	}
+	return checkPodCliqueSetSize(pcs)
+}
+
+// newClientIdentitySecret returns an Ed25519 key with its self-signed, non-CA client certificate,
+// valid from one hour ago for ten years, and an SSH key pair.
+func newClientIdentitySecret(namespace, name string) (*corev1.Secret, error) {
+	now := time.Now()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	if err != nil {
+		return nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: name},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
+	if err != nil {
+		return nil, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return nil, err
+	}
+	sshKey, sshPub, err := secret.GenerateSSHKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Type:       corev1.SecretTypeOpaque,
+		// The key is never rewritten, so nobody may swap it in place either.
+		Immutable: ptr.To(true),
+		Data: map[string][]byte{
+			"client.pem": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
+			"client.key": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+			// The shared MPI SSH Secret's key names, so template items resolve unchanged.
+			"private.key":     sshKey,
+			"private.key.pub": sshPub,
+		},
+	}, nil
 }

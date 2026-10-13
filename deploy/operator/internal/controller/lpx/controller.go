@@ -213,6 +213,14 @@ func (r *graphReconciler) reconcileWorkloads(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.stampClientIdentity(ctx, dgd, desiredPCS); err != nil {
+		// A Secret created by an earlier reconcile may not be in the cache yet.
+		if apierrors.IsAlreadyExists(err) {
+			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the LPX client identity Secret cache observation")
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return ctrl.Result{}, err
+	}
 
 	// Grove rolls compatible layouts; immutable structure or OnDelete builds replace the PCS.
 	if pcs != nil && !podCliqueSetLayoutMatches(pcs, desiredPCS) {

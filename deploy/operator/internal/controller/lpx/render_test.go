@@ -5,7 +5,9 @@ package lpx
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/url"
 	"os"
@@ -1050,6 +1052,7 @@ func renderLPXTestPodCliqueSet(
 	t.Helper()
 	rendered, _, err := reconciler.renderPodCliqueSet(ctx, deployment, dgd, map[string]*lpx.Workload{desired.workload.ServingComponentName(): desired.workload}, map[string]*lpx.MaterializationPlan{desired.workload.ServingComponentName(): desired.plan}, nil)
 	require.NoError(t, err)
+	require.NoError(t, reconciler.stampClientIdentity(ctx, dgd, rendered))
 	return rendered
 }
 
@@ -1161,4 +1164,77 @@ func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 		require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 		require.NotContains(t, clique.Labels, consts.KubeLabelKaiSchedulerQueue, "clique %s", clique.Name)
 	}
+}
+
+func TestStampClientIdentity(t *testing.T) {
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	dgd.UID = "dgd-uid"
+	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+
+	t.Log("The first render creates the DGD's key; agents get its certificate and mount, every clique the UID")
+	pcs := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	secret := &corev1.Secret{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: "lpx-id-dgd-uid"}, secret))
+	require.True(t, metav1.IsControlledBy(secret, dgd))
+	require.True(t, ptr.Deref(secret.Immutable, false))
+	require.NotEmpty(t, secret.Data["private.key"])
+	require.NotEmpty(t, secret.Data["private.key.pub"])
+	block, _ := pem.Decode(secret.Data["client.pem"])
+	require.NotNil(t, block)
+	agents := 0
+	for _, clique := range pcs.Spec.Template.Cliques {
+		require.Equal(t, "dgd-uid", clique.Labels[consts.KubeLabelDynamoGraphDeploymentUID])
+		mounted := slices.ContainsFunc(clique.Spec.PodSpec.Containers, func(c corev1.Container) bool {
+			return slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == "/etc/lpx/identity" })
+		})
+		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleAgent {
+			require.False(t, mounted, clique.Name)
+			continue
+		}
+		agents++
+		require.True(t, mounted, clique.Name)
+		require.Equal(t, base64.StdEncoding.EncodeToString(block.Bytes), clique.Annotations[clientCertAnnotation])
+	}
+	require.Positive(t, agents)
+	for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		require.Equal(t, "lpx-id-dgd-uid", group.Annotations[clientIdentityAnnotation])
+	}
+
+	t.Log("Later renders reuse the key")
+	again := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	require.Equal(t, pcs.Spec.Template.Cliques, again.Spec.Template.Cliques)
+
+	t.Log("References to the cluster-wide MPI SSH Secret get the DGD's own key pair; template items still resolve")
+	config := *r.config
+	config.MPI.SSHSecretName = "ssh-secret" // the fixtures' templates mount this Secret
+	r.config = &config
+	fresh, _, err := r.renderPodCliqueSet(ctx, child, dgd, map[string]*lpx.Workload{desired.workload.ServingComponentName(): desired.workload}, map[string]*lpx.MaterializationPlan{desired.workload.ServingComponentName(): desired.plan}, nil)
+	require.NoError(t, err)
+	custom := []corev1.KeyToPath{{Key: "private.key.pub", Path: "authorized_keys"}}
+	spec := &fresh.Spec.Template.Cliques[0].Spec.PodSpec
+	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "ssh-projected", VolumeSource: corev1.VolumeSource{
+		Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-secret"}, Items: custom}}}}}})
+	require.NoError(t, r.stampClientIdentity(ctx, dgd, fresh))
+	plain := 0
+	for _, clique := range fresh.Spec.Template.Cliques {
+		for _, volume := range clique.Spec.PodSpec.Volumes {
+			if volume.Name == "ssh-secret" {
+				plain++
+				require.Equal(t, "lpx-id-dgd-uid", volume.Secret.SecretName, clique.Name)
+				require.Equal(t, []corev1.KeyToPath{{Key: "private.key", Path: "private.key"}, {Key: "private.key.pub", Path: "private.key.pub"}},
+					volume.Secret.Items, clique.Name)
+			}
+		}
+	}
+	require.Positive(t, plain)
+	projected := spec.Volumes[len(spec.Volumes)-1].Projected.Sources[0].Secret
+	require.Equal(t, "lpx-id-dgd-uid", projected.Name)
+	require.Equal(t, custom, projected.Items)
+
+	t.Log("A Secret the DGD does not control is never adopted")
+	secret.OwnerReferences = nil
+	require.NoError(t, r.Update(ctx, secret))
+	require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, again), "is not controlled by this DGD")
 }
