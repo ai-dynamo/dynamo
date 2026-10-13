@@ -391,8 +391,17 @@ class _ReasoningUsageAnnotator:
         return annotated
 
 
-def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
+def map_finish_reason(
+    raw_reason: str | dict[str, Any] | None,
+) -> FinishReason | None:
     if raw_reason is None:
+        return None
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        if isinstance(error_message, str):
+            logger.error("Router reported a generation error: %s", error_message)
+            return FinishReason.ERROR
+        logger.warning("Malformed error finish_reason from router")
         return None
     if raw_reason.startswith("error"):
         return FinishReason.ERROR

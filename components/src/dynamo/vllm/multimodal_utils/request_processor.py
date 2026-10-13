@@ -318,6 +318,20 @@ class MultimodalTransferError(RuntimeError):
         )
 
 
+def _advertised_mm_transfer(
+    request: dict[str, Any],
+) -> Optional[tuple[dict[str, Any], str, Any]]:
+    """Return the first non-null processed-input transfer advertised."""
+    extra_args = request.get("extra_args") or {}
+    shm_metadata = extra_args.get("mm_kwargs_shm")
+    if shm_metadata is not None:
+        return extra_args, "shm", shm_metadata
+    nixl_metadata = extra_args.get("mm_kwargs_nixl")
+    if nixl_metadata is not None:
+        return extra_args, "nixl", nixl_metadata
+    return None
+
+
 class VllmMultimodalRequestProcessor:
     """Translate Dynamo multimodal requests into vLLM engine inputs."""
 
@@ -712,17 +726,10 @@ class VllmMultimodalRequestProcessor:
         transfer is advertised, failing closed prevents a multimodal request
         from silently reaching the engine as text-only.
         """
-        extra_args = request.get("extra_args") or {}
-        shm_metadata_raw = extra_args.get("mm_kwargs_shm")
-        nixl_metadata_raw = extra_args.get("mm_kwargs_nixl")
-        if shm_metadata_raw is not None:
-            transport = "shm"
-            metadata_raw = shm_metadata_raw
-        elif nixl_metadata_raw is not None:
-            transport = "nixl"
-            metadata_raw = nixl_metadata_raw
-        else:
+        advertised_transfer = _advertised_mm_transfer(request)
+        if advertised_transfer is None:
             return None
+        extra_args, transport, metadata_raw = advertised_transfer
 
         try:
             if transport == "shm":
@@ -1012,12 +1019,20 @@ class VllmMultimodalRequestProcessor:
             # pre-rendered input intentionally remains an aggregated-only fast
             # path until that handoff can be derived from vLLM's processed
             # feature data.
+            advertised_transfer = _advertised_mm_transfer(request)
             multi_modal_data = await self.extract_multimodal_data(
                 request,
                 request_id,
                 context,
                 mm_processor_kwargs,
             )
+            if advertised_transfer is not None and not multi_modal_data:
+                _, transport, _ = advertised_transfer
+                raise MultimodalTransferError(
+                    transport,
+                    "P/D prefill requires usable raw media to construct "
+                    "decode handoff metadata",
+                )
 
         return PreparedMultimodalInput(
             request=request_for_prompt,

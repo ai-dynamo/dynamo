@@ -1262,6 +1262,16 @@ def _logprobs_processor(vllm_processor_module):
     )
 
 
+def test_map_finish_reason_handles_rust_error_map(vllm_processor_module, caplog):
+    message = "Multimodal SHM transfer failed; use DYNAMO_MM_TRANSFER=nixl"
+
+    with caplog.at_level("ERROR"):
+        finish_reason = vllm_processor_module.map_finish_reason({"error": message})
+
+    assert finish_reason is vllm_processor_module.FinishReason.ERROR
+    assert message in caplog.text
+
+
 def test_disabled_mm_transfer_omits_shm_requirement_log(
     vllm_processor_module,
     monkeypatch,
