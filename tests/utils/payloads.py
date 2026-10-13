@@ -291,9 +291,18 @@ class ChatPayloadWithLogprobs(ChatPayload):
         assert "logprobs" in choice, "Missing 'logprobs' in choice"
 
         logprobs_data = choice["logprobs"]
+        requested_top_logprobs = self.body.get("top_logprobs") or 0
+        if requested_top_logprobs > 0:
+            assert (
+                logprobs_data is not None
+            ), "Expected logprobs for top_logprobs request"
         if logprobs_data is not None:
             assert "content" in logprobs_data, "Missing 'content' in logprobs"
             content_logprobs = logprobs_data["content"]
+            if requested_top_logprobs > 0:
+                assert (
+                    content_logprobs
+                ), "Expected logprobs content for top_logprobs request"
 
             if content_logprobs:
                 # Validate structure of logprobs
@@ -303,6 +312,11 @@ class ChatPayloadWithLogprobs(ChatPayload):
                     assert (
                         "top_logprobs" in item
                     ), "Missing 'top_logprobs' in logprobs content"
+
+                    if requested_top_logprobs > 0:
+                        assert item[
+                            "top_logprobs"
+                        ], "Expected top_logprobs alternatives"
 
                     # Sanity check: logprob should be valid (not nan/inf/positive)
                     logprob_val = item["logprob"]
@@ -973,6 +987,9 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
         assert "logprobs" in choice, "Missing 'logprobs' in choice"
 
         logprobs_data = choice["logprobs"]
+        requested_logprobs = self.body.get("logprobs") or 0
+        if requested_logprobs > 0:
+            assert logprobs_data is not None, "Expected logprobs for logprobs request"
         if logprobs_data is not None:
             assert (
                 "token_logprobs" in logprobs_data
@@ -981,6 +998,16 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
 
             token_logprobs = logprobs_data["token_logprobs"]
             tokens = logprobs_data["tokens"]
+            if requested_logprobs > 0:
+                assert token_logprobs, "Expected token_logprobs for logprobs request"
+                top_logprobs = logprobs_data.get("top_logprobs")
+                assert top_logprobs, "Expected top_logprobs alternatives"
+                assert len(top_logprobs) == len(
+                    tokens
+                ), "Expected alternatives for each token"
+                assert all(
+                    top_logprobs
+                ), "Expected non-empty top_logprobs for each token"
 
             if token_logprobs:
                 assert len(token_logprobs) == len(

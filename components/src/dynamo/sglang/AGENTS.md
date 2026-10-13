@@ -312,8 +312,10 @@ only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_l
 is requested.
 
 **Top-k logprobs**: `logprobs >= 1` and `prompt_logprobs >= 1` are supported. Dynamo
-never sets `return_text_in_logprobs`, so SGLang returns top-k token ids without text and
-skips its per-position top-k detokenization; the frontend fills candidate text.
+does not set `return_text_in_logprobs` on its own requests, so SGLang returns top-k
+token ids without text and skips its per-position top-k detokenization; the frontend
+fills candidate text. Clients of the engine-native `/generate` passthrough can set
+`return_text_in_logprobs: true` explicitly and invoke that detokenization path.
 
 **Streaming behavior** (`_extract_logprobs`):
 
