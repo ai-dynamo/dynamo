@@ -13,7 +13,7 @@ Low-Rank Adaptation (LoRA) serves specialized model variants without duplicating
 - **Multiple sources**: `file://`, `s3://`, or `hf://` URIs
 - **Automatic caching**: Downloaded adapters are cached under `DYN_LORA_PATH`
 - **Discovery**: Loaded adapters appear in `/v1/models`
-- **KV-aware routing**: Route requests to workers with the matching adapter and cached prefix blocks; validated with vLLM
+- **KV-aware routing**: Route requests to workers with the matching adapter and cached prefix blocks
 - **Kubernetes native**: Manage adapters declaratively through the `DynamoModel` CRD; documented for vLLM
 
 ## Backend Support
@@ -21,7 +21,7 @@ Low-Rank Adaptation (LoRA) serves specialized model variants without duplicating
 | Backend | Status | Support Scope |
 |---------|--------|-----------------|
 | vLLM | <Badge intent="success" minimal>Supported</Badge> | Dynamic load/unload for aggregated and disaggregated workers; aggregated adapter-aware KV routing |
-| SGLang | <Badge intent="warning" minimal>Experimental</Badge> | Dynamic load/unload and aggregated inference; disaggregated serving and feature pairings are not end-to-end validated |
+| SGLang | <Badge intent="success" minimal>Supported</Badge> | Dynamic load/unload for aggregated workers; aggregated adapter-aware KV routing. Disaggregated serving is experimental |
 | TensorRT-LLM | <Badge intent="note" minimal>Not supported</Badge> | — |
 
 See the [feature support matrix](../../reference/general/compatibility.mdx#feature-support) for the backend and interaction matrices.
@@ -353,7 +353,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
 
 ## Serve a LoRA Adapter with SGLang
 
-**Experimental.** The repository validates dynamic loading, discovery, and inference for aggregated SGLang workers. Unloading is implemented but not exercised by an end-to-end test. Prefill and decode lifecycle registration has unit coverage, but disaggregated SGLang LoRA and feature pairings such as KV-aware routing are not end-to-end validated. The Kubernetes workflow above and the adapter-aware routing demo below are vLLM-specific.
+Aggregated SGLang workers support dynamic loading, unloading, and [adapter-aware KV routing](#kv-cache-aware-lora-routing). Disaggregated SGLang LoRA is experimental. The Kubernetes workflow above is vLLM-specific.
 
 <Steps>
   <Step title="Prepare the adapter">
@@ -407,7 +407,10 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
 
 ## KV Cache-Aware LoRA Routing
 
-This section describes the validated vLLM path. KV-aware routing with SGLang LoRA remains experimental because the combined path is not end-to-end validated.
+This section applies to vLLM workers and aggregated SGLang workers.
+
+> [!NOTE]
+> SGLang workers require SGLang TBD or later and must publish KV events with `"format": "dynamo"` in `--kv-events-config`. Without it, the router indexes adapter blocks as base-model blocks.
 
 > [!IMPORTANT]
 > With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware.
@@ -421,11 +424,13 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
 
     - **Distinct hash spaces per adapter**: Blocks cached under adapter `A` are never confused with adapter `B` or the base model, even when token sequences match. The adapter name is mixed into the `LocalBlockHash` computation.
     - **Prefix sharing within the same adapter**: Requests targeting the same LoRA adapter reuse KV prefix blocks like base-model requests.
-    - **No extra configuration**: The LoRA name propagates through KV events (`BlockStored`) from the engine to the router. The router uses the `lora_name` field to route requests to workers with matching cached blocks.
+    - **Adapter name in KV events**: The LoRA name propagates through KV events (`BlockStored`) from the engine to the router. The router uses the `lora_name` field to route requests to workers with matching cached blocks.
 
     This works across the publisher pipeline, the KV consolidator, and the routing query path.
 
-    For a local two-worker demo with KV-aware routing, run [`agg_lora_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_router.sh) and load the adapter on both worker system ports.
+    For a local two-worker demo with KV-aware routing, run the [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_router.sh) or [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/lora/agg_lora_router.sh) `agg_lora_router.sh` and load the adapter on both worker system ports.
+
+    With SGLang, an adapter's cached blocks stay on the worker after the adapter is unloaded, until they are evicted. If the adapter is loaded again, the router can count those blocks as overlap, so routing may be suboptimal until they are evicted. Responses are not affected.
   </Accordion>
 </AccordionGroup>
 
