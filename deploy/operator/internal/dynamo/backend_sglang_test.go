@@ -565,6 +565,8 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 	const image15 = "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0"
 	const customPayload = `{"model":"custom","input":"probe"}`
 	sourced := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}
+	configMapEnvFrom := []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}}
+	secretEnvFrom := []corev1.EnvFromSource{{Prefix: "DYN_", SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}}
 	payload := func(value string) []corev1.EnvVar {
 		return []corev1.EnvVar{{Name: healthCheckPayloadEnv, Value: value}}
 	}
@@ -609,6 +611,7 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 			image:       image15,
 			args:        []string{sglangEmbeddingWorkerFlag},
 			env:         payload(customPayload),
+			envFrom:     configMapEnvFrom,
 			wantPayload: payload(customPayload),
 		},
 		{
@@ -616,12 +619,14 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 			image:       image15,
 			args:        []string{sglangEmbeddingWorkerFlag},
 			env:         []corev1.EnvVar{{Name: healthCheckPayloadEnv, ValueFrom: sourced}},
+			envFrom:     secretEnvFrom,
 			wantPayload: []corev1.EnvVar{{Name: healthCheckPayloadEnv, ValueFrom: sourced}},
 		},
 		{
-			name:  "CLI user payload is preserved",
-			image: image15,
-			args:  []string{sglangEmbeddingWorkerFlag, healthCheckPayloadFlag + "=" + customPayload},
+			name:    "CLI user payload is preserved",
+			image:   image15,
+			args:    []string{sglangEmbeddingWorkerFlag, healthCheckPayloadFlag + "=" + customPayload},
+			envFrom: configMapEnvFrom,
 		},
 		{
 			name:  "indirect embedding mode skips the shim",
@@ -629,16 +634,17 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, ValueFrom: sourced}},
 		},
 		{
-			name:    "envFrom may contain user payload",
-			image:   image15,
-			args:    []string{sglangEmbeddingWorkerFlag},
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}},
-		},
-		{
-			name:        "unrelated envFrom prefix allows default",
+			name:        "ConfigMap envFrom does not suppress default",
 			image:       image15,
 			args:        []string{sglangEmbeddingWorkerFlag},
-			envFrom:     []corev1.EnvFromSource{{Prefix: "OTHER_", ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}},
+			envFrom:     configMapEnvFrom,
+			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
+		},
+		{
+			name:        "prefixed Secret envFrom does not suppress default",
+			image:       image15,
+			args:        []string{sglangEmbeddingWorkerFlag},
+			envFrom:     secretEnvFrom,
 			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
 		},
 	}
@@ -646,6 +652,7 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 	backend := &SGLangBackend{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render the SGLang container with the configured environment sources")
 			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env, EnvFrom: tt.envFrom}
 			err := backend.UpdateContainer(
 				container, 1, RoleMain, &v1beta1.DynamoComponentDeploymentSharedSpec{},
@@ -653,6 +660,7 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 			)
 			require.NoError(t, err)
 
+			t.Log("Check the complete payload override and preserve envFrom references")
 			var got []corev1.EnvVar
 			for _, env := range container.Env {
 				if env.Name == healthCheckPayloadEnv {
@@ -660,6 +668,7 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 				}
 			}
 			require.Equal(t, tt.wantPayload, got)
+			require.Equal(t, tt.envFrom, container.EnvFrom)
 		})
 	}
 }

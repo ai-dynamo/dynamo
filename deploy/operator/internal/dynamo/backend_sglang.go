@@ -51,7 +51,6 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	if version, err := runtimeversion.Resolve(container.Image, component.RuntimeVersionOverride); err == nil &&
 		version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) &&
 		!sglangHealthCheckPayloadConfigured(container) &&
-		!sglangEnvFromMaySet(container.EnvFrom, healthCheckPayloadEnv) &&
 		sglangEmbeddingWorkerEnabled(container) {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  healthCheckPayloadEnv,
@@ -112,16 +111,6 @@ func sglangEmbeddingWorkerEnabled(container *corev1.Container) bool {
 	}
 
 	return enabled
-}
-
-// An envFrom source with a matching prefix could provide a user-owned payload.
-func sglangEnvFromMaySet(sources []corev1.EnvFromSource, name string) bool {
-	for _, source := range sources {
-		if strings.HasPrefix(name, source.Prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func sglangHealthCheckPayloadConfigured(container *corev1.Container) bool {

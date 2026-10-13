@@ -29,7 +29,18 @@ A single frontend can discover worker generations from multiple supported releas
 
 This guarantee covers the frontend-to-worker discovery metadata and wire protocols owned by Dynamo. It does not establish a compatibility window for direct worker-to-worker protocols, such as prefill-to-decode communication.
 
-For Dynamo 1.5.0 SGLang embedding workers, the Operator supplies an embedding-shaped health-check payload when `--embedding-worker` or a literal `DYN_SGL_EMBEDDING_WORKER` value enables embedding mode. If embedding mode is set through Kubernetes `valueFrom` or `envFrom`, set `DYN_HEALTH_CHECK_PAYLOAD` explicitly before upgrading to an Operator that enables active health checks. Use a JSON payload with the worker's model name and a text input, for example `{"model":"your-model","input":"Test"}`. The Operator also leaves `envFrom` payload sources untouched; if an `envFrom` source might supply `DYN_HEALTH_CHECK_PAYLOAD`, it does not inject a default that could override that source.
+For Dynamo 1.5.0 SGLang embedding workers, the Operator supplies an embedding-shaped health-check payload when `--embedding-worker` or a literal `DYN_SGL_EMBEDDING_WORKER` value enables embedding mode. If embedding mode is set only through Kubernetes `valueFrom` or `envFrom`, set `DYN_HEALTH_CHECK_PAYLOAD` explicitly before upgrading to an Operator that enables active health checks. Use a JSON payload with the worker's model name and a text input, for example `{"model":"your-model","input":"Test"}`.
+
+The Operator ignores `envFrom` when deciding whether to inject this default and does not read referenced ConfigMaps or Secrets during rendering. An injected payload in `env` takes precedence over the same variable supplied by `envFrom`. To preserve a custom payload, declare `DYN_HEALTH_CHECK_PAYLOAD` explicitly in `env`, using either a literal value or `valueFrom`, or pass `--health-check-payload`. For example, reference a ConfigMap key explicitly:
+
+```yaml
+env:
+  - name: DYN_HEALTH_CHECK_PAYLOAD
+    valueFrom:
+      configMapKeyRef:
+        name: health-check-settings
+        key: payload
+```
 
 ### Rolling Update Behavior
 
