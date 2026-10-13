@@ -720,14 +720,17 @@ impl NvExtResponseFieldSelection {
                 .is_some_and(|result| {
                     result.get("kind").and_then(serde_json::Value::as_str)
                         == Some("generation_artifact")
-                        && result.get("mode").and_then(serde_json::Value::as_str)
-                            == Some(mode.as_str())
+                        && result
+                            .get("mode")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<ArtifactMode>(value).ok())
+                            == Some(mode)
                 })
         {
             let message =
                 "backend did not provide the requested generation_artifact delivery result";
             return Err(dynamo_runtime::error::DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::NotImplemented)
+                .error_type(dynamo_runtime::error::ErrorType::BackendProtocol)
                 .message(message)
                 .public_message(message)
                 .build()
@@ -1174,6 +1177,16 @@ mod tests {
             selection
                 .validate_metadata_upload_result(Some(&FinishReason::Stop), None)
                 .is_err()
+        );
+        let error = selection
+            .validate_metadata_upload_result(Some(&FinishReason::Stop), None)
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                .unwrap()
+                .class(),
+            dynamo_runtime::error::ErrorType::BackendProtocol
         );
         assert!(
             selection
