@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 import uvloop
 from google.protobuf import json_format, text_format
 from tritonserver import Model as TritonModel
@@ -63,7 +63,7 @@ def _read_model_config(
         # Read Triton model config from config.pbtxt
         config_path = f"{repository_path}/{model_name}/config.pbtxt"
         with open(config_path, "r") as f:
-            model_config = text_format.Parse(f.read(), mc.ModelConfig())
+            model_config = text_format.Parse(f.read(), model_config_pb.ModelConfig())
             serialized_config = model_config.SerializeToString()
             logger.info(f"Loaded model config from {config_path}")
             logger.debug(serialized_config)
@@ -71,8 +71,8 @@ def _read_model_config(
     else:
         # model.config() returns dict[str, Any]; parse it back into the ModelConfig
         # protobuf and serialize to bytes, matching the config.pbtxt branch above.
-        model_config_pb = json_format.ParseDict(model_config, mc.ModelConfig())
-        serialized_config = model_config_pb.SerializeToString()
+        parsed_pb = json_format.ParseDict(model_config, model_config_pb.ModelConfig())
+        serialized_config = parsed_pb.SerializeToString()
         logger.info("Read model config from Triton.")
         logger.debug(serialized_config)
         return serialized_config
@@ -86,7 +86,7 @@ def _collect_ensemble_dependency_models(
     """Return names of models referenced as a step inside any model's
     ``ensemble_scheduling``.
 
-    Invoked on the ``--task classify`` and ``--task embed`` paths, which
+    Invoked on the ``--task classify`` and ``--task embeddings`` paths, which
     both pair one user-facing ensemble (STRING in, FP32 out) with
     tokenizer and numeric-model dependencies. Constructing a classify
     or embedding handler for the tokenizer or numeric stage raises
@@ -122,7 +122,7 @@ def _collect_ensemble_dependency_models(
         if not raw_config:
             continue
         try:
-            cfg = json_format.ParseDict(raw_config, mc.ModelConfig())
+            cfg = json_format.ParseDict(raw_config, model_config_pb.ModelConfig())
         except json_format.ParseError as exc:
             logger.warning(
                 "Could not parse runtime config for '%s' while scanning "
@@ -146,7 +146,7 @@ def _collect_ensemble_dependency_models(
     for pbtxt in pbtxts:
         try:
             with pbtxt.open() as f:
-                cfg = text_format.Parse(f.read(), mc.ModelConfig())
+                cfg = text_format.Parse(f.read(), model_config_pb.ModelConfig())
         except (OSError, text_format.ParseError) as exc:
             logger.warning(
                 "Could not read %s while scanning for ensemble dependencies: %s",
@@ -190,7 +190,7 @@ async def _register_and_serve(
 
     triton_model_config = _read_model_config(model, model_name, model_repository)
 
-    if config.task in ("classify", "embed"):
+    if config.task in ("classify", "embeddings"):
         model_input = ModelInput.Text
         model_type = (
             ModelType.Classify if config.task == "classify" else ModelType.Embedding
@@ -242,7 +242,7 @@ def _build_handler(
     model: TritonModel,
     triton_model_config_bytes: bytes,
 ):
-    parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
+    parsed_config = model_config_pb.ModelConfig.FromString(triton_model_config_bytes)
     if config.task == "classify":
         return ClassifyWorkerHandler(
             server,
@@ -251,13 +251,13 @@ def _build_handler(
             classify_input_name=config.classify_input_name,
             classify_output_name=config.classify_output_name,
         )
-    elif config.task == "embed":
+    elif config.task == "embeddings":
         return EmbeddingWorkerHandler(
             server,
             model,
             parsed_config,
-            embed_input_name=config.embed_input_name,
-            embed_output_name=config.embed_output_name,
+            embeddings_input_name=config.embeddings_input_name,
+            embeddings_output_name=config.embeddings_output_name,
         )
     else:
         return RequestHandler(server, model, parsed_config)
@@ -332,7 +332,7 @@ async def init_worker(
     # ensembles are exposed on /v1/classify and /v1/embeddings. The
     # tensor path registers everything so a dependency model stays
     # addressable directly over KServe gRPC for debugging.
-    if config.task in ("classify", "embed"):
+    if config.task in ("classify", "embeddings"):
         deps = _collect_ensemble_dependency_models(
             server, model_names, model_repository
         )

@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Final, Optional
+from typing import Any, AsyncGenerator, ClassVar, Final, Optional
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 from tritonserver import MemoryType as TritonMemoryType
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
@@ -28,8 +28,8 @@ from dynamo.common.backend.health_check import is_probe
 
 logger = logging.getLogger(__name__)
 
-TYPE_STRING: Final[int] = mc.DataType.TYPE_STRING
-TYPE_FP32: Final[int] = mc.DataType.TYPE_FP32
+TYPE_STRING: Final[int] = model_config_pb.DataType.TYPE_STRING
+TYPE_FP32: Final[int] = model_config_pb.DataType.TYPE_FP32
 
 
 # Client-input errors are raised as plain ``ValueError``; the PyO3 binding
@@ -40,7 +40,7 @@ TYPE_FP32: Final[int] = mc.DataType.TYPE_FP32
 
 
 def resolve_string_input_name(
-    config: mc.ModelConfig,
+    config: model_config_pb.ModelConfig,
     model_name: str,
     override: Optional[str],
     task_label: str,
@@ -65,7 +65,7 @@ def resolve_string_input_name(
 
 
 def validate_string_input_dims(
-    config: mc.ModelConfig,
+    config: model_config_pb.ModelConfig,
     name: str,
     model_name: str,
     task_label: str,
@@ -91,7 +91,7 @@ def validate_string_input_dims(
 
 
 def resolve_fp32_output_name(
-    config: mc.ModelConfig,
+    config: model_config_pb.ModelConfig,
     model_name: str,
     override: Optional[str],
     task_label: str,
@@ -231,17 +231,28 @@ def extract_text_input(input_field: Any, task_label: str) -> list[str]:
 class PoolingWorkerHandlerBase(ABC):
     """Shared pipeline for the Triton ``/v1/classify`` and ``/v1/embeddings`` workers."""
 
-    task_label: str = ""
-    cli_input_flag: str = ""
-    cli_output_flag: str = ""
-    endpoint: str = ""
-    unsupported_controls: tuple[str, ...] = ()
+    # Subclass identity: set as class attributes on each concrete subclass.
+    # No defaults, so a missing override fails at import rather than at
+    # request time with an empty string in the error message.
+    task_label: ClassVar[str]
+    cli_input_flag: ClassVar[str]
+    cli_output_flag: ClassVar[str]
+    endpoint: ClassVar[str]
+    unsupported_controls: ClassVar[tuple[str, ...]]
+
+    # Per-instance state (assigned in ``__init__`` below).
+    _server: TritonServer
+    _model: TritonModel
+    _config: model_config_pb.ModelConfig
+    _input_name: str
+    _output_name: str
+    _batched: bool
 
     def __init__(
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: mc.ModelConfig,
+        triton_model_config: model_config_pb.ModelConfig,
         input_name: Optional[str] = None,
         output_name: Optional[str] = None,
     ) -> None:

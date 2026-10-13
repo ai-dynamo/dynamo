@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import ml_dtypes
 import numpy as np
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 
 from dynamo.triton import handlers
 
@@ -94,7 +94,7 @@ def run_handler_generate(
     """Build a RequestHandler over a _MockModel and drive generate to completion."""
     model = _MockModel(triton_output_metadata, triton_responses, max_batch_size)
     handler = handlers.RequestHandler(
-        MagicMock(), model, mc.ModelConfig(max_batch_size=max_batch_size)
+        MagicMock(), model, model_config_pb.ModelConfig(max_batch_size=max_batch_size)
     )
 
     async def _collect() -> list[dict[str, Any]]:
@@ -311,7 +311,9 @@ def _make_handler(
         side_effect=AssertionError("async_infer must not be called")
     )
 
-    return handlers.RequestHandler(server, model, mc.ModelConfig(max_batch_size=0))
+    return handlers.RequestHandler(
+        server, model, model_config_pb.ModelConfig(max_batch_size=0)
+    )
 
 
 def _run_generate(
@@ -392,7 +394,7 @@ def test_generate_does_not_call_model_metadata_per_response():
         ],
     )
     handler = handlers.RequestHandler(
-        MagicMock(), model, mc.ModelConfig(max_batch_size=0)
+        MagicMock(), model, model_config_pb.ModelConfig(max_batch_size=0)
     )
 
     # Wrap metadata *after* __init__ so we only observe generate()-time calls.

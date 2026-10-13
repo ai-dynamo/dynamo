@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 
 from dynamo.triton.embedding_handler import EmbeddingWorkerHandler
 
@@ -29,8 +29,8 @@ def _make_config_proto(
     outputs: list[tuple[str, int]],
     name: str = "mock-embedder",
     max_batch_size: int = 8,
-) -> mc.ModelConfig:
-    config = mc.ModelConfig(name=name, max_batch_size=max_batch_size)
+) -> model_config_pb.ModelConfig:
+    config = model_config_pb.ModelConfig(name=name, max_batch_size=max_batch_size)
     for input_name, dtype in inputs:
         config.input.add(name=input_name, data_type=dtype, dims=[-1])
     for output_name, dtype in outputs:
@@ -98,12 +98,12 @@ def _make_handler(
     outputs: list[tuple[str, int]] | None = None,
     responses: list[Any] | None = None,
     max_batch_size: int = 8,
-    embed_input_name: str | None = None,
-    embed_output_name: str | None = None,
+    embeddings_input_name: str | None = None,
+    embeddings_output_name: str | None = None,
 ) -> tuple[_MockModel, EmbeddingWorkerHandler]:
     config = _make_config_proto(
-        inputs=inputs or [("TEXT", mc.DataType.TYPE_STRING)],
-        outputs=outputs or [("embedding", mc.DataType.TYPE_FP32)],
+        inputs=inputs or [("TEXT", model_config_pb.DataType.TYPE_STRING)],
+        outputs=outputs or [("embedding", model_config_pb.DataType.TYPE_FP32)],
         max_batch_size=max_batch_size,
     )
     model = _MockModel(responses or [], max_batch_size=max_batch_size)
@@ -111,8 +111,8 @@ def _make_handler(
         server=MagicMock(),
         model=model,
         triton_model_config=config,
-        embed_input_name=embed_input_name,
-        embed_output_name=embed_output_name,
+        embeddings_input_name=embeddings_input_name,
+        embeddings_output_name=embeddings_output_name,
     )
     return model, handler
 
@@ -125,15 +125,15 @@ class TestInitAndResolve:
     def test_explicit_overrides_win(self) -> None:
         _, handler = _make_handler(
             inputs=[
-                ("TEXT_A", mc.DataType.TYPE_STRING),
-                ("TEXT_B", mc.DataType.TYPE_STRING),
+                ("TEXT_A", model_config_pb.DataType.TYPE_STRING),
+                ("TEXT_B", model_config_pb.DataType.TYPE_STRING),
             ],
             outputs=[
-                ("emb_a", mc.DataType.TYPE_FP32),
-                ("emb_b", mc.DataType.TYPE_FP32),
+                ("emb_a", model_config_pb.DataType.TYPE_FP32),
+                ("emb_b", model_config_pb.DataType.TYPE_FP32),
             ],
-            embed_input_name="TEXT_B",
-            embed_output_name="emb_a",
+            embeddings_input_name="TEXT_B",
+            embeddings_output_name="emb_a",
         )
         assert handler._input_name == "TEXT_B"
         assert handler._output_name == "emb_a"
@@ -142,8 +142,8 @@ class TestInitAndResolve:
         with pytest.raises(ValueError, match="TYPE_STRING input tensor"):
             _make_handler(
                 inputs=[
-                    ("A", mc.DataType.TYPE_STRING),
-                    ("B", mc.DataType.TYPE_STRING),
+                    ("A", model_config_pb.DataType.TYPE_STRING),
+                    ("B", model_config_pb.DataType.TYPE_STRING),
                 ]
             )
 
@@ -151,17 +151,21 @@ class TestInitAndResolve:
         with pytest.raises(ValueError, match="TYPE_FP32 output tensor"):
             _make_handler(
                 outputs=[
-                    ("emb", mc.DataType.TYPE_FP32),
-                    ("scores", mc.DataType.TYPE_FP32),
+                    ("emb", model_config_pb.DataType.TYPE_FP32),
+                    ("scores", model_config_pb.DataType.TYPE_FP32),
                 ]
             )
 
     def test_rank_2_string_input_dims_rejected(self) -> None:
         # The handler builds [N, 1] request tensors; a declared [1, 1]
         # input would produce shape [N, 1, 1] and fail every request.
-        config = mc.ModelConfig(name="rank2", max_batch_size=4)
-        config.input.add(name="TEXT", data_type=mc.DataType.TYPE_STRING, dims=[1, 1])
-        config.output.add(name="embedding", data_type=mc.DataType.TYPE_FP32, dims=[-1])
+        config = model_config_pb.ModelConfig(name="rank2", max_batch_size=4)
+        config.input.add(
+            name="TEXT", data_type=model_config_pb.DataType.TYPE_STRING, dims=[1, 1]
+        )
+        config.output.add(
+            name="embedding", data_type=model_config_pb.DataType.TYPE_FP32, dims=[-1]
+        )
         with pytest.raises(ValueError, match=r"dims=\[1, 1\]"):
             EmbeddingWorkerHandler(
                 server=MagicMock(),
@@ -170,9 +174,13 @@ class TestInitAndResolve:
             )
 
     def test_endpoint_label_in_dims_error(self) -> None:
-        config = mc.ModelConfig(name="rank2", max_batch_size=4)
-        config.input.add(name="TEXT", data_type=mc.DataType.TYPE_STRING, dims=[2])
-        config.output.add(name="embedding", data_type=mc.DataType.TYPE_FP32, dims=[-1])
+        config = model_config_pb.ModelConfig(name="rank2", max_batch_size=4)
+        config.input.add(
+            name="TEXT", data_type=model_config_pb.DataType.TYPE_STRING, dims=[2]
+        )
+        config.output.add(
+            name="embedding", data_type=model_config_pb.DataType.TYPE_FP32, dims=[-1]
+        )
         with pytest.raises(ValueError, match="/v1/embeddings path"):
             EmbeddingWorkerHandler(
                 server=MagicMock(),

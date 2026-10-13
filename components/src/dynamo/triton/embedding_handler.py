@@ -13,7 +13,7 @@ import base64
 from typing import Any, Final, Optional
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
 
@@ -28,8 +28,8 @@ class EmbeddingWorkerHandler(PoolingWorkerHandlerBase):
     """
 
     task_label = "embedding"
-    cli_input_flag = "--embed-input-name"
-    cli_output_flag = "--embed-output-name"
+    cli_input_flag = "--embeddings-input-name"
+    cli_output_flag = "--embeddings-output-name"
     endpoint = "/v1/embeddings"
     # ``dimensions`` (Matryoshka truncation) and the tokenization kwargs are
     # baked into the Triton model plan; clients relying on them get a 400 so a
@@ -44,16 +44,16 @@ class EmbeddingWorkerHandler(PoolingWorkerHandlerBase):
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: mc.ModelConfig,
-        embed_input_name: Optional[str] = None,
-        embed_output_name: Optional[str] = None,
+        triton_model_config: model_config_pb.ModelConfig,
+        embeddings_input_name: Optional[str] = None,
+        embeddings_output_name: Optional[str] = None,
     ) -> None:
         super().__init__(
             server,
             model,
             triton_model_config,
-            input_name=embed_input_name,
-            output_name=embed_output_name,
+            input_name=embeddings_input_name,
+            output_name=embeddings_output_name,
         )
 
     def _pre_dispatch(self, request: dict) -> None:

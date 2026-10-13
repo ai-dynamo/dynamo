@@ -13,7 +13,7 @@ import time
 from typing import Any, Optional
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
 
@@ -56,7 +56,7 @@ class ClassifyWorkerHandler(PoolingWorkerHandlerBase):
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: mc.ModelConfig,
+        triton_model_config: model_config_pb.ModelConfig,
         classify_input_name: Optional[str] = None,
         classify_output_name: Optional[str] = None,
     ) -> None:
@@ -105,9 +105,9 @@ class ClassifyWorkerHandler(PoolingWorkerHandlerBase):
             context.id() if context is not None else ""
         )
         return {
-            "id": f"classify-{response_request_id}"
-            if response_request_id
-            else "classify",
+            "id": (
+                f"classify-{response_request_id}" if response_request_id else "classify"
+            ),
             "object": "list",
             "created": int(time.time()),
             "model": model_name,

@@ -10,7 +10,7 @@ import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as model_config_pb
 
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.triton import main
@@ -30,7 +30,7 @@ def patched_worker(monkeypatch):
     # Stub text_format but keep Parse() -> a real ModelConfig so downstream
     # SerializeToString() yields bytes that _build_handler can parse.
     text_format_mock = MagicMock(name="text_format")
-    text_format_mock.Parse.return_value = mc.ModelConfig()
+    text_format_mock.Parse.return_value = model_config_pb.ModelConfig()
     monkeypatch.setattr(main, "text_format", text_format_mock)
     monkeypatch.setattr(main, "register_model", register_model)
     return types.SimpleNamespace(register_model=register_model)
@@ -47,8 +47,8 @@ def _make_config(task: str = "tensor") -> MagicMock:
     config.task = task
     config.classify_input_name = None
     config.classify_output_name = None
-    config.embed_input_name = None
-    config.embed_output_name = None
+    config.embeddings_input_name = None
+    config.embeddings_output_name = None
     return config
 
 
@@ -181,7 +181,7 @@ def test_register_and_serve_embed_task_wires_embedding_handler(monkeypatch, tmp_
     endpoint.serve_endpoint = AsyncMock()
     runtime = MagicMock(name="runtime")
     runtime.endpoint.return_value = endpoint
-    config = _make_config(task="embed")
+    config = _make_config(task="embeddings")
 
     loaded_model = MagicMock(name="model")
     # Empty runtime config forces _read_model_config to the disk-pbtxt path.
@@ -356,10 +356,10 @@ def _make_init_worker_config(
     return config
 
 
-# Classify and embed share the ensemble-dependency filter, so the three
+# Classify and embeddings share the ensemble-dependency filter, so the three
 # init_worker tests below are parameterized over both task endpoints to
 # prevent one branch from silently losing coverage.
-@pytest.mark.parametrize("task", ["classify", "embed"])
+@pytest.mark.parametrize("task", ["classify", "embeddings"])
 def test_init_worker_filters_ensemble_dependencies(init_worker_env, tmp_path, task):
     """Dependencies are filtered before the TaskGroup fans out so a
     failing-to-construct handler for a dep cannot cancel the valid
@@ -383,7 +383,7 @@ def test_init_worker_registers_standalone_model(init_worker_env, tmp_path):
     """Pin the no-op path: a future filter change must not silently
     strip the only user-facing model when no ensembles are present.
     One task is enough: ``_register_and_serve`` is mocked, so classify
-    and embed share an observable contract in the no-dependency case;
+    and embeddings share an observable contract in the no-dependency case;
     the task-branched behavior is pinned by the ensemble-filter tests."""
     _write_standalone_classifier_repo(tmp_path, model_name="clf")
     _make_server_with_models(init_worker_env.server_cls, ["clf"])
@@ -397,7 +397,7 @@ def test_init_worker_registers_standalone_model(init_worker_env, tmp_path):
     assert registered == ["clf"]
 
 
-@pytest.mark.parametrize("task", ["classify", "embed"])
+@pytest.mark.parametrize("task", ["classify", "embeddings"])
 def test_init_worker_raises_when_only_dependencies_present(
     init_worker_env, tmp_path, task
 ):
@@ -419,7 +419,7 @@ def test_init_worker_raises_when_only_dependencies_present(
 def test_init_worker_tensor_task_registers_every_model_in_ensemble_repo(
     init_worker_env, tmp_path, monkeypatch
 ):
-    """``--task tensor`` must not invoke the classify/embed dependency
+    """``--task tensor`` must not invoke the classify/embeddings dependency
     filter. A dependency model may still be useful to call directly
     over KServe gRPC for debugging, so the tensor path registers every
     ready model unchanged."""

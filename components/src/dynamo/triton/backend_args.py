@@ -13,7 +13,7 @@ from tritonserver import RateLimitMode as TritonRateLimitMode
 from dynamo.common.configuration.utils import add_argument
 from dynamo.triton.args import Config, DynamoArgGroup
 
-_TASK_CHOICES = ("tensor", "classify", "embed")
+_TASK_CHOICES = ("tensor", "classify", "embeddings")
 
 
 def _enum_arg(enum_cls, flag: str) -> Callable[[str], object]:
@@ -413,7 +413,7 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             help=(
                 "Endpoint the worker advertises: 'tensor' (default, raw "
                 "Dynamo tensor inference), 'classify' (/v1/classify), "
-                "or 'embed' (/v1/embeddings)."
+                "or 'embeddings' (/v1/embeddings)."
             ),
         )
         add_argument(
@@ -442,11 +442,11 @@ class DynamoTritonArgGroup(DynamoArgGroup):
         )
         add_argument(
             endpoint_group,
-            flag_name="--embed-input-name",
-            env_var="DYN_TRITON_EMBED_INPUT_NAME",
+            flag_name="--embeddings-input-name",
+            env_var="DYN_TRITON_EMBEDDINGS_INPUT_NAME",
             default=None,
             help=(
-                "Explicit input tensor name for --task embed. Omit to "
+                "Explicit input tensor name for --task embeddings. Omit to "
                 "auto-detect the sole TYPE_STRING input in the model's "
                 "config.pbtxt; required when the model declares more than "
                 "one BYTES input."
@@ -454,11 +454,11 @@ class DynamoTritonArgGroup(DynamoArgGroup):
         )
         add_argument(
             endpoint_group,
-            flag_name="--embed-output-name",
-            env_var="DYN_TRITON_EMBED_OUTPUT_NAME",
+            flag_name="--embeddings-output-name",
+            env_var="DYN_TRITON_EMBEDDINGS_OUTPUT_NAME",
             default=None,
             help=(
-                "Explicit output tensor name for --task embed. Omit to "
+                "Explicit output tensor name for --task embeddings. Omit to "
                 "auto-detect the sole TYPE_FP32 output in the model's "
                 "config.pbtxt; required when the model declares more than "
                 "one FP32 output."
@@ -508,8 +508,8 @@ class DynamoTritonConfig(Config):
     task: str
     classify_input_name: Optional[str]
     classify_output_name: Optional[str]
-    embed_input_name: Optional[str]
-    embed_output_name: Optional[str]
+    embeddings_input_name: Optional[str]
+    embeddings_output_name: Optional[str]
 
     def validate(self) -> None:
         if hasattr(super(), "validate"):
@@ -537,12 +537,13 @@ class DynamoTritonConfig(Config):
                 "--classify-input-name and --classify-output-name are only "
                 "valid with --task classify"
             )
-        if self.task != "embed" and (
-            self.embed_input_name is not None or self.embed_output_name is not None
+        if self.task != "embeddings" and (
+            self.embeddings_input_name is not None
+            or self.embeddings_output_name is not None
         ):
             raise ValueError(
-                "--embed-input-name and --embed-output-name are only "
-                "valid with --task embed"
+                "--embeddings-input-name and --embeddings-output-name are only "
+                "valid with --task embeddings"
             )
 
         if self.backend_directory is not None and not os.path.isdir(
@@ -585,8 +586,8 @@ _NON_TRITON_SERVER_FIELDS = frozenset(
         "task",
         "classify_input_name",
         "classify_output_name",
-        "embed_input_name",
-        "embed_output_name",
+        "embeddings_input_name",
+        "embeddings_output_name",
     )
 )
 
