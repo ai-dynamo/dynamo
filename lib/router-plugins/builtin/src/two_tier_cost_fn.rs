@@ -79,6 +79,7 @@ struct Parameters {
 }
 
 impl Default for Parameters {
+    /// Use the upstream load gates and cache threshold, inheriting the router's host weight.
     fn default() -> Self {
         Self {
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
@@ -90,6 +91,7 @@ impl Default for Parameters {
 }
 
 impl Parameters {
+    /// Reject invalid thresholds and explicit host weights before constructing the policy.
     fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
         if !self.cache_threshold.is_finite() || !(0.0..=1.0).contains(&self.cache_threshold) {
             return Err(WorkerSelectionPolicyProviderError::new(
@@ -124,6 +126,10 @@ fn effective_overlap(cache: WorkerCacheInput<'_>, host_cache_weight: f64) -> f64
     cache.device_overlap_blocks() + host_cache_weight * cache.host_overlap_blocks()
 }
 
+/// Apply the load gates, then weighted cache affinity, with least load as the fallback.
+///
+/// Cache and load rows must describe the same candidates in the same order. Empty or
+/// mismatched inputs return `None`; a zero-block request falls back to least load.
 fn select_row(
     parameters: &Parameters,
     cache: WorkerCacheInputs<'_>,
@@ -178,6 +184,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
         WorkerInputs::CACHE | WorkerInputs::LOAD
     }
 
+    /// Select a candidate row, reporting unavailable cache or load inputs as policy errors.
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -200,6 +207,9 @@ impl WorkerPicker for TwoTierCostFnPicker {
     }
 }
 
+/// Validate instance parameters and build a factory that resolves the host weight per policy.
+///
+/// An explicit instance weight takes precedence over the supplied router configuration.
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
@@ -274,6 +284,7 @@ mod tests {
         select_with(Parameters::default(), workers)
     }
 
+    /// Apply custom parameters to device-only fixtures by supplying zero host overlap.
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
         select_tiers(
             parameters,
@@ -400,6 +411,7 @@ mod tests {
         );
     }
 
+    /// A forty-request load spread displaces CPU cache affinity when both load gates hold.
     #[test]
     fn load_tier_outranks_host_overlap() {
         assert_eq!(
@@ -433,6 +445,7 @@ mod tests {
         );
     }
 
+    /// Reject negative and non-finite host weights while accepting zero and unit weights.
     #[test]
     fn rejects_negative_host_cache_weight() {
         let weight = |v| {
