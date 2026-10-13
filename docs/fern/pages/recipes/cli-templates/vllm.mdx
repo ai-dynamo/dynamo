@@ -48,8 +48,10 @@ The default model is `Qwen/Qwen3-0.6B`.
 </Accordion>
 <Accordion title="Qwen3-ASR Realtime Transcription">
 
-**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM 0.30.0's native
-Qwen3-ASR support. The launch script requires an explicit `--hf-overrides` argument:
+**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM's native
+Qwen3-ASR support. The launch script automatically supplies the realtime architecture
+override for the default `Qwen/Qwen3-ASR-0.6B` model, so `--hf-overrides` is optional
+for that model and required for other models:
 
 ```bash
 ./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
