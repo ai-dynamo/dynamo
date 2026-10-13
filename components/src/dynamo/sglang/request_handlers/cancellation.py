@@ -108,9 +108,70 @@ class CancellationMixin:
         stream_source: AsyncIterator[Any],
         cancellation_task: asyncio.Task[Any],
     ) -> AsyncGenerator[Any, None]:
-        """Drain briefly after abort, then stop a stream that did not terminate."""
+        """Drain briefly after abort, then stop a stream that did not terminate.
+
+        Until cancellation fires, chunks are awaited directly: racing every chunk
+        against the cancellation task costs a Task plus asyncio.wait() per token.
+        Cancellation arms a timer that interrupts the in-flight read at the drain
+        deadline (at once if the monitor failed); after that, reads race the
+        deadline as before.
+        """
         iterator = aiter(stream_source)
+        loop = asyncio.get_running_loop()
         drain_deadline: float | None = None
+        if not cancellation_task.done():
+            reader: asyncio.Task[Any] | None = None
+            interrupted = False
+            timer: asyncio.TimerHandle | None = None
+
+            def interrupt() -> None:
+                nonlocal interrupted
+                interrupted = True
+                if reader is not None:
+                    reader.cancel()
+
+            def on_cancellation(task: asyncio.Task[Any]) -> None:
+                nonlocal drain_deadline, timer
+                if task.cancelled():
+                    return
+                if task.exception() is not None:
+                    interrupt()
+                    return
+                drain_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_S
+                timer = loop.call_later(_CANCELLATION_DRAIN_TIMEOUT_S, interrupt)
+
+            cancellation_task.add_done_callback(on_cancellation)
+            try:
+                while not cancellation_task.done():
+                    reader = asyncio.current_task()
+                    try:
+                        item = await anext(iterator)
+                    except StopAsyncIteration:
+                        return
+                    except asyncio.CancelledError:
+                        if not interrupted:
+                            raise
+                        # Withdraw our own cancel request; another one still
+                        # pending (the consumer went away too) wins.
+                        current = asyncio.current_task()
+                        uncancel = getattr(current, "uncancel", None)
+                        if uncancel is not None and uncancel() > 0:
+                            raise
+                        cancellation_task.result()  # re-raise a monitor failure
+                        logging.warning(
+                            "Timed out draining SGLang stream after cancellation"
+                        )
+                        return
+                    finally:
+                        reader = None
+                    yield item
+            finally:
+                cancellation_task.remove_done_callback(on_cancellation)
+                if timer is not None:
+                    timer.cancel()
+            cancellation_task.result()  # re-raise a monitor failure
+            if drain_deadline is None:
+                drain_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_S
         while True:
             next_item = asyncio.create_task(_next_stream_item(iterator))
             try:
@@ -121,10 +182,7 @@ class CancellationMixin:
                     )
                     if cancellation_task in done:
                         cancellation_task.result()
-                        drain_deadline = (
-                            asyncio.get_running_loop().time()
-                            + _CANCELLATION_DRAIN_TIMEOUT_S
-                        )
+                        drain_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_S
                     if next_item in done:
                         try:
                             yield next_item.result()
@@ -133,7 +191,7 @@ class CancellationMixin:
                         continue
 
                 assert drain_deadline is not None
-                remaining = drain_deadline - asyncio.get_running_loop().time()
+                remaining = drain_deadline - loop.time()
                 if remaining <= 0:
                     logging.warning(
                         "Timed out draining SGLang stream after cancellation"
@@ -434,6 +492,18 @@ class CancellationMixin:
             request_id = self._resolved_request_id(request_id_future)
             ordered_abort_task = None
             try:
+                if not cancellation_task.done() and (
+                    context.is_stopped()
+                    or (
+                        self.shutdown_event is not None and self.shutdown_event.is_set()
+                    )
+                ):
+                    # The signal fired and the stream ended first: let the monitor
+                    # finish ordering its abort rather than racing a fallback abort.
+                    await asyncio.wait(
+                        (cancellation_task,),
+                        timeout=_CANCELLATION_DISPATCH_WAIT_TIMEOUT_S,
+                    )
                 if not cancellation_task.done():
                     logging.debug(
                         "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",

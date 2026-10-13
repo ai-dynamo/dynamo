@@ -43,7 +43,7 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
     handler._handle_cancellation = set_shutdown_when_cancelled
     request_id_future = asyncio.get_running_loop().create_future()
     request_id_future.set_result("sglang-request-id")
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     with pytest.raises(EngineShutdown, match="shut down during token generation"):
         async with handler._cancellation_monitor(request_id_future, context):
@@ -642,6 +642,98 @@ async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
     assert "Timed out draining SGLang stream after cancellation" in caplog.messages
     await asyncio.wait_for(iterator_finished.wait(), timeout=1)
     assert cancellation_seen.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_stream_reads_chunks_directly_until_cancellation(
+    decode_cancellation_case, monkeypatch
+):
+    async def no_race(*_args, **_kwargs):
+        raise AssertionError("chunks must not race cancellation before it fires")
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation.asyncio.wait", no_race
+    )
+
+    async def chunks():
+        for i in range(3):
+            await asyncio.sleep(0)
+            yield {"chunk": i}
+
+    cancellation_task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        outputs = await _collect(
+            decode_cancellation_case.handler._stream_until_cancelled(
+                chunks(), cancellation_task
+            )
+        )
+    finally:
+        cancellation_task.cancel()
+        await asyncio.gather(cancellation_task, return_exceptions=True)
+
+    assert outputs == [{"chunk": 0}, {"chunk": 1}, {"chunk": 2}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancellation_during_read_is_bounded_by_drain_deadline(
+    decode_cancellation_case, monkeypatch, caplog
+):
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation._CANCELLATION_DRAIN_TIMEOUT_S",
+        0.01,
+    )
+    read_cancelled = asyncio.Event()
+
+    async def stalls_after_first_chunk():
+        yield {"chunk": 0}
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            read_cancelled.set()
+            raise
+        yield {"chunk": 1}
+
+    cancellation_task = asyncio.create_task(asyncio.sleep(0.01))
+    consumer = asyncio.create_task(
+        _collect(
+            decode_cancellation_case.handler._stream_until_cancelled(
+                stalls_after_first_chunk(), cancellation_task
+            )
+        )
+    )
+    outputs = await asyncio.wait_for(consumer, timeout=1)
+
+    assert outputs == [{"chunk": 0}]
+    assert read_cancelled.is_set()
+    assert "Timed out draining SGLang stream after cancellation" in caplog.messages
+    # The interrupt withdraws its own cancel request.
+    assert consumer.cancelling() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_monitor_failure_during_read_is_raised(decode_cancellation_case):
+    async def stalled_stream():
+        await asyncio.Future()
+        yield {}
+
+    async def failing_monitor():
+        await asyncio.sleep(0.01)
+        raise EngineShutdown("Engine was shut down during token generation")
+
+    cancellation_task = asyncio.create_task(failing_monitor())
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        await asyncio.wait_for(
+            _collect(
+                decode_cancellation_case.handler._stream_until_cancelled(
+                    stalled_stream(), cancellation_task
+                )
+            ),
+            timeout=0.5,
+        )
 
 
 @pytest.mark.asyncio
