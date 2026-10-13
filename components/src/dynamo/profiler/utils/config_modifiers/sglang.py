@@ -65,9 +65,8 @@ def _has_arg(args: list[str], key: str) -> bool:
     return any(arg == key or arg.startswith(f"{key}=") for arg in args)
 
 
-# SGLang 0.5.21 removed these deprecated aliases. argparse prefix matching then
-# rejects each one as ambiguous between its -decode and -prefill forms. The
-# generator templates still emit them, so map them to what the aliases meant.
+# SGLang 0.5.21 removed these aliases, which argparse now rejects as ambiguous;
+# generator templates still emit them, so map each to the -decode form it meant.
 _LEGACY_CUDA_GRAPH_ARGS = {
     "--cuda-graph-bs": "--cuda-graph-bs-decode",
     "--cuda-graph-max-bs": "--cuda-graph-max-bs-decode",
