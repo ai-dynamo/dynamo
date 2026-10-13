@@ -606,23 +606,46 @@ fn media_io_kwargs_are_refused_only_with_media() {
 }
 
 #[test]
-fn media_needs_server_support() {
-    let media = aggregated(&with_media(
-        "video_url",
-        vec![url("https://example.com/v.mp4")],
-    ))
-    .unwrap();
-    require_media_support(&media, true).unwrap();
-    let error = require_media_support(&media, false).unwrap_err();
-    assert_eq!(
-        error.public_message(),
-        Some(
-            "this SGLang server does not accept image, video, or audio inputs over gRPC; serve a multimodal model with an SGLang version that supports gRPC media"
-        )
-    );
+fn media_needs_server_support_for_its_kind() {
+    let media = |kind| aggregated(&with_media(kind, vec![url("https://example.com/m")])).unwrap();
+    let image_only = MediaSupport {
+        image: true,
+        ..Default::default()
+    };
+    let image_and_video = MediaSupport {
+        video: true,
+        ..image_only
+    };
+    let audio_only = MediaSupport {
+        audio: true,
+        ..Default::default()
+    };
+    require_media_support(&media("image_url"), image_only).unwrap();
+    require_media_support(&media("video_url"), image_and_video).unwrap();
+    require_media_support(&media("audio_url"), audio_only).unwrap();
+    for (kind, support, message) in [
+        (
+            "image_url",
+            audio_only,
+            "this SGLang server does not accept image inputs over gRPC; serve an image model with an SGLang version that supports gRPC media",
+        ),
+        (
+            "video_url",
+            image_only,
+            "this SGLang server does not accept video inputs over gRPC; serve a video model with an SGLang version that supports gRPC media",
+        ),
+        (
+            "audio_url",
+            image_and_video,
+            "this SGLang server does not accept audio inputs over gRPC; serve an audio model with an SGLang version that supports gRPC media",
+        ),
+    ] {
+        let error = require_media_support(&media(kind), support).unwrap_err();
+        assert_eq!(error.public_message(), Some(message), "{kind}");
+    }
 
     for text in [request(), with_media("image_url", Vec::new())] {
-        require_media_support(&aggregated(&text).unwrap(), false).unwrap();
+        require_media_support(&aggregated(&text).unwrap(), MediaSupport::default()).unwrap();
     }
 }
 

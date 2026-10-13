@@ -529,15 +529,32 @@ pub(crate) fn discovery_mode(server_info: &Value) -> Result<DisaggregationMode, 
     }
 }
 
-pub(crate) fn supports_multimodal_inputs(server_info: &Value) -> bool {
-    server_info
-        .get("grpc_features")
-        .and_then(Value::as_array)
-        .is_some_and(|features| {
-            features
-                .iter()
-                .any(|feature| feature.as_str() == Some("multimodal_inputs"))
-        })
+/// Media kinds that this SGLang server reads over gRPC.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MediaSupport {
+    pub(crate) image: bool,
+    pub(crate) video: bool,
+    pub(crate) audio: bool,
+}
+
+/// SGLang lists one `grpc_features` entry for each media kind that the model's
+/// processor can place in the prompt. It drops the other media silently.
+pub(crate) fn media_support(server_info: &Value) -> MediaSupport {
+    let listed = |name: &str| {
+        server_info
+            .get("grpc_features")
+            .and_then(Value::as_array)
+            .is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature.as_str() == Some(name))
+            })
+    };
+    MediaSupport {
+        image: listed("image_inputs"),
+        video: listed("video_inputs"),
+        audio: listed("audio_inputs"),
+    }
 }
 
 fn parse_json_object(label: &str, raw: &str) -> Result<Value, DynamoError> {
@@ -629,8 +646,8 @@ mod tests {
     use tonic::transport::Endpoint;
 
     use super::{
-        NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery, rpc_with_deadline, status_to_dynamo, supports_multimodal_inputs,
+        MediaSupport, NodeMetadata, client_from_channel, discover, discovery_mode, json_u32,
+        json_u64, media_support, parse_discovery, rpc_with_deadline, status_to_dynamo,
         worker_group_id_from_addresses,
     };
     use crate::proto as pb;
@@ -896,17 +913,31 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_inputs_need_the_grpc_feature() {
-        assert!(supports_multimodal_inputs(
-            &json!({"grpc_features": ["other", "multimodal_inputs"]})
-        ));
+    fn media_support_reads_one_grpc_feature_per_media_kind() {
+        assert_eq!(
+            media_support(&json!({"grpc_features": ["other", "image_inputs", "video_inputs"]})),
+            MediaSupport {
+                image: true,
+                video: true,
+                audio: false
+            }
+        );
+        assert_eq!(
+            media_support(&json!({"grpc_features": ["audio_inputs"]})),
+            MediaSupport {
+                image: false,
+                video: false,
+                audio: true
+            }
+        );
         for info in [
             json!({}),
             json!({"grpc_features": []}),
-            json!({"grpc_features": "multimodal_inputs"}),
+            json!({"grpc_features": ["multimodal_inputs"]}),
+            json!({"grpc_features": "image_inputs"}),
             json!({"grpc_features": [null, 1]}),
         ] {
-            assert!(!supports_multimodal_inputs(&info), "{info}");
+            assert_eq!(media_support(&info), MediaSupport::default(), "{info}");
         }
     }
 
