@@ -591,7 +591,6 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo-runtime (maturin) wheel
 ARG USE_SCCACHE
 ARG TARGETARCH
 ARG ENABLE_MEDIA_FFMPEG
