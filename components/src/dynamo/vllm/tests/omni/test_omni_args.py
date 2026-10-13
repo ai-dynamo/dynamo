@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+
 try:
     import vllm.platforms as vllm_platforms
     from vllm.engine.arg_utils import _compute_kwargs
@@ -106,6 +108,48 @@ def _make_omni_config(**overrides) -> OmniConfig:
 def test_omni_config_valid_defaults():
     config = _make_omni_config()
     config.validate()
+
+
+@pytest.mark.parametrize(
+    ("env_value", "cli_args", "expected"),
+    [
+        (None, [], 6),
+        ("0", [], 0),
+        ("9", [], 9),
+        (None, ["--image-png-compression-level", "0"], 0),
+        (None, ["--image-png-compression-level", "9"], 9),
+        ("9", ["--image-png-compression-level", "0"], 0),
+    ],
+)
+def test_image_png_compression_config(monkeypatch, env_value, cli_args, expected):
+    monkeypatch.delenv("DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL", raising=False)
+    if env_value is not None:
+        monkeypatch.setenv("DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL", env_value)
+    parser = argparse.ArgumentParser()
+    DynamoRuntimeArgGroup().add_arguments(parser)
+    OmniArgGroup().add_arguments(parser)
+
+    config = OmniConfig.from_cli_args(parser.parse_args(cli_args))
+    config.validate()
+
+    assert config.image_png_compression_level == expected
+
+
+@pytest.mark.parametrize("source", ["cli", "environment"])
+@pytest.mark.parametrize("level", ["-1", "10", "100", "1.5", "invalid"])
+def test_invalid_image_png_compression_rejected(monkeypatch, source, level):
+    monkeypatch.delenv("DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL", raising=False)
+    argv = ["--image-png-compression-level", level]
+    if source == "environment":
+        monkeypatch.setenv("DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL", level)
+        argv = []
+
+    with pytest.raises((ValueError, SystemExit)):
+        parser = argparse.ArgumentParser()
+        DynamoRuntimeArgGroup().add_arguments(parser)
+        OmniArgGroup().add_arguments(parser)
+        config = OmniConfig.from_cli_args(parser.parse_args(argv))
+        config.validate()
 
 
 def test_startup_lora_paths_parse_as_diffusion_options():

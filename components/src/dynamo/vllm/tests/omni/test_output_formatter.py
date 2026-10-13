@@ -5,11 +5,17 @@
 
 import base64
 import sys
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from PIL import Image
+
+from dynamo.common.storage import get_fs
+from dynamo.common.utils.output_modalities import RequestType
 
 try:
     import torch
@@ -19,6 +25,7 @@ try:
         AudioFormatter,
         AudioStreamState,
         DiffusionFormatter,
+        OutputFormatter,
         TextFormatter,
         _build_completion_usage,
         _error_chunk,
@@ -131,10 +138,61 @@ def _make_diffusion_formatter():
 
 class TestDiffusionFormatterPrepareImages:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("level", [0, 1, 6, 9])
+    @pytest.mark.parametrize("mode", ["RGB", "RGBA"])
+    @pytest.mark.parametrize("response_format", ["b64_json", "url"])
+    async def test_png_compression_preserves_images(
+        self, tmp_path, level, mode, response_format
+    ):
+        formatter = OutputFormatter(
+            "test-model",
+            media_fs=get_fs(tmp_path.as_uri()),
+            image_png_compression_level=level,
+        )
+        images = [
+            Image.new(mode, (16, 12), (20, 40, 60, 80) if mode == "RGBA" else "red"),
+            Image.new(mode, (8, 24), "blue"),
+        ]
+
+        result = await formatter.format(
+            SimpleNamespace(final_output_type="image", images=images),
+            "req-png",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format=response_format,
+        )
+
+        assert len(result["data"]) == len(images)
+        for item, original in zip(result["data"], images, strict=True):
+            if response_format == "url":
+                assert item["url"].endswith(".png")
+                raw = Path(item["url"].removeprefix("file://")).read_bytes()
+            else:
+                raw = base64.b64decode(item["b64_json"], validate=True)
+            with Image.open(BytesIO(raw)) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == original.size
+                assert decoded.mode == original.mode
+                assert decoded.tobytes() == original.tobytes()
+            with BytesIO() as expected:
+                original.save(expected, format="PNG", compress_level=level)
+                assert raw == expected.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_default_png_encoding_is_unchanged(self):
+        img = Image.new("RGB", (16, 12), "red")
+        urls = await _make_diffusion_formatter()._prepare_images([img], "req-default")
+        with BytesIO() as expected:
+            img.save(expected, format="PNG")
+            assert urls == [
+                "data:image/png;base64,"
+                + base64.b64encode(expected.getvalue()).decode()
+            ]
+
+    @pytest.mark.asyncio
     async def test_b64_json(self):
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"fake_png_data")
+        img.save = lambda b, **kwargs: b.write(b"fake_png_data")
         results = await f._prepare_images([img], "req-1", "b64_json")
         assert len(results) == 1
         assert results[0].startswith("data:image/png;base64,")
@@ -143,7 +201,7 @@ class TestDiffusionFormatterPrepareImages:
     async def test_b64_default_when_none(self):
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"data")
+        img.save = lambda b, **kwargs: b.write(b"data")
         results = await f._prepare_images([img], "req-1", None)
         assert results[0].startswith("data:image/png;base64,")
 
@@ -158,7 +216,7 @@ class TestDiffusionFormatterPrepareImages:
         f = _make_diffusion_formatter()
         imgs = [MagicMock() for _ in range(3)]
         for img in imgs:
-            img.save = lambda b, format: b.write(b"px")
+            img.save = lambda b, **kwargs: b.write(b"px")
         results = await f._prepare_images(imgs, "req-1", "b64_json")
         assert len(results) == 3
 
@@ -170,7 +228,7 @@ class TestDiffusionFormatterImage:
 
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         chunk = await f._encode_image(
             [img], "req-1", request_type=RequestType.CHAT_COMPLETION
         )
@@ -183,7 +241,7 @@ class TestDiffusionFormatterImage:
 
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         chunk = await f._encode_image(
             [img],
             "req-1",
@@ -198,7 +256,7 @@ class TestDiffusionFormatterImage:
 
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         chunk = await f._encode_image(
             [img],
             "req-1",
@@ -1234,7 +1292,7 @@ class TestOutputFormatter:
         stage = MagicMock()
         stage.final_output_type = "image"
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         stage.images = [img]
         chunk = await f.format(
             stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
