@@ -972,6 +972,32 @@ async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
 
 #[tokio::test]
 #[serial]
+async fn chat_completions_reject_empty_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        let body = json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 10,
+            "tools": []
+        });
+        let response = post_json(&svc, "/v1/chat/completions", body).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "tools array cannot be empty; omit the field entirely to disable tool use",
+        )
+        .await;
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn anthropic_content_validation_applies_to_messages_and_count_tokens() {
     temp_env::async_with_vars(BASE_ENV, async {
         let svc = HarnessService::start(Vec::new()).await;
