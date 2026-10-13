@@ -22,6 +22,9 @@ fn preserves_exact_presigned_capability_and_redacts_debug() {
     let input = presigned();
     let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
     assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+    let raw = serde_json::to_string(&input).unwrap();
+    let upload: MetadataUpload = serde_json::from_str(&raw).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
     let debug = format!("{upload:?}");
     for secret in [
         "storage.example",
@@ -44,6 +47,53 @@ fn legacy_round_trip_preserves_main_shape_and_optional_fallback() {
         assert!(!format!("{upload:?}").contains("bucket"));
         assert!(!upload.is_artifact());
     }
+}
+
+#[test]
+fn rejects_duplicate_fields_in_raw_json() {
+    for input in [
+        r#"{"url":"s3://a","url":"s3://b"}"#,
+        r#"{"url":"s3://a","u\u0072l":"s3://b"}"#,
+        r#"{"url":"s3://a","fallback_url":"s3://b","fallback_url":"s3://c"}"#,
+        r#"{"kind":"generation_artifact","kind":"generation_artifact","contents":[],"mode":"inline_base64"}"#,
+        r#"{"kind":"generation_artifact","contents":[],"mode":"inline_base64","mode":"inline_base64"}"#,
+        r#"{"kind":"generation_artifact","contents":[],"mode":"object_store","destination":{"kind":"managed_store","profile":"test","object_key":"a"},"destination":{"kind":"managed_store","profile":"test","object_key":"b"}}"#,
+        r#"{"kind":"generation_artifact","contents":[],"mode":"object_store","destination":{"kind":"managed_store","profile":"test","object_key":"a","object_key":"b"}}"#,
+        r#"{"kind":"generation_artifact","contents":[],"mode":"object_store","destination":{"kind":"presigned_http_put","url":"https://example.com/a","url":"https://example.com/b","required_headers":{},"expires_at":"2030-01-01T00:00:00Z","max_bytes":100,"object_id":"object"}}"#,
+        r#"{"kind":"generation_artifact","contents":[],"mode":"object_store","destination":{"kind":"presigned_http_put","url":"https://example.com/a","required_headers":{"X-Token":"a","X-Token":"b"},"expires_at":"2030-01-01T00:00:00Z","max_bytes":100,"object_id":"object"}}"#,
+    ] {
+        let error = serde_json::from_str::<MetadataUpload>(input).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("duplicate"), "{input}: {error}");
+        assert!(!message.contains("s3://") && !message.contains("X-Token"));
+    }
+}
+
+#[test]
+fn rejects_duplicate_upload_fields_in_raw_openai_requests() {
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+    let chat = r#"{"model":"test","messages":[{"role":"user","content":"hello"}],"nvext":{"metadata_upload":{"url":"s3://a","url":"s3://b"}}}"#;
+    let error = serde_json::from_str::<NvCreateChatCompletionRequest>(chat).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate metadata_upload field")
+    );
+
+    let completion = r#"{"model":"test","prompt":"hello","nvext":{"metadata_upload":{"kind":"generation_artifact","contents":[],"mode":"inline_base64","mode":"inline_base64"}}}"#;
+    let error = serde_json::from_str::<NvCreateCompletionRequest>(completion).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate metadata_upload field")
+    );
+
+    let valid_chat = r#"{"model":"test","messages":[{"role":"user","content":"hello"}],"nvext":{"metadata_upload":{"url":"s3://a"}}}"#;
+    assert!(serde_json::from_str::<NvCreateChatCompletionRequest>(valid_chat).is_ok());
+    let valid_completion = r#"{"model":"test","prompt":"hello","nvext":{"metadata_upload":{"kind":"generation_artifact","contents":[],"mode":"inline_base64"}}}"#;
+    assert!(serde_json::from_str::<NvCreateCompletionRequest>(valid_completion).is_ok());
 }
 
 #[test]

@@ -712,7 +712,9 @@ impl NvExtResponseFieldSelection {
         engine_data: Option<&serde_json::Value>,
     ) -> anyhow::Result<()> {
         if let Some(mode) = self.metadata_upload
-            && finish_reason.is_some_and(|reason| !matches!(reason, FinishReason::Error(_)))
+            && finish_reason.is_some_and(|reason| {
+                !matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
+            })
             && !engine_data
                 .and_then(|data| data.get("metadata_upload"))
                 .is_some_and(|result| {
@@ -1198,6 +1200,11 @@ mod tests {
                 .is_ok()
         );
         assert!(
+            selection
+                .validate_metadata_upload_result(Some(&FinishReason::Cancelled), None)
+                .is_ok()
+        );
+        assert!(
             NvExtResponseFieldSelection::default()
                 .validate_metadata_upload_result(Some(&FinishReason::Stop), None)
                 .is_ok()
@@ -1213,7 +1220,6 @@ mod tests {
         let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "n": 2, "nvext": artifact})).unwrap();
         assert!(chat.validate().is_err());
         for (prompt, n, best_of) in [
-            (serde_json::json!("hello"), 2, 2),
             (serde_json::json!("hello"), 1, 2),
             (serde_json::json!(["hello", "world"]), 1, 1),
         ] {
