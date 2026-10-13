@@ -1395,12 +1395,54 @@ export const NIGHTLIES_NOTE =
 
 export const INTEL_MAIN_TOT: BackendPins = {
   sglang: "0.5.11",
-  vllm: "0.24.0",
+  vllm: "0.30.0",
   nixlSglang: "1.1.0",
-  nixlVllm: "1.1.0",
+  nixlVllm: "1.4.1",
 };
 
 export const INTEL_RELEASES: Release[] = [
+  {
+    version: "v1.5.1",
+    notesHref: "/dynamo/dev/reference/releases/v1-5-0#v151",
+    date: "Oct 6, 2026",
+    kind: "patch",
+    github: `${GH}v1.5.1`,
+    pins: {
+      sglang: "0.5.11",
+      vllm: "0.27.1",
+      nixlSglang: "1.1.0",
+      nixlVllm: "1.3.2",
+    },
+    ucx: "1.21.x",
+  },
+  {
+    version: "v1.5.0",
+    notesHref: "/dynamo/dev/reference/releases/v1-5-0",
+    date: "Sep 18, 2026",
+    kind: "stable",
+    github: `${GH}v1.5.0`,
+    pins: {
+      sglang: "0.5.11",
+      vllm: "0.27.1",
+      nixlSglang: "1.1.0",
+      nixlVllm: "1.3.2",
+    },
+    ucx: "1.21.x",
+  },
+  {
+    version: "v1.4.0",
+    notesHref: "/dynamo/dev/reference/releases/v1-4-0",
+    date: "Aug 14, 2026",
+    kind: "stable",
+    github: `${GH}v1.4.0`,
+    pins: {
+      sglang: "0.5.11",
+      vllm: "0.26.0",
+      nixlSglang: "1.1.0",
+      nixlVllm: "1.3.2",
+    },
+    ucx: "1.21.x",
+  },
   {
     version: "v1.3.0",
     notesHref: "/dynamo/dev/reference/releases/v1-3-0",
@@ -1425,6 +1467,24 @@ export interface XpuRow {
 }
 
 export const XPU_HISTORY: XpuRow[] = [
+  {
+    version: "1.5.1",
+    backend: "SGLang",
+    oneapi: "2025.3",
+    minDriver: "25.48.36300.8",
+  },
+  {
+    version: "1.5.0",
+    backend: "SGLang",
+    oneapi: "2025.3",
+    minDriver: "25.48.36300.8",
+  },
+  {
+    version: "1.4.0",
+    backend: "SGLang",
+    oneapi: "2025.3",
+    minDriver: "25.48.36300.8",
+  },
   {
     version: "1.3.0",
     backend: "SGLang",
