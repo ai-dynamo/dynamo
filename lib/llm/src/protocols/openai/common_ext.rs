@@ -76,6 +76,20 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub guided_whitespace_pattern: Option<String>,
 
+    /// vLLM word exclusions, tokenized and enforced by the engine.
+    /// Omission adds no restriction; an empty list explicitly clears exclusions.
+    /// Null and empty string entries are invalid. Requires a vLLM token-input
+    /// worker and cannot combine
+    /// nonempty words with Dynamo's nonempty `bad_words_token_ids` extension.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_bad_words"
+    )]
+    #[schema(value_type = Vec<String>, required = false)]
+    #[builder(default, setter(strip_option))]
+    pub bad_words: Option<Vec<String>>,
+
     /// Whether to skip special tokens in the decoded output.
     /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
     /// When false, special tokens are included in the output text.
@@ -153,6 +167,15 @@ impl CommonExt {
     }
 }
 
+/// Preserve a supplied list, including empty, but reject null and non-string items.
+/// Serde's field default handles omission without calling this deserializer.
+fn deserialize_bad_words<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Some)
+}
+
 /// Trait for types that provide CommonExt fields
 pub trait CommonExtProvider {
     /// Get a reference to the CommonExt struct if available
@@ -194,6 +217,88 @@ mod tests {
 
     use serde_json;
 
+    /// API omission and empty lists differ; null and malformed list items never
+    /// become an accepted unconstrained request. Both endpoints share this type.
+    #[test]
+    fn bad_words_preserves_presence_and_rejects_null() {
+        let omitted: CommonExt = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(omitted.bad_words.is_none());
+        assert!(
+            serde_json::to_value(omitted)
+                .unwrap()
+                .get("bad_words")
+                .is_none()
+        );
+        for words in [
+            serde_json::json!([]),
+            serde_json::json!(["hello", " hello", "hello"]),
+        ] {
+            let parsed: CommonExt =
+                serde_json::from_value(serde_json::json!({"bad_words": words})).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap()["bad_words"], words);
+        }
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!("hello"),
+            serde_json::json!([1]),
+        ] {
+            assert!(
+                serde_json::from_value::<CommonExt>(serde_json::json!({"bad_words": invalid}))
+                    .is_err()
+            );
+        }
+    }
+
+    /// Request parsing must extract words into the worker-bound sampling object,
+    /// not leave a newly admitted field in an ignored extra-body map.
+    #[test]
+    fn bad_words_reaches_sampling_on_both_endpoints() {
+        use crate::protocols::common::SamplingOptionsProvider;
+        use crate::protocols::openai::{
+            chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+        };
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role":"user", "content":"hello"}], "bad_words": ["hello"]
+        })).unwrap();
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "prompt":"hello", "bad_words": []
+        }))
+        .unwrap();
+        assert_eq!(
+            chat.extract_sampling_options().unwrap().bad_words,
+            Some(vec!["hello".into()])
+        );
+        assert_eq!(
+            completion.extract_sampling_options().unwrap().bad_words,
+            Some(vec![])
+        );
+        assert!(!chat.unsupported_fields.contains_key("bad_words"));
+        assert!(!completion.unsupported_fields.contains_key("bad_words"));
+    }
+
+    /// Older/default worker messages omit this opt-in field; newer readers must
+    /// still accept them and serialization must not add an absent constraint.
+    #[test]
+    fn bad_words_wire_is_optional_without_changing_default_messages() {
+        use crate::protocols::common::SamplingOptions;
+        let legacy: SamplingOptions = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(legacy.bad_words.is_none());
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("bad_words")
+                .is_none()
+        );
+        let enabled = SamplingOptions {
+            bad_words: Some(vec![]),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["bad_words"],
+            serde_json::json!([])
+        );
+    }
+
     #[test]
     fn test_validation_min_tokens() {
         // Test that min_tokens with 0 is valid
@@ -210,6 +315,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            bad_words: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
             add_generation_prompt: None,

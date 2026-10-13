@@ -31,6 +31,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import build_sampling_params
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -1405,6 +1406,33 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
         },
         "other_internal": "kept",
     }
+
+
+@pytest.mark.parametrize("words", [[], ["hello"], ["hello", " hello", "hello"]])
+def test_build_sampling_params_delivers_bad_words_without_mutating_input(words):
+    """Keep word strings until engine tokenization; vLLM may deduplicate its copy.
+
+    This proves transport, not token exclusion: the real-server regression checks
+    generated content. Empty lists must clear configured defaults, not fall back.
+    """
+    original = list(words)
+    request = {"token_ids": [1, 2], "sampling_options": {"bad_words": words}}
+    params = build_sampling_params(request, {"bad_words": ["default"]})
+    assert params.bad_words == list(dict.fromkeys(words))
+    assert words == original
+    assert params.detokenize is False
+
+
+def test_build_sampling_params_keeps_token_exclusions_with_empty_bad_words():
+    """An empty text list must not erase the existing token-ID-only extension."""
+    request = {
+        "token_ids": [1, 2],
+        "sampling_options": {"bad_words": []},
+        "extra_args": {"sampling_options": {"bad_words_token_ids": [[10, 11]]}},
+    }
+    params = build_sampling_params(request, {})
+    assert params.bad_words == []
+    assert params.bad_words_token_ids == [[10, 11]]
 
 
 def test_build_sampling_params_maps_max_thinking_tokens():
