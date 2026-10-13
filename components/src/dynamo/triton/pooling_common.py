@@ -13,6 +13,7 @@ not carried on the OpenAI request.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Final, Optional
 
 import numpy as np
@@ -227,7 +228,7 @@ def extract_text_input(input_field: Any, task_label: str) -> list[str]:
     )
 
 
-class PoolingWorkerHandlerBase:
+class PoolingWorkerHandlerBase(ABC):
     """Shared pipeline for the Triton ``/v1/classify`` and ``/v1/embeddings`` workers."""
 
     task_label: str = ""
@@ -298,8 +299,9 @@ class PoolingWorkerHandlerBase:
         async for response in self._run(request, context):
             yield response
 
+    @abstractmethod
     def _pre_dispatch(self, request: dict) -> None:
-        pass
+        ...
 
     async def _run(self, request: dict, context: Any) -> AsyncGenerator[dict, None]:
         model_name = request.get("model") or self._model.name
@@ -367,13 +369,15 @@ class PoolingWorkerHandlerBase:
 
         yield self._response_envelope(data, model_name, request, context)
 
+    @abstractmethod
     def _row_from_output(self, arr_row: np.ndarray, inference_response: Any) -> dict:
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _response_envelope(
         self, data: list[dict], model_name: str, request: dict, context: Any
     ) -> dict:
-        raise NotImplementedError
+        ...
 
     def _probe(self) -> dict:
         try:
@@ -385,5 +389,6 @@ class PoolingWorkerHandlerBase:
             raise RuntimeError(f"triton not ready: {exc}") from exc
         return self._probe_envelope()
 
+    @abstractmethod
     def _probe_envelope(self) -> dict:
-        raise NotImplementedError
+        ...
