@@ -413,14 +413,14 @@ def _chat_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
         or top_logprobs < 0
     ):
         raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
     if logprobs is True:
         return top_logprobs if top_logprobs is not None else 0
     if isinstance(logprobs, int) and not isinstance(logprobs, bool):
         return logprobs
-    if top_logprobs:
-        raise PreprocessError(
-            "When using `top_logprobs`, `logprobs` must be set to true."
-        )
     return None
 
 
