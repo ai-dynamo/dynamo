@@ -44,6 +44,8 @@ func TestEngineGroupCheckpointRejectsInvalidRecoveryAuthority(t *testing.T) {
 		{"wrong owner", "not owned by Engine Group"},
 		{"empty state", "no authoritative base topology"},
 		{"invalid state", "invalid checkpoint state"},
+		{"future capacity revision", "capacity revision"},
+		{"future traffic revision", "traffic revision"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("initialize a healthy world and persist its recovery authority")
@@ -88,6 +90,10 @@ func TestEngineGroupCheckpointRejectsInvalidRecoveryAuthority(t *testing.T) {
 				checkpoint.State.Topologies.Snapshots = nil
 			case "invalid state":
 				checkpoint.State.ControlRevision = -1
+			case "future capacity revision":
+				checkpoint.State.Capacity.Observed.AppliedRevision = checkpoint.State.ControlRevision + 1
+			case "future traffic revision":
+				checkpoint.State.Traffic.Observed.AppliedRevision = checkpoint.State.ControlRevision + 1
 			}
 			if test.name != "missing" {
 				if test.name != "corrupt" {
@@ -112,6 +118,62 @@ func TestEngineGroupCheckpointRejectsInvalidRecoveryAuthority(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEngineGroupCheckpointRejectsForgedReleaseBeforeFirstApply(t *testing.T) {
+	t.Log("initialize a two-replica world and persist retirement before releasing any capacity")
+	ctx := t.Context()
+	backend := newEngineGroupControllerTestBackend(2)
+	backend.ambiguousApply = false
+	group := &api.DynamoGraphDeploymentEngineGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "release-authority", Namespace: "test", UID: "group-uid", Generation: 1},
+		Spec:       api.DynamoGraphDeploymentEngineGroupSpec{Replicas: 1},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, api.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(group).WithObjects(group).Build()
+	provider := engineGroupControllerTestRuntimeProvider{backend: backend}
+	controller := &Reconciler{Client: kube, RuntimeProvider: provider}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(group)}
+	for range 3 {
+		_, err := controller.Reconcile(ctx, request)
+		require.NoError(t, err)
+	}
+	var checkpoint engineGroupCheckpoint
+	for range 32 {
+		_, err := controller.Reconcile(ctx, request)
+		require.NoError(t, err)
+		require.NoError(t, kube.Get(ctx, request.NamespacedName, group))
+		checkpoint = engineGroupControllerTestCheckpoint(t, ctx, kube, group)
+		if checkpoint.State.Capacity.Desired != nil && len(checkpoint.State.Capacity.Desired.ReleaseFences) != 0 {
+			break
+		}
+	}
+	require.NotNil(t, checkpoint.State.Capacity.Desired)
+	require.Len(t, checkpoint.State.Capacity.Desired.ReleaseFences, 1)
+	require.Greater(t, checkpoint.State.Capacity.Desired.ControlRevision, backend.capacity.AppliedRevision)
+	beforeCapacity := cloneEngineGroupControllerTestCapacity(backend.capacity)
+	beforeMembershipCalls := backend.membershipApplyCount()
+
+	t.Log("corrupt the durable victim UID without changing canonical allocations or the committed retirement")
+	checkpoint.State.Capacity.Desired.ReleaseFences[0].CapacityRefs[0].UID = "uid-0"
+	store := engineGroupCheckpointStore(controller, group)
+	journal := &corev1.ConfigMap{}
+	require.NoError(t, kube.Get(ctx, client.ObjectKey{Namespace: store.Namespace, Name: store.Name}, journal))
+	encoded, err := json.Marshal(checkpoint)
+	require.NoError(t, err)
+	journal.Data["state.json"] = string(encoded)
+	require.NoError(t, kube.Update(ctx, journal))
+
+	t.Log("restart and reject checkpoint authority before submitting deletion or another collective")
+	controller = &Reconciler{Client: kube, RuntimeProvider: provider}
+	_, err = controller.Reconcile(ctx, request)
+	require.ErrorContains(t, err, "canonical allocation")
+	assert.Equal(t, beforeCapacity, backend.capacity)
+	assert.Equal(t, beforeMembershipCalls, backend.membershipApplyCount())
+	require.NoError(t, kube.Get(ctx, request.NamespacedName, group))
+	assert.Equal(t, metav1.ConditionUnknown, meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionTopologyKnown).Status)
 }
 
 func TestEngineGroupCheckpointWriteFailurePrecedesEffects(t *testing.T) {
