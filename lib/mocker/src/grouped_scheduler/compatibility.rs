@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::common::handoff::{HandoffId as DynamoHandoffId, HandoffTransferTiming};
-use crate::common::protocols::{DirectRequest, KvTransferTimingMode, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, KvTransferTimingMode, MockerConfig, OutputSignal};
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::scheduler::SchedulerLifecycleEvent;
 
@@ -26,13 +26,13 @@ pub(super) enum Cleanup {
 }
 
 pub(super) struct CompatibilityState {
-    args: MockEngineArgs,
+    args: MockerConfig,
     request_prompt_lengths: Mutex<HashMap<Uuid, usize>>,
     handoffs: Mutex<HandoffMap>,
 }
 
 impl CompatibilityState {
-    pub(super) fn new(args: MockEngineArgs) -> Self {
+    pub(super) fn new(args: MockerConfig) -> Self {
         Self {
             args,
             request_prompt_lengths: Mutex::new(HashMap::new()),
@@ -106,7 +106,7 @@ impl CompatibilityState {
                     output.completed,
                     prompt_len,
                     self.args.kv_transfer_bandwidth,
-                    self.args.kv_bytes_per_token,
+                    self.args.kv_transfer_bytes_per_token,
                 )
             }),
             cached_tokens: output.cached_tokens,

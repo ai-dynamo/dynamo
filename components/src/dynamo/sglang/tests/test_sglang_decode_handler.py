@@ -39,8 +39,10 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     extract_media_urls,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
@@ -1713,6 +1715,80 @@ class TestMultimodalGuard:
                     "multi_modal_uuids": {"image_url": ["cached-image"]},
                 }
             )
+
+    @pytest.mark.parametrize(
+        "engine, consumes_media",
+        [
+            (
+                SimpleNamespace(
+                    tokenizer_manager=SimpleNamespace(
+                        model_config=SimpleNamespace(is_multimodal=False)
+                    )
+                ),
+                False,
+            ),
+            (
+                SimpleNamespace(
+                    tokenizer_manager=SimpleNamespace(
+                        model_config=SimpleNamespace(is_multimodal=True)
+                    )
+                ),
+                True,
+            ),
+            (SimpleNamespace(), True),
+            (None, True),
+        ],
+        ids=["text_only", "multimodal", "no_model_config", "no_engine"],
+    )
+    def test_engine_consumes_media(self, engine, consumes_media):
+        assert engine_consumes_media(engine) is consumes_media
+
+    @pytest.mark.parametrize(
+        "media_request",
+        [
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/a.jpg"}]
+                },
+            },
+            {
+                "token_ids": [1, 2, 3],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.com/a.jpg"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+        ids=["extracted", "raw_message"],
+    )
+    def test_rejects_media_the_engine_does_not_consume(self, media_request):
+        with pytest.raises(InvalidArgument, match="does not accept image input"):
+            reject_unconsumed_media(media_request, consumes_media=False)
+
+    def test_allows_media_the_engine_consumes(self):
+        reject_unconsumed_media(
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/a.jpg"}]
+                },
+            },
+            consumes_media=True,
+        )
+
+    def test_allows_text_and_empty_media_lists(self):
+        reject_unconsumed_media(
+            {"token_ids": [1, 2, 3], "multi_modal_data": {"image_url": []}},
+            consumes_media=False,
+        )
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):

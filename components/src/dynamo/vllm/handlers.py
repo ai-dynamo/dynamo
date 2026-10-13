@@ -92,7 +92,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
-from dynamo.vllm.kv_hints import _apply_kv_hint, publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -157,7 +157,6 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
-_KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -934,8 +933,6 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
-    _apply_kv_hint(sampling_params, request.get("kv_hint"))
-
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
     # bridge pressure before chunks cross into Dynamo.
@@ -951,40 +948,75 @@ def build_sampling_params(
 def _update_kv_transfer_params(
     sampling_params: SamplingParams,
     kv_transfer_params: Mapping[str, Any],
-    *,
-    preserve_kv_hint: bool = False,
 ) -> None:
-    """Set vLLM KV transfer params, optionally carrying Dynamo's transfer hint.
-
-    ``build_sampling_params`` may have copied ``kv_hint`` from the Dynamo
-    request into ``sampling_params.extra_args["kv_transfer_params"]``. The new
-    ``kv_transfer_params`` value comes from vLLM's ``KVTransferConfig``
-    (``engine_client.vllm_config.kv_transfer_config``), via the connector
-    protocol selected in ``make_kv_connector_protocol``.
-
-    Prefill preserves the request hint when replacing the object with fresh
-    protocol params. Decode handoff uses prefill-produced params and should not
-    inherit a stale prefill-side hint.
-    """
+    """Set connector-owned vLLM KV transfer parameters."""
     extra_args = (
         dict(sampling_params.extra_args)
         if isinstance(sampling_params.extra_args, dict)
         else {}
     )
-    updated_params = dict(kv_transfer_params)
-    updated_params.pop(_KV_HINT_EXTRA_ARGS_KEY, None)
-
-    existing_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-    kv_hint = (
-        existing_params.get(_KV_HINT_EXTRA_ARGS_KEY)
-        if preserve_kv_hint and isinstance(existing_params, Mapping)
-        else None
-    )
-    if isinstance(kv_hint, Mapping):
-        updated_params[_KV_HINT_EXTRA_ARGS_KEY] = kv_hint
-
-    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = updated_params
+    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = dict(kv_transfer_params)
     sampling_params.extra_args = extra_args
+
+
+@functools.cache
+def _vllm_kv_hints_types() -> tuple[type[Any], type[Any]] | None:
+    """Load vLLM's first-class KV hint types when the API is available."""
+    try:
+        module = importlib.import_module("vllm.v1.kv_hints")
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.v1.kv_hints":
+            raise
+        return None
+
+    action_type = getattr(module, "KvHintAction", None)
+    envelope_type = getattr(module, "KvHintsEnvelope", None)
+    if action_type is None or envelope_type is None:
+        return None
+    return action_type, envelope_type
+
+
+def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
+    """Convert Dynamo's typed KV hint message to vLLM's envelope type."""
+    raw_envelope = request.get("kv_hint")
+    if raw_envelope is None:
+        return None
+    if not isinstance(raw_envelope, Mapping):
+        raise ValueError("kv_hint must be an object")
+
+    kv_hints_types = _vllm_kv_hints_types()
+    if kv_hints_types is None:
+        raise RuntimeError(
+            "This vLLM version does not support first-class KV hint request metadata"
+        )
+    action_type, envelope_type = kv_hints_types
+
+    raw_actions = raw_envelope.get("actions")
+    if not isinstance(raw_actions, list):
+        raise ValueError("kv_hint.actions must be a list")
+    actions = []
+    for raw_action in raw_actions:
+        if not isinstance(raw_action, Mapping):
+            raise ValueError("each kv_hint action must be an object")
+        payload = raw_action.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("kv_hint action payload must be an object")
+        actions.append(
+            action_type(
+                action_id=str(raw_action["action_id"]),
+                action_type=str(raw_action["action_type"]),
+                action_version=str(raw_action["action_version"]),
+                payload=dict(payload),
+            )
+        )
+
+    envelope = envelope_type(
+        protocol_version=str(raw_envelope["protocol_version"]),
+        message_id=str(raw_envelope["message_id"]),
+        actions=actions,
+    )
+
+    return envelope
 
 
 def build_sampling_params_openai(
@@ -3419,6 +3451,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         session_id=None,
         report_kv_cache_hit=True,
         want_engine_data=False,
+        kv_hints=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3438,6 +3471,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     trace_headers=trace_headers,
                     priority=priority,
                     session_id=session_id,
+                    **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
@@ -4007,6 +4041,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
         session_id = session_id_from_request(request)
+        # For P/D, apply hints only to prefill workers (kv_params is None).
+        kv_hints = _build_vllm_kv_hints(request) if kv_params is None else None
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -4057,6 +4093,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         # decode attempt's count would not be local reuse.
                         report_kv_cache_hit=kv_params is None,
                         want_engine_data=want_engine_data,
+                        kv_hints=kv_hints,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -4108,6 +4145,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         session_id = session_id_from_request(request)
+        kv_hints = _build_vllm_kv_hints(request)
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
@@ -4142,6 +4180,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     trace_headers=trace_headers,
                     priority=priority,
                     session_id=session_id,
+                    **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                 )
 
                 async for res in gen:
@@ -4246,16 +4285,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug("Prefill Request ID: %s", request_id)
-        try:
-            self._multimodal_request_processor.validate_multimodal_request(request)
-        except ValueError as exc:
-            logger.error("Request %s: %s", request_id, exc)
-            yield {
-                "status": "error",
-                "message": str(exc),
-                "disaggregated_params": None,
-            }
-            return
+        self._multimodal_request_processor.validate_multimodal_request(request)
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
@@ -4308,7 +4338,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         _update_kv_transfer_params(
             sampling_params,
             kv_protocol.prefill_request_kv_transfer_params(),
-            preserve_kv_hint=True,
         )
 
         # Extract LoRA request if present
@@ -4331,6 +4360,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
         session_id = session_id_from_request(request)
+        kv_hints = _build_vllm_kv_hints(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -4345,6 +4375,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         trace_headers=trace_headers,
                         priority=priority,
                         session_id=session_id,
+                        **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,

@@ -12,7 +12,6 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 from __future__ import annotations
 
 import logging
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -35,9 +34,11 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsShmReceiver,
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
+    decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
@@ -462,14 +463,14 @@ class VllmMultimodalRequestProcessor:
         return expanded
 
     @staticmethod
-    def _multimodal_disabled_error() -> ValueError:
-        return ValueError(
+    def _multimodal_disabled_error() -> InvalidArgument:
+        return InvalidArgument(
             "Received multimodal data but multimodal processing is not enabled. "
             "Use --enable-multimodal flag to enable multimodal processing."
         )
 
     def validate_multimodal_request(self, request: dict[str, Any]) -> None:
-        """Enforce the multimodal opt-in on the unmodified inbound request."""
+        """Enforce opt-in and engine item limits before loading any media."""
         extra_args = request.get("extra_args")
         has_transfer = isinstance(extra_args, dict) and any(
             extra_args.get(key) is not None
@@ -481,6 +482,44 @@ class VllmMultimodalRequestProcessor:
             or has_transfer
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
+
+        mm_map = request.get("multi_modal_data")
+        if not mm_map:
+            return
+        vllm_config = getattr(self.engine_client, "vllm_config", None)
+        if vllm_config is None:
+            return
+        mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        mm_processor_kwargs = get_mm_processor_kwargs(request)
+        video_audio_count = (
+            len(mm_map.get(VIDEO_URL_KEY, []))
+            if mm_processor_kwargs
+            and mm_processor_kwargs.get("use_audio_in_video", False)
+            else 0
+        )
+
+        # These are inbound media items, not decoded frames or image crops.
+        for modality, key in (
+            ("image", IMAGE_URL_KEY),
+            ("video", VIDEO_URL_KEY),
+            ("audio", AUDIO_URL_KEY),
+        ):
+            items = mm_map.get(key, [])
+            count = len(items)
+            if modality == "audio":
+                count += video_audio_count
+            limit_modality = _normalize_forwarded_mm_modality(
+                modality, self.use_unified_vision_chunk
+            )
+            limit = mm_config.get_limit_per_prompt(limit_modality)
+            if count > limit:
+                raise InvalidArgument(
+                    f"At most {limit} {modality}(s) may be provided in one prompt. "
+                    "Set `--limit-mm-per-prompt` to increase this limit."
+                )
 
     def initialize_prefill_handoff(self) -> None:
         """Load model policy needed to construct the P/D decode handoff."""
@@ -717,10 +756,10 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
-                # The sender is Dynamo's internal frontend transfer service,
-                # which deliberately serializes vLLM's Python-only kwargs
-                # objects. External request payloads never supply these bytes.
-                item = pickle.loads(payload)
+                # Decode with the typed msgpack decoder. It yields only
+                # MultiModalKwargsItem values and refuses the pickle extension
+                # codes, whatever VLLM_ALLOW_INSECURE_SERIALIZATION says.
+                item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
                         "%s transfer produced %s instead of MultiModalKwargsItem",

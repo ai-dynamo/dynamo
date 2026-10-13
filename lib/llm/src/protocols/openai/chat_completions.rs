@@ -284,6 +284,14 @@ pub struct NvCreateChatCompletionResponse {
     pub nvext: Option<serde_json::Value>,
 }
 
+/// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallCompletion {
+    pub choice_index: u32,
+    pub tool_index: u32,
+    pub complete: bool,
+}
+
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -300,6 +308,9 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_call_completion: Vec<ToolCallCompletion>,
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -313,6 +324,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.tool_call_completion.clear();
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())
@@ -1711,6 +1723,41 @@ mod tests {
 
         validate::validate_tools(&Some(&tools))
             .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_tools_array() {
+        const EMPTY_TOOLS: &str =
+            "tools array cannot be empty; omit the field entirely to disable tool use";
+
+        for tool_choice in [None, Some("required")] {
+            let mut request_json = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": []
+            });
+            if let Some(tool_choice) = tool_choice {
+                request_json["tool_choice"] = tool_choice.into();
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+            let err = ValidateRequest::validate(&request).expect_err("empty tools must fail");
+            assert_eq!(err.to_string(), EMPTY_TOOLS, "tool_choice={tool_choice:?}");
+        }
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": [],
+            "tool_choice": "required"
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request)
+            .expect("empty tools with system-message tools should validate");
     }
 
     #[test]

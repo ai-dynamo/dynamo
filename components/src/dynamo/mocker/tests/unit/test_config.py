@@ -1,28 +1,18 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
-import importlib.util
 import json
 import sys
-from importlib.metadata import PackageNotFoundError, distribution
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from dynamo.llm import EngineType, EntrypointArgs
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker import config as CONFIG
 from dynamo.mocker.args import parse_args
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.mocker.utils import kv_cache
-
-MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
-SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
-assert SPEC is not None
-assert SPEC.loader is not None
-CONFIG = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(CONFIG)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -32,451 +22,175 @@ pytestmark = [
 ]
 
 
-def make_args(**overrides):
-    defaults = {
-        "extra_engine_args": None,
-        "engine_type": "vllm",
-        "num_gpu_blocks": None,
-        "block_size": None,
-        "max_model_len": None,
-        "max_num_seqs": 256,
-        "max_num_batched_tokens": 8192,
-        "enable_prefix_caching": True,
-        "enable_chunked_prefill": True,
-        "preemption_mode": "lifo",
-        "speedup_ratio": 1.0,
-        "decode_speedup_ratio": 1.0,
-        "dp_size": 1,
-        "startup_time": None,
-        "kv_transfer_bandwidth": 64.0,
-        "kv_transfer_timing_mode": "full_prompt",
-        "reasoning": None,
-        "response_replay_trace_path": None,
-        "sglang_schedule_policy": None,
-        "sglang_page_size": None,
-        "sglang_max_prefill_tokens": None,
-        "sglang_chunked_prefill_size": None,
-        "sglang_clip_max_new_tokens": None,
-        "sglang_schedule_conservativeness": None,
-        "sglang_generate": False,
-        "trtllm_capacity_scheduler_policy": None,
-        "ais_perf_model": False,
-        "ais_system": None,
-        "ais_backend": None,
-        "ais_backend_version": None,
-        "ais_tp_size": None,
-        "ais_moe_tp_size": None,
-        "ais_moe_ep_size": None,
-        "ais_attention_dp_size": None,
-        "ais_nextn": None,
-        "ais_nextn_accept_rates": None,
-        "ais_mtp_seed": 42,
-        "gpu_memory_utilization": None,
-        "mem_fraction_static": None,
-        "free_gpu_memory_fraction": None,
-        "model_path": None,
-        "is_prefill_worker": False,
-        "is_decode_worker": False,
-    }
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+def test_removed_engine_classes_are_not_exported():
+    import dynamo._core as core
+    import dynamo.mocker as mocker
+
+    for name in ("MockEngineArgs", "SglangArgs", "TrtllmArgs"):
+        assert not hasattr(core, name)
+        assert not hasattr(mocker, name)
 
 
-def _load_replay_main():
-    try:
-        distribution("aisimulate")
-    except PackageNotFoundError:
-        pytest.skip(
-            "Dynamo replay CLI tests require the optional AISimulate distribution"
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_canonical_cli_config_reaches_runtime_and_replay(backend):
+    from dynamo._core import run_mocker_synthetic_trace_replay
+
+    config = CONFIG.build_mocker_engine_args(
+        parse_args(
+            ["--engine-type", backend, "--max-model-len", "8", "--num-gpu-blocks", "64"]
         )
-    return importlib.import_module("dynamo.replay.config")
-
-
-def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(engine_type="sglang", block_size=None, sglang_page_size=16)
     )
+    config["engine"]["timing_model"] = {
+        "type": "fixed",
+        "prefill_ms": 1.0,
+        "decode_ms": 1.0,
+    }
+    restored = normalize_mocker_config(json.dumps(config))
+    assert restored == config
+    _, runtime = CONFIG.build_runtime_config(restored)
+    assert runtime.context_length == 8
+    assert runtime.total_kv_blocks == 64
+    for isl, output, status in [(3, 5, "completed"), (8, 0, "rejected")]:
+        result = run_mocker_synthetic_trace_replay(
+            isl,
+            10,
+            1,
+            extra_engine_args=restored,
+            replay_concurrency=1,
+            capture_per_request=True,
+        )
+        assert result.per_request[0]["output_length"] == output
+        assert result.per_request[0]["terminal_status"] == status
 
-    block_size, runtime_config = CONFIG.build_runtime_config(engine_args)
 
-    assert block_size == 16
-    assert runtime_config.context_length == 0
-    assert runtime_config.total_kv_blocks == 16384
-    assert runtime_config.max_num_seqs == 256
-    assert runtime_config.max_num_batched_tokens == 8192
-    assert runtime_config.runtime_data["output_replay_consumer"] == "true"
+def test_runtime_overrides_do_not_change_shared_engine_input(monkeypatch):
+    monkeypatch.setenv("DYN_HTTP_RPC_HOST", "127.0.0.1")
+    base = CONFIG.build_mocker_engine_args(
+        parse_args(["--disaggregation-mode", "prefill"])
+    )
+    worker = CONFIG.apply_worker_engine_args_overrides(
+        base, bootstrap_port=9001, kv_bytes_per_token=128, ais_mtp_seed=9
+    )
+    assert base["dynamo"]["bootstrap_port"] is None
+    assert worker["engine"]["aic_mtp_seed"] == 9
+    _, runtime = CONFIG.build_runtime_config(worker)
+    assert runtime.bootstrap_port == 9001
+    assert runtime.bootstrap_host == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "legacy_flags",
+    [
+        ["--sglang-page-size", "32", "--sglang-schedule-policy", "fcfs"],
+        ["--sglang-page-size=32", "--sglang-schedule-policy=fcfs", "--block-size=32"],
+    ],
+)
+def test_legacy_sglang_cli_aliases_warn_and_match_canonical_config(legacy_flags):
+    with pytest.warns(FutureWarning) as warnings:
+        legacy = CONFIG.build_mocker_engine_args(
+            parse_args(["--engine-type", "sglang", *legacy_flags])
+        )
+    canonical = CONFIG.build_mocker_engine_args(
+        parse_args(
+            [
+                "--engine-type",
+                "sglang",
+                "--block-size",
+                "32",
+                "--sglang-schedule-policy",
+                "fifo",
+            ]
+        )
+    )
+    assert legacy == canonical
+    assert len(warnings) == 2
+    for warning in warnings:
+        message = str(warning.message)
+        assert "deprecated" in message
+        assert "Dynamo 1.8.0 (two releases after 1.6.0)" in message
+    assert "use --sglang-schedule-policy fifo" in str(warnings[0].message)
+    assert "use --block-size" in str(warnings[1].message)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "trtllm"])
+def test_legacy_sglang_page_size_does_not_change_other_backends(backend):
+    flags = ["--engine-type", backend, "--block-size", "64"]
+    with pytest.warns(FutureWarning, match="--sglang-page-size is deprecated"):
+        legacy = CONFIG.build_mocker_engine_args(
+            parse_args([*flags, "--sglang-page-size", "16"])
+        )
+    assert legacy == CONFIG.build_mocker_engine_args(parse_args(flags))
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--sglang-page-size", "16", "--block-size", "32"],
+        ["--block-size", "32", "--sglang-page-size", "16"],
+    ],
+)
+def test_legacy_sglang_page_size_rejects_conflicting_block_size(flags, capsys):
+    with pytest.warns(FutureWarning, match="--sglang-page-size is deprecated"):
+        with pytest.raises(SystemExit, match="2"):
+            parse_args(["--engine-type", "sglang", *flags])
+    assert "--sglang-page-size and --block-size must match" in capsys.readouterr().err
+
+
+def test_profile_is_an_explicit_timing_provider(tmp_path):
+    from dynamo._core import run_mocker_synthetic_trace_replay
+
+    path = tmp_path / "profile.npz"
+    np.savez(
+        path,
+        prefill_isl=np.array([1.0, 100.0]),
+        prefill_ttft_ms=np.array([100.0, 100.0]),
+        decode_active_kv_tokens=np.array([1.0, 100.0]),
+        decode_context_length=np.array([1.0, 100.0]),
+        decode_itl=np.array([[200.0, 200.0], [200.0, 200.0]]),
+    )
+    profile = {
+        "type": "external",
+        "provider": "dynamo_profile",
+        "config": {"path": str(path)},
+    }
+    config = normalize_mocker_config({"engine": {"timing_model": profile}})
+    result = run_mocker_synthetic_trace_replay(
+        4, 2, 1, extra_engine_args=config, arrival_interval_ms=10
+    )
+    assert result.summary["mean_ttft_ms"] == 100
+    assert result.summary["mean_tpot_ms"] == 200
+    config["engine"]["timing_model"] = {
+        "type": "fixed",
+        "prefill_ms": 2.0,
+        "decode_ms": 3.0,
+    }
+    result = run_mocker_synthetic_trace_replay(
+        4, 2, 1, extra_engine_args=config, arrival_interval_ms=10
+    )
+    assert result.summary["mean_ttft_ms"] == 2
+    assert result.summary["mean_tpot_ms"] == 3
+    with pytest.raises(ValueError, match="planner_profile_data"):
+        normalize_mocker_config({"dynamo": {"planner_profile_data": str(path)}})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"engine_type": "sglang"},
+        {"engine": {"num_gpu_blocks": "bad"}},
+        {"engine": {"max_model_len": 0}},
+        {"gpu_memory_utilization": 1.1},
+        {"gpu_memory_utilization": float("nan")},
+    ],
+)
+def test_canonical_validation_rejects_bad_input(bad):
+    with pytest.raises(ValueError):
+        normalize_mocker_config(bad)
 
 
 def test_sglang_generate_capability_is_opt_in():
     assert parse_args([]).sglang_generate is False
     assert parse_args(["--sglang-generate"]).sglang_generate is True
-
-
-def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
-    with pytest.raises(Exception, match="block_size and sglang.page_size to match"):
-        CONFIG.build_mocker_engine_args(
-            make_args(engine_type="sglang", block_size=8, sglang_page_size=4)
-        )
-
-
-def test_load_mocker_engine_args_from_json_file_normalizes_page_size(tmp_path):
-    config_path = tmp_path / "engine_args.json"
-    config_path.write_text(
-        '{"engine_type":"sglang","sglang":{"page_size":32},"num_gpu_blocks":1024}'
-    )
-
-    engine_args = CONFIG.load_mocker_engine_args(
-        make_args(extra_engine_args=config_path)
-    )
-
-    assert engine_args.block_size == 32
-    assert engine_args.num_gpu_blocks == 1024
-
-
-def test_build_mocker_engine_args_trtllm_defaults_block_size():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(engine_type="trtllm", block_size=None)
-    )
-
-    # TRT-LLM PyTorch backend default tokens_per_block.
-    assert engine_args.block_size == 32
-
-
-def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            engine_type="trtllm",
-            trtllm_capacity_scheduler_policy="guaranteed_no_evict",
-        )
-    )
-
-    assert engine_args.block_size == 32
-
-
-@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
-def test_build_mocker_engine_args_accepts_mtp(engine_type):
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            engine_type=engine_type,
-            ais_nextn=1,
-        )
-    )
-
-    assert engine_args.ais_nextn == 1
-
-
-def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
-    with pytest.raises(Exception, match="guaranteed_no_evict"):
-        CONFIG.build_mocker_engine_args(
-            make_args(
-                engine_type="trtllm",
-                trtllm_capacity_scheduler_policy="max_utilization",
-            )
-        )
-
-
-def test_load_mocker_engine_args_from_json_file_accepts_trtllm(tmp_path):
-    config_path = tmp_path / "engine_args.json"
-    config_path.write_text(
-        '{"engine_type":"trtllm",'
-        '"trtllm":{"capacity_scheduler_policy":"guaranteed_no_evict"},'
-        '"num_gpu_blocks":1024}'
-    )
-
-    engine_args = CONFIG.load_mocker_engine_args(
-        make_args(extra_engine_args=config_path)
-    )
-
-    assert engine_args.num_gpu_blocks == 1024
-    # block_size omitted from JSON -> normalized to the TRT-LLM default.
-    assert engine_args.block_size == 32
-
-
-def test_worker_overrides_drive_runtime_config_for_prefill_worker(monkeypatch):
-    monkeypatch.setenv("DYN_HTTP_RPC_HOST", "127.0.0.1")
-
-    def unexpected_dns_lookup(_hostname):
-        raise AssertionError("explicit RPC host must bypass hostname lookup")
-
-    monkeypatch.setattr(CONFIG.socket, "gethostbyname", unexpected_dns_lookup)
-    engine_args = CONFIG.build_mocker_engine_args(make_args(is_prefill_worker=True))
-    worker_args = CONFIG.apply_worker_engine_args_overrides(
-        engine_args,
-        bootstrap_port=9001,
-        kv_bytes_per_token=128,
-    )
-
-    block_size, runtime_config = CONFIG.build_runtime_config(worker_args)
-
-    assert block_size == 64
-    assert worker_args.bootstrap_port == 9001
-    assert runtime_config.bootstrap_port == 9001
-    assert runtime_config.bootstrap_host == "127.0.0.1"
-
-
-def test_runtime_config_disables_local_indexer_for_decode_worker():
-    engine_args = CONFIG.build_mocker_engine_args(make_args(is_decode_worker=True))
-
-    _, runtime_config = CONFIG.build_runtime_config(engine_args)
-
-    assert engine_args.enable_local_indexer is True
-    assert runtime_config.enable_local_indexer is False
-
-
-def test_entrypoint_args_accept_typed_mocker_engine_args():
-    engine_args = CONFIG.build_mocker_engine_args(make_args())
-
-    entrypoint_args = EntrypointArgs(
-        engine_type=EngineType.Mocker,
-        mocker_engine_args=engine_args,
-        kv_cache_block_size=engine_args.block_size,
-    )
-
-    assert entrypoint_args is not None
-
-
-def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
-    planner_profile_data = tmp_path / "planner_profile_data.npz"
-    np.savez(
-        planner_profile_data,
-        prefill_isl=np.array([128.0, 256.0]),
-        prefill_ttft_ms=np.array([4.0, 8.0]),
-        decode_active_kv_tokens=np.array([1024.0, 2048.0]),
-        decode_context_length=np.array([128.0, 256.0]),
-        decode_itl=np.array([[1.0, 1.5], [2.0, 2.5]]),
-    )
-
-    args = make_args(
-        engine_type="sglang",
-        num_gpu_blocks=2048,
-        block_size=128,
-        max_num_seqs=64,
-        max_num_batched_tokens=4096,
-        enable_prefix_caching=False,
-        enable_chunked_prefill=False,
-        preemption_mode="fifo",
-        speedup_ratio=2.0,
-        decode_speedup_ratio=3.0,
-        dp_size=4,
-        startup_time=1.5,
-        planner_profile_data=planner_profile_data,
-        is_prefill_worker=True,
-        is_decode_worker=False,
-        kv_bytes_per_token=131072,
-        kv_transfer_bandwidth=123.0,
-        kv_transfer_timing_mode="destination_missing",
-        response_replay_trace_path=None,
-        reasoning=json.dumps(
-            {
-                "start_thinking_token_id": 11,
-                "end_thinking_token_id": 12,
-                "thinking_ratio": 0.25,
-            }
-        ),
-        sglang_schedule_policy="lpm",
-        sglang_page_size=128,
-        sglang_max_prefill_tokens=8192,
-        sglang_chunked_prefill_size=2048,
-        sglang_clip_max_new_tokens=1024,
-        sglang_schedule_conservativeness=0.8,
-        ais_perf_model=True,
-        ais_system="h200_sxm",
-        ais_backend_version="0.5.6.post2",
-        ais_tp_size=8,
-        ais_attention_dp_size=4,
-        model_path="/models/mock",
-        gpu_memory_utilization=None,
-        mem_fraction_static=None,
-    )
-
-    engine_args = CONFIG.build_mocker_engine_args(args)
-    assert engine_args.num_gpu_blocks == 2048
-    assert engine_args.block_size == 128
-    assert engine_args.max_num_seqs == 64
-    assert engine_args.max_num_batched_tokens == 4096
-    assert engine_args.enable_prefix_caching is False
-    assert engine_args.enable_local_indexer is True
-    assert engine_args.dp_size == 4
-    assert engine_args.worker_type == "prefill"
-    assert engine_args.gpu_memory_utilization is None
-    assert engine_args.mem_fraction_static is None
-    assert engine_args.ais_perf_config["backend"] == "sglang"
-    assert engine_args.ais_perf_config["system"] == "h200_sxm"
-    assert engine_args.ais_perf_config["backend_version"] == "0.5.6.post2"
-    assert engine_args.ais_perf_config["tp"] == 8
-    assert engine_args.ais_perf_config["model"] == "/models/mock"
-    assert engine_args.ais_perf_config["moe_tp_size"] is None
-    assert engine_args.ais_perf_config["moe_ep_size"] is None
-    assert engine_args.ais_perf_config["attention_dp"] == 4
-    assert engine_args.bootstrap_port is None
-    assert engine_args.kv_transfer_timing_mode == "destination_missing"
-
-
-def test_ais_backend_override_decouples_from_engine_type():
-    args = make_args(
-        engine_type="vllm",
-        ais_perf_model=True,
-        ais_system="h200_sxm",
-        ais_backend="trtllm",
-        model_path="/models/mock",
-        ais_tp_size=4,
-        num_gpu_blocks=16384,
-    )
-
-    engine_args = CONFIG.build_mocker_engine_args(args)
-
-    assert engine_args.ais_perf_config["backend"] == "trtllm"
-
-
-def test_build_mocker_engine_args_propagates_mtp_configuration():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            ais_perf_model=True,
-            ais_system="h200_sxm",
-            model_path="/models/mock",
-            num_gpu_blocks=128,
-            ais_nextn=3,
-            ais_nextn_accept_rates="1,0.5",
-            ais_mtp_seed=99,
-        )
-    )
-
-    assert engine_args.ais_nextn == 3
-    assert engine_args.ais_nextn_accept_rates == "1,0.5,0"
-    assert engine_args.ais_mtp_seed == 99
-
-
-def test_worker_override_offsets_mtp_seed():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(ais_nextn=1, ais_mtp_seed=2**64 - 1)
-    )
-
-    worker_args = CONFIG.apply_worker_engine_args_overrides(engine_args, ais_mtp_seed=0)
-
-    assert worker_args.ais_mtp_seed == 0
-
-
-def test_mocker_cli_accepts_mtp_configuration():
-    args = parse_args(
-        [
-            "--aic-nextn",
-            "3",
-            "--aic-nextn-accept-rates",
-            "1,0.5",
-            "--aic-mtp-seed",
-            "99",
-        ]
-    )
-
-    assert args.ais_nextn == 3
-    assert args.ais_nextn_accept_rates == "1,0.5"
-    assert args.ais_mtp_seed == 99
-
-
-def test_mocker_cli_maps_native_host_offload_flags():
-    args = parse_args(
-        [
-            "--kv-bytes-per-token",
-            "1024",
-            "--num-host-blocks",
-            "128",
-            "--host-offload-d2h-bandwidth-gbps",
-            "12.5",
-            "--host-offload-h2d-bandwidth-gbps",
-            "0",
-        ]
-    )
-
-    engine_args = CONFIG.build_mocker_engine_args(args)
-
-    # Host blocks fall back to kv_bytes_per_token when the engine is built.
-    assert engine_args.kv_bytes_per_token == 1024
-    assert engine_args.kv_cache_bytes_per_token is None
-    assert engine_args.native_host_offload["num_host_blocks"] == 128
-    assert engine_args.native_host_offload["d2h_bandwidth_gbps"] == 12.5
-    assert engine_args.native_host_offload["h2d_bandwidth_gbps"] == 0.0
-
-
-def test_mocker_cli_accepts_max_model_len():
-    args = parse_args(["--max-model-len", "32768"])
-
-    engine_args = CONFIG.build_mocker_engine_args(args)
-    _, runtime_config = CONFIG.build_runtime_config(engine_args)
-
-    assert engine_args.max_model_len == 32768
-    assert runtime_config.context_length == 32768
-
-
-@pytest.mark.parametrize("value", ["0", "-1"])
-def test_mocker_cli_rejects_non_positive_max_model_len(value):
-    with pytest.raises(SystemExit):
-        parse_args(["--max-model-len", value])
-
-
-def test_build_mocker_engine_args_keeps_max_model_len_explicit_only():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(model_path="/models/mock", num_gpu_blocks=4096)
-    )
-
-    assert engine_args.max_model_len is None
-
-
-def test_build_mocker_engine_args_preserves_explicit_max_model_len():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            model_path="/models/mock",
-            max_model_len=32768,
-            num_gpu_blocks=4096,
-        )
-    )
-
-    assert engine_args.max_model_len == 32768
-
-
-@pytest.mark.planner
-def test_replay_engine_args_keeps_max_model_len_explicit_only():
-    replay_main = _load_replay_main()
-
-    engine_args = replay_main.load_engine_args(
-        json.dumps(
-            {
-                "num_gpu_blocks": 4096,
-            }
-        )
-    )
-
-    assert engine_args.max_model_len is None
-
-
-@pytest.mark.planner
-def test_replay_engine_args_preserves_explicit_max_model_len():
-    replay_main = _load_replay_main()
-
-    engine_args = replay_main.load_engine_args(
-        json.dumps(
-            {
-                "num_gpu_blocks": 4096,
-                "max_model_len": 32768,
-            }
-        )
-    )
-
-    assert engine_args.max_model_len == 32768
-
-
-def test_canonical_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
-    config = {
-        "model": "example/model",
-        "system": "h200_sxm",
-        "backend": "vllm",
-        "worker_type": "aggregated",
-        "attention_dp": 4,
-    }
-    args = MockEngineArgs(ais_perf_config=config, num_gpu_blocks=4096)
-    assert args.dp_size == 4
-    assert args.num_gpu_blocks == 4096
-    with pytest.raises(Exception, match="dp_size|attention_dp"):
-        MockEngineArgs(ais_perf_config=config, dp_size=2, num_gpu_blocks=4096)
 
 
 def test_get_kv_cache_dtype_bytes_supports_int8():
@@ -490,7 +204,7 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     cfg = SimpleNamespace(dtype="bfloat16")
     assert get_kv_cache_dtype_bytes(cfg, "int8") == 1
     assert get_kv_cache_dtype_bytes(cfg, "fp8") == 1
-    assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
+    assert get_kv_cache_dtype_bytes(cfg, "auto") == 2
 
 
 def test_compute_kv_bytes_reads_local_config_json_without_transformers(
@@ -554,19 +268,6 @@ def test_compute_kv_bytes_uses_transformers_text_config_for_hub_ids(monkeypatch)
     )
 
     assert kv_cache.compute_kv_bytes_per_token("org/model") == 256
-
-
-_KV_TEXT_CONFIG = {
-    "num_hidden_layers": 2,
-    "num_key_value_heads": 4,
-    "num_attention_heads": 8,
-    "hidden_size": 64,
-    "torch_dtype": "bfloat16",
-}
-
-
-def _fake_transformers(from_pretrained):
-    return SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
 
 
 def test_compute_kv_bytes_unwraps_nested_thinker_text_config(monkeypatch, tmp_path):
@@ -646,96 +347,6 @@ def test_compute_kv_bytes_propagates_unexpected_errors(monkeypatch):
         kv_cache.compute_kv_bytes_per_token("org/model")
 
 
-def test_build_mocker_engine_args_estimates_canonical_capacity(monkeypatch):
-    calls = []
-
-    def estimate(config, **kwargs):
-        calls.append((config, kwargs))
-        return 46000
-
-    monkeypatch.setattr(CONFIG, "estimate_canonical_num_gpu_blocks", estimate)
-    args = CONFIG.build_mocker_engine_args(
-        make_args(
-            ais_perf_model=True,
-            model_path="/models/mock",
-            ais_tp_size=4,
-            engine_type="sglang",
-            sglang_page_size=128,
-            max_num_batched_tokens=4096,
-            max_num_seqs=64,
-            mem_fraction_static=0.77,
-        )
-    )
-    assert args.num_gpu_blocks == 46000
-    config, limits = calls[0]
-    assert config["backend"] == "sglang"
-    assert config["model"] == "/models/mock"
-    assert config["tp"] == 4
-    assert limits == {
-        "block_size": 128,
-        "max_num_batched_tokens": 4096,
-        "max_num_seqs": 64,
-        "mem_fraction_static": 0.77,
-    }
-
-
-def test_capacity_errors_propagate_and_explicit_blocks_skip_estimation(monkeypatch):
-    def fail(config, **kwargs):
-        raise ValueError("invalid capacity request")
-
-    monkeypatch.setattr(CONFIG, "estimate_canonical_num_gpu_blocks", fail)
-    with pytest.raises(ValueError, match="invalid capacity request"):
-        CONFIG.build_mocker_engine_args(
-            make_args(ais_perf_model=True, model_path="/models/mock")
-        )
-    args = CONFIG.build_mocker_engine_args(
-        make_args(ais_perf_model=True, model_path="/models/mock", num_gpu_blocks=12345)
-    )
-    assert args.num_gpu_blocks == 12345
-
-
-def test_load_mocker_engine_args_estimates_canonical_json_capacity(
-    tmp_path, monkeypatch
-):
-    canonical = {
-        "model": "example/model",
-        "system": "h200_sxm",
-        "backend": "vllm",
-        "worker_type": "aggregated",
-    }
-
-    def estimate(config, **kwargs):
-        assert config == canonical
-        assert kwargs["block_size"] == 64
-        return 47000
-
-    monkeypatch.setattr(CONFIG, "estimate_canonical_num_gpu_blocks", estimate)
-    path = tmp_path / "engine.json"
-    path.write_text(json.dumps({"ais_perf_config": canonical}))
-    args = CONFIG.load_mocker_engine_args(make_args(extra_engine_args=path))
-    assert args.num_gpu_blocks == 47000
-
-
-def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
-    payload = {
-        "engine_type": "vllm",
-        "num_gpu_blocks": 2048,
-        "block_size": 128,
-        "max_num_seqs": None,
-        "max_num_batched_tokens": None,
-        "worker_type": "decode",
-        "has_perf_model": True,
-    }
-
-    engine_args = MockEngineArgs.from_json(json.dumps(payload))
-
-    assert engine_args.num_gpu_blocks == 2048
-    assert engine_args.block_size == 128
-    assert engine_args.max_num_seqs is None
-    assert engine_args.max_num_batched_tokens is None
-    assert engine_args.worker_type == "decode"
-
-
 def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
 
@@ -748,68 +359,67 @@ def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
         parse_args(["--response-plane", "invalid"])
 
 
-def test_canonical_ais_config_preserves_role_controls_and_roots(tmp_path):
-    roots = [tmp_path / "first", tmp_path / "second"]
-    for root in roots:
-        root.mkdir()
-    canonical = {
-        "model": "example/model",
-        "system": "h200_sxm",
-        "backend": "vllm",
-        "worker_type": "prefill",
-        "estimation_mode": "fpm_regression",
-        "systems_paths": [str(root) for root in roots],
-        "estimator_config": {"fpm_regression": {"sampling": {"bins_per_axis": [4, 8]}}},
-    }
-    args = CONFIG.build_mocker_engine_args(
-        make_args(
-            ais_perf_config=canonical,
-            is_prefill_worker=True,
-            num_gpu_blocks=128,
-        )
+_KV_TEXT_CONFIG = {
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 4,
+    "num_attention_heads": 8,
+    "hidden_size": 64,
+    "torch_dtype": "bfloat16",
+}
+
+
+def _fake_transformers(from_pretrained):
+    return SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
+
+
+def test_mocker_cli_maps_native_host_offload_flags():
+    args = parse_args(
+        [
+            "--kv-bytes-per-token",
+            "1024",
+            "--num-host-blocks",
+            "128",
+            "--host-offload-d2h-bandwidth-gbps",
+            "12.5",
+            "--host-offload-h2d-bandwidth-gbps",
+            "0",
+        ]
     )
-    assert args.ais_perf_config["worker_type"] == "prefill"
-    assert args.ais_perf_config["systems_paths"] == canonical["systems_paths"]
-    assert args.ais_perf_config["estimator_config"] == canonical["estimator_config"]
-    assert args.ais_perf_config["backend"] == "vllm"
+
+    engine_args = CONFIG.build_mocker_engine_args(args)["engine"]
+
+    # The CLI resolves shared transfer/cache geometry before upstream validation.
+    assert engine_args["kv_transfer_bytes_per_token"] == 1024
+    assert engine_args["kv_cache_bytes_per_token"] == 1024
+    assert engine_args["native_host_offload"]["num_host_blocks"] == 128
+    assert engine_args["native_host_offload"]["d2h_bandwidth_gbps"] == 12.5
+    assert engine_args["native_host_offload"]["h2d_bandwidth_gbps"] == 0.0
 
 
-def test_canonical_ais_config_rejects_role_and_legacy_conflicts():
-    canonical = {
-        "model": "example/model",
-        "system": "h200_sxm",
-        "backend": "vllm",
-        "worker_type": "decode",
-    }
-    with pytest.raises(ValueError, match="worker role"):
-        CONFIG.build_mocker_engine_args(make_args(ais_perf_config=canonical))
-    with pytest.raises(ValueError, match="cannot be combined"):
-        CONFIG.build_mocker_engine_args(
-            make_args(ais_perf_config=canonical, ais_tp_size=1)
-        )
+@pytest.mark.asyncio
+async def test_native_host_offload_resolves_model_geometry_before_validation(
+    monkeypatch,
+):
+    # The CLI module sets this process default on import; keep it test-scoped.
+    monkeypatch.setenv("DYN_COMPUTE_THREADS", "0")
+    mocker_main = importlib.import_module("dynamo.mocker.main")
+    args = parse_args(["--model-path", "test-model", "--num-host-blocks", "16"])
+    captured = []
 
+    async def prefetch_model(_model):
+        return "/test-model"
 
-def test_ais_sdk_accepts_only_canonical_identity():
-    from dynamo.llm import AisPerfConfig
+    async def launch_workers(_args, config):
+        captured.append(config)
 
-    payload = {
-        "model": "example/model",
-        "system": "h200_sxm",
-        "backend": "vllm",
-        "worker_type": "aggregated",
-        "estimation_mode": "fpm_regression",
-        "estimator_config": {"fpm_regression": {"sampling": {"bins_per_axis": [4, 8]}}},
-    }
-    config = AisPerfConfig(payload)
-    assert config.to_dict()["estimator_config"] == payload["estimator_config"]
-    with pytest.raises(TypeError):
-        AisPerfConfig(payload, aic_tp_size=1)
-    with pytest.raises((TypeError, ValueError)):
-        AisPerfConfig({**payload, "typo": True})
-    args = MockEngineArgs(ais_perf_config=payload, ais_mtp_seed=17)
-    assert args.ais_perf_config["model"] == payload["model"]
-    assert args.ais_mtp_seed == 17
-    with pytest.raises(TypeError):
-        MockEngineArgs(aic_backend="vllm")
-    with pytest.raises(TypeError):
-        MockEngineArgs(ais_backend="vllm")
+    monkeypatch.setattr(mocker_main, "parse_args", lambda: args)
+    monkeypatch.setattr(mocker_main, "prefetch_model", prefetch_model)
+    monkeypatch.setattr(mocker_main, "compute_kv_bytes_per_token", lambda *_: 2048)
+    monkeypatch.setattr(mocker_main, "launch_workers", launch_workers)
+    await mocker_main.worker()
+
+    assert len(captured) == 1
+    engine = captured[0]["engine"]
+    assert engine["kv_cache_bytes_per_token"] == 2048
+    assert engine["kv_transfer_bytes_per_token"] == 2048
+    assert engine["native_host_offload"]["num_host_blocks"] == 16

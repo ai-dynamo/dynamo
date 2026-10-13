@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::ValueEnum;
 use dashmap::DashMap;
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig, WorkerType};
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, RequestOutputBuffering};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_trtllm_sidecar::proto as pb;
@@ -125,13 +125,13 @@ pub struct TrtllmMockerService {
 }
 
 impl TrtllmMockerService {
-    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockerConfig) -> anyhow::Result<Self> {
         // Normalizing first is what applies the TensorRT-LLM rules: block-size
         // floor and default, the max_model_len rejection, and the capacity
         // scheduler policy check.
         let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
-            engine_args.engine_type == EngineType::Trtllm,
+            engine_args.backend == EngineType::Trtllm,
             "Mocker engine_type must be trtllm"
         );
         anyhow::ensure!(engine_args.dp_size == 1, "Mocker dp_size must be 1");
@@ -159,7 +159,9 @@ impl TrtllmMockerService {
             served_model_name: config.model.clone(),
             served_model_aliases: Vec::new(),
             max_context_length: Some(config.context_length),
-            max_output_tokens: Some(request::MAX_NEW_TOKENS),
+            // Preserve the sidecar's default budget when max_tokens is omitted.
+            // Explicit requests may use the larger request::MAX_NEW_TOKENS cap.
+            max_output_tokens: Some(32_768),
             tokenizer_modes: Vec::new(),
             supports_text_input: Some(false),
             supports_token_ids_input: Some(true),
@@ -230,13 +232,13 @@ impl TrtllmMockerService {
                 total_kv_blocks: Some(u64::try_from(engine_args.num_gpu_blocks).map_err(|_| {
                     anyhow::anyhow!("num_gpu_blocks exceeds the Control API range")
                 })?),
-                max_running_requests: engine_args
-                    .max_num_seqs
+                max_running_requests: (engine_args.max_num_seqs != usize::MAX)
+                    .then_some(engine_args.max_num_seqs)
                     .map(u64::try_from)
                     .transpose()
                     .map_err(|_| anyhow::anyhow!("max_num_seqs exceeds the Control API range"))?,
-                max_batched_tokens: engine_args
-                    .max_num_batched_tokens
+                max_batched_tokens: (engine_args.max_num_batched_tokens != usize::MAX)
+                    .then_some(engine_args.max_num_batched_tokens)
                     .map(u64::try_from)
                     .transpose()
                     .map_err(|_| {
