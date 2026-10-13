@@ -232,6 +232,16 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_best_of(&self) -> Option<u8> {
         self.inner.best_of
     }
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        self.inner.logit_bias.as_ref().map(|bias| {
+            bias.iter()
+                .filter_map(|(token, value)| {
+                    Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                })
+                .collect()
+        })
+    }
 }
 
 impl CommonExtProvider for NvCreateCompletionRequest {

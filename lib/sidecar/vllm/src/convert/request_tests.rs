@@ -1128,6 +1128,25 @@ fn unprojected_native_sampling_is_rejected_instead_of_silently_discarded() {
 }
 
 #[test]
+fn logit_bias_is_forwarded_to_decoding_parameters() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions {
+        logit_bias: Some(std::collections::HashMap::from([(18, -100.0), (42, 5.5)])),
+        ..Default::default()
+    };
+    let wire = build_generate_request(
+        request,
+        "logit-bias".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("logit_bias request should convert");
+    let decoding = wire.decoding.expect("decoding parameters");
+    assert_eq!(decoding.logit_bias.len(), 2);
+    assert_eq!(decoding.logit_bias.get(&18), Some(&-100.0));
+    assert_eq!(decoding.logit_bias.get(&42), Some(&5.5));
+}
+
+#[test]
 fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
     let request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
     let wire = build_generate_request(
