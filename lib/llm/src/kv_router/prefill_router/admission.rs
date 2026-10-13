@@ -12,7 +12,10 @@ use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-use super::{PrefillCompletion, PrefillError, PrefillRouter, handoff::PrefillTask};
+use super::{
+    PrefillCompletion, PrefillError, PrefillRouter,
+    handoff::{PrefillTask, keep_engine_data},
+};
 use crate::protocols::common::{
     llm_backend::{FinishReason, LLMEngineOutput},
     timing::RequestTracker,
@@ -56,15 +59,18 @@ impl PrefillRouter {
                     && obj.contains_key("bootstrap_room")
             });
 
+        let mut prefill_output = None;
         let completion = if !is_bootstrap {
             if let Some(ref tracker) = tracker {
                 tracker.record_prefill_complete();
             }
+            keep_engine_data(&first_output, &mut prefill_output);
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
                     let detail = format!("Prefill router returned error in output stream: {error}");
                     return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
+                keep_engine_data(&next, &mut prefill_output);
                 if let Some(output) = next.data.as_ref()
                     && prompt_tokens_details.is_none()
                 {
@@ -78,15 +84,17 @@ impl PrefillRouter {
         } else {
             Some(PrefillTask::spawn(async move {
                 let _task_guard = task_guard;
+                let mut prefill_output = None;
                 while let Some(output) = prefill_response.next().await {
                     PrefillTask::check_output(&output)?;
+                    keep_engine_data(&output, &mut prefill_output);
                 }
                 // Bootstrap details unblock decode, but do not mean prefill is
                 // complete. Record completion only after its stream finishes.
                 if let Some(tracker) = tracker {
                     tracker.record_prefill_complete();
                 }
-                Ok(())
+                Ok(prefill_output)
             }))
         };
 
@@ -144,6 +152,7 @@ impl PrefillRouter {
             },
             worker_link: output.worker_trace_link.clone(),
             completion,
+            prefill_output: prefill_output.map(Box::new),
         })
     }
 
@@ -161,8 +170,12 @@ impl PrefillRouter {
                     completion: Some(task),
                     ..
                 } => task.wait().await,
-                PrefillCompletion::Terminal { output } => PrefillTask::check_output(&output),
-                _ => Ok(()),
+                PrefillCompletion::Handoff { prefill_output, .. } => {
+                    Ok(prefill_output.map(|output| *output))
+                }
+                PrefillCompletion::Terminal { output } => {
+                    PrefillTask::check_output(&output).map(|()| None)
+                }
             }
         })
     }

@@ -45,6 +45,9 @@ from dynamo.sglang.thinking_budget import (
 # This remains as a compatibility fallback for older callers that still encode
 # an unresolved data-parallel rank in-band instead of omitting the field.
 _DP_RANK_UNSET = 2**32 - 1
+# Frontend request annotation asking for prefill's final native response
+# (lib/llm/src/protocols/response_merge.rs PREFILL_OUTPUT_ANNOTATION).
+_PREFILL_OUTPUT_ANNOTATION = "prefill_output"
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -284,14 +287,25 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
-        final_meta_info = await task
-        if final_meta_info is None:
+        final_result = await task
+        if final_result is None:
             return
         # Bootstrap happens before prefill runs, so the cache-hit report for
         # this attempt needs its own trailing chunk.
-        kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
+        engine_data: Dict[str, Any] = {}
+        kv_cache_hit = _kv_cache_hit_engine_data(_result_meta_info(final_result))
         if kv_cache_hit:
-            yield {"token_ids": [], "engine_data": {"kv_cache_hit": kv_cache_hit}}
+            engine_data["kv_cache_hit"] = kv_cache_hit
+        # Only prefill runs the prompt, so prompt-side outputs (input logprobs,
+        # routed experts) exist only in its native response. The frontend
+        # joins them into the decode response when it asks for them.
+        native_response = (final_result.get("engine_data") or {}).get("sglang_response")
+        if native_response is not None and _PREFILL_OUTPUT_ANNOTATION in (
+            inner_request.get("annotations") or []
+        ):
+            engine_data["sglang_response"] = native_response
+        if engine_data:
+            yield {"token_ids": [], "engine_data": engine_data}
 
     async def _consume_results(
         self,
@@ -307,23 +321,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
 
         Returns:
-            The finished result's ``meta_info``, or None when the request was
-            cancelled or never finished.
+            The finished result, or None when the request was cancelled or
+            never finished.
         """
         # Preserve the response ID as a fallback if SGLang replaces the submitted ID.
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        final_meta_info: Optional[Dict[str, Any]] = None
+        final_result: Optional[Dict[str, Any]] = None
         async with self._cancellation_monitor(
             request_id_future, context, submitted_request_id
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(results, cancellation_task):
-                meta_info = res.get("meta_info") or (
-                    res.get("engine_data", {})
-                    .get("sglang_response", {})
-                    .get("meta_info", {})
-                )
+                meta_info = _result_meta_info(res)
                 if meta_info.get("finish_reason"):
-                    final_meta_info = meta_info
+                    final_result = res
                 if not request_id_future.done():
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
@@ -334,4 +344,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 # clean up, then closes a stream that does not terminate.
             if cancellation_task.done():
                 return None
-        return final_meta_info
+        return final_result
+
+
+def _result_meta_info(result: Dict[str, Any]) -> Dict[str, Any]:
+    """``meta_info`` of an SGLang result or of a native Generate chunk."""
+    return result.get("meta_info") or (
+        result.get("engine_data", {}).get("sglang_response", {}).get("meta_info", {})
+    )

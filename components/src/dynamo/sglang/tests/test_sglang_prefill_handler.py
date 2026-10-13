@@ -335,5 +335,68 @@ async def test_prefill_omits_kv_cache_hit_after_cancellation(
     assert "disaggregated_params" in chunks[0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_native_prefill_returns_final_response_for_frontend_join(monkeypatch):
+    native_response = {
+        "output_ids": [7],
+        "meta_info": {
+            "id": "request-id",
+            "finish_reason": {"type": "length"},
+            "prompt_tokens": 3,
+            "cached_tokens": 2,
+            "input_token_logprobs": [[None, 1, None], [-0.5, 2, None]],
+            "routed_experts": "AQID",
+        },
+    }
+    handler = _kv_hit_prefill_handler(monkeypatch, [], cancelled=False)
+    handler._supports_ordered_cancellation = False
+
+    async def native_results():
+        yield {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.build_native_generate_request",
+        lambda payload, **kwargs: SimpleNamespace(sampling_params={}),
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.native_generate_stream",
+        lambda engine, request: native_results(),
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+
+    async def run(annotations):
+        return await _drain(
+            handler.generate(
+                {
+                    "request": {
+                        "token_ids": [1, 2, 3],
+                        "routing": {},
+                        "annotations": annotations,
+                        "extra_args": {"sglang_tito": {"return_logprob": True}},
+                    },
+                    "sampling_params": {},
+                },
+                context,
+            )
+        )
+
+    kv_cache_hit = {"prompt_tokens": 3, "reused_tokens": 2}
+    chunks = await run(["prefill_output"])
+    assert len(chunks) == 2
+    assert "disaggregated_params" in chunks[0]
+    assert chunks[1] == {
+        "token_ids": [],
+        "engine_data": {
+            "kv_cache_hit": kv_cache_hit,
+            "sglang_response": native_response,
+        },
+    }
+    chunks = await run([])
+    assert chunks[1] == {"token_ids": [], "engine_data": {"kv_cache_hit": kv_cache_hit}}
+
+
 async def _drain(stream):
     return [item async for item in stream]

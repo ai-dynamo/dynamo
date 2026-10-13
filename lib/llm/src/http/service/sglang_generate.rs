@@ -5,7 +5,8 @@
 //!
 //! The public body is parsed only far enough to project Dynamo routing controls;
 //! engine-owned fields stay opaque and are forwarded to the SGLang worker.
-//! Only SGLang's incremental SSE mode is currently exposed.
+//! Workers always stream SGLang's incremental output. `stream=true` returns it
+//! as SSE; `stream=false` joins it into one response (see `response_merge`).
 
 use std::sync::Arc;
 
@@ -37,7 +38,9 @@ use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use crate::protocols::sglang::generate::SglangGenerateRequest;
+use crate::protocols::sglang::merge::SglangMerger;
 use crate::protocols::sglang::stream::SglangGenerateStream;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -104,9 +107,29 @@ fn error_response(code: StatusCode, message: String) -> Response {
     (code, Json(generate_error(message))).into_response()
 }
 fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+    let (error_type, message) = classify_error(error);
+    let body = serde_json::to_string(&generate_error(message)).expect("serializable error");
+    (error_type, body)
+}
+
+/// Status for an error that ends a unary request, matching the statuses
+/// `dispatch` returns before the stream opens.
+fn unary_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, StatusCode, String) {
+    let (error_type, message) = classify_error(error);
+    let status = match error_type {
+        _ if super::metrics::request_deadline_exceeded(error) => StatusCode::TOO_MANY_REQUESTS,
+        ErrorType::Cancelled => StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+        ErrorType::Overload | ErrorType::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorType::Validation => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (error_type, status, message)
+}
+
+fn classify_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     // Deadline is checked before overload so a chain carrying both markers keeps
     // the deadline outcome, matching the OpenAI surface.
-    let (error_type, message) = if super::metrics::request_deadline_exceeded(error) {
+    if super::metrics::request_deadline_exceeded(error) {
         (
             ErrorType::Cancelled,
             super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
@@ -124,9 +147,7 @@ fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String
         (ErrorType::Cancelled, SanitizedError::Cancelled.to_string())
     } else {
         (ErrorType::Internal, SanitizedError::Internal.to_string())
-    };
-    let body = serde_json::to_string(&generate_error(message)).expect("serializable error");
-    (error_type, body)
+    }
 }
 
 fn adapt_openai_error(response: super::openai::ErrorResponse) -> Response {
@@ -203,6 +224,11 @@ fn preprocessed_request(
     let routing_priority = request.priority.unwrap_or_default();
     let cache_namespace = request.cache_namespace().map(str::to_owned);
     let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
+    let annotations = SglangMerger::shared()
+        .wants_prefill_output(&worker_envelope)
+        .then(|| PREFILL_OUTPUT_ANNOTATION.to_string())
+        .into_iter()
+        .collect();
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("sglang_tito".to_string(), worker_envelope);
 
@@ -232,6 +258,7 @@ fn preprocessed_request(
             ..Default::default()
         }))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
+        .annotations(annotations)
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -264,13 +291,7 @@ async fn handler(
     if let Err(message) = request.validate() {
         return error_response(StatusCode::BAD_REQUEST, message);
     }
-    if !request.stream {
-        return error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            "non-streaming SGLang generate requests are not implemented; set stream=true"
-                .to_string(),
-        );
-    }
+    let streaming = request.stream;
 
     let models = canonical_generate_models(
         state.manager(),
@@ -335,7 +356,7 @@ async fn handler(
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),
-        request_type: "streaming".to_string(),
+        request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
     let (mut connection_handle, stream_handle) = create_connection_monitor(
         engine_context,
@@ -357,6 +378,7 @@ async fn handler(
             model,
             state.clone(),
             stream_handle,
+            streaming,
         )
         .instrument(dispatch_span),
     )
@@ -380,11 +402,12 @@ async fn dispatch(
     model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
+    streaming: bool,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
         super::metrics::Endpoint::Generate,
-        true,
+        streaming,
         &request_id,
     );
     let request_context = context.context();
@@ -458,7 +481,33 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
-    let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
+    let merger = SglangMerger::shared();
+    if !streaming {
+        let result = run_until_killed(
+            request_context.as_ref(),
+            SglangGenerateStream::fold(stream, merger),
+        )
+        .await;
+        return match result {
+            Some(Ok(response)) if !(request_context.is_killed() || engine_context.is_killed()) => {
+                inflight_guard.mark_ok();
+                Json(response).into_response()
+            }
+            Some(Err(error)) => {
+                let (error_type, status, message) = unary_error(&error);
+                if error_type == ErrorType::Internal {
+                    tracing::error!(%request_id, %error, "SGLang unary generate failed");
+                }
+                inflight_guard.mark_error(error_type);
+                error_response(status, message)
+            }
+            _ => {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                cancelled_response()
+            }
+        };
+    }
+    let stream = SglangGenerateStream::from_annotated_stream(stream, merger).map(|result| {
         result
             .map(|value| Event::default().data(value.to_string()))
             .map_err(axum::Error::new)
@@ -483,6 +532,7 @@ mod tests {
 
     use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
+    use crate::protocols::common::llm_backend::LLMEngineOutput;
 
     #[test]
     fn cache_salt_matches_routing_and_native_payload() {
@@ -522,6 +572,7 @@ mod tests {
             "test-model".to_string(),
             state.clone(),
             ConnectionHandle::create_disabled(tx),
+            true,
         )
         .await;
 
@@ -708,6 +759,7 @@ mod tests {
             "test-model".to_string(),
             state.clone(),
             stream_handle,
+            true,
         )
         .await;
         connection_handle.disarm();
@@ -728,5 +780,151 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn prompt_side_flags_request_prefill_output() {
+        for (body, expected) in [
+            (serde_json::json!({"input_ids": [1]}), false),
+            (
+                serde_json::json!({"input_ids": [1], "return_logprob": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"input_ids": [1], "return_routed_experts": true}),
+                true,
+            ),
+        ] {
+            let request: SglangGenerateRequest = serde_json::from_value(body).unwrap();
+            let request = preprocessed_request(request, "test-model", None, "request-id").unwrap();
+            assert_eq!(request.has_annotation(PREFILL_OUTPUT_ANNOTATION), expected);
+        }
+    }
+
+    /// Replays a fixed worker stream.
+    struct ReplayEngine(Vec<crate::protocols::Annotated<LLMEngineOutput>>);
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for ReplayEngine
+    {
+        async fn generate(
+            &self,
+            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            Ok(dynamo_runtime::engine::ResponseStream::new(
+                Box::pin(futures::stream::iter(self.0.clone())),
+                request.context(),
+            ))
+        }
+    }
+
+    fn native(response: serde_json::Value) -> crate::protocols::Annotated<LLMEngineOutput> {
+        crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({ "sglang_response": response })),
+            ..Default::default()
+        })
+    }
+
+    async fn unary_dispatch(
+        outputs: Vec<crate::protocols::Annotated<LLMEngineOutput>>,
+    ) -> (StatusCode, serde_json::Value, Arc<service_v2::State>) {
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(ReplayEngine(outputs)),
+            dispatch_test_context(),
+            "req-unary".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            ConnectionHandle::create_disabled(tx),
+            false,
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap(), state)
+    }
+
+    #[tokio::test]
+    async fn unary_dispatch_returns_one_joined_response() {
+        let prefill = crate::protocols::Annotated::from_annotation(
+            PREFILL_OUTPUT_ANNOTATION,
+            &serde_json::json!({"sglang_response": {"meta_info": {
+                "input_token_logprobs": [[null, 1, null]],
+            }}}),
+        )
+        .unwrap();
+        let (status, body, state) = unary_dispatch(vec![
+            prefill,
+            native(
+                serde_json::json!({"text": "a", "output_ids": [5], "meta_info": {
+                    "completion_tokens": 1, "finish_reason": null, "input_token_logprobs": [],
+                }}),
+            ),
+            native(
+                serde_json::json!({"text": "b", "output_ids": [6], "meta_info": {
+                    "completion_tokens": 2, "finish_reason": {"type": "stop"},
+                    "input_token_logprobs": [],
+                }}),
+            ),
+        ])
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({"text": "ab", "output_ids": [5, 6], "meta_info": {
+                "completion_tokens": 2, "finish_reason": {"type": "stop"},
+                "input_token_logprobs": [[null, 1, null]],
+            }})
+        );
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                state.manager().metric_model_for("test-model"),
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn unary_dispatch_maps_stream_errors_to_status() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+        let invalid = DynamoError::builder()
+            .error_type(DynamoErrorType::InvalidArgument)
+            .message("bad sampling params")
+            .build();
+        let (status, body, _) = unary_dispatch(vec![
+            native(serde_json::json!({"output_ids": [5], "meta_info": {"completion_tokens": 1}})),
+            crate::protocols::Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(invalid),
+            },
+        ])
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], "bad sampling params");
+
+        let (status, _, _) = unary_dispatch(Vec::new()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
