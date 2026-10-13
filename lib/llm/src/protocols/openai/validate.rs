@@ -1088,6 +1088,8 @@ mod tests {
 
     use super::*;
 
+    /// Echoing client-controlled keys can duplicate a whole request body while
+    /// building HTTP errors, so oversized keys must also yield a fixed diagnostic.
     #[test]
     fn test_validate_logit_bias_keys() {
         let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
