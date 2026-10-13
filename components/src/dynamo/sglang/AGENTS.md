@@ -50,8 +50,9 @@ engine. If SGLang exposes `Engine.attach_tokenizer_worker`, children use it inst
 facade.
 
 Configuration (`effective_gateway_workers`, `validate_gateway_mode`, applied in `main.py`
-before snapshot preparation and runtime creation): `--gateway-workers N` sets
-`tokenizer_worker_num` to N; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
+before snapshot preparation and runtime creation): `--gateway-workers N` sets the raw
+`tokenizer_worker_num` to N in `args.py` before `ServerArgs.from_cli_args`, because SGLang's
+`PortArgs.init_new` reads the raw field; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
 above 1 that differs from `--gateway-workers` is an error. Gateway mode is rejected for the direct-engine workers
 (embedding, rerank, multimodal, diffusion), with `--enable-lora` (dynamic LoRA state would
 live in one child), with `--enable-forward-pass-metrics` (the schedulers stamp FPM with the
