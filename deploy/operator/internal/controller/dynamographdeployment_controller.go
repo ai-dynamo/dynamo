@@ -345,12 +345,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	if poolMappingErr == nil {
 		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
-			predicate.Funcs{
-				CreateFunc:  func(event.CreateEvent) bool { return false },
-				DeleteFunc:  func(event.DeleteEvent) bool { return true },
-				UpdateFunc:  func(event.UpdateEvent) bool { return true },
-				GenericFunc: func(event.GenericEvent) bool { return false },
-			},
 		))
 	}
 
