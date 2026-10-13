@@ -2192,12 +2192,12 @@ class FrontendResponse:
 
     def __init__(self, status_code: int, body: object) -> None: ...
 
-async def run_input(
+def run_input(
     distributed_runtime: DistributedRuntime,
     input: str,
     engine_config: EngineConfig,
     frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
-) -> None:
+) -> asyncio.Future[None]:
     """Start an engine, connect it to an input, and run until stopped.
 
     ``frontend_route_extensions`` supplies additional HTTP routes to the
