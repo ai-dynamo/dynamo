@@ -32,3 +32,13 @@
     periodSeconds: 10
     timeoutSeconds: 10
     failureThreshold: 12
+# Keep the worker discoverable while cold compilation delays health checks.
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/readinessProbe
+  value:
+    httpGet:
+      path: /health
+      port: system
+    periodSeconds: 10
+    timeoutSeconds: 4
+    failureThreshold: 18

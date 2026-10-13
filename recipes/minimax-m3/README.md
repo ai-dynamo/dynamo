@@ -114,16 +114,18 @@ Use `LoadRestrictionsNone` only with reviewed paths. Inspect the rendered
 ConfigMap, ComputeDomain, and DynamoGraphDeployment before applying them.
 Keep filled cluster values and rendered manifests outside the repository.
 
-### Aggregated Worker Liveness
+### Aggregated Worker Health Probes
 
 For `agg-gb200-agentic`, select the optional
 [worker-liveness Component](vllm/agg-gb200-agentic/kustomize/components/worker-liveness/kustomization.yaml)
 to allow cold FMHA kernel compilation to finish before a liveness restart.
 It sets `/live` on port `9090` with a 10-second interval, a 10-second timeout,
-and 12 consecutive failures before restarting. Startup and readiness probes
-remain at the operator defaults. With one worker, readiness loss during
-compilation can still temporarily remove the model from discovery and cause
-HTTP 404 responses until readiness recovers.
+and 12 consecutive failures before restarting. It also sets readiness on
+`/health` with a 10-second interval, a 4-second timeout, and 18 consecutive
+failures before marking the worker unready. This allows brief health-check
+failures during compilation without removing the worker from discovery.
+A genuinely unready worker also remains eligible for traffic longer.
+The startup probe remains at the operator default.
 
 Validate the private cluster composition first using the commands above.
 The cluster validator accepts only cluster binding Components, so select
