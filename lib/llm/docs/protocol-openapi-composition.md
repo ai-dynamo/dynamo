@@ -19,8 +19,15 @@ The schema-only fork is no longer needed. The schema exports originate in
 [frontend-crates #338](https://github.com/ai-dynamo/frontend-crates/pull/338).
 
 The dependency exports owned schemas and explicit `x-dynamo-schema-import`
-slots for unannotated async-openai types. A slot is not a complete contract.
+slots because the pinned async-openai 0.42.1 types lack the schema annotations
+needed to compile them into the native export. A slot is not a complete contract.
 The composition stage must resolve every in-scope slot or fail visibly.
+
+Async-openai 0.42.2 includes the annotations, but frontend-crates must enable
+and compile those schemas instead of selecting placeholder types. Track that
+integration in [frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
+After native export covers the supported upstream surface, remove the corresponding
+import mappings; when no in-scope slots remain, remove the composition stage.
 
 Use the OpenAI YAML from async-openai's published 0.42.1 source revision
 `d453592328fdbb3f59c1ea74f8e6cdf7f9140efb`:

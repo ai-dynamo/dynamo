@@ -41,11 +41,18 @@ Use `generate-frontend-openapi` as the default Dynamo source. It builds the fron
 without a listener and writes `docs/frontends/openapi.json`; no model, GPU, or deployment is
 required.
 
-The raw export contains explicit `x-dynamo-schema-import` slots for some upstream types.
-Assessment resolves them from a checksum-pinned OpenAI document and applies guarded
-corrections reviewed against Dynamo's Rust types. The
+The raw export contains explicit `x-dynamo-schema-import` slots because the pinned
+`async-openai` 0.42.1 types lack the schema annotations needed to compile them into the
+native export. Assessment temporarily resolves those slots from a checksum-pinned OpenAI
+document and applies guarded corrections reviewed against Dynamo's Rust types. The
 [composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/docs/protocol-openapi-composition.md)
 describe this dependency boundary and its implementation guards.
+
+`async-openai` 0.42.2 includes the annotations, but frontend-crates must enable and compile
+those schemas instead of selecting placeholder types. Track that integration in
+[frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
+After the native export covers the supported upstream surface, remove the corresponding
+import mappings; when no in-scope slots remain, remove the composition stage.
 
 Retain:
 
