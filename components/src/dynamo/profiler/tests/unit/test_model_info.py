@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from huggingface_hub import ModelInfo as HubModelInfo
+from requests import exceptions as request_exceptions
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -171,6 +172,92 @@ def test_hub_weight_size_falls_back_when_index_is_unavailable(
     monkeypatch.setattr(
         "dynamo.profiler.utils.model_info.hf_hub_download",
         lambda **kwargs: index_path,
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 4
+
+
+@pytest.mark.parametrize(
+    "indexed, shard_metadata, has_estimate",
+    [
+        (True, "missing-size", True),
+        (True, "missing-shard", True),
+        (True, "missing-size", False),
+        (True, "missing-shard", False),
+        (False, "missing-size", True),
+        (False, "complete", True),
+    ],
+)
+def test_hub_weight_size_requires_complete_checkpoint_sizes(
+    monkeypatch, tmp_path, indexed, shard_metadata, has_estimate
+) -> None:
+    filenames = [
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    ]
+    siblings = [{"rfilename": filenames[0], "size": 1024**2}]
+    if shard_metadata != "missing-shard":
+        sibling = {"rfilename": filenames[1]}
+        if shard_metadata == "complete":
+            sibling["size"] = 1024**2
+        siblings.append(sibling)
+    if indexed:
+        siblings.append({"rfilename": "model.safetensors.index.json"})
+        index_path = tmp_path / "model.safetensors.index.json"
+        index_path.write_text(
+            json.dumps({"weight_map": {"layer0": filenames[0], "layer1": filenames[1]}})
+        )
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.model_info.hf_hub_download",
+            lambda **kwargs: index_path,
+        )
+    info = HubModelInfo(
+        id="test/model",
+        sha="test-revision",
+        siblings=siblings,
+        safetensors=(
+            {"parameters": {"BF16": 2 * 1024**2}, "total": 2 * 1024**2}
+            if has_estimate
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    expected = 2 if shard_metadata == "complete" else 4 if has_estimate else 0
+    assert get_model_weight_size_from_hub("test/model") == expected
+
+
+@pytest.mark.parametrize(
+    "error_name",
+    ["ConnectionError", "Timeout", "SSLError", "ProxyError", "LocalEntryNotFoundError"],
+)
+def test_hub_weight_size_falls_back_when_index_download_fails(
+    monkeypatch, error_name
+) -> None:
+    if error_name == "LocalEntryNotFoundError":
+        # Marker collection stubs Hub's top-level module without its errors module.
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        error_type = LocalEntryNotFoundError
+    else:
+        error_type = getattr(request_exceptions, error_name)
+    info = HubModelInfo(
+        id="test/model",
+        sha="test-revision",
+        siblings=[{"rfilename": "model.safetensors.index.json"}],
+        safetensors={"parameters": {"BF16": 2 * 1024**2}, "total": 2 * 1024**2},
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    def download_index(**kwargs):
+        raise error_type("index unavailable")
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.hf_hub_download", download_index
     )
 
     assert get_model_weight_size_from_hub("test/model") == 4

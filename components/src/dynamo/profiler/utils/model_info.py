@@ -10,7 +10,6 @@ from typing import Optional, Union
 
 from huggingface_hub import ModelInfo as HubModelInfo
 from huggingface_hub import hf_hub_download, model_info
-from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
 from transformers import AutoConfig
 
@@ -116,7 +115,7 @@ def _get_hub_checkpoint_filenames(
                         isinstance(name, str) for name in weight_map.values()
                     ):
                         return set()
-                except (HfHubHTTPError, OSError, ValueError, KeyError, TypeError):
+                except (OSError, ValueError, KeyError, TypeError):
                     # An unavailable index must not make unrelated files authoritative.
                     return set()
                 checkpoints.update(
@@ -159,13 +158,15 @@ def get_model_weight_size_from_hub(
         info = model_info(model_name, token=token, files_metadata=True)
 
         checkpoint_filenames = _get_hub_checkpoint_filenames(model_name, info, token)
-        total_size_bytes = sum(
-            sibling.size
-            for sibling in info.siblings or []
-            if sibling.rfilename in checkpoint_filenames and sibling.size is not None
-        )
+        sizes = {sibling.rfilename: sibling.size for sibling in info.siblings or []}
+        total_size_bytes = 0
+        if checkpoint_filenames and all(
+            sizes.get(name) is not None for name in checkpoint_filenames
+        ):
+            total_size_bytes = sum(sizes[name] for name in checkpoint_filenames)
 
-        # If no file sizes were available, try to estimate from safetensors metadata
+        # Incomplete checkpoint sizes must not be mistaken for the full model.
+        # Fall back to an estimate from safetensors metadata when needed.
         if total_size_bytes == 0 and info.safetensors is not None:
             # SafeTensors info gives parameter counts per dtype
             for dtype, param_count in info.safetensors.parameters.items():
