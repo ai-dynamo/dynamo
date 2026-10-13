@@ -16,7 +16,7 @@ from yarl import URL
 
 opendal = pytest.importorskip("opendal")
 
-from dynamo.artifacts.storage import (
+from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guard
     ArtifactStorageError,
     ManagedProfile,
     ManagedStoreTarget,
