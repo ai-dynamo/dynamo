@@ -171,10 +171,19 @@ def _tag_xfail_for_datadog(item) -> None:
     it has to be applied at collection — tagging from a report hook is too
     late.
 
-    No-ops when ddtrace is absent: the marker is inert without the plugin.
+    No-ops when ddtrace is absent: ``dd_tags`` is only registered by its
+    plugin, so applying it without would fail collection as an unknown marker.
     """
     marker = item.get_closest_marker("xfail")
-    if marker is None:
+    if marker is None or not item.config.pluginmanager.hasplugin("ddtrace"):
+        return
+    # Conditions are positional args or ``condition=``; no condition means
+    # unconditional. When every condition is falsy pytest runs the test as a
+    # normal one, so tagging it would make a plain pass look like an xpass.
+    conditions = marker.args or (
+        (marker.kwargs["condition"],) if "condition" in marker.kwargs else ()
+    )
+    if conditions and not any(conditions):
         return
     item.add_marker(
         pytest.mark.dd_tags(
@@ -183,7 +192,11 @@ def _tag_xfail_for_datadog(item) -> None:
                 # A strict xfail that passes is reported as a failure, so the
                 # two cannot be collapsed downstream.
                 "test.xfail_strict": str(
-                    bool(marker.kwargs.get("strict", False))
+                    bool(
+                        marker.kwargs.get(
+                            "strict", item.config.getini("xfail_strict")
+                        )
+                    )
                 ).lower(),
             }
         )

@@ -297,10 +297,6 @@ jobs:
           lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
           echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
-          # Agentless upload requires DD_API_KEY.
-          if [ -z "${DD_API_KEY:-}" ]; then
-            echo "::warning title=Datadog::DD_API_KEY is empty; test sessions will not upload."
-          fi
 
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
