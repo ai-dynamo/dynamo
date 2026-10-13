@@ -18,8 +18,8 @@ import requests
 
 from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.http_checks import check_health_ready as check_health_ready
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_port, deallocate_port
-from tests.utils.test_output import resolve_test_output_path
 
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
@@ -698,6 +698,7 @@ class ManagedProcess:
             time.sleep(sleep)
             elapsed = time.time() - start_time
         self._logger.error("FAILED: Check Port: %s", port)
+        self._log_tail_on_error()
         raise RuntimeError("FAILED: Check Port: %s" % port)
 
     def _check_urls(self, timeout):
@@ -784,6 +785,7 @@ class ManagedProcess:
             attempt,
             timeout,
         )
+        self._log_tail_on_error(lines=100)
         raise RuntimeError(
             "TIMEOUT: Check URL: %s failed after %.1fs (timeout=%.1fs)"
             % (url, elapsed, timeout)
@@ -851,6 +853,7 @@ class ManagedProcess:
             attempt,
             elapsed,
         )
+        self._log_tail_on_error(lines=100)
         raise RuntimeError("FAILED: Custom health check")
 
     def _terminate_all_matching_process_names(self):

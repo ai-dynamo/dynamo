@@ -67,6 +67,22 @@ class DynamoSGLangArgGroup(ArgGroup):
             "the same SGLang-native pre/post processing with KV router support.",
         )
 
+        add_argument(
+            g,
+            flag_name="--gateway-workers",
+            env_var="DYN_SGL_GATEWAY_WORKERS",
+            default=None,
+            arg_type=int,
+            help="Run N gateway processes in front of this engine, each a Dynamo "
+            "endpoint instance with its own SGLang request gateway (SGLang calls "
+            "that process a tokenizer worker; it also handles request intake and "
+            "output relay, which is the work being spread). Sets SGLang's "
+            "--tokenizer-worker-num to N; a --tokenizer-worker-num above 1 that "
+            "differs from N is an error, and --tokenizer-worker-num N alone runs N "
+            "gateways as well. Decode and prefill LLM workers only; not with "
+            "--enable-lora, --enable-forward-pass-metrics or snapshot mode. Child 0 "
+            "takes DYN_SYSTEM_PORT, the other children bind a random system port.",
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--enable-multimodal",
@@ -171,6 +187,18 @@ class DynamoSGLangArgGroup(ArgGroup):
         # DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-after-init",
+            env_var="DYN_SGL_FREEZE_GC_AFTER_INIT",
+            default=False,
+            help=(
+                "Collect and freeze tracked objects in the decode/aggregated worker "
+                "before serving requests to reduce full-GC streaming stalls. "
+                "Opt in only after validating memory usage for the workload."
+            ),
+        )
+
         add_argument(
             g,
             flag_name="--sglang-trace-level",
@@ -187,6 +215,7 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
+    gateway_workers: Optional[int] = None
     # Internal roles derived from the canonical multimodal arguments in args.py.
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
@@ -204,6 +233,7 @@ class DynamoSGLangConfig(ConfigBase):
     enable_rl: bool
     engine_routes: list[str]
     frontend_decoding: bool = False
+    freeze_gc_after_init: bool = False
     sglang_trace_level: int
 
     # Extra served names beyond the primary, parsed from --served-model-name.
@@ -234,6 +264,8 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        if self.gateway_workers is not None and self.gateway_workers < 1:
+            raise ValueError("--gateway-workers must be a positive integer")
         self.validate_multimodal_topology()
 
         self.validate_dedicated_mm_encoder()

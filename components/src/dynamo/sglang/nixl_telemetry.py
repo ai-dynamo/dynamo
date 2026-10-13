@@ -29,6 +29,7 @@ from dynamo.common.utils.nixl_telemetry import (
     derive_nixl_prometheus_port,
     nixl_prometheus_base_port,
 )
+from dynamo.sglang.capacity import sglang_dp_layout
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,9 @@ def _node_local_rank_count(server_args: Any, *, dp_rank: int | None) -> int:
     """
     pp_size_per_node, tp_size_per_node = _node_local_launch_shape(server_args)
     ranks = pp_size_per_node * tp_size_per_node
-    if dp_rank is not None and not getattr(server_args, "enable_dp_attention", False):
-        ranks *= max(getattr(server_args, "dp_size", 1) or 1, 1)
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
+    if dp_rank is not None and not enable_dp_attention:
+        ranks *= dp_size
 
     return ranks
 
@@ -94,14 +96,18 @@ def _node_local_rank(
     rank = (pp_rank % pp_size_per_node) * tp_size_per_node + (
         tp_rank % tp_size_per_node
     )
-    if dp_rank is not None and not getattr(server_args, "enable_dp_attention", False):
+    if dp_rank is not None and not sglang_dp_layout(server_args)[1]:
         rank += dp_rank * pp_size_per_node * tp_size_per_node
 
     return rank
 
 
 def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None:
-    """Rewrite this process's exporter port before the NIXL agent is built."""
+    """Rewrite this process's exporter port before the NIXL agent is built.
+
+    Raises ``ValueError`` when the NIXL environment is invalid or the rank's
+    fixed port cannot fit in Dynamo's declared scrape range.
+    """
     base_port = nixl_prometheus_base_port()
     if base_port is None:
         return
@@ -163,8 +169,10 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     """Point SGLang's scheduler launches at the wrapper, when telemetry is on.
 
     A no-op when NIXL Prometheus telemetry is disabled, so a deployment that
-    does not scrape NIXL keeps SGLang's own entry point. Raises ``RuntimeError``
-    when telemetry is on but this SGLang offers no override point.
+    does not scrape NIXL keeps SGLang's own entry point. Raises ``ValueError``
+    for invalid NIXL environment values or an unusable fixed port, and
+    ``RuntimeError`` when telemetry is on but this SGLang offers no override
+    point.
     """
     if nixl_prometheus_base_port() is None:
         return

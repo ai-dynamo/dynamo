@@ -157,7 +157,8 @@ impl AnthropicRequestValidationError {
     fn status(&self) -> StatusCode {
         match self {
             Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
-            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            // Unsupported server tools cannot succeed on retry; 5xx makes clients retry.
+            Self::NotImplemented(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedContent(_) => StatusCode::BAD_REQUEST,
         }
     }
@@ -165,7 +166,7 @@ impl AnthropicRequestValidationError {
     fn anthropic_error_type(&self) -> &'static str {
         match self {
             Self::InvalidArgument(_) => "invalid_request_error",
-            Self::NotImplemented(_) => "api_error",
+            Self::NotImplemented(_) => "invalid_request_error",
             Self::UnsupportedContent(_) => "invalid_request_error",
         }
     }
@@ -226,7 +227,7 @@ impl AnthropicHandlerError {
                 (ErrorClass::InvalidRequest, ErrorType::NotImplemented)
             }
             AnthropicRequestValidationError::NotImplemented(_) => {
-                (ErrorClass::NotImplemented, ErrorType::NotImplemented)
+                (ErrorClass::InvalidRequest, ErrorType::NotImplemented)
             }
         };
         Self::new(
@@ -610,7 +611,7 @@ async fn anthropic_messages(
             .or_insert(serde_json::Value::Bool(false));
     }
 
-    let request = context.map(|_req| chat_request);
+    let mut request = context.map(|_req| chat_request);
 
     // Anthropic requests are converted to the same chat request contract. Keep
     // parser activation identical to the OpenAI Chat Completions and Responses
@@ -630,6 +631,10 @@ async fn anthropic_messages(
     let parsing_options = parsing_options
         .with_parallel_tool_calls(request.inner.parallel_tool_calls)
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+    request.insert(
+        crate::preprocessor::REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
+        parsing_options.clone(),
+    );
 
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
@@ -645,6 +650,19 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
+        // (`rate_limit_error`) with a `Cancelled` metric label and no
+        // rejection accounting.
+        if let Some(error) = super::metrics::queue_deadline_error(e.as_ref()) {
+            super::metrics::record_failure(error);
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_error_unrecorded(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()

@@ -22,47 +22,30 @@ pub struct GrpcChannelPool {
 }
 
 impl GrpcChannelPool {
+    /// `bootstrap`: true for synchronous constructors that run before logging
+    /// initialization and need retry warnings on stderr. Deferred launcher
+    /// discovery and `LLMEngine::start` pass false to use tracing.
     pub async fn connect(
         peer: &str,
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
+        bootstrap: bool,
     ) -> Result<Self, DynamoError> {
         let endpoint_label = endpoint.to_string();
         let tonic_endpoint = Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
             invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
         })?;
-        let deadline = checked_instant_add(
-            Instant::now(),
-            transport.startup_deadline,
-            "gRPC startup deadline",
-        )?;
-        let first = connect_until_ready(
+        let channels = connect_pool_with(
             peer,
-            tonic_endpoint.clone(),
-            endpoint_label.clone(),
-            1,
+            &endpoint_label,
             transport,
-            deadline,
+            bootstrap,
+            |_, attempt_timeout| {
+                let endpoint = tonic_endpoint.clone().connect_timeout(attempt_timeout);
+                async move { endpoint.connect().await }
+            },
         )
         .await?;
-        let mut channels = vec![first];
-        let remaining = try_join_all((1..transport.connections.get()).map(|index| {
-            let endpoint = tonic_endpoint.clone();
-            let endpoint_label = endpoint_label.clone();
-            async move {
-                connect_until_ready(
-                    peer,
-                    endpoint,
-                    endpoint_label,
-                    index + 1,
-                    transport,
-                    deadline,
-                )
-                .await
-            }
-        }))
-        .await?;
-        channels.extend(remaining);
         Ok(Self {
             channels,
             next: AtomicUsize::new(0),
@@ -83,14 +66,63 @@ impl GrpcChannelPool {
     }
 }
 
-async fn connect_until_ready(
+pub(crate) async fn connect_pool_with<C, F, E>(
     peer: &str,
-    endpoint: Endpoint,
-    endpoint_label: String,
+    endpoint: &str,
+    transport: GrpcTransportConfig,
+    bootstrap: bool,
+    connect: impl Fn(usize, Duration) -> F,
+) -> Result<Vec<C>, DynamoError>
+where
+    F: std::future::Future<Output = Result<C, E>>,
+    E: std::error::Error + 'static,
+{
+    let deadline = checked_instant_add(
+        Instant::now(),
+        transport.startup_deadline,
+        "gRPC startup deadline",
+    )?;
+    let first = connect_until_ready(
+        peer,
+        endpoint,
+        1,
+        transport,
+        deadline,
+        bootstrap,
+        |timeout| connect(1, timeout),
+    )
+    .await?;
+    let mut channels = vec![first];
+    let remaining = try_join_all((2..=transport.connections.get()).map(|slot| {
+        let connect = &connect;
+        connect_until_ready(
+            peer,
+            endpoint,
+            slot,
+            transport,
+            deadline,
+            bootstrap,
+            move |timeout| connect(slot, timeout),
+        )
+    }))
+    .await?;
+    channels.extend(remaining);
+    Ok(channels)
+}
+
+async fn connect_until_ready<C, F, E>(
+    peer: &str,
+    endpoint_label: &str,
     pool_slot: usize,
     transport: GrpcTransportConfig,
     deadline: Instant,
-) -> Result<Channel, DynamoError> {
+    bootstrap: bool,
+    connect: impl Fn(Duration) -> F,
+) -> Result<C, DynamoError>
+where
+    F: std::future::Future<Output = Result<C, E>>,
+    E: std::error::Error + 'static,
+{
     let started = Instant::now();
     let mut attempt = 0_u64;
     let mut last_error = None;
@@ -102,7 +134,7 @@ async fn connect_until_ready(
         if remaining.is_zero() {
             return Err(startup_timeout(
                 peer,
-                &endpoint_label,
+                endpoint_label,
                 pool_slot,
                 attempt,
                 started.elapsed(),
@@ -112,10 +144,12 @@ async fn connect_until_ready(
         }
 
         attempt += 1;
-        let attempt_endpoint = endpoint
-            .clone()
-            .connect_timeout(transport.connect_attempt_timeout.min(remaining));
-        match timeout_at(deadline, attempt_endpoint.connect()).await {
+        match timeout_at(
+            deadline,
+            connect(transport.connect_attempt_timeout.min(remaining)),
+        )
+        .await
+        {
             Ok(Ok(channel)) => return Ok(channel),
             Ok(Err(error)) => {
                 let detailed_error = format_error_chain(&error);
@@ -124,18 +158,29 @@ async fn connect_until_ready(
                 let log_interval_elapsed = last_logged_at
                     .is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL);
                 if error_changed || log_interval_elapsed {
-                    tracing::debug!(
-                        peer,
-                        endpoint = %endpoint_label,
-                        pool_slot,
-                        attempt,
-                        elapsed = ?started.elapsed(),
-                        remaining = ?deadline.saturating_duration_since(now),
-                        retry_interval = ?transport.retry_interval,
-                        suppressed_attempts,
-                        error = ?error,
-                        "sidecar gRPC connection attempt failed"
-                    );
+                    // Synchronous constructors may precede logging setup;
+                    // deferred launcher discovery already has a subscriber.
+                    if bootstrap {
+                        eprintln!(
+                            "{peer} gRPC connection attempt failed; retrying (endpoint={endpoint_label}, pool_slot={pool_slot}, attempt={attempt}, elapsed={:?}, remaining={:?}, retry_interval={:?}, suppressed_attempts={suppressed_attempts}, error={detailed_error})",
+                            started.elapsed(),
+                            deadline.saturating_duration_since(now),
+                            transport.retry_interval,
+                        );
+                    } else {
+                        tracing::warn!(
+                            peer,
+                            endpoint = %endpoint_label,
+                            pool_slot,
+                            attempt,
+                            elapsed = ?started.elapsed(),
+                            remaining = ?deadline.saturating_duration_since(now),
+                            retry_interval = ?transport.retry_interval,
+                            suppressed_attempts,
+                            error = ?error,
+                            "sidecar gRPC connection attempt failed; retrying"
+                        );
+                    }
                     last_logged_at = Some(now);
                     last_logged_error = Some(detailed_error.clone());
                     suppressed_attempts = 0;
@@ -147,7 +192,7 @@ async fn connect_until_ready(
             Err(_) => {
                 return Err(startup_timeout(
                     peer,
-                    &endpoint_label,
+                    endpoint_label,
                     pool_slot,
                     attempt,
                     started.elapsed(),
@@ -160,7 +205,7 @@ async fn connect_until_ready(
         if Instant::now() >= deadline {
             return Err(startup_timeout(
                 peer,
-                &endpoint_label,
+                endpoint_label,
                 pool_slot,
                 attempt,
                 started.elapsed(),
@@ -175,6 +220,15 @@ async fn connect_until_ready(
         )?;
         sleep_until(retry_at.min(deadline)).await;
     }
+}
+
+/// The instant by which startup work -- connecting, waiting for the engine to
+/// answer, discovering the model -- must be done. Every sidecar bounds its whole
+/// startup path by this one deadline rather than by per-RPC constants, so
+/// `--grpc-startup-deadline-secs` actually governs how long a slow-loading engine is
+/// given.
+pub fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
+    checked_instant_add(Instant::now(), duration, "gRPC startup deadline")
 }
 
 fn checked_instant_add(
@@ -205,7 +259,10 @@ fn startup_timeout(
     ))
 }
 
-fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+/// Flattens an error's `source()` chain into one string ("outer: middle:
+/// inner"). `Display` alone on a `tonic::transport::Error` gives only the
+/// constant "transport error" -- this is what callers should log instead.
+pub fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -240,7 +297,7 @@ mod tests {
         let endpoint = GrpcEndpoint::parse(&address.to_string(), "--test-endpoint").unwrap();
         let result = tokio::time::timeout(
             Duration::from_millis(300),
-            GrpcChannelPool::connect("test", &endpoint, transport),
+            GrpcChannelPool::connect("test", &endpoint, transport, false),
         )
         .await
         .expect("connection retries must respect the startup deadline");

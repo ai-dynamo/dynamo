@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
@@ -57,6 +57,7 @@ use tracing::Instrument;
 /// This must match `MIGRATION_BLOCKING_REASONS` in `lib/llm/src/migration.rs`.
 pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
     "request.cancelled",
+    "request.deadline_exceeded",
     "backend.cancelled",
     "capacity.exhausted",
     "capacity.pool_exhausted",
@@ -181,16 +182,22 @@ fn try_acquire_retained_dispatch_permit(
 
 // Only dispatch and the first response are detached from the caller. The tail
 // is handed back so normal stream polling and cancellation stay on the caller.
+//
+// With `establish`, the caller stops waiting once the worker has ACKed and not
+// established its response stream within the timeout. The detached task keeps
+// the guard, permit, and response registration until the worker responds or
+// the stream closes, since a remote read of guarded memory may be active.
 async fn dispatch_with_first_response_guard<F, U>(
     dispatch: F,
     guard: EngineContextGuard,
     permit: OwnedSemaphorePermit,
+    establish: Option<(Duration, tokio::sync::oneshot::Receiver<()>)>,
 ) -> Result<ManyOut<U>, Error>
 where
     F: Future<Output = Result<ManyOut<U>, Error>> + Send + 'static,
     U: Data + MaybeError,
 {
-    let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
+    let (dispatch_tx, mut dispatch_rx) = tokio::sync::oneshot::channel();
 
     tokio::spawn(
         async move {
@@ -232,9 +239,55 @@ where
         .in_current_span(),
     );
 
-    dispatch_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("retained request dispatch ended before setup completed"))?
+    let setup_ended = || anyhow::anyhow!("retained request dispatch ended before setup completed");
+    let Some((timeout, acked)) = establish else {
+        return dispatch_rx.await.map_err(|_| setup_ended())?;
+    };
+    // A dispatch that fails before the ACK drops `acked`; its error still
+    // arrives on `dispatch_rx`.
+    let expired = async move {
+        if acked.await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(timeout).await;
+    };
+    tokio::select! {
+        biased;
+        result = &mut dispatch_rx => result.map_err(|_| setup_ended())?,
+        () = expired => {
+            tracing::warn!(
+                timeout_secs = timeout.as_secs_f64(),
+                "worker accepted the request but did not establish its response stream before the timeout"
+            );
+            Err(establish_timeout_error(timeout))
+        }
+    }
+}
+
+/// How `dispatch_and_finalize` waits for the worker's response stream after
+/// the worker ACKs the request.
+enum PrologueWait {
+    /// Wait until the stream is established, fails, or the request is cancelled.
+    Unbounded,
+    /// Fail with `ResponseTimeout` if the stream is not established within this
+    /// long after the ACK. Expiry drops the response registration.
+    Deadline(Duration),
+    /// First-response-guarded dispatch: cancellation is deferred until the
+    /// prologue and the wait is unbounded here. `acked` fires after the ACK so
+    /// the caller can bound its own wait.
+    Retained {
+        acked: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+}
+
+fn establish_timeout_error(timeout: Duration) -> Error {
+    DynamoError::builder()
+        .error_type(ErrorType::ResponseTimeout)
+        .message(format!(
+            "worker did not establish its response stream within {timeout:?} of accepting the request"
+        ))
+        .build()
+        .into()
 }
 
 /// Stream transformation helper that:
@@ -540,6 +593,9 @@ pub struct AddressedRequest<T> {
     /// Carries endpoint name + instance_id so cancellation is scoped to the
     /// exact (endpoint, instance) pair, not all endpoints on the same runtime.
     instance: Option<Instance>,
+    /// Bound on the wait for the worker's response stream, measured from the
+    /// worker's request-plane ACK. See [`Self::with_establish_timeout`].
+    establish_timeout: Option<Duration>,
 }
 
 impl<T> AddressedRequest<T> {
@@ -548,6 +604,7 @@ impl<T> AddressedRequest<T> {
             request,
             address,
             instance: None,
+            establish_timeout: None,
         }
     }
 
@@ -556,7 +613,21 @@ impl<T> AddressedRequest<T> {
             request,
             address,
             instance: Some(instance),
+            establish_timeout: None,
         }
+    }
+
+    /// Fail a unary dispatch with `ResponseTimeout` when the worker ACKs the
+    /// request but does not establish its response stream within `timeout`.
+    /// The deadline starts at the ACK, so time spent on local admission,
+    /// connection setup, and the send does not count against it.
+    pub fn with_establish_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.establish_timeout = timeout;
+        self
+    }
+
+    pub fn establish_timeout(&self) -> Option<Duration> {
+        self.establish_timeout
     }
 
     pub fn for_instance(request: T, instance: Instance) -> Self {
@@ -635,7 +706,9 @@ impl AddressedPushRouter {
         }
     }
 
-    /// Cancel all pending response-stream registrations for an instance.
+    /// Cancel stream registrations for an instance. The TCP response plane cancels
+    /// pending handshakes and lets established response streams drain; the QUIC
+    /// response plane also cancels active streams.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         match &self.responses {
             ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
@@ -691,6 +764,7 @@ impl AddressedPushRouter {
             Some(&instance),
             None,
             Some(input_stream),
+            PrologueWait::Unbounded,
         )
         .await
     }
@@ -709,12 +783,15 @@ impl AddressedPushRouter {
         instance: Option<&Instance>,
         request: Option<&T>,
         input_stream: Option<crate::engine::DataStream<T>>,
+        prologue_wait: PrologueWait,
     ) -> Result<ManyOut<U>, Error>
     where
         T: Data + Serialize,
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
         let engine_ctx = context.context();
+        let defer_cancellation_until_prologue =
+            matches!(prologue_wait, PrologueWait::Retained { .. });
 
         let queue_start = Instant::now();
         REQUEST_PLANE_INFLIGHT.inc();
@@ -723,13 +800,15 @@ impl AddressedPushRouter {
         let enable_request_stream = input_stream.is_some();
         let payload_codec = payload_codec_for_worker(instance);
 
-        // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
-        // which simplifies the cancellation of registration on error. Each side is
-        // disarmed by `into_parts()` on awaiting stream provider: past that point the
-        // subject is reaped by the worker's dial-in (instance healthy) or the discovery
-        // watcher (instance dropped), so no cleanup is owed.
+        // Keep registration cleanup armed through dispatch errors. The response
+        // registration also stays armed while waiting for the response prologue;
+        // the request-stream registration is handed off to its forwarder below.
         let (send_registered, recv_registered) = self
-            .register_streams(engine_ctx.clone(), enable_request_stream)
+            .register_streams(
+                engine_ctx.clone(),
+                enable_request_stream,
+                defer_cancellation_until_prologue,
+            )
             .await?;
 
         // Tombstone check: if discovery already removed the worker, fail fast
@@ -812,6 +891,17 @@ impl AddressedPushRouter {
             return Err(err.into());
         }
 
+        let establish_timeout = match prologue_wait {
+            PrologueWait::Unbounded => None,
+            PrologueWait::Deadline(timeout) => Some(timeout),
+            PrologueWait::Retained { acked } => {
+                if let Some(acked) = acked {
+                    let _ = acked.send(());
+                }
+                None
+            }
+        };
+
         // Spawn the forwarder before awaiting the response prologue so request
         // frames pre-load into the worker's input buffer while the engine
         // initialises in parallel. The response provider only resolves after
@@ -834,13 +924,34 @@ impl AddressedPushRouter {
         let _nvtx_wait = dynamo_nvtx_range!("transport.response.wait_backend");
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
-        // Disarms the recv-side cleanup; see the holding rationale above.
-        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
+        // Dropping the pending wait on expiry removes the response registration.
+        let prologue = recv_registered.wait();
+        let prologue = match establish_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, prologue).await {
+                Ok(prologue) => prologue,
+                Err(_) => {
+                    tracing::warn!(
+                        request_id = context.id(),
+                        instance_id = ?instance.map(|inst| inst.id()),
+                        timeout_secs = timeout.as_secs_f64(),
+                        "worker accepted the request but did not establish its response stream before the timeout"
+                    );
+                    return Err(establish_timeout_error(timeout));
+                }
+            },
+            None => prologue.await,
+        };
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        let response_stream = match prologue {
             Ok(Ok(stream)) => stream,
+            Err(_) | Ok(Err(_)) if engine_ctx.is_stopped() || engine_ctx.is_killed() => {
+                return Ok(ResponseStream::new(
+                    Box::pin(futures::stream::empty()),
+                    engine_ctx,
+                ));
+            }
             Ok(Err(e)) => {
                 return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }
@@ -872,6 +983,7 @@ impl AddressedPushRouter {
         &self,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
+        defer_cancellation_until_prologue: bool,
     ) -> Result<(
         Option<RegisteredStream<StreamSender>>,
         RegisteredStream<StreamReceiver>,
@@ -882,6 +994,7 @@ impl AddressedPushRouter {
                     .context(engine_ctx)
                     .enable_request_stream(enable_request_stream)
                     .enable_response_stream(true)
+                    .defer_cancellation_until_prologue(defer_cancellation_until_prologue)
                     .build()?;
                 let pending: PendingConnections = responses.register(options).await;
                 pending.into_parts()
@@ -1024,6 +1137,7 @@ where
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
         let (addressed_request, context) = request.transfer(());
+        let establish_timeout = addressed_request.establish_timeout();
         let (request, address, instance_info) = addressed_request.into_parts();
 
         let first_response_guard = context
@@ -1033,6 +1147,13 @@ where
         if let Some(guard) = first_response_guard.and_then(|guard| guard.take()) {
             let permit =
                 try_acquire_retained_dispatch_permit(&RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS)?;
+            let (acked, establish) = match establish_timeout {
+                Some(timeout) => {
+                    let (acked_tx, acked_rx) = tokio::sync::oneshot::channel();
+                    (Some(acked_tx), Some((timeout, acked_rx)))
+                }
+                None => (None, None),
+            };
             let router = self.clone();
             let dispatch = async move {
                 router
@@ -1042,18 +1163,24 @@ where
                         instance_info.as_ref(),
                         Some(&request),
                         None,
+                        PrologueWait::Retained { acked },
                     )
                     .await
             };
-            return dispatch_with_first_response_guard(dispatch, guard, permit).await;
+            return dispatch_with_first_response_guard(dispatch, guard, permit, establish).await;
         }
 
+        let prologue_wait = match establish_timeout {
+            Some(timeout) => PrologueWait::Deadline(timeout),
+            None => PrologueWait::Unbounded,
+        };
         self.dispatch_and_finalize::<T, U>(
             &context,
             address,
             instance_info.as_ref(),
             Some(&request),
             None,
+            prologue_wait,
         )
         .await
     }
@@ -1092,8 +1219,7 @@ where
         input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error>;
 
-    /// Discovery-driven cleanup when an instance leaves — the request plane
-    /// cancels its call-home streams; another transport frees per-instance state.
+    /// Release per-instance transport state when discovery removes an instance.
     async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
 
     /// Discovery-driven notification when an instance (re)appears — the request
@@ -1134,7 +1260,7 @@ where
                 endpoint = %id.endpoint,
                 instance_id = id.instance_id,
                 cancelled = n,
-                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+                "Cancelled stream registrations for removed instance (discovery-driven cleanup)"
             );
         }
     }
@@ -1147,17 +1273,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, FIRST_RESPONSE_GUARD_CONTEXT_KEY,
-        FirstResponseGuard, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
-        ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
-        dispatch_with_first_response_guard, payload_codec_for_worker,
-        propagate_first_response_guard, serialize_control_message,
+        AddressedPushRouter, AddressedRequest, CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo,
+        FIRST_RESPONSE_GUARD_CONTEXT_KEY, FirstResponseGuard, RequestControlMessage,
+        RequestPlaneClient, RequestPlanePayloadCodec, RequestType, ResponseType, TwoPartCodec,
+        attach_first_response_guard, build_request_envelope, dispatch_with_first_response_guard,
+        payload_codec_for_worker, propagate_first_response_guard, serialize_control_message,
         try_acquire_retained_dispatch_permit,
     };
     use crate::{
         component::{Instance, TransportType},
+        engine::AsyncEngine,
         error::{ErrorType, match_error_chain},
-        pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
+        pipeline::{
+            AsyncEngineContextProvider, Context, ManyOut, ResponseStream,
+            network::{
+                egress::unified_client::Headers,
+                tcp::{client::TcpClient, server::TcpStreamServer},
+            },
+        },
         protocols::annotated::Annotated,
     };
     use serde::{Deserialize, Serialize};
@@ -1194,6 +1327,134 @@ mod tests {
     #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct TestRequest {
         value: u64,
+    }
+
+    #[tokio::test]
+    async fn quic_router_delivers_data_after_successful_wait() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quic_router_delivers_data_after_successful_wait"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        use super::{
+            AddressedPushRouter, AddressedRequest, RequestPlaneClient, quic_response, tcp,
+        };
+        use crate::pipeline::{AsyncEngine, SingleIn};
+        use bytes::Bytes;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        // Capture the request envelope, but exercise the real router and QUIC response plane.
+        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CaptureRequest {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: Bytes,
+                _headers: super::super::unified_client::Headers,
+            ) -> anyhow::Result<Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control = serde_json::from_slice(&message.header)?;
+                self.0.send(control).await?;
+                Ok(Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "test"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let address = "127.0.0.1:0".parse().unwrap();
+            let responses =
+                quic_response::QuicResponseServer::new(address, address, shutdown).unwrap();
+            // The router also needs a TCP request-callback server. Isolate its TLS
+            // configuration from tests that change the process-wide environment.
+            let callbacks = temp_env::async_with_vars(
+                [
+                    ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                    ("DYN_TCP_TLS_KEY_PATH", None),
+                    ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ],
+                tcp::server::TcpStreamServer::new(
+                    tcp::server::ServerOptions::builder()
+                        .interface(Some("127.0.0.1".to_string()))
+                        .build()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (request_tx, mut request_rx) = mpsc::channel(1);
+            let router = AddressedPushRouter::new_quic(
+                Arc::new(CaptureRequest(request_tx)),
+                callbacks,
+                responses,
+            );
+            let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
+            let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
+            let (response, (mut sender, payload_codec)) =
+                tokio::join!(router.generate(request), async {
+                    let control = request_rx.recv().await.unwrap();
+                    let worker_context =
+                        Context::with_id_and_metadata((), control.id, control.metadata);
+                    let mut sender = pool
+                        .sender(worker_context.context(), control.connection_info)
+                        .await
+                        .unwrap();
+                    sender.send_prologue(None).await.unwrap();
+                    (sender, control.payload_codec)
+                });
+
+            // Send data only after generate() returns through wait(), so cleanup on
+            // success cannot be hidden by data buffered before the handshake finishes.
+            let mut response: ManyOut<Annotated<u64>> = response.unwrap();
+            // The first item uses QUIC's priority lane; the second uses its bulk lane.
+            for value in [1_u64, 2] {
+                sender
+                    .send(
+                        payload_codec
+                            .encode(&super::NetworkStreamWrapper {
+                                data: Some(Annotated::from_data(value)),
+                                complete_final: value == 2,
+                            })
+                            .unwrap()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+                let item = response
+                    .next()
+                    .await
+                    .expect("QUIC stream ended before delivering data");
+                assert!(
+                    item.error.is_none(),
+                    "unexpected QUIC response error: {:?}",
+                    item.error
+                );
+                assert_eq!(item.data, Some(value));
+            }
+            sender.finish().await.unwrap();
+            assert!(
+                response.next().await.is_none(),
+                "QUIC stream must end after all data"
+            );
+        })
+        .await
+        .expect("QUIC router did not deliver the established response stream");
     }
 
     #[test]
@@ -1284,6 +1545,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_response_guard_defers_tcp_cancellation_until_prologue() {
+        struct CapturingClient(tokio::sync::mpsc::Sender<ConnectionInfo>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CapturingClient {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: bytes::Bytes,
+                _headers: Headers,
+            ) -> anyhow::Result<bytes::Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control: RequestControlMessage = serde_json::from_slice(&message.header)?;
+                self.0.send(control.connection_info).await?;
+                Ok(bytes::Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "capturing"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let server = TcpStreamServer::new(
+                        TcpStreamServer::options_builder()
+                            .interface(Some("127.0.0.1".to_string()))
+                            .build()
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    let (connection_tx, mut connection_rx) = tokio::sync::mpsc::channel(1);
+                    let router =
+                        AddressedPushRouter::new(Arc::new(CapturingClient(connection_tx)), server)
+                            .unwrap();
+                    let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+                    let mut request = Context::new(AddressedRequest::new(1_u64, "worker".into()));
+                    attach_first_response_guard(
+                        &mut request,
+                        Arc::new(DropSignal(Some(guard_dropped_tx))),
+                    );
+                    let context = request.context();
+                    let mut generation = tokio::spawn(async move {
+                        let response: ManyOut<Annotated<u64>> = router.generate(request).await?;
+                        Ok::<_, anyhow::Error>(response)
+                    });
+                    let connection_info = connection_rx.recv().await.unwrap();
+                    let worker_context = Context::with_id_and_metadata(
+                        (),
+                        context.id().to_string(),
+                        Default::default(),
+                    )
+                    .context();
+                    let mut sender = TcpClient::create_response_stream(
+                        worker_context.clone(),
+                        connection_info,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                    for kill in [false, true] {
+                        if kill {
+                            context.kill();
+                        } else {
+                            context.stop_generating();
+                        }
+                        tokio::select! {
+                            _ = worker_context.stopped() => panic!("guarded worker was cancelled before prologue"),
+                            _ = &mut guard_dropped_rx => panic!("guard was released before prologue"),
+                            _ = &mut generation => panic!("guarded generation completed before prologue"),
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        }
+                        assert!(!worker_context.is_stopped());
+                        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+                        assert!(!generation.is_finished());
+                    }
+
+                    sender
+                        .send_prologue(Some("worker setup failed".into()))
+                        .await
+                        .unwrap();
+                    let mut response = generation.await.unwrap().unwrap();
+                    assert!(response.context().is_killed());
+                    assert!(response.next().await.is_none());
+                    guard_dropped_rx.await.unwrap();
+                })
+                .await
+                .expect("guarded TCP dispatch did not complete after the error prologue");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn first_response_guard_outlives_cancelled_dispatch_waiter() {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
         let response_context = Context::new(()).context();
@@ -1317,6 +1688,7 @@ mod tests {
             },
             guard,
             permit,
+            None,
         ));
 
         dispatch_started_rx.await.unwrap();
@@ -1349,6 +1721,102 @@ mod tests {
         drop(released_permit);
     }
 
+    /// The retained deadline starts at the ACK. On expiry the caller gets a
+    /// `ResponseTimeout` while the detached dispatch keeps its guard and permit
+    /// until the worker's first response.
+    #[tokio::test]
+    async fn retained_establish_timeout_starts_at_ack_and_keeps_guard() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (acked_tx, acked_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel::<()>();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel::<()>();
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let timeout = Duration::from_millis(100);
+
+        let mut waiter = tokio::spawn(dispatch_with_first_response_guard(
+            async move {
+                let _ = ack_rx.await;
+                let _ = acked_tx.send(());
+                let _ = release_dispatch_rx.await;
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+            permit,
+            Some((timeout, acked_rx)),
+        ));
+
+        assert!(
+            tokio::time::timeout(timeout * 3, &mut waiter)
+                .await
+                .is_err(),
+            "time before the ACK must not count against the establish timeout"
+        );
+
+        ack_tx.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not time out after the ACK")
+            .unwrap()
+            .expect_err("dispatch without a response stream must time out");
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::ResponseTimeout], &[]),
+            "expected ResponseTimeout, got: {error}"
+        );
+        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+        assert!(try_acquire_retained_dispatch_permit(&permits).is_err());
+
+        release_dispatch_tx.send(()).unwrap();
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("guard was not released after the first worker response")
+            .unwrap();
+    }
+
+    /// A retained dispatch that fails before the ACK reports its own error,
+    /// not a response timeout.
+    #[tokio::test]
+    async fn retained_establish_timeout_passes_through_pre_ack_error() {
+        let (acked_tx, acked_rx) = oneshot::channel::<()>();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let (guard_dropped_tx, _guard_dropped_rx) = oneshot::channel();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_with_first_response_guard::<_, Annotated<u64>>(
+                async move {
+                    drop(acked_tx);
+                    Err(anyhow::anyhow!(
+                        crate::error::DynamoError::builder()
+                            .error_type(ErrorType::ConnectionTimeout)
+                            .message("request plane send timed out")
+                            .build()
+                    ))
+                },
+                Arc::new(DropSignal(Some(guard_dropped_tx))),
+                permit,
+                Some((Duration::from_millis(50), acked_rx)),
+            ),
+        )
+        .await
+        .expect("waiter must resolve with the dispatch error")
+        .expect_err("dispatch error must propagate");
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::ConnectionTimeout], &[]),
+            "expected the dispatch error, got: {error}"
+        );
+        assert!(
+            !match_error_chain(error.as_ref(), &[ErrorType::ResponseTimeout], &[]),
+            "a pre-ACK failure must not be reported as a response timeout"
+        );
+    }
+
     #[tokio::test]
     async fn dropping_handed_off_tail_closes_upstream() {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
@@ -1364,6 +1832,7 @@ mod tests {
             },
             Arc::new(DropSignal(Some(guard_dropped_tx))),
             permit,
+            None,
         )
         .await
         .unwrap();

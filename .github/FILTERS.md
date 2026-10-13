@@ -11,7 +11,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `core`                                                  | Main test suite (vLLM, SGLang, TRT-LLM containers)                                                                                                                                   |
 | `dev_images`                                            | dev / local-dev image builds only (no runtime or GPU jobs)                                                                                                                           |
 | `operator`                                              | Kubernetes operator tests                                                                                                                                                            |
-| `snapshot`                                              | Checkpoint-placeholder image + all-framework standalone Snapshot deploy tests (github.com/ai-dynamo/snapshot is external; this covers Dynamo's integration surface)                  |
+| `snapshot`                                              | All-framework standalone Snapshot deploy tests (github.com/ai-dynamo/snapshot is external; this covers Dynamo's integration surface)                                               |
 | `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's checkpoint deploy suite                                                                                                                                             |
 | `deploy`                                                | Deploy-specific tests                                                                                                                                                                |
 | `vllm` / `sglang` / `trtllm` / `triton`                 | Backend-specific tests                                                                                                                                                               |
@@ -22,6 +22,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `docs`                                                  | Docs Lint, Fern Configuration, Docs Website Composition, and Fern Broken Links checks; Fern preview or publish workflow                                                              |
 | `fern_components`                                       | Parse custom MDX components (a step inside Fern Configuration Check)                                                                                                                 |
 | `examples`                                              | Recipe Kustomize generation and docs-artifact unit checks                                                                                                                            |
+| `planner_gym` | Planner Gym CPU tests (native adapters excluded), package builds, and changed-file reporting regressions (Python 3.11 and 3.12) |
 | `ignore`                                                | Nothing (classification only)                                                                                                                                                        |
 | `rust`                                                  | Rust pre merge checks                                                                                                                                                                |
 
@@ -72,14 +73,17 @@ Example: `lib/**/*.rs` matches all Rust files under `lib/`.
 
 ## Adding a New Filter Group
 
-If you create a new filter in `filters.yaml`, you must also update the shared
-changed-files action so the coverage check knows about it:
+Add the group to `filters.yaml`. The changed-files reporter automatically includes
+its JSON file list in coverage checks, except for the `all` catch-all group.
+No parallel list of filter names needs updating.
 
-1. Add the filter to `filters.yaml`.
-2. Edit `.github/actions/changed-files/action.yml`:
-   - Expose the new filter as an output (see the existing `core`, `planner`,
-     `vllm`, `sglang`, `trtllm`, etc. entries at the top of the file).
-   - Add its `*_all_modified_files` to the `COVERED_FILES` line in the
-     "Check for uncovered files" step.
+If a job uses the filter to decide whether to run, expose its `*_any_modified`
+value as an output in `.github/actions/changed-files/action.yml`, then connect
+that output to the job's condition.
 
-If you skip this step, CI will fail with "uncovered files" even though your filter exists.
+The reporter consumes JSON files written by the pinned changed-files action.
+Keep `json`, `escape_json`, and `write_output_files` enabled and `safe_output`
+disabled: v42 removes one quote-escape layer when writing each file, while its
+shell sanitization would alter filenames. Filenames are never interpolated into
+shell source. The reporter preserves spaces, quotes, and newlines and prints
+JSON-escaped names so they cannot introduce workflow commands into the log.

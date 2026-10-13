@@ -14,7 +14,6 @@ mod ingress;
 mod input;
 mod membership;
 mod pending;
-mod policy_registry;
 mod server;
 mod service;
 mod types;
@@ -22,7 +21,14 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use crate::WorkerSelectionPolicyFactory;
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
+pub use crate::plugins::{
+    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    WorkerSelectionPolicyRegistryError,
+};
 pub use crate::services::common::replica_sync::{
     HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver, ReplicaPeerError,
     SchedulerLoadSink,
@@ -37,12 +43,6 @@ pub use ingress::KvEventIngress;
 pub use input::{PromptRequest, PromptView};
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
-pub use policy_registry::{
-    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
-    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
 pub use server::{AppState, run_server};
 pub use service::{
     SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,

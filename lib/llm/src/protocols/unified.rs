@@ -428,6 +428,10 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
     fn get_common_ignore_eos(&self) -> Option<bool> {
         self.inner.common.ignore_eos
     }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        OpenAIStopConditionsProvider::get_thinking_token_budget(&self.inner)
+    }
 }
 
 impl OpenAIOutputOptionsProvider for UnifiedRequest {
@@ -534,6 +538,7 @@ impl UnifiedRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::StopConditionsProvider;
 
     #[test]
     fn test_chat_completions_roundtrip() {
@@ -550,11 +555,28 @@ mod tests {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            ..Default::default()
         };
 
         let unified = UnifiedRequest::from(req.clone());
         assert!(matches!(unified.api_context, ApiContext::ChatCompletions));
         assert_eq!(unified.model(), "test-model");
+    }
+
+    #[test]
+    fn test_thinking_token_budget_reaches_unified_stop_conditions() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32,
+            "nvext": {"max_thinking_tokens": 16}
+        }))
+        .unwrap();
+
+        let unified = UnifiedRequest::from(request);
+        let stop_conditions = unified.extract_stop_conditions().unwrap();
+
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
     }
 
     #[test]

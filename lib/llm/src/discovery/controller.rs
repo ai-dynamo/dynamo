@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 
+use super::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
+
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -137,6 +139,13 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 
     fn remove_group(&self, key: &GroupKey);
+
+    fn publish_group_observation(
+        &self,
+        _key: &GroupKey,
+        _observation: Option<WorkerGroupObservation>,
+    ) {
+    }
 
     fn discard_prepared(&self, prepared: Self::Prepared);
 
@@ -281,6 +290,9 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     groups: HashMap<GroupKey, DesiredGroup>,
     revision: u64,
     instance_revisions: HashMap<String, u64>,
+    /// The revision at the last `DiscoveryEvent::Resync`. A periodic list that started before
+    /// it can carry an instance the resync removed, so its result is discarded.
+    resync_revision: u64,
     builds: JoinSet<BuildResult<H::Prepared>>,
     reconciliations: JoinSet<ReconciliationResult>,
     active_builds: usize,
@@ -300,6 +312,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             groups: HashMap::new(),
             revision: 0,
             instance_revisions: HashMap::new(),
+            resync_revision: 0,
             builds: JoinSet::new(),
             reconciliations: JoinSet::new(),
             active_builds: 0,
@@ -391,6 +404,21 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 tracing::error!("Unexpected non-model removal in model discovery stream");
                 false
             }
+            DiscoveryEvent::Resync(instances) => {
+                // A resync supersedes every list that started before it, including one that
+                // started at the current revision: the events it missed never reached the
+                // controller, so nothing advanced the revision on their behalf.
+                self.revision = self.revision.wrapping_add(1);
+                self.resync_revision = self.revision;
+                self.apply_reconciliation(
+                    ReconciliationResult {
+                        revision: self.revision,
+                        instances: Ok(instances),
+                    },
+                    namespace_filter,
+                );
+                false
+            }
         };
     }
 
@@ -440,6 +468,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if materializes_worker_set {
             if affects_selected {
                 self.reconcile_group(&group_key, true);
+            } else {
+                self.publish_group_observation(&group_key);
             }
         } else {
             for key in self.materialization_groups_for(&endpoint_id, instance_id) {
@@ -469,13 +499,84 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         {
             group.remove(&instance);
         }
-        for key in affected_groups {
-            self.reconcile_group(&key, true);
+        for key in &affected_groups {
+            self.reconcile_group(key, true);
+        }
+        if instance.materializes_worker_set() && !affected_groups.contains(&instance.group_key) {
+            self.publish_group_observation(&instance.group_key);
         }
         true
     }
 
+    fn publish_group_observation(&self, key: &GroupKey) {
+        let observation = self.groups.get(key).and_then(|group| {
+            let members = group
+                .cohorts
+                .values()
+                .flatten()
+                .filter_map(|key| self.desired.get(key))
+                .collect::<Vec<_>>();
+            let selected_checksum = group.selected_checksum()?;
+            let representative = members
+                .iter()
+                .find(|member| member.mdc_checksum == selected_checksum)?;
+            let checksum_mismatches = members
+                .iter()
+                .filter(|member| member.mdc_checksum != selected_checksum)
+                .map(|member| member.mcid.instance_id)
+                .collect();
+            // During a replacement, the status carries the retained commit while
+            // the successor is queued, building, or retrying. The retained pipeline
+            // has its own admission channel, so inspect that channel until the
+            // successor takes over.
+            let committed_keys = status_committed_members(&group.status);
+            let admission = group
+                .retained
+                .as_ref()
+                .map_or(&group.admission_tx, |retained| &retained.admission_tx)
+                .borrow();
+            let committed = members
+                .iter()
+                .filter(|member| {
+                    committed_keys.is_some_and(|keys| keys.contains(&member.key))
+                        && admission.contains(&member.mcid.instance_id)
+                })
+                .map(|member| member.mcid.instance_id)
+                .collect();
+            let card = &representative.card;
+            Some(WorkerGroupObservation {
+                model: key.model_name.clone(),
+                endpoint: representative.endpoint_id.clone(),
+                model_type: card.model_type,
+                worker_type: crate::kv_router::RouterLoadSource::from_worker_type(
+                    ModelDeploymentCard::resolve_worker_type(card.worker_type, card.model_type),
+                )
+                .metric_label(),
+                workers: members
+                    .iter()
+                    .map(|member| (member.mcid.instance_id, member.card.runtime_config.clone()))
+                    .collect(),
+                committed,
+                checksum_mismatches,
+                state: match &group.status {
+                    GroupStatus::Ready { .. } => WorkerGroupState::Ready,
+                    GroupStatus::Retrying { .. } => WorkerGroupState::MaterializationFailed,
+                    GroupStatus::Blocked { .. } | GroupStatus::BlockedReady { .. } => {
+                        WorkerGroupState::CommitBlocked
+                    }
+                    _ => WorkerGroupState::Pending,
+                },
+            })
+        });
+        self.host.publish_group_observation(key, observation);
+    }
+
     fn reconcile_group(&mut self, key: &GroupKey, desired_changed: bool) {
+        self.reconcile_group_inner(key, desired_changed);
+        self.publish_group_observation(key);
+    }
+
+    fn reconcile_group_inner(&mut self, key: &GroupKey, desired_changed: bool) {
         let Some(mut group) = self.groups.remove(key) else {
             return;
         };
@@ -850,10 +951,17 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 }
             });
             self.active_builds += 1;
+            self.publish_group_observation(&key);
         }
     }
 
     fn apply_build_result(&mut self, result: BuildResult<H::Prepared>) {
+        let key = result.spec.key.clone();
+        self.apply_build_result_inner(result);
+        self.publish_group_observation(&key);
+    }
+
+    fn apply_build_result_inner(&mut self, result: BuildResult<H::Prepared>) {
         let Some(mut group) = self.groups.remove(&result.spec.key) else {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -977,6 +1085,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     fn release_due_retries(&mut self) {
         let now = Instant::now();
         let mut retained_retries = Vec::new();
+        let mut queued_retries = Vec::new();
         for (key, group) in &mut self.groups {
             let (mdc_checksum, deadline, committed_members) = match &group.status {
                 GroupStatus::Retrying {
@@ -1008,7 +1117,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     mdc_checksum: mdc_checksum.clone(),
                     committed_members,
                 };
+                queued_retries.push(key.clone());
             }
+        }
+        for key in queued_retries {
+            self.publish_group_observation(&key);
         }
         for key in retained_retries {
             self.reconcile_group(&key, false);
@@ -1022,6 +1135,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 retained.admission_tx.send_replace(Vec::new());
             }
             cancel_build(&group.status);
+        }
+        for key in self.groups.keys() {
+            self.publish_group_observation(key);
         }
         self.builds.abort_all();
         while self.builds.join_next().await.is_some() {}
@@ -1045,6 +1161,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         result: ReconciliationResult,
         namespace_filter: &NamespaceFilter,
     ) {
+        if result.revision < self.resync_revision {
+            tracing::debug!(
+                "Discarding a model reconciliation snapshot that predates a discovery resync"
+            );
+            return;
+        }
         let instances = match result.instances {
             Ok(instances) => instances,
             Err(error) => {
@@ -1239,6 +1361,7 @@ mod tests {
         admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
+        inventory: super::super::worker_inventory::WorkerInventory,
         prepared_replacements: AtomicUsize,
     }
 
@@ -1259,6 +1382,7 @@ mod tests {
                     admissions: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
+                    inventory: Default::default(),
                     prepared_replacements: AtomicUsize::new(0),
                 }),
                 start_rx,
@@ -1455,6 +1579,14 @@ mod tests {
             self.removed_groups.fetch_add(1, Ordering::SeqCst);
         }
 
+        fn publish_group_observation(
+            &self,
+            key: &GroupKey,
+            observation: Option<WorkerGroupObservation>,
+        ) {
+            self.inventory.publish(key.id(), observation);
+        }
+
         fn discard_prepared(&self, prepared: Self::Prepared) {
             let Prepared(_build) = prepared;
             self.discarded.fetch_add(1, Ordering::SeqCst);
@@ -1590,6 +1722,8 @@ mod tests {
             "the committed group must survive the upgrade's last legacy worker leaving"
         );
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.committed, HashSet::from([2]));
         // The retained pipeline keeps its channel and stops admitting the worker
         // that left, so it never routes to a worker that is gone.
         assert_eq!(*committed_admissions.borrow(), vec![2]);
@@ -1597,6 +1731,9 @@ mod tests {
 
         controller.start_queued_builds();
         let upgraded_spec = starts.recv().await.unwrap();
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.state, WorkerGroupState::Pending);
+        assert_eq!(observation.committed, HashSet::from([2]));
         assert_eq!(
             upgraded_spec.video_contract,
             Some(contract_digest("round_ties_even"))
@@ -1698,6 +1835,8 @@ mod tests {
         );
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
         assert!(committed_admissions.borrow().is_empty());
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert!(observation.committed.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1727,6 +1866,9 @@ mod tests {
         assert_eq!(host.members(&group_key()).len(), 2);
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
         assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.state, WorkerGroupState::MaterializationFailed);
+        assert_eq!(observation.committed, HashSet::from([1, 2]));
 
         // A retained worker republishes a different contract while the failed rebuild
         // waits to retry. The retained pipeline still expands video prompts with
@@ -1776,6 +1918,12 @@ mod tests {
         controller.apply_removed(&second.key);
         assert_eq!(*committed_admissions.borrow(), vec![1]);
         assert!(committed_admissions.has_changed().is_ok());
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.committed, HashSet::from([1]));
+        assert_eq!(
+            observation.workers.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([1])
+        );
 
         controller.start_queued_builds();
         starts.recv().await.unwrap();
@@ -2159,6 +2307,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_resync_replaces_the_desired_instances() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance(1, "spec");
+        let second = instance(2, "spec");
+
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
+        controller.apply_event(
+            DiscoveryEvent::Resync(vec![discovery_instance(&second)]),
+            &NamespaceFilter::Global,
+        );
+        assert_eq!(host.members(&group_key()), BTreeSet::from([second.key]));
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_cannot_revive_a_removed_instance() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        controller.apply_added(first.clone());
+        // The periodic list starts here and captures `first` before its removal.
+        let list_revision = controller.revision;
+        controller.apply_removed(&first.key);
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_is_discarded_when_no_event_advanced_the_revision() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        // The periodic list starts here and captures `first`. Its registration and its
+        // removal are then both lost to a backend buffer overflow, so no event reaches
+        // the controller to advance the revision before the resync that follows.
+        let list_revision = controller.revision;
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
+    }
+
+    #[tokio::test]
     async fn reconciliation_repairs_missed_state_without_undoing_newer_events() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
@@ -2213,5 +2427,122 @@ mod tests {
             &NamespaceFilter::Global,
         );
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
+    }
+
+    #[tokio::test]
+    async fn inventory_tracks_rejected_newcomers_succession_and_final_removal() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let incumbent = instance(1, "first");
+        let newcomer = instance(2, "second");
+        controller.apply_added(incumbent.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        controller.apply_added(newcomer.clone());
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.state, WorkerGroupState::Ready);
+        assert_eq!(observation.workers.len(), 2);
+        assert_eq!(observation.committed, HashSet::from([1]));
+        assert_eq!(observation.checksum_mismatches, HashSet::from([2]));
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([incumbent.key.clone()])
+        );
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+
+        controller.apply_removed(&newcomer.key);
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.workers.len(), 1);
+        assert_eq!(observation.committed, HashSet::from([1]));
+        assert!(observation.checksum_mismatches.is_empty());
+        controller.apply_added(newcomer.clone());
+        controller.apply_removed(&incumbent.key);
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.state, WorkerGroupState::Pending);
+        assert_eq!(
+            observation.workers.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([2])
+        );
+        assert!(observation.committed.is_empty());
+        assert!(observation.checksum_mismatches.is_empty());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.inventory.snapshot()[0].1.committed, HashSet::from([2]));
+
+        controller.apply_removed(&newcomer.key);
+        assert!(host.inventory.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn inventory_reflects_each_frontends_first_observed_cohort() {
+        for (first_id, rejected_id) in [(1, 2), (2, 1)] {
+            let (host, mut starts) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            controller.apply_added(instance(first_id, &format!("spec-{first_id}")));
+            controller.apply_added(instance(rejected_id, &format!("spec-{rejected_id}")));
+            let observation = host.inventory.snapshot().pop().unwrap().1;
+            assert_eq!(observation.state, WorkerGroupState::Pending);
+            assert!(observation.committed.is_empty());
+            assert_eq!(
+                observation.checksum_mismatches,
+                HashSet::from([rejected_id])
+            );
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            let observation = host.inventory.snapshot().pop().unwrap().1;
+            assert_eq!(observation.state, WorkerGroupState::Ready);
+            assert_eq!(observation.committed, HashSet::from([first_id]));
+            assert_eq!(
+                observation.checksum_mismatches,
+                HashSet::from([rejected_id])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_keeps_checksum_rejection_separate_from_build_failure() {
+        let (host, mut starts) = FakeHost::new();
+        host.failures.store(1, Ordering::SeqCst);
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        controller.apply_added(instance(1, "first"));
+        controller.apply_added(instance(2, "second"));
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.state, WorkerGroupState::MaterializationFailed);
+        assert!(observation.committed.is_empty());
+        assert_eq!(observation.checksum_mismatches, HashSet::from([2]));
+    }
+
+    #[tokio::test]
+    async fn inventory_preserves_encode_topology_and_generation_timing_attribution() {
+        use crate::{model_type::ModelType, worker_type::WorkerType};
+
+        for (capabilities, timing_type) in [
+            (ModelType::Chat, "decode"),
+            (ModelType::Completions, "decode"),
+            (ModelType::empty(), "encode"),
+        ] {
+            let (host, _) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let mut worker = instance(1, "encode");
+            worker.card.worker_type = Some(WorkerType::Encode);
+            worker.card.model_type = capabilities;
+            worker.mdc_checksum = worker.card.mdcsum().to_string();
+            controller.apply_added(worker);
+            let observation = host.inventory.snapshot().pop().unwrap().1;
+            assert_eq!(observation.worker_type, "encode");
+            assert_eq!(observation.model_type, capabilities);
+            assert_eq!(observation.metric_worker_type(), timing_type);
+        }
     }
 }

@@ -21,6 +21,20 @@ def make_frames(n=3, h=8, w=8) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# compute_num_frames
+# ---------------------------------------------------------------------------
+
+
+def test_compute_num_frames_rounds_fractional_frame_rate():
+    from dynamo.common.utils.video_utils import compute_num_frames
+
+    result = compute_num_frames(seconds=10, fps=23.976)
+
+    assert result == 240
+    assert isinstance(result, int)
+
+
+# ---------------------------------------------------------------------------
 # encode_to_video_bytes
 # ---------------------------------------------------------------------------
 

@@ -285,12 +285,47 @@ class TestResolvedLaunchConfiguration:
         ports = [_port_for_scheduler(raw, *call) for call in _scheduler_calls(resolved)]
         assert ports == list(range(BASE_PORT, BASE_PORT + 8))
 
+    def test_ranks_are_numbered_from_the_attention_dp_width(self, telemetry_env):
+        """SGLang >= #41818 resolves ``--dp-size 8 --enable-dp-attention`` to
+        ``attn_dp_size=8`` with ``dp_size=1`` and ``enable_dp_attention=False``.
+
+        The launch is unchanged: one group of eight schedulers, each ``dp_rank``
+        derived from its ``tp_rank``. Reading only the deprecated flag would
+        fold ``dp_rank`` in a second time, as in the case above.
+        """
+        legacy = _server_args(tp_size=8, dp_size=8, enable_dp_attention=True)
+        resolved = _server_args(tp_size=8, attn_dp_size=8)
+        telemetry_env.setattr(
+            sglang_compat, "sglang_resolved_view", lambda server_args: resolved
+        )
+
+        ports = [
+            _port_for_scheduler(resolved, *call) for call in _scheduler_calls(legacy)
+        ]
+        assert ports == list(range(BASE_PORT, BASE_PORT + 8))
+
 
 class TestInstall:
     def test_install_is_a_no_op_when_telemetry_is_disabled(self, telemetry_env):
         """No SGLang import, so a non-telemetry deployment cannot regress on it."""
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
         install_per_rank_nixl_prometheus_ports()
+
+    @pytest.mark.parametrize(
+        ("env_name", "value"),
+        [
+            ("NIXL_TELEMETRY_ENABLE", "maybe"),
+            (NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, "not-a-port"),
+        ],
+    )
+    def test_invalid_config_is_rejected_before_importing_sglang(
+        self, telemetry_env, env_name, value
+    ):
+        telemetry_env.setenv(env_name, value)
+        telemetry_env.setitem(sys.modules, "sglang", _LazyProxyModule())
+
+        with pytest.raises(ValueError, match=env_name):
+            install_per_rank_nixl_prometheus_ports()
 
     def test_install_points_sglang_at_the_wrapper(self, telemetry_env):
         """The override has to land on the class, not on the ``sglang`` proxy."""

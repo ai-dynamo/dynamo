@@ -871,6 +871,7 @@ impl FpmEventSubscriber {
                                         );
                                     }
                                 }
+                                Some(Ok(DiscoveryEvent::Resync(_))) => {}
                                 Some(Err(e)) => {
                                     tracing::warn!("FPM tracker: discovery error: {e}");
                                 }

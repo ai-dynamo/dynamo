@@ -3,8 +3,9 @@
 
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import aiohttp
 import httpx
@@ -13,6 +14,7 @@ import pytest
 import requests
 import yaml
 
+from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -148,11 +150,11 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     replacement_port_forward = MagicMock(local_port=31002)
     deployment.port_forward = MagicMock(return_value=replacement_port_forward)
     response = MagicMock(spec=requests.Response)
-    request_sender = MagicMock(side_effect=[transport_error, response])
+    request_sender = MagicMock(side_effect=[transport_error, response, response])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
 
-    result = deployment.send_request_with_port_forward_retry(
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
         endpoint="/v1/chat/completions",
@@ -169,9 +171,58 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     assert (
         request_sender.call_args_list[1].args[0].startswith("http://localhost:31002/")
     )
+    assert active_port_forward is replacement_port_forward
+    next_result, next_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test"},
+        timeout=120,
+        port_forward=active_port_forward,
+        request_sender=request_sender,
+    )
+    assert next_result is response
+    assert next_port_forward is replacement_port_forward
+    assert request_sender.call_count == 3
+    assert (
+        request_sender.call_args_list[2].args[0].startswith("http://localhost:31002/")
+    )
     original_port_forward.stop.assert_called_once_with()
     deployment.port_forward.assert_called_once()
     sleep.assert_called_once_with(5)
+
+
+def test_request_rebuilds_port_forward_after_stream_body_failure(
+    monkeypatch, tmp_path
+) -> None:
+    deployment = managed_deployment(tmp_path)
+    original_port_forward = MagicMock(local_port=31001)
+    replacement_port_forward = MagicMock(local_port=31002)
+    deployment.port_forward = MagicMock(return_value=replacement_port_forward)
+    dropped_response = MagicMock(spec=requests.Response)
+    type(dropped_response).content = PropertyMock(
+        side_effect=requests.ConnectionError("stream dropped after headers")
+    )
+    response = MagicMock(spec=requests.Response)
+    type(response).content = PropertyMock(return_value=b"data: [DONE]\n")
+    request_sender = MagicMock(side_effect=[dropped_response, response])
+    monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", MagicMock())
+
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test", "stream": True},
+        timeout=120,
+        port_forward=original_port_forward,
+        request_sender=request_sender,
+    )
+
+    assert result is response
+    assert active_port_forward is replacement_port_forward
+    dropped_response.close.assert_called_once_with()
+    original_port_forward.stop.assert_called_once_with()
+    deployment.port_forward.assert_called_once()
 
 
 def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
@@ -231,3 +282,62 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
         previous=True,
         tail_lines=50000,
     )
+
+
+@pytest.mark.parametrize(
+    ("failed", "capture_behavior", "expected_events"),
+    [
+        (False, "complete", ["service-logs", "delete"]),
+        (
+            True,
+            "complete",
+            ["capture-start", "capture-done", "service-logs", "delete"],
+        ),
+        (True, "timeout", ["capture-start", "service-logs", "delete"]),
+        (True, "cancel", ["capture-start", "service-logs", "delete"]),
+    ],
+    ids=["success", "failure", "capture-timeout", "capture-cancelled"],
+)
+async def test_discovery_capture_and_cleanup(
+    monkeypatch, tmp_path, failed, capture_behavior, expected_events
+):
+    deployment = managed_deployment(tmp_path)
+    events = []
+
+    # Isolate teardown from Kubernetes startup.
+    monkeypatch.setattr(
+        ManagedDeployment, "__aenter__", AsyncMock(return_value=deployment)
+    )
+    deployment._get_service_logs = MagicMock(
+        side_effect=lambda: events.append("service-logs")
+    )
+    snapshot_timeout = 1 if capture_behavior == "cancel" else 0.01
+    monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", snapshot_timeout)
+
+    async def capture():
+        events.append("capture-start")
+        if capture_behavior in {"timeout", "cancel"}:
+            await asyncio.Event().wait()
+        await asyncio.sleep(0)
+        events.append("capture-done")
+
+    async def delete():
+        events.append("delete")
+
+    deployment._capture_discovery_state = capture
+    deployment._delete_deployment = delete
+
+    if capture_behavior == "cancel":
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.01):
+                async with deployment:
+                    raise ValueError("inference failed")
+    elif failed:
+        with pytest.raises(ValueError, match="inference failed"):
+            async with deployment:
+                raise ValueError("inference failed")
+    else:
+        async with deployment:
+            pass
+
+    assert events == expected_events

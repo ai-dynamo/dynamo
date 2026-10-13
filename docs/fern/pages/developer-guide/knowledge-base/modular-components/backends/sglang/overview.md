@@ -81,7 +81,7 @@ docker run --gpus all -it --rm \
     --ulimit nofile=65536:65536 \
     --cap-add CAP_SYS_PTRACE --ipc host \
     -v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface \
-    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
 ```
 
 Mount the host Hugging Face cache (`-v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface`) so each container restart doesn't re-download model weights. The container runs as user `dynamo` (UID 1000), which is why the in-container path is `/home/dynamo/.cache/huggingface`.
@@ -157,14 +157,14 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
 | **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
 | **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | 🚧 | — | |
-| **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | 🚧 | 🚧 | — |
+| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | 🚧 | — | 🚧 | 🚧 | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap. The worker probes `engine.async_generate` once at startup and stops forwarding `mm_hashes` when the build does not accept it; the frontend keeps deriving image-aware routing keys regardless, so the worker's internally computed hashes never line up with them and only the text prefix overlaps. Expect image-blind cache hits on such a build rather than an error. ([Source](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md))
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](multimodal.md))
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../../concepts/fault-tolerance/request-cancellation-architecture.md))
 > 4. **LoRA**: Dynamic adapter loading, discovery, and aggregated inference have pre-merge end-to-end coverage. Unloading is implemented but not exercised by an end-to-end test. Prefill/decode registration has unit coverage, but disaggregated LoRA and feature pairings such as KV-aware routing have not been validated end to end. ([Source](../../../../../cli/operations/lora-adapters.md))
-> 5. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
+> 5. **Speculative Decoding**: EAGLE3 support documented. ([Source](../../../../additional-resources/speculative-decoding/speculative-decoding-with-sglang.md))
 
 ## Quick Start
 
@@ -206,6 +206,15 @@ cd $DYNAMO_HOME/examples/backends/sglang
 ```
 
 > **Performance caveat:** Qwen3-0.6B is small enough that the disaggregated pathway is dominated by transport overhead and will often look slower than aggregated. Use it for plumbing validation, not benchmarks. Switch to Qwen3-32B-FP8 or larger for realistic disagg numbers.
+
+### Thinking Token Budgets
+
+Send a root-level `thinking_token_budget` on chat or Responses requests to limit reasoning tokens. Dynamo forwards it to SGLang's `sampling_params.custom_params.thinking_budget`; it does not configure a custom logit processor. Omit the field to keep the engine default. A budget is optional with `--enable-strict-thinking`, and a request that disables thinking ignores the budget.
+
+Start token-generation workers with `--enable-strict-thinking` and a compatible `--reasoning-parser` (for example, `qwen3`). The parser must support SGLang's strict-thinking token filter, either through excluded tokens or a non-negative `SGLANG_MAX_THINK_TOKENS` engine default. Keep tokenizer initialization enabled; `--skip-tokenizer-init` is incompatible with this feature. Apply these settings to both prefill and decode workers in a disaggregated deployment. Diffusion workers do not support thinking token budgets.
+
+> [!WARNING]
+> The multimodal launch scripts `agg_vision.sh`, `multimodal_epd.sh`, and `multimodal_disagg.sh` currently use `--skip-tokenizer-init`. Their defaults cannot enforce thinking token budgets. Removing that flag and configuring strict thinking with a compatible reasoning parser are prerequisites; budget enforcement with those multimodal examples has not been validated end to end.
 
 ### Multi-Node TP
 

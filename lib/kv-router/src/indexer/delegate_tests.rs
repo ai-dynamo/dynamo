@@ -42,11 +42,6 @@ fn indexer(variant: &str, delegate: Arc<Recorder>) -> Box<dyn KvIndexerInterface
             .delegate(delegate)
             .build(),
         ),
-        "concurrent" => Box::new(ThreadPoolIndexer::new(
-            concurrent_radix_tree::ConcurrentRadixTree::new_with_delegate(delegate),
-            4,
-            32,
-        )),
         "compressed" => Box::new(ThreadPoolIndexer::new(
             concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed::new_with_delegate(
                 delegate,
@@ -85,16 +80,7 @@ fn indexer(variant: &str, delegate: Arc<Recorder>) -> Box<dyn KvIndexerInterface
 #[rstest]
 #[tokio::test]
 async fn delegate_tracks_first_and_last_owner(
-    #[values(
-        "single",
-        "concurrent",
-        "compressed",
-        "positional",
-        "lower",
-        "local",
-        "sharded"
-    )]
-    variant: &str,
+    #[values("single", "compressed", "positional", "lower", "local", "sharded")] variant: &str,
 ) {
     let recorder = Arc::new(Recorder::default());
     let indexer = indexer(variant, recorder.clone());
@@ -135,16 +121,7 @@ async fn delegate_tracks_first_and_last_owner(
 #[rstest]
 #[tokio::test]
 async fn delegate_shared_prefix_split_and_clear(
-    #[values(
-        "single",
-        "concurrent",
-        "compressed",
-        "positional",
-        "lower",
-        "local",
-        "sharded"
-    )]
-    variant: &str,
+    #[values("single", "compressed", "positional", "lower", "local", "sharded")] variant: &str,
 ) {
     let recorder = Arc::new(Recorder::default());
     let indexer = indexer(variant, recorder.clone());
@@ -171,7 +148,7 @@ async fn delegate_shared_prefix_split_and_clear(
 #[rstest]
 #[tokio::test]
 async fn delegate_parallel_owners_and_reset(
-    #[values("single", "concurrent", "compressed", "positional")] variant: &str,
+    #[values("single", "compressed", "positional")] variant: &str,
 ) {
     let recorder = Arc::new(Recorder::default());
     let indexer = indexer(variant, recorder.clone());
@@ -198,7 +175,7 @@ async fn delegate_parallel_owners_and_reset(
 #[rstest]
 #[tokio::test]
 async fn delegate_rejected_store_is_silent(
-    #[values("single", "concurrent", "compressed", "positional")] variant: &str,
+    #[values("single", "compressed", "positional")] variant: &str,
 ) {
     let recorder = Arc::new(Recorder::default());
     let indexer = indexer(variant, recorder.clone());
@@ -301,16 +278,7 @@ fn delegate_cuckoo_nonempty_replacement_reports_only_ownership_changes() {
 #[rstest]
 #[tokio::test]
 async fn delegate_matches_dump_after_mixed_owner_changes(
-    #[values(
-        "single",
-        "concurrent",
-        "compressed",
-        "positional",
-        "lower",
-        "local",
-        "sharded"
-    )]
-    variant: &str,
+    #[values("single", "compressed", "positional", "lower", "local", "sharded")] variant: &str,
 ) {
     let recorder = Arc::new(Recorder::default());
     let indexer = indexer(variant, recorder.clone());

@@ -67,7 +67,9 @@ impl GrpcTuningConfig {
 
 use crate::grpc::service::dispatch_error_status;
 use crate::grpc::service::openai::completion_response_stream;
-use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
+use crate::grpc::service::tensor::{
+    ExtendedNvCreateTensorResponse, kserve_metadata_shape, tensor_response_stream,
+};
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
 
@@ -686,7 +688,10 @@ impl GrpcInferenceService for KserveService {
                                         .and_then(|dt| dt.oip_name())
                                         .unwrap_or("TYPE_INVALID")
                                         .to_string(),
-                                    shape: input.dims.clone(),
+                                    shape: kserve_metadata_shape(
+                                        &input.dims,
+                                        model_config.max_batch_size,
+                                    ),
                                 })
                                 .collect(),
                             outputs: model_config
@@ -700,7 +705,10 @@ impl GrpcInferenceService for KserveService {
                                             .and_then(|dt| dt.oip_name())
                                             .unwrap_or("TYPE_INVALID")
                                             .to_string(),
-                                        shape: output.dims.clone(),
+                                        shape: kserve_metadata_shape(
+                                            &output.dims,
+                                            model_config.max_batch_size,
+                                        ),
                                     },
                                 )
                                 .collect(),

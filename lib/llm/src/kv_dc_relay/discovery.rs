@@ -407,6 +407,7 @@ impl MembershipState {
                 self.cards.remove(&id).is_some()
             }
             DiscoveryEvent::Removed(_) => false,
+            DiscoveryEvent::Resync(instances) => self.replace_all(instances, filter),
         }
     }
 
@@ -1092,6 +1093,21 @@ mod tests {
         assert_eq!(state.projection_count, projection_count + 1);
         assert!(receiver.has_changed().unwrap());
         assert_ne!(*receiver.borrow_and_update(), initial);
+    }
+
+    #[test]
+    fn a_resync_replaces_the_membership() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        let first = instance("generate", 1, None, card("llama", "meta/llama", 64));
+        let second = instance("generate", 2, None, card("llama", "meta/llama", 64));
+        assert!(state.apply(DiscoveryEvent::Added(first), &filter));
+
+        assert!(state.apply(DiscoveryEvent::Resync(vec![second.clone()]), &filter));
+        let members: Vec<u64> = state.cards.keys().map(|id| id.instance_id).collect();
+        assert_eq!(members, vec![2]);
+
+        assert!(!state.apply(DiscoveryEvent::Resync(vec![second]), &filter));
     }
 
     #[test]

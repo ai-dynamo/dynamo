@@ -26,6 +26,7 @@ from tests.utils.collection_env_guard import (
 )
 from tests.utils.constants import TEST_MODELS, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import (
     ServicePorts,
     allocate_port,
@@ -33,7 +34,6 @@ from tests.utils.port_utils import (
     deallocate_port,
     deallocate_ports,
 )
-from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
@@ -234,6 +234,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "token_budget_parity: compares native backend and Dynamo prompt/output "
         "overflow behavior",
+    )
+    config.addinivalue_line(
+        "markers",
+        "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary "
+        "against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
     )
     config.addinivalue_line(
         "markers",

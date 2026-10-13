@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import json
 import warnings
 from dataclasses import replace
 
@@ -22,10 +21,15 @@ from aisimulate.config_adapter import (
     PredictionAdapterContext,
     RecommendationAdapterContext,
 )
-from aisimulate.sweeper.provider import CandidateContext, SweepContext
+from aisimulate.sweeper.provider import (
+    CandidateContext,
+    InfeasibleCandidate,
+    SweepContext,
+)
 from aisimulate.sweeper.replay import BackendDeploymentSpec
 
 import dynamo.planner.simulation.provider as planner_provider_module
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.simulation import create_provider
 from dynamo.planner.simulation.load_predictor import LoadPredictorResult
 
@@ -430,11 +434,11 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
         "ttft_ms": 2000.0,
         "itl_ms": 30.0,
     }
-    assert replay_spec.config == {
-        "scaling_policy": "throughput_180_5",
-        **expected,
-    }
-    assert replay_spec.runtime_hooks[0].config == {"planner_config": expected}
+    actual = replay_spec.runtime_hooks[0].config["planner_config"]
+    assert PlannerConfig.model_validate(actual) == PlannerConfig.model_validate(
+        expected
+    )
+    assert replay_spec.config == {"scaling_policy": "throughput_180_5", **actual}
 
 
 def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> None:
@@ -580,11 +584,16 @@ def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
         )
 
 
-def test_public_planner_prediction_requires_sla_for_throughput_scaling() -> None:
-    with pytest.raises(ValueError, match="throughput scaling requires"):
+def test_public_planner_prediction_requires_complete_sla() -> None:
+    with pytest.raises(ValueError, match="Planner throughput scaling requires"):
         create_provider().compile_prediction(
-            {"policy": "enabled"},
-            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+            {
+                "policy": "enabled",
+                "target": "sla",
+                "enable_throughput_scaling": True,
+                "enable_load_scaling": False,
+            },
+            _prediction_context(),
         )
 
 
@@ -657,7 +666,11 @@ def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
         )
 
 
-def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
+def test_custom_fpm_preset_validation_ignores_prometheus_environment(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PROMETHEUS_EXTRA_QUERY_PARAMS", "missing-equals")
+    monkeypatch.setenv("PROMETHEUS_CA_BUNDLE", str(tmp_path / "missing-ca.pem"))
     context = RecommendationAdapterContext(
         engine={},
         traffic={},
@@ -665,7 +678,13 @@ def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
         optimization={"target": "goodput"},
         sweep=_sweep_context(target="goodput"),
     )
-    with pytest.raises(ValueError):
+    preset = {"max_num_fpm_samples": 64, "fpm_sample_bucket_size": 16}
+    plan = create_provider().compile_recommendation(
+        {"fpm_sampling": {"preset": [preset]}}, context
+    )
+    assert plan.fragment.choices_by_branch["agg"]["fpm_sampling"] == [preset]
+
+    with pytest.raises(ValueError, match="must be a perfect square"):
         create_provider().compile_recommendation(
             {
                 "fpm_sampling": {
@@ -695,10 +714,16 @@ def test_custom_disabled_scaling_preset_uses_null_inactive_intervals() -> None:
         "throughput_adjustment_interval_seconds": None,
         "load_adjustment_interval_seconds": None,
     }
-    plan = create_provider().compile_recommendation(
-        {"scaling_policy": {"preset": [disabled]}}, context
+    adapter = create_provider()
+    plan = adapter.compile_recommendation(
+        {"policy": "enabled", "scaling_policy": {"preset": [disabled]}}, context
     )
     assert plan.fragment.choices_by_branch["agg"]["scaling_policy"] == [disabled]
+    spec = adapter.materialize_candidate(
+        plan, {"policy": "enabled", "scaling_policy": disabled}, _candidate_context()
+    )
+    assert spec.config == {"policy": "disabled"}
+    assert spec.runtime_hooks == ()
 
     invalid = dict(disabled)
     invalid["throughput_adjustment_interval_seconds"] = 180
@@ -709,7 +734,8 @@ def test_custom_disabled_scaling_preset_uses_null_inactive_intervals() -> None:
         )
 
 
-def test_preset_off_rejects_infeasible_recombined_scaling_intervals() -> None:
+@pytest.mark.parametrize("throughput_enabled", [False, True])
+def test_preset_off_uses_real_planner_interval_validation(throughput_enabled) -> None:
     adapter = create_provider()
     context = RecommendationAdapterContext(
         engine={},
@@ -721,7 +747,7 @@ def test_preset_off_rejects_infeasible_recombined_scaling_intervals() -> None:
     plan = adapter.compile_recommendation(
         {
             "scaling_policy": {"preset": False},
-            "enable_throughput_scaling": False,
+            "enable_throughput_scaling": throughput_enabled,
             "enable_load_scaling": {"choices": [False, True]},
             "throughput_adjustment_interval_seconds": {"choices": [20, 40]},
             "load_adjustment_interval_seconds": {"choices": [10, 30]},
@@ -734,22 +760,37 @@ def test_preset_off_rejects_infeasible_recombined_scaling_intervals() -> None:
     }
     selection.update(
         policy="enabled",
-        enable_throughput_scaling=False,
+        enable_throughput_scaling=throughput_enabled,
         enable_load_scaling=True,
         throughput_adjustment_interval_seconds=20,
         load_adjustment_interval_seconds=30,
     )
-    with pytest.raises(ValueError, match="independent Planner scaling-policy"):
-        adapter.materialize_candidate(plan, selection, _candidate_context())
+    if throughput_enabled:
+        with pytest.raises(InfeasibleCandidate, match="load_adjustment_interval"):
+            adapter.materialize_candidate(plan, selection, _candidate_context())
+    else:
+        spec = adapter.materialize_candidate(plan, selection, _candidate_context())
+        assert spec.config["load_adjustment_interval_seconds"] == 30
 
 
-def test_enabled_planner_prediction_keeps_public_config_separate_from_hook() -> None:
+@pytest.mark.parametrize(
+    "trace_format", ["mooncake-delta", "agentic_mooncake", "dynamo", "weka"]
+)
+def test_enabled_planner_prediction_keeps_public_config_separate_from_hook(
+    trace_format,
+) -> None:
     context = PredictionAdapterContext(
         engine={
             "mode": "aggregated",
             "workers": {"aggregated": {"parallelism": {"tensor": 1}}},
         },
-        traffic={},
+        traffic={
+            "source": {
+                "type": "trace",
+                "format": trace_format,
+                "paths": ["unopened.jsonl"],
+            }
+        },
         evaluation={},
     )
     spec = create_provider().compile_prediction(
@@ -798,42 +839,29 @@ def test_static_predictor_fallback_stays_within_configured_preset_list() -> None
     assert plan.state["load_predictor"]["best_by_interval"] == {"180": "arima_raw"}
 
 
-def test_native_dynamo_agentic_trace_is_detected_after_payload_header(tmp_path) -> None:
-    trace = tmp_path / "trace.jsonl"
-    trace.write_text(
-        json.dumps({"event_type": "request_payload"})
-        + "\n"
-        + json.dumps(17)
-        + "\n"
-        + json.dumps({"event_type": "request_end", "request": {}})
-        + "\n"
-        + json.dumps(
-            {
-                "event": {
-                    "event_type": "request_end",
-                    "agent_context": {"session_id": "s"},
+@pytest.mark.parametrize(
+    "trace_format", ["mooncake-delta", "agentic_mooncake", "dynamo", "weka"]
+)
+def test_enabled_planner_recommendation_accepts_native_trace_formats(
+    trace_format,
+) -> None:
+    plan = create_provider().compile_recommendation(
+        {"policy": "enabled", "scaling_policy": {"preset": ["load_180_5"]}},
+        RecommendationAdapterContext(
+            engine={},
+            traffic={
+                "source": {
+                    "type": "trace",
+                    "format": trace_format,
+                    "paths": ["unopened.jsonl"],
                 }
-            }
-        )
-        + "\n"
+            },
+            evaluation={},
+            optimization={"target": "throughput"},
+            sweep=_sweep_context(target="throughput"),
+        ),
     )
-    with pytest.raises(ValueError, match=r"planner\.policy=disabled"):
-        create_provider().compile_recommendation(
-            {"policy": "enabled"},
-            RecommendationAdapterContext(
-                engine={},
-                traffic={
-                    "source": {
-                        "type": "trace",
-                        "format": "dynamo",
-                        "paths": [str(trace)],
-                    }
-                },
-                evaluation={},
-                optimization={"target": "throughput"},
-                sweep=_sweep_context(target="throughput"),
-            ),
-        )
+    assert plan.fragment.choices_by_branch["agg"]["policy"] == ["enabled"]
 
 
 def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:
@@ -869,7 +897,7 @@ def test_public_policy_and_min_workers_are_independent_dimensions() -> None:
         "scaling_policy": "load_180_5",
         "fpm_sampling": "default",
         "load_sensitivity": "default",
-        "min_workers": 2,
+        "min_workers": 0,
     }
     disabled = adapter.materialize_replay(
         plan,
@@ -885,9 +913,11 @@ def test_public_policy_and_min_workers_are_independent_dimensions() -> None:
     assert disabled.config == {"policy": "disabled"}
     assert disabled.runtime_hooks == ()
     assert enabled.config["policy"] == "enabled"
-    assert enabled.config["min_workers"] == 2
+    assert enabled.config["min_workers"] == 0
     assert enabled.config["max_num_gpus"] == 8
-    assert enabled.runtime_hooks[0].config["planner_config"]["min_endpoint"] == 2
+    assert enabled.runtime_hooks[0].config["planner_config"]["min_endpoint"] == 0
+    predicted = adapter.compile_prediction(enabled.config, _prediction_context())
+    assert predicted.runtime_hooks == enabled.runtime_hooks
 
 
 def test_public_custom_predictor_preset_requires_every_knob() -> None:
@@ -900,3 +930,175 @@ def test_public_custom_predictor_preset_requires_every_knob() -> None:
                 },
             }
         )
+
+
+def _prediction_context(sla=None) -> PredictionAdapterContext:
+    return PredictionAdapterContext(
+        engine={
+            "mode": "aggregated",
+            "workers": {
+                "aggregated": {"parallelism": {"tensor": 4, "attention_data": 2}}
+            },
+        },
+        traffic={},
+        evaluation={"sla": sla} if sla else {},
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"throughput_adjustment_interval_seconds": None},
+        {
+            "target": "sla",
+            "enable_load_scaling": False,
+            "load_adjustment_interval_seconds": None,
+        },
+    ],
+)
+def test_prediction_defaults_and_inactive_nulls_match_real_planner(overrides) -> None:
+    sla = {"ttft_ms": 2000.0, "itl_ms": 30.0}
+    spec = create_provider().compile_prediction(
+        {"policy": "enabled", **overrides}, _prediction_context(sla)
+    )
+    actual = PlannerConfig.model_validate(
+        spec.runtime_hooks[0].config["planner_config"]
+    )
+    expected_fields = {
+        key: value for key, value in overrides.items() if value is not None
+    }
+    expected_fields["optimization_target"] = expected_fields.pop("target", "throughput")
+    if expected_fields["optimization_target"] == "sla":
+        expected_fields.update(sla)
+    expected = PlannerConfig(
+        mode="agg",
+        decode_engine_num_gpu=8,
+        report_interval_hours=None,
+        live_dashboard_port=0,
+        metric_pulling_prometheus_extra_query_params=None,
+        **expected_fields,
+    )
+    assert actual == expected
+    assert spec.config["load_adjustment_interval_seconds"] is not None
+    assert spec.config["throughput_adjustment_interval_seconds"] is not None
+    assert not any("token" in key or "url" in key for key in spec.config)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"load_adjustment_interval_seconds": None},
+        {"target": "sla", "throughput_adjustment_interval_seconds": None},
+    ],
+)
+def test_prediction_rejects_null_for_effective_active_interval(overrides) -> None:
+    with pytest.raises(ValueError, match="cannot be null"):
+        create_provider().compile_prediction(
+            {"policy": "enabled", **overrides},
+            _prediction_context({"ttft_ms": 2000.0, "itl_ms": 30.0}),
+        )
+
+
+@pytest.mark.parametrize("independent", [False, True])
+@pytest.mark.parametrize("target", ["throughput", "goodput"])
+def test_default_search_filters_dimensions_and_roundtrips(
+    target, independent, monkeypatch, tmp_path
+) -> None:
+    adapter = create_provider()
+    context = _sweep_context(target=target)
+    config = (
+        {
+            name: {"preset": False}
+            for name in ("scaling_policy", "fpm_sampling", "load_sensitivity")
+        }
+        if independent
+        else {}
+    )
+    plan = adapter.compile_recommendation(
+        config,
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={"sla": context.goal["sla"]},
+            optimization={"target": target},
+            sweep=context,
+        ),
+    )
+    choices = plan.fragment.choices_by_branch["agg"]
+    if target == "throughput":
+        if independent:
+            assert choices["enable_throughput_scaling"] == [False]
+            assert "max_num_fpm_samples" not in choices
+        else:
+            assert choices["scaling_policy"] == [
+                "disabled",
+                "load_180_5",
+                "load_180_10",
+            ]
+            assert "fpm_sampling" not in choices
+    selection = {name: values[-1] for name, values in choices.items()}
+    spec = adapter.materialize_candidate(plan, selection, _candidate_context())
+    assert spec.config["policy"] == "enabled"
+    for name, value in {
+        "PROMETHEUS_ENDPOINT": "https://unused.invalid",
+        "PROMETHEUS_TOKEN": "unused-token",
+        "PROMETHEUS_TOKEN_FILE": str(tmp_path / "missing-token"),
+        "PROMETHEUS_SSL_VERIFY": "true",
+        "PROMETHEUS_EXTRA_QUERY_PARAMS": "missing-equals",
+        "PROMETHEUS_CA_BUNDLE": str(tmp_path / "missing-ca.pem"),
+        "DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS": "invalid-timeout",
+        "PLANNER_PROMETHEUS_PORT": "invalid-port",
+    }.items():
+        monkeypatch.setenv(name, value)
+    assert adapter.materialize_candidate(plan, selection, _candidate_context()) == spec
+    predicted = adapter.compile_prediction(
+        spec.config, _prediction_context(context.goal["sla"])
+    )
+    assert predicted.runtime_hooks == spec.runtime_hooks
+
+
+def test_explicit_subset_rejects_incompatible_policy_and_preserves_inactive_null() -> (
+    None
+):
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={"target": "throughput"},
+        sweep=_sweep_context(target="throughput"),
+    )
+    with pytest.raises(ValueError, match="incompatible"):
+        adapter.compile_recommendation(
+            {"scaling_policy": {"preset": ["load_180_5", "throughput_180_5"]}},
+            context,
+        )
+    custom = {
+        "enable_throughput_scaling": False,
+        "enable_load_scaling": True,
+        "throughput_adjustment_interval_seconds": None,
+        "load_adjustment_interval_seconds": 5,
+    }
+    plan = adapter.compile_recommendation(
+        {
+            "policy": "enabled",
+            "scaling_policy": {"preset": [custom]},
+            "load_sensitivity": {"preset": ["conservative"]},
+        },
+        context,
+    )
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert choices["scaling_policy"] == [custom]
+    assert choices["load_sensitivity"] == ["conservative"]
+    assert "fpm_sampling" not in choices
+    spec = adapter.materialize_candidate(
+        plan,
+        {name: values[0] for name, values in choices.items()},
+        _candidate_context(),
+    )
+    assert (
+        spec.config["throughput_adjustment_interval_seconds"]
+        == PlannerConfig.model_fields["throughput_adjustment_interval_seconds"].default
+    )
+    assert spec.config["load_scaling_down_sensitivity"] == 90

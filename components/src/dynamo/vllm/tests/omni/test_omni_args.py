@@ -3,6 +3,7 @@
 
 """Unit tests for OmniConfig validation and omni argument parsing."""
 
+import argparse
 import contextlib
 import dataclasses
 import logging
@@ -19,6 +20,7 @@ try:
     from dynamo.vllm import main as vllm_main
     from dynamo.vllm.omni.args import (
         FlexibleArgumentParser,
+        OmniArgGroup,
         OmniConfig,
         OmniDiffusionKwargs,
         OmniEngineArgs,
@@ -31,6 +33,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     # Building the vLLM argument parser resolves a device; on an accelerator-less
     # host that raises unless a platform is pinned first.
@@ -105,6 +108,103 @@ def test_omni_config_valid_defaults():
     config.validate()
 
 
+def test_startup_lora_paths_parse_as_diffusion_options():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        ["--lora-path", "/models/fast-a.safetensors", "/models/fast-b.safetensors"]
+    )
+
+    assert args.lora_path == [
+        "/models/fast-a.safetensors",
+        "/models/fast-b.safetensors",
+    ]
+
+
+def test_ulysses_a2a_permute_parses_as_parallel_option():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--ulysses-a2a-permute"])
+
+    assert args.ulysses_a2a_permute is True
+
+
+def test_fastvideo_vsa_topk_parses_as_diffusion_option():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--fastvideo-vsa-topk", "64"])
+
+    assert args.fastvideo_vsa_topk == 64
+
+
+def test_diffusion_only_options_remain_unset_when_omitted():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert {
+        "enable_layerwise_offload": args.enable_layerwise_offload,
+        "layerwise_num_gpu_layers": args.layerwise_num_gpu_layers,
+        "vae_use_slicing": args.vae_use_slicing,
+        "vae_use_tiling": args.vae_use_tiling,
+        "boundary_ratio": args.boundary_ratio,
+        "enable_cache_dit_summary": args.enable_cache_dit_summary,
+        "enable_cpu_offload": args.enable_cpu_offload,
+    } == {
+        "enable_layerwise_offload": None,
+        "layerwise_num_gpu_layers": None,
+        "vae_use_slicing": None,
+        "vae_use_tiling": None,
+        "boundary_ratio": None,
+        "enable_cache_dit_summary": None,
+        "enable_cpu_offload": None,
+    }
+
+
+@pytest.mark.parametrize("source", ["cli", "environment"])
+@pytest.mark.parametrize("layers", [0, 1])
+def test_removed_layerwise_gpu_layers_rejected(monkeypatch, source, layers):
+    monkeypatch.delenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", raising=False)
+    argv = []
+    if source == "environment":
+        monkeypatch.setenv("DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS", str(layers))
+    else:
+        argv = ["--layerwise-num-gpu-layers", str(layers)]
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    config = _make_omni_config(layerwise_num_gpu_layers=args.layerwise_num_gpu_layers)
+
+    with pytest.raises(
+        ValueError,
+        match="--layerwise-num-gpu-layers.*no longer supported.*--enable-layerwise-offload",
+    ):
+        config.validate()
+
+
+def test_diffusion_bool_option_preserves_explicit_false():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--no-vae-use-tiling"])
+
+    assert args.vae_use_tiling is False
+
+
+def test_diffusion_bool_environment_option_is_parsed(monkeypatch):
+    monkeypatch.setenv("DYN_OMNI_VAE_USE_TILING", "false")
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert args.vae_use_tiling is False
+
+
 @pytest.mark.parametrize("fps", [0, -1, -100])
 def test_omni_config_invalid_video_fps(fps):
     config = _make_omni_config(default_video_fps=fps)
@@ -138,6 +238,13 @@ def test_omni_config_invalid_boundary_ratio(ratio):
 def test_omni_config_valid_boundary_ratio(ratio):
     config = _make_omni_config(boundary_ratio=ratio)
     config.validate()
+
+
+@pytest.mark.parametrize("topk", [0, -1])
+def test_omni_config_invalid_fastvideo_vsa_topk(topk):
+    config = _make_omni_config(fastvideo_vsa_topk=topk)
+    with pytest.raises(ValueError, match="--fastvideo-vsa-topk must be > 0"):
+        config.validate()
 
 
 def test_negative_stage_id_rejected():
