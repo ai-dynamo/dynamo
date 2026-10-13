@@ -245,7 +245,9 @@ It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the 
 
 KV-cache transfer between workers uses [NIXL](https://github.com/ai-dynamo/nixl) with the LIBFABRIC backend. Enable it by passing the following argument to vLLM:
 
-`--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
+On prefill workers use: `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
+
+On decode workers use: `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
 
 *Note: On instance types without EFA support, NIXL's libfabric backend falls back to TCP automatically. However, vLLM's `NixlConnector` defaults to `cuda` as the buffer device, so you must add `"kv_buffer_device":"cpu"` to the `kv-transfer-config` argument for disaggregated serving to work without EFA.*
 

@@ -12,9 +12,11 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
-    PreprocessedRequest, WorkerConfig, usage,
+    PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -74,12 +76,18 @@ impl SglangSidecarEngine {
 
     /// Parse CLI arguments without connecting; discovery runs after probe startup.
     pub fn from_cli() -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, false))
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, false),
+        ))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -87,12 +95,18 @@ impl SglangSidecarEngine {
     pub fn try_from_args_async(
         argv: Vec<String>,
     ) -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, false))
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, false),
+        ))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -157,6 +171,7 @@ impl SglangSidecarEngine {
 
         let common = args.sidecar.common;
         let config = WorkerConfig {
+            runtime: common.runtime,
             namespace: common.namespace,
             component: if disaggregation_mode == DisaggregationMode::Aggregated {
                 common.component
@@ -336,7 +351,7 @@ impl LLMEngine for SglangSidecarEngine {
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
-            return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
+            return Ok(native_http.generate(native_request, ctx, self.cancel.child_token()));
         }
         let mut grpc_client = state.pool.stream_client();
 
@@ -369,12 +384,15 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
+            let stopped_ctx = ctx.inner_arc();
+            let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
+            let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
 
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
-                _ = ctx.stopped() => None,
-                _ = cancel.cancelled() => None,
+                _ = &mut request_cancellation => None,
+                _ = &mut shutdown_cancellation => None,
                 response = grpc_client.generate(grpc_request) => Some(response),
             };
             let Some(opened) = opened else {
@@ -408,12 +426,12 @@ impl LLMEngine for SglangSidecarEngine {
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => {
+                    _ = &mut request_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
-                    _ = cancel.cancelled() => {
+                    _ = &mut shutdown_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;

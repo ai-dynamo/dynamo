@@ -1000,25 +1000,29 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                             logprob_val <= 0
                         ), f"logprob at index {i} should be <= 0, got {logprob_val}"
 
-                # Validate top_logprobs entries have token, logprob, and bytes when present
-                top_logprobs_list = logprobs_data.get("top_logprobs", [])
+                # Completions top_logprobs follow the OpenAI legacy format: one
+                # {token: logprob} map per generated token (unlike chat's records).
+                top_logprobs_list = logprobs_data.get("top_logprobs") or []
                 for i, token_top_lps in enumerate(top_logprobs_list):
                     if not token_top_lps:
                         continue
-                    for top_lp in token_top_lps:
+                    assert isinstance(
+                        token_top_lps, dict
+                    ), f"top_logprobs[{i}] should be a token->logprob map, got {type(token_top_lps).__name__}"
+                    # The sampled token can appear in addition to the top-k.
+                    requested_logprobs = self.body.get("logprobs")
+                    if requested_logprobs is not None:
+                        assert len(token_top_lps) <= requested_logprobs + 1, (
+                            f"Too many entries in top_logprobs[{i}]: "
+                            f"expected at most {requested_logprobs + 1}"
+                        )
+                    for token, logprob in token_top_lps.items():
+                        assert math.isfinite(
+                            logprob
+                        ), f"top_logprobs[{i}][{token!r}] is not finite"
                         assert (
-                            "token" in top_lp
-                        ), f"Missing 'token' in top_logprobs[{i}] entry"
-                        assert (
-                            "logprob" in top_lp
-                        ), f"Missing 'logprob' in top_logprobs[{i}] entry"
-                        assert (
-                            "bytes" in top_lp
-                        ), f"Missing 'bytes' in top_logprobs[{i}] entry"
-                        if top_lp["token"]:
-                            assert (
-                                top_lp["bytes"] is not None
-                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+                            logprob <= 0
+                        ), f"top_logprobs[{i}][{token!r}] should be <= 0, got {logprob}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"

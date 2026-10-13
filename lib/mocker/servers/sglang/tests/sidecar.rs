@@ -7,7 +7,7 @@ use dynamo_backend_common::{
     AsyncEngineContext, BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext,
     LLMEngine, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::{
     SglangSidecarEngine, proto::sglang_service_server::SglangServiceServer,
@@ -24,7 +24,7 @@ struct RunningServer {
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockEngineArgs) -> Self {
+    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
         let service = SglangMockerService::new(
             MockerServerConfig {
                 mode,
@@ -62,17 +62,19 @@ impl Drop for RunningServer {
     }
 }
 
-fn fast_engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(EngineType::Sglang)
-        .block_size(4)
-        .num_gpu_blocks(4_096)
-        .max_num_seqs(Some(64))
-        .max_num_batched_tokens(Some(1_024))
-        .speedup_ratio(0.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": EngineType::Sglang,
+            "block_size": 4,
+            "num_gpu_blocks": 4_096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1_024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngine {
