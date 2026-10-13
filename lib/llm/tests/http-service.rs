@@ -3641,3 +3641,77 @@ mod zero_top_logprobs {
         run_case(true).await;
     }
 }
+
+/// `--reject-media`: a streaming chat request whose history carries an image is
+/// refused with the configured status before routing. The client gets that
+/// status instead of a 200 stream, and the engine never sees the request.
+#[tokio::test]
+async fn test_reject_media_refuses_streaming_request_before_routing() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .media_rejection(dynamo_llm::frontend_config::MediaRejectionConfig::new(
+            true, 429,
+        ))
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("text-only");
+    let engine = Arc::new(NvExtCaptureEngine::default());
+    state
+        .manager()
+        .add_chat_completions_model("text-only", card.mdcsum(), engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let url = format!("http://localhost:{port}/v1/chat/completions");
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": "text-only",
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "Model does not accept image input; received unsupported content type 'image_url'."
+    );
+    assert!(
+        engine.nvext.lock().unwrap().is_none(),
+        "refused request must not reach the engine"
+    );
+
+    // A text-only request on the same frontend is served.
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": "text-only",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    assert!(engine.nvext.lock().unwrap().is_some());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}

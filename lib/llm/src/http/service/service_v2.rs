@@ -48,7 +48,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{FrontendApiConfig, MediaRejectionConfig, MetricsConfig};
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
 };
@@ -722,6 +722,11 @@ impl State {
     /// Response field used for emitted OpenAI-compatible reasoning content.
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
+    }
+
+    /// Media refusal for text-only models (`--reject-media`).
+    pub fn media_rejection(&self) -> MediaRejectionConfig {
+        self.frontend_api_config.media_rejection()
     }
 }
 
@@ -1665,6 +1670,13 @@ impl HttpServiceConfigBuilder {
         self.frontend_api_config
             .get_or_insert_with(FrontendApiConfig::default)
             .set_reasoning_field(reasoning_field);
+        self
+    }
+
+    pub fn media_rejection(mut self, media_rejection: MediaRejectionConfig) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_media_rejection(media_rejection);
         self
     }
 

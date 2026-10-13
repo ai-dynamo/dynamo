@@ -211,6 +211,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     chat_processor: str
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
+    reject_media: bool
+    reject_media_status_code: int
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
@@ -276,6 +278,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
+        if not 400 <= self.reject_media_status_code <= 599:
+            raise ValueError("--reject-media-status-code must be a 4xx or 5xx status")
         if self.session_affinity_ttl_secs is not None and not (
             1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS
         ):
@@ -710,6 +714,31 @@ class FrontendArgGroup(ArgGroup):
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."
             ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--reject-media",
+            env_var="DYN_REJECT_MEDIA",
+            default=False,
+            help=(
+                "Refuse chat requests that carry image, video, or audio content in "
+                "any message, including history, before routing. For frontends that "
+                "serve text-only models: a streaming client gets an HTTP error "
+                "instead of a 200 followed by an error event. The status is set by "
+                "--reject-media-status-code."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--reject-media-status-code",
+            env_var="DYN_REJECT_MEDIA_STATUS_CODE",
+            default=415,
+            help=(
+                "HTTP status (4xx or 5xx) for a request refused by --reject-media. "
+                "Set it to a status an upstream gateway fails over on, such as 429, "
+                "to send these requests to a multimodal model."
+            ),
+            arg_type=int,
         )
         add_negatable_bool_argument(
             g,

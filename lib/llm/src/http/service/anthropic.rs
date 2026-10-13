@@ -590,6 +590,17 @@ async fn anthropic_messages(
         return Err(AnthropicHandlerError::validation(error.message())
             .into_marked_response(&mut inflight_guard));
     }
+    // A text-only frontend refuses media before routing (`--reject-media`).
+    if let Some(refusal) = super::openai::media_refusal(&state, &chat_request) {
+        return Err(AnthropicHandlerError::new(
+            ErrorClass::UnsupportedMedia,
+            refusal.status,
+            "invalid_request_error",
+            refusal.message,
+            ErrorType::UnsupportedModality,
+        )
+        .into_marked_response(&mut inflight_guard));
+    }
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
