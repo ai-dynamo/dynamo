@@ -8355,7 +8355,6 @@ mod tests {
     // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
     // "response_format": { "type": "invalid_format" } : Not Done
-    // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
     fn test_bad_base_request_for_completion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
