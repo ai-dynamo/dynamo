@@ -10,6 +10,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Discovery, DiscoveryInstance, DiscoveryInstanceId, DiscoverySpec, EndpointInstanceId};
 
+// A short grace period lets healthy unregisters finish, including serialized K8s updates.
+// After it expires only the shutdown caller stops waiting; release keeps retrying until the
+// primary token fires, so this is not a discovery RPC deadline or a replacement barrier.
+const SHUTDOWN_RELEASE_GRACE_PERIOD: Duration = Duration::from_secs(1);
+
 struct RegistrationEntry {
     instance: DiscoveryInstance,
     leases: usize,
@@ -189,14 +194,23 @@ impl EndpointRegistrationLease {
 
     /// Keep normal replacement ordered, but do not hold runtime shutdown on discovery failure.
     pub(crate) async fn release_on_shutdown(self, shutdown: CancellationToken) -> Result<()> {
+        let id = self.id.clone();
         let release = self.release();
         tokio::pin!(release);
         tokio::select! {
             result = &mut release => result,
             _ = shutdown.cancelled() => {
-                tokio::time::timeout(Duration::from_secs(1), release)
-                    .await
-                    .context("endpoint discovery release timed out during runtime shutdown")?
+                match tokio::time::timeout(SHUTDOWN_RELEASE_GRACE_PERIOD, release).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            instance = ?id,
+                            grace_period_secs = SHUTDOWN_RELEASE_GRACE_PERIOD.as_secs(),
+                            "Endpoint discovery release timed out during shutdown; continuing cleanup"
+                        );
+                        Ok(())
+                    }
+                }
             }
         }
     }
@@ -281,47 +295,7 @@ mod tests {
         }
     }
 
-    struct UnavailableUnregisterDiscovery {
-        inner: MockDiscovery,
-        hanging: bool,
-        attempted: tokio::sync::Notify,
-    }
-
-    #[async_trait]
-    impl Discovery for UnavailableUnregisterDiscovery {
-        fn instance_id(&self) -> u64 {
-            self.inner.instance_id()
-        }
-
-        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-            self.inner.register_internal(spec).await
-        }
-
-        async fn unregister(&self, _instance: DiscoveryInstance) -> Result<()> {
-            self.attempted.notify_one();
-            if self.hanging {
-                std::future::pending().await
-            } else {
-                anyhow::bail!("discovery unavailable")
-            }
-        }
-
-        async fn get_endpoint(&self, id: &EndpointInstanceId) -> Result<Option<DiscoveryInstance>> {
-            self.inner.get_endpoint(id).await
-        }
-
-        async fn list(&self, _query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
-            anyhow::bail!("endpoint lease acquisition must use a point lookup")
-        }
-
-        async fn list_and_watch(
-            &self,
-            query: DiscoveryQuery,
-            cancel_token: Option<CancellationToken>,
-        ) -> Result<DiscoveryStream> {
-            self.inner.list_and_watch(query, cancel_token).await
-        }
-    }
+    use crate::test_utils::UnavailableUnregisterDiscovery;
 
     #[tokio::test]
     async fn runtime_shutdown_bounds_failed_and_hanging_discovery_release() {
@@ -346,11 +320,10 @@ mod tests {
                 discovery.attempted.notified().await;
                 assert!(futures::poll!(release.as_mut()).is_pending());
                 shutdown.cancel();
-                let error = tokio::time::timeout(Duration::from_secs(3), release)
+                tokio::time::timeout(Duration::from_secs(3), release)
                     .await
                     .expect("release blocked runtime shutdown")
-                    .unwrap_err();
-                assert!(error.to_string().contains("timed out"));
+                    .expect("shutdown timeout must not fail the endpoint");
                 assert!(!primary.is_cancelled());
                 primary.cancel();
             }

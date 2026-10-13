@@ -196,6 +196,8 @@ enum KeyValueStoreEnum {
     Nats(NATSStore),
     Etcd(EtcdStore),
     File(FileStore),
+    #[cfg(test)]
+    NoRangeReads(MemoryStore),
 }
 
 impl KeyValueStoreEnum {
@@ -211,6 +213,10 @@ impl KeyValueStoreEnum {
             Nats(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
             Etcd(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
             File(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            #[cfg(test)]
+            NoRangeReads(x) => Box::new(no_range_reads::Bucket(
+                x.get_or_create_bucket(bucket_name, ttl).await?,
+            )),
         })
     }
 
@@ -233,6 +239,11 @@ impl KeyValueStoreEnum {
                 .get_bucket(bucket_name)
                 .await?
                 .map(|b| Box::new(b) as Box<dyn Bucket>),
+            #[cfg(test)]
+            NoRangeReads(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(no_range_reads::Bucket(b)) as Box<dyn Bucket>),
         };
         Ok(maybe_bucket)
     }
@@ -244,6 +255,8 @@ impl KeyValueStoreEnum {
             Etcd(x) => x.connection_id(),
             Nats(x) => x.connection_id(),
             File(x) => x.connection_id(),
+            #[cfg(test)]
+            NoRangeReads(x) => x.connection_id(),
         }
     }
 
@@ -254,6 +267,8 @@ impl KeyValueStoreEnum {
             Etcd(x) => x.shutdown(),
             Nats(x) => x.shutdown(),
             File(x) => x.shutdown(),
+            #[cfg(test)]
+            NoRangeReads(x) => x.shutdown(),
         }
     }
 
@@ -261,6 +276,8 @@ impl KeyValueStoreEnum {
         use KeyValueStoreEnum::*;
         match self {
             Memory(_) | File(_) => Ok(()),
+            #[cfg(test)]
+            NoRangeReads(_) => Ok(()),
             Etcd(x) => x.check_connection().await,
             Nats(x) => x.check_connection().await,
         }
@@ -953,5 +970,61 @@ mod tests {
 
         let _ = futures::join!(handle1, handle2);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod no_range_reads {
+    use super::Bucket as _;
+    use super::*;
+
+    impl Manager {
+        pub(crate) fn memory_without_range_reads() -> Self {
+            Self::new(KeyValueStoreEnum::NoRangeReads(MemoryStore::new()))
+        }
+    }
+
+    pub(super) struct Bucket(pub(super) mem::MemoryBucketRef);
+
+    #[async_trait]
+    impl super::Bucket for Bucket {
+        async fn insert(
+            &self,
+            key: &Key,
+            value: bytes::Bytes,
+            revision: u64,
+        ) -> Result<StoreOutcome, StoreError> {
+            self.0.insert(key, value, revision).await
+        }
+
+        async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
+            self.0.get(key).await
+        }
+
+        async fn compare_and_replace(
+            &self,
+            key: &Key,
+            expected: bytes::Bytes,
+            value: bytes::Bytes,
+        ) -> Result<StoreOutcome, StoreError> {
+            self.0.compare_and_replace(key, expected, value).await
+        }
+
+        async fn delete(&self, key: &Key) -> Result<(), StoreError> {
+            self.0.delete(key).await
+        }
+
+        async fn watch(
+            &self,
+        ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>
+        {
+            self.0.watch().await
+        }
+
+        async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+            Err(StoreError::FilesystemError(
+                "range reads are disabled for this test".to_string(),
+            ))
+        }
     }
 }

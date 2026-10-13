@@ -296,8 +296,8 @@ impl EndpointConfigBuilder {
         let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let startup_cancellation = startup_guard.cancellation.clone();
-        // Unlike endpoint_shutdown_token, this is not cancelled by StartedEndpoint::shutdown.
-        let runtime_shutdown = endpoint.drt().child_token();
+        // Worker draining marks shutdown before Runtime::shutdown stops transports.
+        let runtime_shutdown = endpoint.drt().runtime().shutdown_started_token();
         let (registration_tx, registration_rx) =
             tokio::sync::oneshot::channel::<crate::discovery::EndpointRegistrationLease>();
 
@@ -522,26 +522,7 @@ impl Endpoint {
 mod tests {
     use super::*;
 
-    struct NoopHandler;
-
-    #[async_trait::async_trait]
-    impl PushWorkHandler for NoopHandler {
-        async fn handle_payload(
-            &self,
-            _payload: bytes::Bytes,
-            _request_id: Option<String>,
-        ) -> std::result::Result<(), crate::pipeline::PipelineError> {
-            Ok(())
-        }
-
-        fn add_metrics(
-            &self,
-            _endpoint: &Endpoint,
-            _labels: Option<&[(&str, &str)]>,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
+    use crate::test_utils::NoopHandler;
 
     #[tokio::test]
     async fn cancelled_startup_before_discovery_cleans_handler_and_tracker() {

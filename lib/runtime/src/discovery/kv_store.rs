@@ -1364,7 +1364,7 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_point_lookup_ignores_other_records() {
-        let store = kv::Manager::memory();
+        let store = kv::Manager::memory_without_range_reads();
         let bucket = store
             .get_or_create_bucket(INSTANCES_BUCKET, None)
             .await
@@ -1400,6 +1400,8 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(bucket.entries().await.is_err());
+        assert!(client.list(DiscoveryQuery::AllEndpoints).await.is_err());
         assert_eq!(client.get_endpoint(&id).await.unwrap(), Some(instance));
         let missing = EndpointInstanceId {
             instance_id: id.instance_id.wrapping_add(1),

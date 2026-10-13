@@ -305,9 +305,9 @@ impl ServedIndexerService {
     async fn start(
         component: Component,
         mode: ServedIndexerMode,
-        ignored_instance_ids: &HashSet<u64>,
+        ignored_instance_id: u64,
     ) -> Result<Arc<Self>> {
-        verify_service_topology(&component, mode, ignored_instance_ids).await?;
+        verify_service_topology(&component, mode, ignored_instance_id).await?;
 
         let bindings = Arc::new(RwLock::new(HashMap::new()));
         let mut startup = EndpointStartup::new();
@@ -528,9 +528,8 @@ async fn start_service_locked(
 
     // This key is locked and any previous endpoints have finished cleanup. Discovery caches
     // may still show this runtime's records, including after a failed first record startup.
-    let ignored_instance_ids = HashSet::from([component.drt().connection_id()]);
-    let service =
-        ServedIndexerService::start(component.clone(), mode, &ignored_instance_ids).await?;
+    let ignored_instance_id = component.drt().connection_id();
+    let service = ServedIndexerService::start(component.clone(), mode, ignored_instance_id).await?;
     SERVED_INDEXER_SERVICES.insert(key.clone(), service.clone());
     spawn_teardown_eviction(&component, key, &service);
     Ok((service, true))
@@ -568,7 +567,7 @@ fn spawn_teardown_eviction(
 async fn verify_service_topology(
     component: &Component,
     mode: ServedIndexerMode,
-    ignored_instance_ids: &HashSet<u64>,
+    ignored_instance_id: u64,
 ) -> Result<()> {
     let discovery = component.drt().discovery();
     let endpoints = discovery
@@ -591,7 +590,7 @@ async fn verify_service_topology(
         component.name(),
         mode,
         endpoints,
-        ignored_instance_ids,
+        ignored_instance_id,
     )
 }
 
@@ -600,7 +599,7 @@ fn validate_service_topology(
     component: &str,
     mode: ServedIndexerMode,
     endpoints: impl IntoIterator<Item = DiscoveryInstance>,
-    ignored_instance_ids: &HashSet<u64>,
+    ignored_instance_id: u64,
 ) -> Result<()> {
     let mut query_instances = HashSet::new();
     let mut record_instances = HashSet::new();
@@ -609,7 +608,7 @@ fn validate_service_topology(
         let DiscoveryInstance::Endpoint(instance) = endpoint else {
             continue;
         };
-        if ignored_instance_ids.contains(&instance.instance_id) {
+        if instance.instance_id == ignored_instance_id {
             continue;
         }
         match instance.endpoint.as_str() {
@@ -990,7 +989,7 @@ mod tests {
                             component.name(),
                             ServedIndexerMode::Approximate,
                             stale.clone(),
-                            &HashSet::new(),
+                            component.drt().connection_id().wrapping_add(1),
                         )
                         .is_err()
                     );
@@ -1282,7 +1281,6 @@ mod tests {
                 stale_instance_id,
             ),
         ];
-        let ignored = HashSet::from([stale_instance_id]);
 
         assert!(
             validate_service_topology(
@@ -1290,7 +1288,7 @@ mod tests {
                 "router",
                 ServedIndexerMode::Approximate,
                 endpoints.clone(),
-                &ignored,
+                stale_instance_id,
             )
             .is_ok()
         );
@@ -1306,7 +1304,7 @@ mod tests {
                 "router",
                 ServedIndexerMode::Approximate,
                 endpoints_with_other_instance,
-                &ignored,
+                stale_instance_id,
             )
             .is_err()
         );
@@ -1316,7 +1314,7 @@ mod tests {
                 "router",
                 ServedIndexerMode::Approximate,
                 endpoints,
-                &HashSet::new(),
+                stale_instance_id + 1,
             )
             .is_err()
         );
