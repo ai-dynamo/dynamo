@@ -334,7 +334,39 @@ class TestAddNegatableBool:
         )
 
         help_text = parser.format_help()
-        assert "False" in help_text or "false" in help_text
+        assert "default: off (--no-feature)" in help_text
+
+    @pytest.mark.parametrize(
+        "default, expected",
+        [
+            (True, "default: on (--feature)"),
+            (False, "default: off (--no-feature)"),
+            (None, "default: unset"),
+        ],
+    )
+    def test_help_names_default_spelling(self, monkeypatch, default, expected):
+        monkeypatch.delenv("TEST_VAR", raising=False)
+        parser = argparse.ArgumentParser()
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--feature",
+            env_var="TEST_VAR",
+            default=default,
+            help="Test",
+        )
+
+        assert expected in parser.format_help()
+
+    def test_rejects_negated_flag_name(self):
+        parser = argparse.ArgumentParser()
+        with pytest.raises(ValueError, match="positive spelling"):
+            add_negatable_bool_argument(
+                parser,
+                flag_name="--no-feature",
+                env_var="TEST_VAR",
+                default=True,
+                help="Test",
+            )
 
 
 @pytest.mark.parametrize(
