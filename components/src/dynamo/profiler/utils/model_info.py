@@ -3,11 +3,14 @@
 
 import json
 import logging
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 from stat import S_ISDIR
 from typing import Optional, Union
 
+from huggingface_hub import ModelInfo as HubModelInfo
 from huggingface_hub import hf_hub_download, model_info
+from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
 from transformers import AutoConfig
 
@@ -85,6 +88,68 @@ def get_local_model_weight_size(
     return total_size_bytes / (1024**2)
 
 
+def _get_hub_checkpoint_filenames(
+    model_name: str,
+    info: HubModelInfo,
+    token: Optional[str],
+) -> set[str]:
+    """Select one checkpoint format, using index references when available."""
+    filenames = {sibling.rfilename for sibling in info.siblings or []}
+    for extension in (".safetensors", ".bin", ".pt", ".pth"):
+        indexes = sorted(
+            name for name in filenames if name.endswith(extension + ".index.json")
+        )
+        if indexes:
+            checkpoints = set()
+            for filename in indexes:
+                try:
+                    index_path = hf_hub_download(
+                        repo_id=model_name,
+                        filename=filename,
+                        revision=info.sha,
+                        token=token,
+                    )
+                    with open(index_path) as f:
+                        index = json.load(f)
+                    weight_map = index["weight_map"]
+                    if not isinstance(weight_map, dict) or not all(
+                        isinstance(name, str) for name in weight_map.values()
+                    ):
+                        return set()
+                except (HfHubHTTPError, OSError, ValueError, KeyError, TypeError):
+                    # An unavailable index must not make unrelated files authoritative.
+                    return set()
+                checkpoints.update(
+                    str(PurePosixPath(filename).parent / name)
+                    for name in weight_map.values()
+                )
+            return checkpoints
+
+    for extension in (".safetensors", ".bin", ".pt", ".pth"):
+        if extension == ".safetensors":
+            # Quantized checkpoints often use custom safetensors filenames.
+            checkpoints = {name for name in filenames if name.endswith(extension)}
+        else:
+            checkpoints = {
+                name
+                for name in filenames
+                if re.fullmatch(
+                    r"(?:pytorch_model|model|weights)(?:-\d+-of-\d+)?"
+                    r"(?:\.[^.]+)?" + re.escape(extension),
+                    PurePosixPath(name).name,
+                )
+                or (
+                    extension == ".pth"
+                    and re.fullmatch(
+                        r"consolidated\.\d+\.pth", PurePosixPath(name).name
+                    )
+                )
+            }
+        if checkpoints:
+            return checkpoints
+    return set()
+
+
 def get_model_weight_size_from_hub(
     model_name: str,
     token: Optional[str] = None,
@@ -93,16 +158,12 @@ def get_model_weight_size_from_hub(
     try:
         info = model_info(model_name, token=token, files_metadata=True)
 
-        # Filter for model weight files (safetensors or pytorch bin files)
-        # Also filter out files with None size
-        weight_extensions = [".safetensors", ".bin", ".pt", ".pth"]
-        total_size_bytes = 0
-
-        if info.siblings is not None:
-            for sibling in info.siblings:
-                if any(sibling.rfilename.endswith(ext) for ext in weight_extensions):
-                    if sibling.size is not None:
-                        total_size_bytes += sibling.size
+        checkpoint_filenames = _get_hub_checkpoint_filenames(model_name, info, token)
+        total_size_bytes = sum(
+            sibling.size
+            for sibling in info.siblings or []
+            if sibling.rfilename in checkpoint_filenames and sibling.size is not None
+        )
 
         # If no file sizes were available, try to estimate from safetensors metadata
         if total_size_bytes == 0 and info.safetensors is not None:
