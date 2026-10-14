@@ -146,7 +146,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
 | `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
 | `CONCURRENCY` | `64` | Single value; reset server state between values |
-| `TARGET_MODEL` | `zai-org/GLM-5.3` | Must match `--served-model-name` |
+| `TARGET_MODEL` | `zai-org/GLM-5.3` | Must match `--served-model-name` (`zai-org/GLM-5.2` for the GLM-5.2 fallback) |
 
 ## Artifacts
 

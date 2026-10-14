@@ -12,11 +12,12 @@ use crate::engines::ValidateRequest;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{ChatCommonExt, CommonExt, CommonExtProvider},
     validate,
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 pub mod aggregator;
@@ -87,10 +88,10 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
+    #[schema(value_type = ChatCommonExt)]
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,7 +275,7 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
@@ -294,7 +295,7 @@ pub struct ToolCallCompletion {
 
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
@@ -307,9 +308,11 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
+    #[schema(ignore)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
     /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
     pub tool_call_completion: Vec<ToolCallCompletion>,
 }
 
@@ -645,6 +648,14 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for modalities
