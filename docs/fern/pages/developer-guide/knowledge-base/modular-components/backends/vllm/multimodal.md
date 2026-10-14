@@ -301,12 +301,18 @@ router and worker.
 ### P/D Serving
 
 Use the P/D launcher to separate prefill and decode without deploying a
-dedicated multimodal encoder:
+dedicated multimodal encoder.
+
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_PREFILL_WORKER_GPU` and `DYN_DECODE_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 
+# Multi-GPU deployment
 bash launch/disagg_multimodal_p_d.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# Single-GPU (functional testing with small models; select GPU 0 explicitly)
+CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_p_d.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
 
 For Qwen-VL images, prefill sends grid and embedding-shape metadata so decode
@@ -321,9 +327,9 @@ model families use the expanded prompt token IDs produced during prefill.
 
 ### E/PD Serving (Encode + PD)
 
-For single-GPU mode, set `CUDA_VISIBLE_DEVICES` to the assigned GPU. The launcher uses the first entry and fails if it is missing or empty. For example, use `CUDA_VISIBLE_DEVICES=1` to keep the workers on GPU 1. Explicit `DYN_ENCODE_WORKER_GPU` and `DYN_PD_WORKER_GPU` values override this selection; if both are set, `CUDA_VISIBLE_DEVICES` is not required.
-
 Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
+
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_ENCODE_WORKER_GPU` and `DYN_PD_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
 > [!WARNING]
 > When a separate encode worker is deployed with the current vLLM path, only `image_url` inputs are routed to it. `video_url` inputs are still processed on the combined PD worker.
@@ -341,9 +347,9 @@ CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-
 
 ### E/P/D Serving (Full Disaggregation)
 
-Single-GPU mode uses the first entry of `CUDA_VISIBLE_DEVICES`, which must be set and nonempty unless every worker has an explicit GPU override. `DYN_ENCODE_WORKER_GPU`, `DYN_PREFILL_WORKER_GPU`, and `DYN_DECODE_WORKER_GPU` each override the inherited selection for that worker.
-
 Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
+
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_ENCODE_WORKER_GPU`, `DYN_PREFILL_WORKER_GPU`, and `DYN_DECODE_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
 > [!WARNING]
 > In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
