@@ -209,7 +209,9 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
             continue
         g = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=", line)
         if g:
-            (patched_only if section.startswith("patch.") else git_names).add(g.group(1))
+            (patched_only if section.startswith("patch.") else git_names).add(
+                g.group(1)
+            )
     patched_only -= git_names
     git_names |= patched_only
     if not git_names:
