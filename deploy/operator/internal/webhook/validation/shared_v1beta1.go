@@ -173,6 +173,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				workloadProvider: options.workloadProvider,
 				scope:            provideroverride.ScopeComponent,
 				component:        spec,
+				updateStrategy:   options.groveUpdateStrategy,
 			},
 		)...)
 	}
@@ -222,15 +223,21 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	// Coherent can consume the whole component even with the conservative default of one.
-	if options.grovePathway && options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
+	// Explicit RollingRecreate budgets introduce outage risk beyond its established default.
+	warnForStrategy := options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy
+	if options.groveUpdateStrategy == grovev1alpha1.RollingRecreateStrategy && spec.ProviderOverride != nil {
+		_, warnForStrategy = provideroverride.GroveMaxUnavailable(spec.ProviderOverride.Value.Raw)
+	}
+
+	// Warn for complete-component disruption only when admission knows the serving capacity.
+	if options.grovePathway && warnForStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
 		replicas := k8sptr.Deref(spec.Replicas, 1)
 		minimum := provideroverride.EffectiveGroveMinAvailable(spec)
-		budget := minimum
+		budget := provideroverride.EffectiveGroveMaxUnavailable(spec, options.groveUpdateStrategy)
 		old := options.oldComponent
 		relevantChange := old == nil || options.groveStrategyChanged
 		if old != nil {
-			oldBudget := provideroverride.EffectiveGroveMinAvailable(old)
+			oldBudget := provideroverride.EffectiveGroveMaxUnavailable(old, options.groveUpdateStrategy)
 			oldReplicas := k8sptr.Deref(old.Replicas, 1)
 			// Replica-only edits warn when they introduce full-component disruption risk.
 			replicaRiskIntroduced := oldReplicas != replicas && (oldReplicas <= 0 || oldBudget < oldReplicas)
@@ -238,7 +245,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				!apiequality.Semantic.DeepEqual(old.PodTemplate, spec.PodTemplate) || !apiequality.Semantic.DeepEqual(old.Roles, spec.Roles)
 		}
 		if relevantChange && replicas > 0 && budget >= replicas && minimum > 0 {
-			v.warnf("%s (%q): Coherent updates may temporarily make this entire component unavailable (replicas=%d, minAvailable=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, minimum, budget)
+			if options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy {
+				v.warnf("%s (%q): Coherent updates may temporarily make this entire component unavailable (replicas=%d, minAvailable=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, minimum, budget)
+			} else {
+				v.warnf("%s (%q): RollingRecreate updates may temporarily make this entire component unavailable (replicas=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, budget)
+			}
 		}
 	}
 
@@ -453,6 +464,7 @@ type providerOverrideValidationOptions struct {
 	workloadProvider string
 	scope            provideroverride.Scope
 	component        *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	updateStrategy   grovev1alpha1.UpdateStrategyType
 }
 
 // validateProviderOverride validates override. override and fldPath must not be nil.
@@ -543,6 +555,23 @@ func (v *sharedValidation) validateProviderOverride(
 	// Availability belongs to a complete component, never one multinode member role.
 	if minimum, exists := provideroverride.GroveMinAvailable(override.Value.Raw); exists && options.scope != provideroverride.ScopeComponent {
 		allErrs = append(allErrs, field.Forbidden(valuePath.Child("spec", "minAvailable"), fmt.Sprintf("minAvailable (%d) belongs to the owning component", minimum)))
+	}
+
+	// Validate the budget in its authored component context before Grove admission.
+	if budget, exists := provideroverride.GroveMaxUnavailable(override.Value.Raw); exists && budget > 0 {
+		budgetPath := valuePath.Child("rollingUpdate", "maxUnavailable")
+		if options.scope != provideroverride.ScopeComponent {
+			allErrs = append(allErrs, field.Forbidden(valuePath.Child("rollingUpdate"), "member cliques use the owning component's rollingUpdate budget"))
+		} else {
+			minAvailable := provideroverride.EffectiveGroveMinAvailable(options.component)
+			if options.updateStrategy == grovev1alpha1.OnDeleteStrategy {
+				allErrs = append(allErrs, field.Forbidden(valuePath.Child("rollingUpdate"), "must not be set when the update strategy is OnDelete"))
+			}
+			// A budget survives scaling; Grove caps disruption to the live replicas.
+			if options.updateStrategy == grovev1alpha1.CoherentStrategy && budget < minAvailable {
+				allErrs = append(allErrs, field.Invalid(budgetPath, budget, fmt.Sprintf("must not be less than minAvailable (%d) under the Coherent update strategy", minAvailable)))
+			}
+		}
 	}
 	return allErrs
 }

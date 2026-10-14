@@ -414,6 +414,7 @@ where
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
+        slf.release_replay_prompt_if_final();
         Ok(slf)
     }
 
@@ -464,6 +465,7 @@ where
                         if let Err(err) = self.new_stream(Some(migration_event)).await {
                             tracing::warn!(error = ?err, "Cannot recreate stream");
                         } else {
+                            self.release_replay_prompt_if_final();
                             continue;
                         }
                     } else {
@@ -751,6 +753,15 @@ where
         }
     }
 
+    /// Once no further attempt can be dispatched, the prompt is only replay state: the
+    /// dispatched attempt holds its own reference for as long as it needs one. Release it so a
+    /// long prompt is not pinned for the rest of the response stream.
+    fn release_replay_prompt_if_final(&mut self) {
+        if self.retries_left == 0 && !self.request.token_ids.is_empty() {
+            self.request.token_ids = Arc::default();
+        }
+    }
+
     /// Returns `true` if the tracked request token length plus `new_output_len`
     /// exceeds the configured max_seq_len, in which case migration is disabled.
     fn exceed_max_seq_len(&mut self, new_output_len: u32) -> bool {
@@ -766,6 +777,7 @@ where
                 self.metrics
                     .inc_migration_max_seq_len_exceeded(&self.model_name);
                 self.retries_left = 0; // disable migration
+                self.release_replay_prompt_if_final();
                 return true;
             }
         }
@@ -1572,6 +1584,76 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    async fn build_and_observe_prompt(
+        behavior: MockBehavior,
+        migration_limit: u32,
+    ) -> (
+        RetryManager<BackendOutput>,
+        std::sync::Weak<Vec<TokenIdType>>,
+    ) {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let prompt = Arc::downgrade(&request.token_ids);
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(MockEngine::new(behavior, 10, 100, context_id.clone()));
+        let retry_manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            next_generate,
+            migration_limit,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+        (retry_manager, prompt)
+    }
+
+    /// Without retries left, the RetryManager must not pin the prompt for the whole stream:
+    /// once the final attempt is dispatched, only the downstream attempt may hold it.
+    #[tokio::test]
+    async fn test_retry_manager_releases_prompt_after_final_dispatch() {
+        let (mut retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 0).await;
+        assert!(
+            prompt.upgrade().is_none(),
+            "prompt pinned with no retries left"
+        );
+        let mut responses = 0;
+        while let Some(response) = retry_manager.next().await {
+            assert!(response.err().is_none());
+            responses += 1;
+        }
+        assert_eq!(responses, 10);
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_keeps_prompt_while_retries_remain() {
+        let (_retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 1).await;
+        let prompt = prompt
+            .upgrade()
+            .expect("prompt released while a retry is possible");
+        assert_eq!(*prompt, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_releases_prompt_after_last_retry() {
+        let (mut retry_manager, prompt) =
+            build_and_observe_prompt(MockBehavior::FailThenSuccess, 1).await;
+        assert!(
+            prompt.upgrade().is_none(),
+            "prompt pinned after the last retry"
+        );
+        let mut responses = 0;
+        while let Some(response) = retry_manager.next().await {
+            assert!(response.err().is_none());
+            responses += 1;
+        }
+        assert_eq!(responses, 10);
     }
 
     #[tokio::test]
@@ -2428,14 +2510,12 @@ mod tests {
 
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
 
-        // Tracked token_ids must equal exactly max_seq_len (5).
-        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5).
-        // After migration the retry stream delivers remaining tokens, but the first
-        // new token would push to 6 > 5, so tracking stops and no more are appended.
-        assert_eq!(
-            retry_manager.request.token_ids.len(),
-            5,
-            "tracked token_ids should be exactly max_seq_len"
+        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5). The first
+        // token of the retry stream pushes the sequence to 6 > 5, which disables migration,
+        // so no retry remains and the replay prompt is released.
+        assert!(
+            retry_manager.request.token_ids.is_empty(),
+            "replay prompt pinned after max_seq_len disabled migration"
         );
 
         // The limit was triggered once (first token of the retry stream exceeded 5).
