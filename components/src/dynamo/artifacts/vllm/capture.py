@@ -31,6 +31,10 @@ from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 _CONTENTS = frozenset({"moe_routes", "selected_logprobs", "topk_logprobs"})
 
 
+class CaptureCapacityError(ValueError):
+    """Process capture memory is temporarily unavailable."""
+
+
 class _DeliveryRuntime(Protocol):
     def validate(self, destination: dict[str, Any], mode: str) -> None:
         ...
@@ -116,7 +120,7 @@ class CaptureBudget:
     def reserve(self, size):
         with self._lock:
             if self._used + size > self.max_bytes:
-                raise ValueError("artifact capture capacity exhausted")
+                raise CaptureCapacityError("artifact capture capacity exhausted")
             self._used += size
 
     def release(self, size):
@@ -127,7 +131,7 @@ class CaptureBudget:
 @cache
 def process_capture_budget():
     return CaptureBudget(
-        int(os.environ.get("DYNAMO_ARTIFACT_CAPTURE_BYTES", str(256 << 20)))
+        int(os.environ.get("DYNAMO_ARTIFACT_CAPTURE_BYTES", str(2 << 30)))
     )
 
 
@@ -378,12 +382,22 @@ class VllmArtifactSession:
                     "byte_count": encoded.byte_count,
                     "data_base64": base64.b64encode(encoded.data).decode("ascii"),
                 }
-            return await cast(_DeliveryRuntime, self.runtime).submit(
-                encoded.data,
-                sorted(self.contents),
-                self.settings["destination"],
-                mode=self.settings["mode"],
-            )
+            try:
+                return await cast(_DeliveryRuntime, self.runtime).submit(
+                    encoded.data,
+                    sorted(self.contents),
+                    self.settings["destination"],
+                    mode=self.settings["mode"],
+                )
+            except (ValueError, TypeError, RuntimeError, OSError):
+                return {
+                    "kind": "generation_artifact",
+                    "mode": self.settings["mode"],
+                    "format": "generation_artifact_v1",
+                    "contents": sorted(self.contents),
+                    "state": "failed",
+                    "error_code": "delivery_rejected",
+                }
         except asyncio.CancelledError:
             if encoding is not None:
                 while not encoding.done():
