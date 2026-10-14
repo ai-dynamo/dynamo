@@ -626,11 +626,14 @@ async def test_resolved_max_running_requests_read_failure_keeps_cli_value(
     _patch_runtime_config_dependencies(register, monkeypatch, 256)
     monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
 
+    release = asyncio.Event()
+
     async def raises():
         raise RuntimeError("scheduler unavailable")
 
     async def times_out():
-        await asyncio.sleep(1)
+        await release.wait()
+        return [{}]
 
     get_internal_state = {"raises": raises, "times_out": times_out}.get(failure)
     dynamo_args = register.DynamoConfig()
@@ -645,3 +648,86 @@ async def test_resolved_max_running_requests_read_failure_keeps_cli_value(
     assert runtime_config.total_kv_blocks == 64
     if failure != "missing":
         assert "Could not read SGLang's resolved max_running_requests" in caplog.text
+    # Finish the abandoned read so no task outlives the test.
+    release.set()
+    for _ in range(10):
+        if not register._pending_internal_state_reads:
+            break
+        await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads
+
+
+class _QueueingControlChannel:
+    """Models SGLang's one-in-flight control communicator.
+
+    Requests are serialized by a lock and replies carry no request id, so a
+    caller cancelled mid-exchange would leave its reply for the next caller.
+    """
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self.replies: asyncio.Queue = asyncio.Queue()
+        self.sent = 0
+        self.cancelled = 0
+
+    async def get_internal_state(self):
+        async with self._lock:
+            self.sent += 1
+            try:
+                return await self.replies.get()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+
+
+@pytest.mark.asyncio
+async def test_timed_out_read_is_not_cancelled_and_does_not_leak_into_next_caller(
+    register, monkeypatch
+):
+    monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
+    channel = _QueueingControlChannel()
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(get_internal_state=channel.get_internal_state)
+    )
+
+    assert await register._get_effective_max_running_requests(engine) is None
+    assert channel.cancelled == 0
+    assert len(register._pending_internal_state_reads) == 1
+
+    # The late reply completes the abandoned read instead of being left behind.
+    await channel.replies.put([{"effective_max_running_requests_per_dp": 101}])
+    for _ in range(10):
+        if not register._pending_internal_state_reads:
+            break
+        await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads
+
+    # A later caller gets its own reply, not the stale one.
+    next_read = asyncio.ensure_future(channel.get_internal_state())
+    await channel.replies.put([{"effective_max_running_requests_per_dp": 202}])
+    assert await next_read == [{"effective_max_running_requests_per_dp": 202}]
+    assert channel.sent == 2
+    assert channel.cancelled == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_registration_does_not_cancel_sglang_read(register):
+    channel = _QueueingControlChannel()
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(get_internal_state=channel.get_internal_state)
+    )
+
+    caller = asyncio.ensure_future(register._get_effective_max_running_requests(engine))
+    await asyncio.sleep(0)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert channel.cancelled == 0
+    assert len(register._pending_internal_state_reads) == 1
+    await channel.replies.put([{}])
+    for _ in range(10):
+        if not register._pending_internal_state_reads:
+            break
+        await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads

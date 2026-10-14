@@ -489,11 +489,30 @@ def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudge
 
 
 # Bounds the startup read of SGLang's resolved request cap. The scheduler
-# answers a control request between batches, which happens before any traffic
-# here; the bound only prevents a stuck scheduler from blocking registration.
-# If it fires, a late reply can still reach SGLang's communicator, so keep it
-# generous rather than tight.
+# answers a control request between batches, and no traffic reaches this worker
+# before registration, so the reply normally arrives at once. The bound only keeps
+# a stuck scheduler from blocking registration.
+#
+# The read is shielded, so a timeout abandons the wait but never cancels SGLang's
+# call. SGLang's control communicator does not clean up when its caller is
+# cancelled: on 0.5.21 the late reply attaches to the next get_internal_state
+# caller and hands it stale data, and on 0.5.11 (the XPU pin) the in-flight
+# marker is never cleared, so every later caller waits forever. Dynamo makes no
+# other get_internal_state call, so the exposure is limited to a later
+# Engine.get_server_info() caller; letting the call finish keeps it correct.
 _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S = 10.0
+
+# Holds an abandoned read until it finishes, so it is not garbage-collected
+# mid-flight and its result or exception is always retrieved.
+_pending_internal_state_reads: set[asyncio.Task] = set()
+
+
+def _finish_abandoned_internal_state_read(task: asyncio.Task) -> None:
+    _pending_internal_state_reads.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logging.debug(
+            "Abandoned SGLang get_internal_state read failed: %s", task.exception()
+        )
 
 
 async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
@@ -507,9 +526,11 @@ async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
     get_internal_state = getattr(tokenizer_manager, "get_internal_state", None)
     if get_internal_state is None:
         return None
+    read: Optional[asyncio.Task] = None
     try:
+        read = asyncio.ensure_future(get_internal_state())
         internal_states = await asyncio.wait_for(
-            get_internal_state(), _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S
+            asyncio.shield(read), _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S
         )
     except Exception as e:
         logging.warning(
@@ -519,6 +540,12 @@ async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
             e,
         )
         return None
+    finally:
+        if read is not None and not read.done():
+            # Abandoned (timeout or caller cancellation): let SGLang's call run
+            # to completion instead of cancelling it (see above).
+            _pending_internal_state_reads.add(read)
+            read.add_done_callback(_finish_abandoned_internal_state_read)
     return effective_max_running_requests(internal_states)
 
 
