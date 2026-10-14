@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small-model native EAGLE3 preparation, verify-shape and cleanup oracle."""
+"""Small-model native async EAGLE3 shape, CUDA timing and cleanup oracle."""
 
 import json
 import os
@@ -25,8 +25,8 @@ pytestmark = [
     pytest.mark.model("Nicolassuez/Qwen3-0.6B-eagle3"),
     pytest.mark.timeout(600),
     pytest.mark.requested_vllm_kv_cache_bytes(1073741824),
-    # NVML peak on RTX 6000 Ada, eager/full graphs and acceptance endpoints.
-    pytest.mark.profiled_vram_gib(3.5),
+    # NVML peak 3625 MiB on RTX 6000 Ada; round up the scheduling bound.
+    pytest.mark.profiled_vram_gib(3.6),
 ]
 
 
@@ -41,6 +41,8 @@ def test_eagle3_self_benchmark_native_verification(
     ports.append(api_port)
     fpm_port = allocate_port(DynamoPortRange.FPM.value)
     ports.append(fpm_port)
+    native_fpm_port = allocate_port(DynamoPortRange.FPM.value)
+    ports.append(native_fpm_port)
     output = tmp_path / "benchmark.json"
     benchmark = {
         "mode": "decode",
@@ -89,6 +91,11 @@ def test_eagle3_self_benchmark_native_verification(
         "1073741824",
         "--scheduler-cls",
         "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler",
+        "--forward-pass-metrics-port",
+        str(native_fpm_port),
+        "--async-scheduling",
+        "--override-generation-config",
+        json.dumps({"temperature": 0.7, "top_p": 0.9}),
         "--cudagraph-metrics",
         "--additional-config",
         json.dumps({"benchmark": benchmark}),
@@ -126,10 +133,7 @@ def test_eagle3_self_benchmark_native_verification(
         data = json.loads(output.read_text())
         assert data["valid"], data.get("error")
         assert data["schema_version"] == 3
-        assert (
-            data["measurement_policy"]["decode"]
-            == "first_native_verification_after_prefill"
-        )
+        assert data["measurement_policy"]["decode"] == "continuous_native_async_decode"
         assert len(data["results"]) == 3
         shape_warmups = [
             record
@@ -143,6 +147,13 @@ def test_eagle3_self_benchmark_native_verification(
         )
         spec = data["speculative_benchmark"]
         assert spec["verify_tokens_per_request"] == 4
+        assert spec["timing_scope"] == "model_step_cuda"
+        assert spec["window_warmup_iterations"] == 5
+        assert spec["window_measured_iterations"] == 20
+        assert spec["window_tail_iterations"] == 2
+        assert spec["max_observed_steps_in_flight"] > 1
+        assert spec["sampling"]["temperature"] == 0.7
+        assert spec["sampling"]["top_p"] == 0.9
         assert spec["kv_capacity"]["usable_blocks"] > 0
         assert spec["kv_capacity"]["context_capacity_tokens"] > 0
         assert spec["kv_capacity"]["allocated_kv_tensor_bytes"] > 0
@@ -169,19 +180,18 @@ def test_eagle3_self_benchmark_native_verification(
                 == point["total_kv_read_tokens"]
             )
             measurement = fpm["benchmark_measurement"]
-            sample = measurement["raw_fpms"][0]["benchmark_sample"]
-            assert sample["cudagraph"]["status"] == "observed"
-            assert sample["cudagraph"]["num_unpadded_tokens"] == 4 * point["batch_size"]
-            assert sample["cudagraph"]["runtime_mode"] == (
-                "NONE" if graph_mode == "NONE" else "FULL"
-            )
-            assert set(sample["speculation"]["scheduled_tokens"].values()) == {4}
-            assert set(sample["speculation"]["scheduled_draft_tokens"].values()) == {3}
-            assert (
-                len(sample["speculation"]["output_tokens_per_request"])
-                == point["batch_size"]
-            )
-            actual_outputs = sample["speculation"]["output_tokens_per_request"]
+            raw_fpms = measurement["raw_fpms"]
+            assert len(raw_fpms) == 20
+            samples = [raw["benchmark_sample"] for raw in raw_fpms]
+            assert [sample["window_index"] for sample in samples] == list(range(5, 25))
+            assert all(sample["window_phase"] == "measured" for sample in samples)
+            native_ids = [sample["native_iteration_id"] for sample in samples]
+            assert native_ids == list(range(native_ids[0], native_ids[0] + 20))
+            initial_point = measurement["initial_point"]
+            batch_size = point["batch_size"]
+            kv_lengths = [
+                raw["scheduled_requests"]["sum_decode_kv_tokens"] for raw in raw_fpms
+            ]
             expected_outputs = (
                 {1}
                 if acceptance_length == 1.0
@@ -189,7 +199,36 @@ def test_eagle3_self_benchmark_native_verification(
                 if acceptance_length == 4.0
                 else {2, 3}
             )
-            assert set(actual_outputs) <= expected_outputs
+            assert (
+                initial_point["total_kv_read_tokens"]
+                + 5 * batch_size * min(expected_outputs)
+                <= kv_lengths[0]
+                <= initial_point["total_kv_read_tokens"]
+                + 5 * batch_size * max(expected_outputs)
+            )
+            for index, (raw, sample) in enumerate(zip(raw_fpms, samples, strict=True)):
+                assert raw["scheduled_requests"]["num_decode_requests"] == batch_size
+                assert sample["cudagraph"]["status"] == "observed"
+                assert sample["cudagraph"]["num_unpadded_tokens"] == 4 * batch_size
+                assert sample["cudagraph"]["runtime_mode"] == (
+                    "NONE" if graph_mode == "NONE" else "FULL"
+                )
+                assert set(sample["speculation"]["scheduled_tokens"].values()) == {4}
+                assert set(
+                    sample["speculation"]["scheduled_draft_tokens"].values()
+                ) == {3}
+                actual_outputs = sample["speculation"]["output_tokens_per_request"]
+                assert len(actual_outputs) == batch_size
+                assert set(actual_outputs) <= expected_outputs
+                timing = sample["timing"]
+                assert timing["basis"] == "model_step_cuda"
+                assert timing["duration_seconds"] == raw["wall_time"] > 0
+                if index + 1 < len(raw_fpms):
+                    # Corrected next-iteration context grows by accepted outputs,
+                    # not optimistically by the four scheduled query tokens.
+                    assert kv_lengths[index + 1] - kv_lengths[index] == sum(
+                        actual_outputs
+                    )
             assert fpm["wall_time"] > 0
         merged = _merge_benchmark_rank_results(
             [(0, output, data)], tmp_path / "merged.json"

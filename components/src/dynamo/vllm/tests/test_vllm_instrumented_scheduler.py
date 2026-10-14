@@ -73,6 +73,7 @@ from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     InstrumentedScheduler,
     SkippedBenchmarkPoint,
     _BenchPhase,
+    _SpeculativeBenchmarkStep,
 )
 
 pytestmark = [
@@ -2510,9 +2511,26 @@ def test_decode_benchmark_rejects_unsupported_speculative_decoding(tmp_path):
         InstrumentedScheduler._bench_init(stub, vllm_config)
 
 
+class _NativeEmitterStub:
+    def __init__(self, correct_async_spec_lengths=True):
+        self._correct_async_spec_lengths = correct_async_spec_lengths
+
+    def _emit_if_ready(self, iteration_id):
+        pass
+
+    def before_update(self, output, result):
+        pass
+
+
 @pytest.fixture
-def eagle_benchmark(tmp_path, monkeypatch):
+def eagle_benchmark(tmp_path, monkeypatch, unused_tcp_port):
     monkeypatch.setattr("dynamo.vllm.gc_policy.start_gc_policy", lambda: None)
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_NativeFPMEmitter", _NativeEmitterStub
+    )
+    monkeypatch.setattr(
+        InstrumentedScheduler, "_bench_install_native_fpm_observer", lambda self: None
+    )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._fpm_dp_rank = 0
     stub.max_num_running_reqs = 8
@@ -2525,6 +2543,9 @@ def eagle_benchmark(tmp_path, monkeypatch):
             data_parallel_master_ip="127.0.0.1",
         ),
         speculative_config=SimpleNamespace(method="eagle3", num_speculative_tokens=3),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        observability_config=SimpleNamespace(forward_pass_metrics_port=unused_tcp_port),
+        model_config=SimpleNamespace(get_diff_sampling_param=lambda: {"top_p": 0.95}),
         additional_config={
             "benchmark": {"mode": "decode", "output_path": str(tmp_path / "sd.json")}
         },
@@ -2551,12 +2572,12 @@ def test_eagle_decode_graph_axis_counts_requests_not_verify_tokens(eagle_benchma
 
 def test_eagle_capacity_reserves_verify_and_next_draft(eagle_benchmark):
     stub = eagle_benchmark
-    stub.max_model_len = 64
+    stub.max_model_len = 256
     stub.block_size = 16
-    stub.cache_config.num_gpu_blocks = 2  # one usable block, plus null block
-    # 12 cached + 4 query tokens fit, but the three-token draft runway does not.
+    stub.cache_config.num_gpu_blocks = 9
+    # 12 cached + 116 window output tokens fit, but the next draft does not.
     assert not stub._bench_decode_point_feasible(1, 12)
-    stub.cache_config.num_gpu_blocks = 3
+    stub.cache_config.num_gpu_blocks = 10
     assert stub._bench_decode_point_feasible(1, 12)
 
 
@@ -2585,6 +2606,7 @@ def test_eagle_native_verify_checks_actual_draft_work(
         "decode", batch_size=2, total_kv_read_tokens=64
     )
     stub._bench_current_fpms = []
+    stub._bench_sd_window_size = 27
     stub._bench_active_req_ids = {"r0", "r1"}
     stub.requests = {
         req_id: SimpleNamespace(
@@ -2620,8 +2642,11 @@ def test_eagle_native_verify_checks_actual_draft_work(
         assert stub._bench_step_speculative_decode() is output
         assert stub._bench_parent_scheduled
         assert stub._bench_sd_measuring and stub._bench_sd_inflight
-        assert stub._bench_step_speculative_decode() is None
-        parent.assert_called_once()
+        assert stub._bench_step_speculative_decode() is output
+        assert stub._bench_sd_inflight == 2
+        assert stub._bench_sd_submitted == 2
+        assert stub._bench_sd_max_inflight == 2
+        assert parent.call_count == 2
 
 
 def test_eagle_prefill_balances_final_chunks_and_restores_serving_policy(
@@ -2710,6 +2735,222 @@ def test_eagle_long_prefill_uses_campaign_budget(eagle_benchmark, monkeypatch):
     stub._bench_sd_inflight = False
     with pytest.raises(TimeoutError, match="preparation timed out"):
         stub._bench_step_speculative_decode()
+
+
+@pytest.mark.parametrize("unsupported", ["runtime", "port", "sync"])
+def test_eagle_native_timing_requirements_fail_closed(
+    eagle_benchmark, monkeypatch, unsupported
+):
+    stub = eagle_benchmark
+    config = stub._bench_capacity_config
+    if unsupported == "runtime":
+        monkeypatch.setattr(instrumented_scheduler_module, "_NativeFPMEmitter", None)
+        message = "requires native vLLM FPM"
+    elif unsupported == "port":
+        config.observability_config.forward_pass_metrics_port = 0
+        message = "forward-pass-metrics-port"
+    else:
+        config.scheduler_config.async_scheduling = False
+        message = "requires native async scheduling"
+    with pytest.raises(ValueError, match=message):
+        stub._bench_init(config)
+
+
+def test_eagle_only_drains_preparation_and_window_tail(eagle_benchmark):
+    stub = eagle_benchmark
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_point_result_timed_out = lambda: False
+    stub._bench_sd_inflight = 1
+    assert not stub.has_requests()  # Prefix preparation.
+    stub._bench_sd_measuring = True
+    stub._bench_sd_window_size = 27
+    stub._bench_sd_submitted = 1
+    assert stub.has_requests()  # Let EngineCore submit the second native batch.
+    stub._bench_sd_submitted = 27
+    assert not stub.has_requests()
+    stub._bench_sd_inflight = 0
+    stub._bench_sd_steps[41] = object()
+    assert not stub.has_requests()  # CUDA timing can arrive after CPU output.
+    stub._bench_sd_steps.clear()
+    assert stub.has_requests()
+
+
+def test_eagle_missing_tail_timing_is_bounded(eagle_benchmark):
+    stub = eagle_benchmark
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_sd_measuring = True
+    stub._bench_sd_submitted = 27
+    stub._bench_sd_window_size = 27
+    stub._bench_sd_steps[41] = object()
+    stub._bench_point_result_timed_out = lambda: True
+    stub._bench_abort = MagicMock()
+    with pytest.raises(TimeoutError, match="timing drain timed out"):
+        stub.has_requests()
+    stub._bench_abort.assert_called_once()
+
+
+def test_eagle_late_global_output_does_not_consume_window_inflight(
+    eagle_benchmark, monkeypatch
+):
+    stub = eagle_benchmark
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_sd_inflight = 1
+    stub._schedule_times = deque([1.0])
+    stale_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *args: "parent-result",
+    )
+    stub._extract_scheduled = (
+        lambda output: instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_decode_requests=1
+        )
+    )
+    stub._cleanup_finished = MagicMock()
+    assert stub._update_from_output(stale_output, SimpleNamespace()) == "parent-result"
+    assert stub._bench_sd_inflight == 1
+    assert not stub._bench_current_fpms
+    assert not stub._schedule_times
+
+
+@pytest.mark.parametrize(
+    "params", [{"min_tokens": 2}, {"stop": ["stop"]}, {"stop_token_ids": [3]}]
+)
+def test_eagle_explicit_stop_controls_fail_closed(eagle_benchmark, params):
+    stub = eagle_benchmark
+    config = stub._bench_capacity_config
+    config.model_config.get_diff_sampling_param = lambda: params
+    with pytest.raises(ValueError, match="bounded windows do not support"):
+        stub._bench_init(config)
+
+
+def test_eagle_factory_observer_is_scoped_and_restored(monkeypatch):
+    created = []
+
+    class NativeEmitter:
+        @classmethod
+        def from_vllm_config(cls, config, scheduler):
+            emitter = SimpleNamespace(_correct_async_spec_lengths=True)
+            created.append(emitter)
+            return emitter
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_NativeFPMEmitter", NativeEmitter
+    )
+    original = NativeEmitter.__dict__["from_vllm_config"]
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_attach_native_fpm = MagicMock()
+    stub._bench_install_native_fpm_observer()
+    NativeEmitter.from_vllm_config(None, object())
+    stub._bench_attach_native_fpm.assert_not_called()
+    NativeEmitter.from_vllm_config(None, stub)
+    stub._bench_attach_native_fpm.assert_called_once_with(created[1])
+    assert NativeEmitter.__dict__["from_vllm_config"] is original
+    assert stub._bench_sd_restore_factory is None
+
+
+def test_eagle_native_join_waits_for_corrected_shape_and_preserves_publisher(
+    eagle_benchmark,
+):
+    stub = eagle_benchmark
+    stub._fpm_worker_id = "test-worker"
+    stub._bench_current_point = BenchmarkPoint(
+        "decode", benchmark_id=7, batch_size=1, total_kv_read_tokens=32
+    )
+    output = SimpleNamespace(forward_pass_metrics_iteration_id=None)
+    step = _SpeculativeBenchmarkStep(7, 5, "measured", {"r": 4}, {"r": 3})
+    step.sample = {"forward_index": 6, "cudagraph": {"status": "unavailable"}}
+    stub._bench_sd_outputs[id(output)] = step
+    published = []
+    pending = SimpleNamespace(
+        scheduled=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_decode_requests=1, sum_decode_kv_tokens=40
+        ),
+        queued=None,
+        duration_seconds=None,
+        decode_lengths={"r": 40},
+    )
+    emitter = SimpleNamespace(_pending={})
+
+    def begin(scheduler, scheduled_output):
+        scheduled_output.forward_pass_metrics_iteration_id = 91
+        emitter._pending[91] = pending
+
+    def emit(iteration_id):
+        item = emitter._pending.get(iteration_id)
+        if (
+            item is not None
+            and item.queued is not None
+            and item.duration_seconds is not None
+        ):
+            published.append(emitter._pending.pop(iteration_id))
+
+    emitter.begin_iteration = begin
+    emitter._emit_if_ready = emit
+    stub._bench_attach_native_fpm(emitter)
+    emitter.begin_iteration(stub, output)
+    assert not stub._bench_sd_outputs
+    pending.duration_seconds = 0.009
+    emitter._emit_if_ready(91)
+    assert not stub._bench_current_fpms
+    assert not published
+    # Native rejection correction settles the real context before emission.
+    pending.scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+        num_decode_requests=1, sum_decode_kv_tokens=37
+    )
+    pending.decode_lengths = None
+    pending.queued = instrumented_scheduler_module.QueuedRequestMetrics()
+    emitter._emit_if_ready(91)
+    fpm = stub._bench_current_fpms[0]
+    assert fpm["scheduled_requests"]["sum_decode_kv_tokens"] == 37
+    assert fpm["wall_time"] == 0.009
+    assert fpm["timing_scope"] == "model_step_cuda"
+    assert fpm["benchmark_sample"]["native_iteration_id"] == 91
+    assert fpm["benchmark_sample"]["timing"]["start_monotonic"] is None
+    assert published == [pending]
+    assert not stub._bench_sd_steps
+    stub._bench_remove_native_fpm_observer()
+    assert emitter.begin_iteration is begin
+    assert emitter._emit_if_ready is emit
+
+
+def test_eagle_actual_median_retains_its_own_context():
+    point = BenchmarkPoint(
+        "decode", benchmark_id=7, batch_size=1, total_kv_read_tokens=32
+    )
+    fpms = [
+        {
+            "wall_time": 0.020 - index * 0.0005,
+            "timing_scope": "model_step_cuda",
+            "scheduled_requests": {
+                "num_decode_requests": 1,
+                "sum_decode_kv_tokens": 40 + 2 * index,
+            },
+            "benchmark_sample": {
+                "sample_index": index,
+                "native_iteration_id": 100 + index,
+            },
+        }
+        for index in range(20)
+    ]
+    stub = _benchmark_save_stub(point, fpms)
+    stub._bench_speculative_tokens = 3
+    stub._bench_expected_fpms = 20
+    stub._bench_save_current_point()
+    result = stub._bench_results[0]
+    retained = result.fpms[0]
+    evidence = retained["benchmark_measurement"]
+    assert evidence["estimate"] == {
+        "method": "actual_upper_median",
+        "raw_sample_indices": list(range(20)),
+        "selected_raw_sample_index": 9,
+    }
+    assert retained["wall_time"] == fpms[9]["wall_time"]
+    assert retained["scheduled_requests"] == fpms[9]["scheduled_requests"]
+    assert result.point.total_kv_read_tokens == 58
+    assert evidence["initial_point"]["total_kv_read_tokens"] == 32
+    assert evidence["raw_fpms"] == fpms
 
 
 @pytest.mark.parametrize(
