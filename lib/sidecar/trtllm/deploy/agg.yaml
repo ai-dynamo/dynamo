@@ -57,7 +57,7 @@ spec:
           # Int32Value decodes that field and skips any other fields.
           startupProbe:
             exec:
-              command:
+              command: &engineReadyCommand
               - python3
               - -c
               - |
@@ -74,18 +74,7 @@ spec:
             failureThreshold: 360   # Up to 30 min for model load and warmup.
           readinessProbe:
             exec:
-              command:
-              - python3
-              - -c
-              - |
-                import grpc
-                from google.protobuf.wrappers_pb2 import Int32Value
-
-                channel = grpc.insecure_channel("127.0.0.1:50051")
-                response = channel.unary_unary("/openengine.v1.Control/Health")(
-                    b"", timeout=3
-                )
-                raise SystemExit(Int32Value.FromString(response).value != 2)
+              command: *engineReadyCommand
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
