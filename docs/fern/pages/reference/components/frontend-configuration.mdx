@@ -230,6 +230,12 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Enable a local predict-on-route side indexer with this TTL in seconds. This option requires KV
   events and is independent of `--router-ttl-secs`, which configures pure approximate mode.
 
+  Set this value lower than the end-to-end time of one request. For RL and other batched workloads
+  with shared prefixes, start at about 1 second. The TTL must cover only the delay between sibling
+  requests as they arrive at the frontend over HTTP. With a larger value, the router routes on its
+  own predictions instead of KV events. If the value is greater than 10 seconds, the router logs a
+  warning at startup.
+
   Environment variable: `DYN_ROUTER_PREDICTED_TTL_SECS`
 </ParamField>
 
