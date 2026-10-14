@@ -43,6 +43,19 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 <RecipeStyles />
 ```
 
+### RecipeCount
+
+On the Recipes overview only, inline where a count appears. It counts the
+page's `[data-recipe-card]` elements, or the target ids in their
+`data-targets`, after the page loads.
+
+```mdx
+import { RecipeCount } from "@/components/RecipeCount";
+
+<h3><RecipeCount of="families" /> model families</h3>
+<strong><RecipeCount of="configurations" /></strong>
+```
+
 ### ReferenceStyles
 
 Once per Reference page that uses the Reference components, immediately after

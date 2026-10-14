@@ -431,6 +431,8 @@ areas:
   - deploy/utils/tests/
   - examples/deployments/
   - examples/gpu-sharing/
+  - recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
+  - recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json
   - tests/deploy/
 - label: lpx
   github_team: '@ai-dynamo/dynamo-lpx-codeowners'

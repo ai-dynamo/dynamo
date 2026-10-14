@@ -85,46 +85,45 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 	t.Log("Define invalid selected chains on otherwise valid HX builds")
 	tests := []struct {
-		name        string
-		partitions  int
-		numLPUNodes uint32
-		chains      [][]uint32
-		wantErr     string
+		name       string
+		partitions int
+		chains     [][]uint32
+		wantErr    string
 	}{
 		{
 			name:       "selected prop-sync chain references missing partition",
-			partitions: 1, numLPUNodes: 2, chains: [][]uint32{{1, 2}},
+			partitions: 1, chains: [][]uint32{{1, 2}},
 			wantErr: "references missing partition ID 2",
 		},
 		{
 			name:       "selected prop-sync chain is not forward-adjacent",
-			partitions: 3, numLPUNodes: 6, chains: [][]uint32{{1, 3}},
+			partitions: 3, chains: [][]uint32{{1, 3}},
 			wantErr: "is not forward-adjacent at partition ID 3",
 		},
 		{
 			name:       "missing edge evidence precedes overlap validation",
-			partitions: 2, numLPUNodes: 4, chains: [][]uint32{{1, 1}, {1, 3}},
+			partitions: 2, chains: [][]uint32{{1, 1}, {1, 3}},
 			wantErr: "selected V3 prop-sync chain 1 references missing partition ID 3",
 		},
 		{
 			name:       "selected prop-sync chains overlap",
-			partitions: 3, numLPUNodes: 6, chains: [][]uint32{{1, 2}, {2, 3}},
+			partitions: 3, chains: [][]uint32{{1, 2}, {2, 3}},
 			wantErr: "overlaps partition ID 2",
 		},
 		{
 			name:       "selected prop-sync chain repeats a partition",
-			partitions: 1, numLPUNodes: 2, chains: [][]uint32{{1, 1}},
+			partitions: 1, chains: [][]uint32{{1, 1}},
 			wantErr: "overlaps partition ID 1",
 		},
 		{
 			name:       "selected prop-sync chain is incomplete",
-			partitions: 3, numLPUNodes: 6, chains: [][]uint32{{1, 2}},
+			partitions: 3, chains: [][]uint32{{1, 2}},
 			wantErr: "complete adjacent prop-sync connector chain",
 		},
 		{
 			name:       "LPU-only partitions require a complete prop-sync chain",
-			partitions: 2, numLPUNodes: 2,
-			wantErr: "complete adjacent prop-sync connector chain",
+			partitions: 2,
+			wantErr:    "complete adjacent prop-sync connector chain",
 		},
 	}
 
@@ -137,7 +136,6 @@ func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 				partition.id = uint32(id)
 				fixture.partitions = append(fixture.partitions, partition)
 			}
-			fixture.numLPUNodes = test.numLPUNodes
 			fixture.selectedPropSyncChains = test.chains
 			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 
@@ -156,7 +154,6 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	second := fixture.partitions[0]
 	second.id = 2
 	fixture.partitions = append(fixture.partitions, second)
-	fixture.numLPUNodes = 4
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
@@ -214,7 +211,6 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	third := fixture.partitions[0]
 	third.id, third.topology = 3, "other-opaque-hx-topology"
 	fixture.partitions = append(fixture.partitions, third)
-	fixture.numLPUNodes = 6
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2, 3}}
 	writeTestV3CapnpManifest(t, buildDir, fixture)
 	intent.BuildSnapshot = normalizeTestSnapshot(t, acquireTestSnapshot(t, buildDir))
@@ -241,7 +237,6 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 	fixture.partitions[0].partitionShape = []uint32{16, 2, 1, 1}
 	fixture.partitions[0].numChips = 32
 	fixture.partitions = append(fixture.partitions, second)
-	fixture.numLPUNodes = 3
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
@@ -263,7 +258,6 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	fixture.partitions[0].topology = v3HXTopologyFamily
 	fixture.partitions[0].topologyFamily = v3HXTopologyFamily
 	fixture.partitions[0].partitionShape = []uint32{16, 1, 1, 1}
-	fixture.numLPUNodes = 1
 	buildDir := writeCompilerFixture(t, fixture)
 	firstSnapshot := acquireTestSnapshot(t, buildDir)
 	intent := ModelProjectionInput{
@@ -291,7 +285,6 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	t.Log("Change the immutable manifest to a two-node topology and project again")
 	fixture.partitions[0].partitionShape = []uint32{16, 2, 1, 1}
 	fixture.partitions[0].numChips = 32
-	fixture.numLPUNodes = 2
 	writeTestV3CapnpManifest(t, buildDir, fixture)
 	secondSnapshot := acquireTestSnapshot(t, buildDir)
 	intent.BuildSnapshot = normalizeTestSnapshot(t, secondSnapshot)
