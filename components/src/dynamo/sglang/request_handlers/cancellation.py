@@ -104,14 +104,7 @@ class CancellationMixin:
         stream_source: AsyncIterator[Any],
         cancellation_task: asyncio.Task[Any],
     ) -> AsyncGenerator[Any, None]:
-        """Drain briefly after abort, then stop a stream that did not terminate.
-
-        One reader task per stream fetches a chunk each time the consumer asks,
-        so the consumer only waits on a plain future, not a Task plus
-        asyncio.wait() per chunk. Cancellation resolves that future at the drain
-        deadline (at once if the monitor failed), even if the stream is slow to
-        honor cancellation; the reader is then cancelled and detached.
-        """
+        """Drain briefly after abort, then stop a stream that did not terminate."""
         iterator = aiter(stream_source)
         loop = asyncio.get_running_loop()
         # Carries the consumer's reply future to the reader.
@@ -458,8 +451,7 @@ class CancellationMixin:
                         self.shutdown_event is not None and self.shutdown_event.is_set()
                     )
                 ):
-                    # The signal fired and the stream ended first: let the monitor
-                    # finish ordering its abort rather than racing a fallback abort.
+                    # Let a signalled monitor send its abort before any fallback abort.
                     try:
                         await asyncio.wait(
                             (cancellation_task,),
