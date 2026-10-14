@@ -157,7 +157,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
 | **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
 | **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | 🚧 | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | 🚧 | — | 🚧 | 🚧 | — |
+| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | 🚧 | — | 🚧 | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap. The worker probes `engine.async_generate` once at startup and stops forwarding `mm_hashes` when the build does not accept it; the frontend keeps deriving image-aware routing keys regardless, so the worker's internally computed hashes never line up with them and only the text prefix overlaps. Expect image-blind cache hits on such a build rather than an error. ([Source](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md))

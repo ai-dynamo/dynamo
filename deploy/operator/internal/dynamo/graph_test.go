@@ -27,6 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -6413,6 +6416,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 		wantArgs         []string
 		wantEnvVars      map[string]string
 		wantErr          bool
+		wantStartupProbe *corev1.Probe
 	}{
 		{
 			name: "frontend with default command",
@@ -6424,6 +6428,45 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+		{
+			name: "frontend with runtime 1.6.0",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeFrontend,
+				RuntimeVersionOverride: "1.6.0",
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
+			wantStartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live", Port: intstr.FromString("http"),
+				}},
+				PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 30,
+			},
+		},
+		{
+			name: "frontend with user startup probe",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeFrontend,
+				RuntimeVersionOverride: "1.6.0",
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name: commonconsts.MainContainerName,
+						StartupProbe: &corev1.Probe{
+							ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}},
+							PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 90,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
+			wantStartupProbe: &corev1.Probe{
+				ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}},
+				PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 90,
 			},
 		},
 		{
@@ -6507,7 +6550,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				require.Equal(t, main.Ports, podSpec.Containers[0].Ports)
 			}
 
-			t.Log("Preserve expected frontend command and arguments")
+			t.Log("Check the startup probe, command, and arguments")
+			require.Equal(t, tt.wantStartupProbe, podSpec.Containers[0].StartupProbe)
 			if !reflect.DeepEqual(podSpec.Containers[0].Command, tt.wantCommand) {
 				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
 					podSpec.Containers[0].Command, tt.wantCommand)
@@ -10366,6 +10410,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 		wantSidecarEnvVars      map[string]string
 		wantSidecarEnvFrom      int
 		wantSidecarProbes       bool
+		wantSidecarStartupProbe *corev1.Probe
 		wantSidecarPorts        bool
 		wantSidecarMounts       []corev1.VolumeMount
 		wantSidecarMountsAbsent []string
@@ -10383,9 +10428,10 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarCount: 1, // only main container
 		},
 		{
-			name: "worker with frontendSidecar gets auto-generated sidecar",
+			name: "worker with unversioned frontendSidecar keeps legacy startup probes",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeWorker,
+				ComponentType:          commonconsts.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.6.0",
 				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
 					Image: "my-frontend:latest",
 					Args:  []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
@@ -10407,6 +10453,25 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			},
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar uses its runtime 1.6.0 startup allowance",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.5.0",
+				FrontendSidecar:        &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:1.6.0"},
+			},
+			parentDGDName: "test-dgd", namespace: "test-ns",
+			wantSidecarCount:  2,
+			wantSidecarName:   commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage:  "my-frontend:1.6.0",
+			wantSidecarProbes: true, wantSidecarPorts: true,
+			wantSidecarStartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live", Port: intstr.FromString("http"),
+				}},
+				PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 30,
+			},
 		},
 		{
 			name: "frontendSidecar with envFromSecret",
@@ -10582,6 +10647,9 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 
 			// The frontend sidecar is the last container
 			sidecar := podSpec.Containers[len(podSpec.Containers)-1]
+
+			t.Log("Check that the frontend sidecar uses its own image version for its startup probe")
+			assert.Equal(t, tt.wantSidecarStartupProbe, sidecar.StartupProbe)
 
 			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
 			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
@@ -12090,4 +12158,88 @@ func TestGenerateEPPDestinationRule_MUTUALPropagatesCerts(t *testing.T) {
 	assert.Equal(t, "/etc/certs/client.pem", dr.Spec.TrafficPolicy.Tls.ClientCertificate)
 	assert.Equal(t, "/etc/certs/client.key", dr.Spec.TrafficPolicy.Tls.PrivateKey)
 	assert.Equal(t, "/etc/certs/ca.pem", dr.Spec.TrafficPolicy.Tls.CaCertificates)
+}
+
+func TestGroveRolloutOverridePreservesWorkerGeneration(t *testing.T) {
+	for _, multinode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multinode=%t", multinode), func(t *testing.T) {
+			t.Log("Render a graph before configuring its rollout budget")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(4))},
+				}},
+			}
+			if multinode {
+				dgd.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+			}
+			oldHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, false, nil)
+			require.NoError(t, err)
+
+			t.Log("Add a budget and resolve its target from the DGD component shape")
+			dgd.Spec.Components[0].ProviderOverride = &v1beta1.ProviderOverride{APIVersion: provideroverride.GroveAPIVersion, Value: apiextensionsv1.JSON{Raw: []byte(`{"rollingUpdate":{"maxUnavailable":2}}`)}}
+			provideroverride.DefaultTarget(dgd.Spec.Components[0].ProviderOverride, commonconsts.WorkloadProviderGrove, provideroverride.ScopeComponent, &dgd.Spec.Components[0])
+			original := dgd.DeepCopy()
+			newHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, oldHash, newHash)
+			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, false, nil)
+			require.NoError(t, err)
+			assert.Equal(t, oldPCS.Spec.Template, newPCS.Spec.Template)
+
+			t.Log("Compose the budget onto its generated clique or scaling group")
+			composed, err := provideroverride.ComposeGroveOverrides(dgd, newPCS)
+			require.NoError(t, err)
+			var typed grovev1alpha1.PodCliqueSet
+			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(composed.Object, &typed))
+			if multinode {
+				require.Len(t, typed.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+				require.Equal(t, int32(2), *typed.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate.MaxUnavailable)
+				for _, clique := range typed.Spec.Template.Cliques {
+					assert.Nil(t, clique.RollingUpdate)
+				}
+			} else {
+				require.Equal(t, int32(2), *typed.Spec.Template.Cliques[0].RollingUpdate.MaxUnavailable)
+			}
+			newGrovePodCliqueSetRequestValidator(t).validate(t, &typed, oldPCS)
+			for _, clique := range typed.Spec.Template.Cliques {
+				clique.RollingUpdate = nil
+			}
+			for i := range typed.Spec.Template.PodCliqueScalingGroupConfigs {
+				typed.Spec.Template.PodCliqueScalingGroupConfigs[i].RollingUpdate = nil
+			}
+			// Empty annotations are omitted by the unstructured wire round-trip.
+			expected := oldPCS.Spec.Template.DeepCopy()
+			for _, clique := range expected.Cliques {
+				if len(clique.Annotations) == 0 {
+					clique.Annotations = nil
+				}
+			}
+			assert.Equal(t, *expected, typed.Spec.Template)
+			assert.False(t, provideroverride.HasGroveTopologyOverrides(dgd))
+			assert.Equal(t, original, dgd)
+
+			t.Log("Changing or removing the budget keeps the same generation")
+			dgd.Spec.Components[0].ProviderOverride.Value.Raw = []byte(`{"rollingUpdate":{"maxUnavailable":3}}`)
+			changedHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, oldHash, changedHash)
+
+			t.Log("Preserve topology in the hash while excluding an adjacent budget")
+			dgd.Spec.Components[0].ProviderOverride.Value.Raw = []byte(`{"topologyConstraint":{"packDomain":"host"}}`)
+			topologyHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			dgd.Spec.Components[0].ProviderOverride.Value.Raw = []byte(`{"topologyConstraint":{"packDomain":"host"},"rollingUpdate":{"maxUnavailable":2}}`)
+			combinedHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, topologyHash, combinedHash)
+			assert.NotEqual(t, oldHash, combinedHash)
+			dgd.Spec.Components[0].ProviderOverride = nil
+			removedHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, oldHash, removedHash)
+		})
+	}
 }
