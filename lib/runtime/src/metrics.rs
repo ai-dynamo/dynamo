@@ -777,16 +777,6 @@ pub struct MetricsRegistry {
     /// Wrapped in Arc to preserve callbacks across clones (e.g. vLLM callbacks
     /// registered at Endpoint remain reachable at DRT).
     pub prometheus_typed_callbacks: Arc<std::sync::RwLock<Vec<PrometheusTypedCallback>>>,
-
-    /// Single-flight state for `/metrics` renders: the last render and when it
-    /// started collecting. Shared by every clone of the registry.
-    expfmt_single_flight: Arc<std::sync::Mutex<ExpfmtRender>>,
-}
-
-#[derive(Default)]
-struct ExpfmtRender {
-    started_at: Option<std::time::Instant>,
-    text: String,
 }
 
 impl std::fmt::Debug for MetricsRegistry {
@@ -827,7 +817,6 @@ impl MetricsRegistry {
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_typed_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
-            expfmt_single_flight: Arc::new(std::sync::Mutex::new(ExpfmtRender::default())),
         }
     }
 
@@ -891,49 +880,7 @@ impl MetricsRegistry {
     /// - Families are merged by name; HELP and TYPE must match.
     /// - Multiple series for the same name are allowed if labels differ.
     /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
-    ///
-    /// Renders are single-flight; see [`Self::prometheus_expfmt_combined_since`].
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
-        self.prometheus_expfmt_combined_since(std::time::Instant::now())
-    }
-
-    /// Render for a scrape that arrived at `requested_at`. Renders never
-    /// overlap, and a render that started collecting after `requested_at` is
-    /// returned as is: the scrape sees every update made before it arrived and
-    /// a burst of overlapping scrapes costs at most two passes through the
-    /// engine callbacks. A callback must not render the registry it is
-    /// registered on.
-    pub fn prometheus_expfmt_combined_since(
-        &self,
-        requested_at: std::time::Instant,
-    ) -> anyhow::Result<String> {
-        let mut last = self
-            .expfmt_single_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if last.started_at.is_some_and(|at| at >= requested_at) {
-            return Ok(last.text.clone());
-        }
-        let started_at = std::time::Instant::now();
-        let text = self.render_expfmt_combined()?;
-        last.started_at = Some(started_at);
-        last.text.clone_from(&text);
-        Ok(text)
-    }
-
-    /// The last render if it started collecting after `requested_at`, without
-    /// waiting on a render in flight.
-    pub fn cached_prometheus_expfmt_since(
-        &self,
-        requested_at: std::time::Instant,
-    ) -> Option<String> {
-        let last = self.expfmt_single_flight.try_lock().ok()?;
-        last.started_at
-            .is_some_and(|at| at >= requested_at)
-            .then(|| last.text.clone())
-    }
-
-    fn render_expfmt_combined(&self) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
 
@@ -2342,61 +2289,6 @@ mod test_metric_families_combined {
                  callback registered another"
             );
         }
-    }
-
-    /// A scrape that arrived before a render started collecting shares that
-    /// render; one that arrived after it started gets a fresh render.
-    #[test]
-    fn scrapes_share_a_render_that_started_after_they_arrived() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::time::{Duration, Instant};
-
-        let registry = MetricsRegistry::new();
-        let renders = StdArc::new(AtomicUsize::new(0));
-        let rendering = StdArc::new(AtomicBool::new(false));
-        let (counter, flag) = (renders.clone(), rendering.clone());
-        registry.add_expfmt_callback(StdArc::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-            flag.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(300));
-            Ok("engine_metric 1\n".to_string())
-        }));
-
-        // Four scrapes arrive, then the first one starts the render.
-        let arrived = Instant::now();
-        let first = {
-            let registry = registry.clone();
-            std::thread::spawn(move || registry.prometheus_expfmt_combined_since(arrived))
-        };
-        while !rendering.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        // A scrape that arrives during the render must not take its data.
-        let late = Instant::now();
-        let waiters: Vec<_> = (0..3)
-            .map(|_| {
-                let registry = registry.clone();
-                std::thread::spawn(move || registry.prometheus_expfmt_combined_since(arrived))
-            })
-            .collect();
-        assert!(first.join().unwrap().unwrap().contains("engine_metric 1"));
-        for w in waiters {
-            assert!(w.join().unwrap().unwrap().contains("engine_metric 1"));
-        }
-        assert_eq!(
-            renders.load(Ordering::SeqCst),
-            1,
-            "early arrivals share the render"
-        );
-
-        registry
-            .prometheus_expfmt_combined_since(late)
-            .expect("render");
-        assert_eq!(
-            renders.load(Ordering::SeqCst),
-            2,
-            "a late arrival renders again"
-        );
     }
 
     /// A failing engine callback is skipped, never fatal: one broken engine
