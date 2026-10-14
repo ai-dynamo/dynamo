@@ -24,7 +24,15 @@
  * Only the .dynref-ww-* layout classes are defined here.
  */
 
-import { ARTIFACTS, CUDA_HISTORY, CURRENT_TAG, RELEASES, type CudaRow } from "./releases.data";
+import {
+  ARTIFACTS,
+  CUDA_HISTORY,
+  CURRENT_TAG,
+  INTEL_RELEASES,
+  RELEASES,
+  XPU_HISTORY,
+  type CudaRow,
+} from "./releases.data";
 
 interface BackendOption {
   id: string;
@@ -39,10 +47,28 @@ const BACKENDS: BackendOption[] = [
   { id: "vllm", label: "vLLM", backend: "vLLM", runtime: "vllm-runtime" },
 ];
 
+const INTEL_BACKENDS = BACKENDS.filter((backend) =>
+  XPU_HISTORY.some((row) => row.backend === backend.backend),
+);
+
 interface CudaOption {
   major: string;
   /** Driver floor for the major's current toolkits, e.g. "580.xx+". */
   floor: string;
+}
+
+interface XpuOption {
+  id: string;
+  oneapi: string;
+}
+
+function xpuOptions(): XpuOption[] {
+  const options = new Map<string, XpuOption>();
+  for (const row of XPU_HISTORY) {
+    const id = row.oneapi.replaceAll(".", "-");
+    options.set(id, { id, oneapi: row.oneapi });
+  }
+  return [...options.values()].sort((a, b) => b.oneapi.localeCompare(a.oneapi));
 }
 
 /** Distinct CUDA toolkit majors in the history, newest first, each with the
@@ -71,6 +97,16 @@ interface WizardRow {
   isCurrent: boolean;
   /** Full image reference to copy — current release only. */
   pull?: string;
+}
+
+interface XpuWizardRow {
+  backendId: string;
+  optionId: string;
+  version: string;
+  href: string;
+  oneapi: string;
+  minDriver: string;
+  isCurrent: boolean;
 }
 
 function pullCommandFor(runtime: string): string | undefined {
@@ -106,6 +142,31 @@ function rowsFor(backend: BackendOption, major: string): WizardRow[] {
   return rows;
 }
 
+function rowsForXpu(backend: BackendOption, option: XpuOption): XpuWizardRow[] {
+  const rows: XpuWizardRow[] = [];
+  for (const release of INTEL_RELEASES) {
+    if (release.kind !== "stable" && release.kind !== "patch") continue;
+    const bare = release.version.replace(/^v/, "");
+    const matches = XPU_HISTORY.filter(
+      (row) =>
+        row.version === bare &&
+        row.backend === backend.backend &&
+        row.oneapi === option.oneapi,
+    );
+    if (matches.length === 0) continue;
+    rows.push({
+      backendId: backend.id,
+      optionId: option.id,
+      version: release.version,
+      href: release.notesHref ?? release.github ?? "https://github.com/ai-dynamo/dynamo/releases",
+      oneapi: matches[0].oneapi,
+      minDriver: matches[0].minDriver,
+      isCurrent: bare === CURRENT_TAG,
+    });
+  }
+  return rows;
+}
+
 const WW_CSS = `
 /* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
    class so the rails stay keyboard-operable; focus rules are generated in
@@ -122,6 +183,10 @@ const WW_CSS = `
     display: flex;
     flex-direction: column;
     gap: 6px;
+}
+
+.dynref-ww-accelerator {
+    flex-basis: 100%;
 }
 
 .dynref-ww-rail {
@@ -230,10 +295,34 @@ const WW_CSS = `
  *  keyboard focus ring per input, plus the two independent hide rules whose
  *  intersection leaves only rows matching both the checked backend and the
  *  checked CUDA major. */
-function filterCss(cuda: CudaOption[]): string {
+function filterCss(cuda: CudaOption[], xpu: XpuOption[]): string {
   const inputs = [
-    ...BACKENDS.map((b) => ({ id: `ww-b-${b.id}`, attr: "data-backend", value: b.id })),
-    ...cuda.map((c) => ({ id: `ww-c-${c.major}`, attr: "data-cuda", value: c.major })),
+    { id: "ww-h-nvidia", hardware: undefined, attr: "data-hardware", value: "nvidia" },
+    { id: "ww-h-intel", hardware: undefined, attr: "data-hardware", value: "intel" },
+    ...BACKENDS.map((b) => ({
+      id: `ww-nb-${b.id}`,
+      hardware: "nvidia",
+      attr: "data-backend",
+      value: b.id,
+    })),
+    ...cuda.map((c) => ({
+      id: `ww-nc-${c.major}`,
+      hardware: "nvidia",
+      attr: "data-driver",
+      value: c.major,
+    })),
+    ...INTEL_BACKENDS.map((b) => ({
+      id: `ww-ib-${b.id}`,
+      hardware: "intel",
+      attr: "data-backend",
+      value: b.id,
+    })),
+    ...xpu.map((option) => ({
+      id: `ww-ix-${option.id}`,
+      hardware: "intel",
+      attr: "data-driver",
+      value: option.id,
+    })),
   ];
   const pillRules = inputs
     .map((i) => `#${i.id}:checked ~ .dynref-ww-rails label[for="${i.id}"]`)
@@ -242,10 +331,15 @@ function filterCss(cuda: CudaOption[]): string {
     .map((i) => `#${i.id}:focus-visible ~ .dynref-ww-rails label[for="${i.id}"]`)
     .join(",\n");
   const hideRules = inputs
-    .map(
-      (i) =>
-        `#${i.id}:checked ~ .dynref-ww-list [${i.attr}]:not([${i.attr}="${i.value}"]) { display: none; }`,
-    )
+    .map((i) => {
+      if (i.attr === "data-hardware") {
+        return [
+          `#${i.id}:checked ~ .dynref-ww-rails [data-hardware]:not([data-hardware="${i.value}"]) { display: none; }`,
+          `#${i.id}:checked ~ .dynref-ww-list [data-hardware]:not([data-hardware="${i.value}"]) { display: none; }`,
+        ].join("\n");
+      }
+      return `#${i.id}:checked ~ .dynref-ww-list [data-hardware="${i.hardware}"][${i.attr}]:not([${i.attr}="${i.value}"]) { display: none; }`;
+    })
     .join("\n");
   return `
 ${pillRules} {
@@ -264,7 +358,12 @@ ${hideRules}
 
 function WizardDataRow({ row, backendLabel }: { row: WizardRow; backendLabel: string }) {
   return (
-    <div className="dynref-ww-row" data-backend={row.backendId} data-cuda={row.major}>
+    <div
+      className="dynref-ww-row"
+      data-hardware="nvidia"
+      data-backend={row.backendId}
+      data-driver={row.major}
+    >
       <span className="dynref-ww-version">
         <a className="dynref-mono dynref-ww-link" href={row.href}>
           {row.version}
@@ -304,13 +403,45 @@ function WizardDataRow({ row, backendLabel }: { row: WizardRow; backendLabel: st
   );
 }
 
+function XpuWizardDataRow({ row }: { row: XpuWizardRow }) {
+  return (
+    <div
+      className="dynref-ww-row"
+      data-hardware="intel"
+      data-backend={row.backendId}
+      data-driver={row.optionId}
+    >
+      <span className="dynref-ww-version">
+        <a className="dynref-mono dynref-ww-link" href={row.href}>
+          {row.version}
+        </a>
+      </span>
+      <span>
+        <span className="dynref-chip dynref-chip--cuda">oneAPI {row.oneapi}</span>
+      </span>
+      <span className="dynref-ww-driver">
+        driver <span className="dynref-mono">{row.minDriver}</span>
+      </span>
+      <span className="dynref-ww-pullslot">
+        {row.isCurrent && <span className="dynref-badge dynref-badge--green">Current</span>}
+      </span>
+    </div>
+  );
+}
+
 export function RunsWhereWizard() {
   const cuda = cudaOptions();
+  const xpu = xpuOptions();
   const defaultBackend = BACKENDS[0];
+  const defaultIntelBackend = INTEL_BACKENDS[0];
   const defaultCuda = cuda[0];
+  const defaultXpu = xpu[0];
 
   const combos = BACKENDS.flatMap((backend) =>
     cuda.map((option) => ({ backend, option, rows: rowsFor(backend, option.major) })),
+  );
+  const xpuCombos = INTEL_BACKENDS.flatMap((backend) =>
+    xpu.map((option) => ({ backend, option, rows: rowsForXpu(backend, option) })),
   );
 
   /* CUDA majors (newest first, cudaOptions order) that DO have qualifying
@@ -327,15 +458,28 @@ export function RunsWhereWizard() {
 
   return (
     <>
-      <style>{WW_CSS + filterCss(cuda)}</style>
+      <style>{WW_CSS + filterCss(cuda, xpu)}</style>
       <section className="dynref-panel">
+        <input
+          className="dynref-ww-filter dynref-vh"
+          type="radio"
+          id="ww-h-nvidia"
+          name="dynref-ww-hardware"
+          defaultChecked
+        />
+        <input
+          className="dynref-ww-filter dynref-vh"
+          type="radio"
+          id="ww-h-intel"
+          name="dynref-ww-hardware"
+        />
         {BACKENDS.map((backend) => (
           <input
             key={backend.id}
             className="dynref-ww-filter dynref-vh"
             type="radio"
-            id={`ww-b-${backend.id}`}
-            name="dynref-ww-backend"
+            id={`ww-nb-${backend.id}`}
+            name="dynref-ww-backend-nvidia"
             defaultChecked={backend.id === defaultBackend.id}
           />
         ))}
@@ -344,9 +488,29 @@ export function RunsWhereWizard() {
             key={option.major}
             className="dynref-ww-filter dynref-vh"
             type="radio"
-            id={`ww-c-${option.major}`}
-            name="dynref-ww-cuda"
+            id={`ww-nc-${option.major}`}
+            name="dynref-ww-driver-nvidia"
             defaultChecked={option.major === defaultCuda.major}
+          />
+        ))}
+        {INTEL_BACKENDS.map((backend) => (
+          <input
+            key={backend.id}
+            className="dynref-ww-filter dynref-vh"
+            type="radio"
+            id={`ww-ib-${backend.id}`}
+            name="dynref-ww-backend-intel"
+            defaultChecked={backend.id === defaultIntelBackend.id}
+          />
+        ))}
+        {xpu.map((option) => (
+          <input
+            key={option.id}
+            className="dynref-ww-filter dynref-vh"
+            type="radio"
+            id={`ww-ix-${option.id}`}
+            name="dynref-ww-driver-intel"
+            defaultChecked={option.id === defaultXpu.id}
           />
         ))}
 
@@ -358,22 +522,49 @@ export function RunsWhereWizard() {
         </div>
 
         <div className="dynref-ww-rails">
-          <div className="dynref-ww-group">
+          <div className="dynref-ww-group dynref-ww-accelerator">
+            <span className="dynref-label">Accelerator</span>
+            <div className="dynref-ww-rail">
+              <label className="dynref-ww-pill" htmlFor="ww-h-nvidia">NVIDIA GPU</label>
+              <label className="dynref-ww-pill" htmlFor="ww-h-intel">Intel GPU</label>
+            </div>
+          </div>
+          <div className="dynref-ww-group" data-hardware="nvidia">
             <span className="dynref-label">Backend</span>
             <div className="dynref-ww-rail">
               {BACKENDS.map((backend) => (
-                <label key={backend.id} className="dynref-ww-pill" htmlFor={`ww-b-${backend.id}`}>
+                <label key={backend.id} className="dynref-ww-pill" htmlFor={`ww-nb-${backend.id}`}>
                   {backend.label}
                 </label>
               ))}
             </div>
           </div>
-          <div className="dynref-ww-group">
+          <div className="dynref-ww-group" data-hardware="nvidia">
             <span className="dynref-label">CUDA driver situation</span>
             <div className="dynref-ww-rail">
               {cuda.map((option) => (
-                <label key={option.major} className="dynref-ww-pill" htmlFor={`ww-c-${option.major}`}>
+                <label key={option.major} className="dynref-ww-pill" htmlFor={`ww-nc-${option.major}`}>
                   CUDA {option.major} driver ({option.floor})
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="dynref-ww-group" data-hardware="intel">
+            <span className="dynref-label">Backend</span>
+            <div className="dynref-ww-rail">
+              {INTEL_BACKENDS.map((backend) => (
+                <label key={backend.id} className="dynref-ww-pill" htmlFor={`ww-ib-${backend.id}`}>
+                  {backend.label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="dynref-ww-group" data-hardware="intel">
+            <span className="dynref-label">oneAPI situation</span>
+            <div className="dynref-ww-rail">
+              {xpu.map((option) => (
+                <label key={option.id} className="dynref-ww-pill" htmlFor={`ww-ix-${option.id}`}>
+                  oneAPI {option.oneapi}
                 </label>
               ))}
             </div>
@@ -394,8 +585,9 @@ export function RunsWhereWizard() {
               <div
                 key={`${backend.id}-${option.major}-empty`}
                 className="dynref-ww-empty"
+                data-hardware="nvidia"
                 data-backend={backend.id}
-                data-cuda={option.major}
+                data-driver={option.major}
               >
                 No release ships {backend.label} for a CUDA {option.major} driver.
                 {(shippedMajors.get(backend.id) ?? []).length > 0 && (
@@ -409,11 +601,31 @@ export function RunsWhereWizard() {
               </div>
             ),
           )}
+          {xpuCombos.map(({ backend, option, rows }) =>
+            rows.length > 0 ? (
+              rows.map((row) => (
+                <XpuWizardDataRow
+                  key={`${backend.id}-${option.id}-${row.version}`}
+                  row={row}
+                />
+              ))
+            ) : (
+              <div
+                key={`${backend.id}-${option.id}-empty`}
+                className="dynref-ww-empty"
+                data-hardware="intel"
+                data-backend={backend.id}
+                data-driver={option.id}
+              >
+                No release ships {backend.label} for oneAPI {option.oneapi}.
+              </div>
+            ),
+          )}
         </div>
 
         <p className="dynref-grid-note">
-          Driver floors from the CUDA & driver history; pull commands shown for the current release
-          only.
+          Driver floors come from the CUDA and XPU histories; pull commands are shown for published
+          current-release images only.
         </p>
       </section>
     </>

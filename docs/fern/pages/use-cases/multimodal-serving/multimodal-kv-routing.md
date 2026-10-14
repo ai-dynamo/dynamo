@@ -80,6 +80,9 @@ The selected worker receives the same per-video hash, and its KV events use that
 ## Launch
 
 <Tabs>
+<Tab title="NVIDIA GPU">
+
+<Tabs>
   <Tab title="vLLM" language="vllm">
     Use the Python chat processor when you need vLLM's model-native multimodal processor or want to transfer processed multimodal inputs from the frontend. Otherwise, use the default Rust frontend.
 
@@ -133,6 +136,29 @@ The selected worker receives the same per-video hash, and its KV events use that
   </Tab>
 </Tabs>
 
+</Tab>
+<Tab title="Intel GPU">
+
+<Tabs>
+  <Tab title="vLLM — Rust frontend">
+    ```bash
+    cd $DYNAMO_HOME
+    ZE_AFFINITY_MASK=0,1 \
+      bash examples/backends/vllm/launch/xpu/agg_multimodal_router_xpu.sh
+    ```
+  </Tab>
+  <Tab title="vLLM — Python chat processor">
+    ```bash
+    cd $DYNAMO_HOME
+    ZE_AFFINITY_MASK=0,1 \
+      bash examples/backends/vllm/launch/xpu/agg_multimodal_router_chat_processor_xpu.sh
+    ```
+  </Tab>
+</Tabs>
+
+</Tab>
+</Tabs>
+
 ## Send a Video Request
 
 The standard OpenAI chat payload uses a `video_url` content part:
@@ -183,6 +209,9 @@ Exact video routing falls back to text-prefix routing for unsupported models, op
 
 ## Support Matrix
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 | Backend | Routing Path | Status | Notes |
 |---------|--------------|--------|-------|
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Exact image routing supports Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, Qwen3.6, and Nemotron 3 Nano Omni. Exact video routing requires frontend decoding and supports Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. Other media layouts use text-prefix routing. |
@@ -191,3 +220,16 @@ Exact video routing falls back to text-prefix routing for unsupported models, op
 | [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Images</Badge> | Exact image routing supports the Qwen2-VL family and Kimi K2.5/K2.6. Video requests and other models use text-prefix routing. |
 
 Nemotron 3 Nano Omni exact image and video routing currently requires the vLLM backend. Other backends fall back to text-prefix routing for this model.
+
+</Tab>
+<Tab title="Intel GPU">
+
+| Backend | Routing Path | Status |
+|---------|--------------|--------|
+| [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> |
+| [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> |
+| SGLang | — | — |
+| TensorRT-LLM | — | — |
+
+</Tab>
+</Tabs>
