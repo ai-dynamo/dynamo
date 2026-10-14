@@ -128,6 +128,11 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        if record.dp_start().checked_add(record.dp_size()).is_none() {
+            return Err(SelectionError::BadRequest(
+                "data parallel rank range overflows u32".to_string(),
+            ));
+        }
         // Reject before any per-rank work so an oversized range cannot allocate per rank.
         if record.dp_size() > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
             return Err(SelectionError::BadRequest(format!(
