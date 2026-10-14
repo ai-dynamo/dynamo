@@ -59,6 +59,19 @@ def create_config() -> DynamoVllmConfig:
     return config
 
 
+def test_artifact_router_profile_accepts_cli_and_environment(monkeypatch):
+    monkeypatch.setenv("DYNAMO_ARTIFACT_ROUTER_PROFILE", "[[3, 8, 2]]")
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+    assert parser.parse_args([]).artifact_router_profile == "[[3, 8, 2]]"
+    assert (
+        parser.parse_args(
+            ["--artifact-router-profile", "[[9, 16, 2]]"]
+        ).artifact_router_profile
+        == "[[9, 16, 2]]"
+    )
+
+
 def write_benchmark_points(tmp_path):
     path = tmp_path / "points.json"
     points = {
