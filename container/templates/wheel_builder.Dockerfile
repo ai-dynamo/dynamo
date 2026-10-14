@@ -326,13 +326,13 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # the media formats we actually build and use, not ffmpeg's full default decoder
 # set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
 # narrow allowlist keeps the shipped libav*.so limited to that set. The allowlist
-# covers exactly two paths: (1) the encode CLI ingesting rawvideo frames from
+# covers three paths: (1) the encode CLI ingesting rawvideo frames from
 # imageio over a pipe and encoding with libvpx_vp9, and (2) the Rust media-ffmpeg
 # VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
 # No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
 # decode does not use ffmpeg (it goes through the Rust `image` crate), so no
 # still-image decoders are enabled here.
-# A third path: vLLM's `vllm-rs` video decode runs `ffprobe`, then image2pipe/ppm (or
+# (3) vLLM's `vllm-rs` video decode runs `ffprobe`, then image2pipe/ppm (or
 # rawvideo) output: uncompressed, no royalty-bearing codec. Do not add --disable-ffprobe.
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x and 9.x (not `pipe:`), so omitting it breaks
