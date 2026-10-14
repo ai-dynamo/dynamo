@@ -42,6 +42,9 @@ use crate::{
 };
 
 pub const TRANSPORT_NAME: &str = "velo_response";
+/// A worker reports a version mismatch over the stream it opens, so later
+/// versions must keep `ResponseAddress`'s `version`, `peer_id`,
+/// `peer_address`, `anchor` and `ticket` decodable.
 const VERSION: u32 = 4;
 /// Process-wide services, keyed by [`service_key`].
 static PROCESS_SERVICES: LazyLock<
@@ -332,21 +335,21 @@ impl VeloResponseService {
             .metrics(PROCESS_METRICS.1.clone())
             .mux_only()
             .messenger_mux(response_mux_config()?)?;
-        match transport {
-            ResponseTransport::Tcp => {
-                builder = builder.add_transport(Arc::new(tcp_transport(address)?));
+        if transport == ResponseTransport::Ucx {
+            // Added first, so Velo prefers UCX for every peer that has it.
+            #[cfg(all(target_os = "linux", feature = "velo-ucx"))]
+            {
+                builder = builder.add_transport(Arc::new(
+                    velo::transports::ucx::UcxTransportBuilder::new().build()?,
+                ));
             }
-            ResponseTransport::Ucx => {
-                #[cfg(all(target_os = "linux", feature = "velo-ucx"))]
-                {
-                    builder = builder.add_transport(Arc::new(
-                        velo::transports::ucx::UcxTransportBuilder::new().build()?,
-                    ));
-                }
-                #[cfg(not(all(target_os = "linux", feature = "velo-ucx")))]
-                bail!("Velo UCX responses require a Linux build with the velo-ucx feature");
-            }
+            #[cfg(not(all(target_os = "linux", feature = "velo-ucx")))]
+            bail!("Velo UCX responses require a Linux build with the velo-ucx feature");
         }
+        // Every service also has TCP. A frontend and worker configured for
+        // different transports still share it, so the worker can open the
+        // stream and report the mismatch instead of leaving the frontend to wait.
+        builder = builder.add_transport(Arc::new(tcp_transport(address)?));
         let velo = builder.build().await?;
         Ok(Arc::new(Self {
             peer_address: BASE64.encode(velo.peer_info().worker_address().as_bytes()),
@@ -468,6 +471,12 @@ impl VeloResponseService {
                         }));
                         return;
                     }
+                }
+                Some(Err(velo::streaming::StreamError::SenderError(error))) => {
+                    // The worker opened the stream only to report why it cannot serve it.
+                    tracing::debug!(context_id = %context.id(), %error, "Velo response worker reported a setup error");
+                    let _ = tx.send(Err(StreamPrologueError::from_message(error)));
+                    return;
                 }
                 other => {
                     tracing::warn!(context_id = %context.id(), reason = %first_kind(&other), "Velo response ended before its prologue");
@@ -624,14 +633,8 @@ impl VeloResponseService {
         );
         let address: ResponseAddress = serde_json::from_str(&info.info)?;
         ensure!(
-            address.version == VERSION
-                && address.ticket.streaming_transport_key.as_str()
-                    == velo::streaming::MESSENGER_MUX_KEY,
-            "unsupported Velo response lifecycle version"
-        );
-        ensure!(
-            address.transport == self.transport,
-            "Velo response transport mismatch"
+            address.ticket.streaming_transport_key.as_str() == velo::streaming::MESSENGER_MUX_KEY,
+            "unsupported Velo response stream transport"
         );
         ensure!(
             address.anchor.unpack().0 == address.peer_id.worker_id(),
@@ -651,6 +654,27 @@ impl VeloResponseService {
                 .open_anchor_stream::<ResponseFrame>(address.anchor, address.ticket)
                 .await?
         };
+        // Check compatibility only now that the stream is open, so the frontend
+        // gets the mismatch at once instead of waiting for a stream that never
+        // starts. `send_err` does not depend on this protocol's frames.
+        let mismatch = if address.version != VERSION {
+            Some(format!(
+                "Velo response protocol mismatch: frontend version {}, worker version {VERSION}",
+                address.version
+            ))
+        } else if address.transport != self.transport {
+            Some(format!(
+                "Velo response transport mismatch: frontend {:?}, worker {:?}",
+                address.transport, self.transport
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = mismatch {
+            let _ = sender.send_err(&message).await;
+            let _ = sender.finalize();
+            bail!(message);
+        }
         tracing::debug!(context_id = %context.id(), "Opened Velo response sender");
         let stop = sender.stop_token();
         let cancel = sender.cancellation_token();
@@ -1076,6 +1100,87 @@ mod tests {
         )
     }
 
+    /// UCX services also listen on TCP. A frontend and worker set to different
+    /// transports reach each other over TCP, and the worker reports the
+    /// mismatch at once. Two UCX services still pick UCX.
+    #[cfg(feature = "velo-ucx")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mismatched_transports_report_over_shared_tcp() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mismatched_transports_report_over_shared_tcp"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let address = "127.0.0.1:0".parse().unwrap();
+        let ucx = VeloResponseService::new(ResponseTransport::Ucx, address)
+            .await
+            .unwrap();
+        let ucx_peer = VeloResponseService::new(ResponseTransport::Ucx, address)
+            .await
+            .unwrap();
+        let tcp = VeloResponseService::new(ResponseTransport::Tcp, address)
+            .await
+            .unwrap();
+        for (frontend, worker) in [(&ucx, &tcp), (&tcp, &ucx)] {
+            let registered = frontend
+                .register_response(EngineContext::new(()).context(), false)
+                .unwrap();
+            let error = worker
+                .sender(
+                    EngineContext::new(()).context(),
+                    registered.connection_info.clone(),
+                    None,
+                )
+                .await
+                .err()
+                .expect("mismatched worker opened a sender");
+            assert!(error.to_string().contains("transport mismatch"), "{error}");
+            match tokio::time::timeout(Duration::from_secs(5), registered.wait())
+                .await
+                .expect("frontend waited for a mismatched worker")
+                .unwrap()
+            {
+                Err(error) => assert!(error.message.contains("transport mismatch")),
+                Ok(_) => panic!("mismatched worker's stream succeeded"),
+            }
+            assert_eq!(
+                worker
+                    .velo
+                    .primary_transport_key(frontend.velo.instance_id())
+                    .as_deref(),
+                Some("tcp")
+            );
+        }
+        let registered = ucx
+            .register_response(EngineContext::new(()).context(), false)
+            .unwrap();
+        let mut sender = ucx_peer
+            .sender(
+                EngineContext::new(()).context(),
+                registered.connection_info.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        sender.send_prologue(None).await.unwrap();
+        registered.wait().await.unwrap().unwrap();
+        assert_eq!(
+            ucx_peer
+                .velo
+                .primary_transport_key(ucx.velo.instance_id())
+                .as_deref(),
+            Some("ucx")
+        );
+        drop(sender);
+        for service in [ucx, ucx_peer, tcp] {
+            service.shutdown().await;
+        }
+    }
+
     async fn lifecycle_suite(transport: ResponseTransport) {
         completion_and_failure_keep_distinct_results(transport).await;
         stop_drains_output_and_cancel_reaches_an_idle_engine(transport).await;
@@ -1412,21 +1517,46 @@ mod tests {
             Err(error) => assert!(error.message.contains("Invalid Velo response prologue")),
             Ok(_) => panic!("malformed prologue succeeded"),
         }
-        let registered = consumer
-            .register_response(EngineContext::new(()).context(), false)
-            .unwrap();
-        let mut address: ResponseAddress =
-            serde_json::from_str(&registered.connection_info.info).unwrap();
-        address.version -= 1;
-        let info = ConnectionInfo {
-            transport: TRANSPORT_NAME.into(),
-            info: serde_json::to_string(&address).unwrap(),
-        };
-        assert!(
-            producer
+        // A version or transport mismatch reaches the frontend over the opened
+        // stream at once, rather than as a stream that never starts.
+        type Skew = fn(&mut ResponseAddress);
+        let skews: [(Skew, &str); 2] = [
+            (|address| address.version -= 1, "protocol mismatch"),
+            (
+                |address| {
+                    address.transport = match address.transport {
+                        ResponseTransport::Tcp => ResponseTransport::Ucx,
+                        ResponseTransport::Ucx => ResponseTransport::Tcp,
+                    }
+                },
+                "transport mismatch",
+            ),
+        ];
+        for (skew, expected) in skews {
+            let registered = consumer
+                .register_response(EngineContext::new(()).context(), false)
+                .unwrap();
+            let info = registered.connection_info.info.clone();
+            let mut address: ResponseAddress = serde_json::from_str(&info).unwrap();
+            skew(&mut address);
+            let info = ConnectionInfo {
+                transport: TRANSPORT_NAME.into(),
+                info: serde_json::to_string(&address).unwrap(),
+            };
+            let error = producer
                 .sender(EngineContext::new(()).context(), info, None)
                 .await
-                .is_err()
-        );
+                .err()
+                .expect("mismatched worker opened a sender");
+            assert!(error.to_string().contains(expected), "{error}");
+            match tokio::time::timeout(Duration::from_secs(5), registered.wait())
+                .await
+                .expect("frontend waited for a mismatched worker")
+                .unwrap()
+            {
+                Err(error) => assert!(error.message.contains(expected), "{}", error.message),
+                Ok(_) => panic!("mismatched worker's stream succeeded"),
+            }
+        }
     }
 }

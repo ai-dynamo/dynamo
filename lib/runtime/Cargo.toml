@@ -131,6 +131,7 @@ nix = { version = "0.30.1", default-features = false, features = ["net"] }
 
 [dev-dependencies]
 h2 = "0.4"
+velo = { workspace = true, features = ["test-helpers"] }
 tower = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 rcgen = { workspace = true }
