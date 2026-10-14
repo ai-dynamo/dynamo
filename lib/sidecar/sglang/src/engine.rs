@@ -12,9 +12,11 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
-    PreprocessedRequest, WorkerConfig, usage,
+    PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -22,7 +24,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, Pool};
+use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
@@ -46,6 +48,7 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
+    combined_token_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,12 +77,18 @@ impl SglangSidecarEngine {
 
     /// Parse CLI arguments without connecting; discovery runs after probe startup.
     pub fn from_cli() -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, false))
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, false),
+        ))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -87,12 +96,18 @@ impl SglangSidecarEngine {
     pub fn try_from_args_async(
         argv: Vec<String>,
     ) -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, false))
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, false),
+        ))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -104,7 +119,7 @@ impl SglangSidecarEngine {
         runtime.block_on(Self::from_parsed_async(args, true))
     }
 
-    fn validate_args(args: &Args) -> Result<(), DynamoError> {
+    pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
@@ -126,13 +141,14 @@ impl SglangSidecarEngine {
         Self::from_discovered(args, discovery)
     }
 
-    fn from_discovered(
+    pub(crate) fn from_discovered(
         args: Args,
         discovery: Discovery,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::validate_args(&args)?;
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let disaggregation_mode = discovery_mode(&discovery)?;
+        let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
                 args.bootstrap_host.as_deref(),
@@ -156,6 +172,7 @@ impl SglangSidecarEngine {
 
         let common = args.sidecar.common;
         let config = WorkerConfig {
+            runtime: common.runtime,
             namespace: common.namespace,
             component: if disaggregation_mode == DisaggregationMode::Aggregated {
                 common.component
@@ -252,7 +269,7 @@ impl LLMEngine for SglangSidecarEngine {
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
         let discovery = client::discover(&mut control, deadline).await?;
-        let observed_mode = discovery_mode(&discovery)?;
+        let observed_mode = client::discovery_mode(&discovery.server_info)?;
         if observed_mode != self.disaggregation_mode {
             return Err(client::invalid_arg(format!(
                 "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
@@ -293,14 +310,20 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
+        let kv_event_sources =
+            discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
+        let combined_token_limit = combined_token_limit(&discovery);
+        if combined_token_limit.is_none() {
+            tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
+        }
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
+                combined_token_limit,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -315,7 +338,7 @@ impl LLMEngine for SglangSidecarEngine {
 
     async fn generate(
         &self,
-        request: PreprocessedRequest,
+        mut request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let state = self
@@ -334,7 +357,14 @@ impl LLMEngine for SglangSidecarEngine {
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
-            return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
+            return Ok(native_http.generate(native_request, ctx, self.cancel.child_token()));
+        }
+        if request.stop_conditions.max_tokens.is_none() {
+            request.stop_conditions.max_tokens = omitted_max_tokens_default(
+                state.combined_token_limit,
+                request.token_ids.len(),
+                request.stop_conditions.min_tokens,
+            );
         }
         let mut grpc_client = state.pool.stream_client();
 
@@ -367,12 +397,15 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
+            let stopped_ctx = ctx.inner_arc();
+            let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
+            let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
 
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
-                _ = ctx.stopped() => None,
-                _ = cancel.cancelled() => None,
+                _ = &mut request_cancellation => None,
+                _ = &mut shutdown_cancellation => None,
                 response = grpc_client.generate(grpc_request) => Some(response),
             };
             let Some(opened) = opened else {
@@ -406,12 +439,12 @@ impl LLMEngine for SglangSidecarEngine {
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => {
+                    _ = &mut request_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
-                    _ = cancel.cancelled() => {
+                    _ = &mut shutdown_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
@@ -574,24 +607,11 @@ async fn bootstrap_discover(
     transport: &GrpcTransportConfig,
     bootstrap: bool,
 ) -> Result<Discovery, DynamoError> {
-    let deadline = Instant::now() + transport.startup_deadline;
-    let mut grpc_client = client::connect(endpoint, transport, deadline, bootstrap).await?;
-    client::discover(&mut grpc_client, deadline).await
-}
-
-fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoError> {
-    match discovery
-        .server_info
-        .get("disaggregation_mode")
-        .and_then(Value::as_str)
-        .unwrap_or("null")
-    {
-        "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
-        "prefill" => Ok(DisaggregationMode::Prefill),
-        "decode" => Ok(DisaggregationMode::Decode),
-        mode => Err(client::protocol_error(format!(
-            "unsupported SGLang disaggregation_mode `{mode}`"
-        ))),
+    match client::bootstrap_discover(endpoint, transport, bootstrap).await? {
+        client::StartupDiscovery::Leader(discovery) => Ok(*discovery),
+        client::StartupDiscovery::Follower => {
+            Err(client::invalid_arg("inference engine requires node_rank=0"))
+        }
     }
 }
 
@@ -698,11 +718,55 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn discover_kv_event_sources(
-    discovery: &Discovery,
-    engine_config: &EngineConfig,
-    grpc_endpoint: &GrpcEndpoint,
+async fn local_kv_event_sources(
+    metadata: &NodeMetadata,
+    config: &mut EngineConfig,
+    deadline: Instant,
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    let llm = config
+        .llm
+        .as_ref()
+        .ok_or_else(|| client::invalid_arg("KV sources require LLM registration"))?;
+    metadata
+        .validate_registration(llm.data_parallel_size.unwrap_or(1), llm.kv_cache_block_size)
+        .map_err(|error| client::invalid_arg(error.to_string()))?;
+    if let Some(group_id) = metadata
+        .worker_group_id(deadline)
+        .await
+        .map_err(|error| client::invalid_arg(error.to_string()))?
+    {
+        config
+            .runtime_data
+            .insert(WORKER_GROUP_KEY.into(), group_id.into());
+    }
+    config.runtime_data.insert(KV_CONFIG_KEY.into(), serde_json::json!({
+        "block_size": llm.kv_cache_block_size,
+        "local_dp_ranks": metadata.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
+    }));
+    Ok(metadata
+        .kv_event_sources
+        .iter()
+        .map(|source| DiscoveredKvEventSource {
+            endpoint: source.endpoint.clone(),
+            topic: source.topic.clone(),
+            dp_rank: source.dp_rank,
+        })
+        .collect())
+}
+
+async fn discover_kv_event_sources(
+    discovery: &Discovery,
+    engine_config: &mut EngineConfig,
+    grpc_endpoint: &GrpcEndpoint,
+    deadline: Instant,
+) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    // An explicit list is authoritative, including an empty list. Only older
+    // engines without this field may use the legacy single-node descriptor.
+    if let Some(metadata) = NodeMetadata::from_server_info(&discovery.server_info)
+        .map_err(|error| client::protocol_error(error.to_string()))?
+    {
+        return local_kv_event_sources(&metadata, engine_config, deadline).await;
+    }
     let Some(descriptor) = discovery.server_info.get("kv_events") else {
         return Ok(Vec::new());
     };
@@ -868,6 +932,41 @@ fn sglang_eagle_enabled(server_info: &Value) -> bool {
                 "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
             )
         })
+}
+
+/// Context length minus the EAGLE draft-token reserve, which SGLang counts
+/// against the context once `max_new_tokens` is set. Adaptive speculation does
+/// not report its reserve.
+fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
+    let server_info = &discovery.server_info;
+    let reserved = if !sglang_eagle_enabled(server_info) {
+        0
+    } else if server_info
+        .get("speculative_adaptive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    } else {
+        let field = |key| client::json_u32(server_info, key);
+        field("speculative_eagle_topk")?
+            .saturating_mul(field("speculative_num_steps")?)
+            .max(field("speculative_num_draft_tokens")?)
+    };
+    discovery.max_model_len?.checked_sub(reserved)
+}
+
+/// SGLang's gRPC bridge turns an unset `max_new_tokens` into its 128-token
+/// default, so ask for the room left in the context. Leave it unset when that
+/// room cannot hold `min_tokens`, and SGLang clamps the request itself.
+fn omitted_max_tokens_default(
+    combined_token_limit: Option<u32>,
+    prompt_len: usize,
+    min_tokens: Option<u32>,
+) -> Option<u32> {
+    combined_token_limit?
+        .checked_sub(u32::try_from(prompt_len).ok()?)
+        .filter(|remaining| *remaining >= min_tokens.unwrap_or(0).max(1))
 }
 
 fn is_deepseek_v4_arch(model_info: &Value) -> bool {
@@ -1042,6 +1141,9 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
     use clap::Parser;
     use dynamo_backend_common::{BackendError, ErrorType, ModelInput};
     use dynamo_sidecar_common::GrpcEndpoint;
@@ -1049,9 +1151,9 @@ mod tests {
 
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
-        SglangSidecarEngine, build_engine_config, discover_kv_event_sources,
-        discovery_bootstrap_port, discovery_mode, hicache_native_offloading_capacity,
-        kv_event_connect_host, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
+        discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
+        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1191,40 +1293,6 @@ mod tests {
                 .to_string()
                 .contains("route-to-encoder is not supported")
         );
-    }
-
-    #[test]
-    fn discovery_roles_accept_native_aliases_and_reject_unknown_strings() {
-        for (value, expected) in [
-            (json!(null), DisaggregationMode::Aggregated),
-            (json!("null"), DisaggregationMode::Aggregated),
-            (json!("agg"), DisaggregationMode::Aggregated),
-            (json!("aggregated"), DisaggregationMode::Aggregated),
-            (json!("prefill"), DisaggregationMode::Prefill),
-            (json!("decode"), DisaggregationMode::Decode),
-        ] {
-            assert_eq!(
-                discovery_mode(&discovery(json!({"disaggregation_mode": value}))).unwrap(),
-                expected
-            );
-        }
-        assert_eq!(
-            discovery_mode(&discovery(json!({}))).unwrap(),
-            DisaggregationMode::Aggregated
-        );
-        for mode in ["encode", "unknown", ""] {
-            let error =
-                discovery_mode(&discovery(json!({"disaggregation_mode": mode}))).unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsupported SGLang disaggregation_mode")
-            );
-        }
     }
 
     #[test]
@@ -1391,12 +1459,18 @@ mod tests {
         (discovery, config, endpoint)
     }
 
-    #[test]
-    fn kv_event_descriptor_is_optional_but_validated_when_present() {
-        let (mut discovery, config, endpoint) = kv_discovery();
+    #[tokio::test]
+    async fn kv_event_descriptor_is_optional_but_validated_when_present() {
+        let (mut discovery, mut config, endpoint) = kv_discovery();
         for value in [json!(null), json!([]), json!("zmq")] {
             discovery.server_info["kv_events"] = value.clone();
-            let result = discover_kv_event_sources(&discovery, &config, &endpoint);
+            let result = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await;
             if value.is_null() {
                 assert!(result.unwrap().is_empty());
             } else {
@@ -1410,9 +1484,15 @@ mod tests {
         }
         discovery.server_info = json!({});
         assert!(
-            discover_kv_event_sources(&discovery, &config, &endpoint)
-                .unwrap()
-                .is_empty()
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
 
         for (field, value) in [
@@ -1427,9 +1507,16 @@ mod tests {
             ("block_size", json!(u64::from(u32::MAX) + 1)),
             ("dp_size", json!(0)),
         ] {
-            let (mut discovery, config, endpoint) = kv_discovery();
+            let (mut discovery, mut config, endpoint) = kv_discovery();
             discovery.server_info["kv_events"][field] = value;
-            let error = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap_err();
+            let error = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
@@ -1438,8 +1525,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn kv_events_require_matching_registration_and_rank_coverage() {
+    #[tokio::test]
+    async fn kv_events_require_matching_registration_and_rank_coverage() {
         for (block_size, dp_size, dp_start, message) in [
             (64, 2, 0, "block size"),
             (128, 1, 0, "reports 2 DP ranks"),
@@ -1451,7 +1538,14 @@ mod tests {
             llm.kv_cache_block_size = Some(block_size);
             llm.data_parallel_size = Some(dp_size);
             llm.data_parallel_start_rank = Some(dp_start);
-            let error = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap_err();
+            let error = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
@@ -1461,23 +1555,36 @@ mod tests {
         let (discovery, mut config, endpoint) = kv_discovery();
         config.llm = None;
         assert!(
-            discover_kv_event_sources(&discovery, &config, &endpoint)
-                .unwrap_err()
-                .to_string()
-                .contains("require an LLM engine registration")
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("require an LLM engine registration")
         );
     }
 
-    #[test]
-    fn kv_events_reject_unmapped_multi_node_dp_and_port_overflow() {
+    #[tokio::test]
+    async fn kv_events_reject_unmapped_multi_node_dp_and_port_overflow() {
         for (nnodes, base_port, message) in [
             (2, 5557, "multi-node DP are unsupported"),
             (1, 65535, "port overflows 65535"),
         ] {
-            let (mut discovery, config, endpoint) = kv_discovery();
+            let (mut discovery, mut config, endpoint) = kv_discovery();
             discovery.server_info["nnodes"] = json!(nnodes);
             discovery.server_info["kv_events"]["endpoint_port_base"] = json!(base_port);
-            let error = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap_err();
+            let error = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
@@ -1548,6 +1655,41 @@ mod tests {
                 "{server_info} must not advertise enable_eagle"
             );
         }
+    }
+
+    #[test]
+    fn combined_token_limit_subtracts_sglang_eagle_reserve() {
+        let limit = |server_info| {
+            let mut discovery = discovery(server_info);
+            discovery.max_model_len = Some(4096);
+            combined_token_limit(&discovery)
+        };
+        let eagle = json!({
+            "speculative_algorithm": "EAGLE",
+            "speculative_eagle_topk": 1,
+            "speculative_num_steps": 3,
+            "speculative_num_draft_tokens": 4,
+        });
+        assert_eq!(limit(json!({})), Some(4096));
+        assert_eq!(limit(eagle.clone()), Some(4092));
+        let mut adaptive = eagle.clone();
+        adaptive["speculative_adaptive"] = true.into();
+        assert_eq!(limit(adaptive), None);
+        let mut incomplete = eagle;
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("speculative_num_steps");
+        assert_eq!(limit(incomplete), None);
+    }
+
+    #[test]
+    fn omitted_max_tokens_default_fills_the_remaining_budget() {
+        assert_eq!(omitted_max_tokens_default(Some(4096), 3, None), Some(4093));
+        assert_eq!(omitted_max_tokens_default(Some(8), 3, Some(5)), Some(5));
+        assert_eq!(omitted_max_tokens_default(Some(8), 3, Some(6)), None);
+        assert_eq!(omitted_max_tokens_default(Some(3), 3, None), None);
+        assert_eq!(omitted_max_tokens_default(None, 3, None), None);
     }
 
     #[test]
@@ -1770,8 +1912,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn discovers_ranked_kv_event_sources_from_server_info() {
+    #[tokio::test]
+    async fn discovers_ranked_kv_event_sources_from_server_info() {
         let discovery = discovery(json!({
             "page_size": 64,
             "dcp_size": 2,
@@ -1786,11 +1928,18 @@ mod tests {
                 "dp_size": 2
             }
         }));
-        let config =
+        let mut config =
             build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
         let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
 
-        let sources = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap();
+        let sources = discover_kv_event_sources(
+            &discovery,
+            &mut config,
+            &endpoint,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             sources,
@@ -1806,6 +1955,88 @@ mod tests {
                     dp_rank: 1,
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn local_metadata_overrides_global_sources_without_shrinking_registration() {
+        use crate::client::{KV_CONFIG_KEY, WORKER_GROUP_KEY};
+
+        let mut discovery = discovery(json!({
+            "page_size": 64, "dp_size": 8, "nnodes": 2, "node_rank": 0,
+            "dist_init_addr": "127.0.0.1:2345",
+            "kv_event_sources": [
+                {"dp_rank":0,"endpoint":"tcp://127.0.0.1:5557","topic":"kv","block_size":64},
+                {"dp_rank":1,"endpoint":"tcp://127.0.0.1:5558","topic":"kv","block_size":64},
+                {"dp_rank":2,"endpoint":"tcp://127.0.0.1:5559","topic":"kv","block_size":64},
+                {"dp_rank":3,"endpoint":"tcp://127.0.0.1:5560","topic":"kv","block_size":64}
+            ],
+            "kv_events": {
+                "publisher": "zmq", "endpoint_host": "*",
+                "endpoint_port_base": 5557, "topic": "kv", "block_size": 64,
+                "dp_size": 8
+            }
+        }));
+        let mut config =
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+        let endpoint = GrpcEndpoint::parse("http://127.0.0.1:30001", "test").unwrap();
+        let sources = discover_kv_event_sources(
+            &discovery,
+            &mut config,
+            &endpoint,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.dp_rank)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(sources[0].endpoint, "tcp://127.0.0.1:5557");
+        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
+        assert_eq!(
+            config.runtime_data[WORKER_GROUP_KEY],
+            "dist_init:tcp://127.0.0.1:2345"
+        );
+        assert_eq!(config.runtime_data[KV_CONFIG_KEY]["block_size"], 64);
+
+        // An explicit empty source list must not fall back to all global ranks.
+        discovery.server_info["kv_event_sources"] = json!([]);
+        assert!(
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            config.runtime_data[KV_CONFIG_KEY]["local_dp_ranks"],
+            json!([])
+        );
+        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
+
+        // Engines without the new metadata field retain the old multinode guard.
+        discovery
+            .server_info
+            .as_object_mut()
+            .unwrap()
+            .remove("kv_event_sources");
+        assert!(
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .is_err()
         );
     }
 }

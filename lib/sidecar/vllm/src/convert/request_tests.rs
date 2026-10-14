@@ -17,6 +17,29 @@ fn assert_invalid(error: DynamoError) {
 }
 
 #[test]
+fn media_strings_move_into_generate_request() {
+    for media in [
+        MultimodalData::RawUrl("data:image/jpeg;base64,AA==".to_string()),
+        MultimodalData::Url("https://example.com/image.jpg".parse().unwrap()),
+    ] {
+        let pointer = match &media {
+            MultimodalData::RawUrl(value) => value.as_ptr(),
+            MultimodalData::Url(value) => value.as_str().as_ptr(),
+            _ => unreachable!(),
+        };
+        let request = epd_request(vec![("image_url", vec![media])]);
+        let wire =
+            build_generate_request(request, "move-media".into(), DisaggregationMode::Aggregated)
+                .unwrap();
+        let source = match wire.media[0].source.as_ref().unwrap() {
+            pb::media_item::Source::DataUri(value) | pb::media_item::Source::Url(value) => value,
+            other => panic!("unexpected media source: {other:?}"),
+        };
+        assert_eq!(source.as_ptr(), pointer);
+    }
+}
+
+#[test]
 fn compatibility_envelope_preserves_typed_controls() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let request = PreprocessedRequest::builder()
@@ -1288,6 +1311,29 @@ fn preprocessed_features_cannot_mix_with_raw_media() {
 }
 
 #[test]
+fn reasoning_parser_extra_args_do_not_reach_the_engine() {
+    // `request()` carries a JSON schema: the only case where vLLM reads these.
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+    consume_reasoning_parser_args(&mut request.extra_args);
+    let converted = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    assert_eq!(converted, baseline);
+}
+
+#[test]
 fn frontend_router_metadata_does_not_require_engine_support() {
     let baseline = build_generate_request(
         request(),
@@ -1296,7 +1342,18 @@ fn frontend_router_metadata_does_not_require_engine_support() {
     )
     .unwrap();
     for (fields, is_supported) in [
-        (json!(["worker_id", "timing"]), true),
+        (
+            json!([
+                "worker_id",
+                "timing",
+                "completion_token_ids",
+                "prompt_token_ids",
+                "prompt_logprobs",
+                "detailed_finish_reason",
+                "stop_reason"
+            ]),
+            true,
+        ),
         (json!(["worker_id", "engine_data"]), false),
     ] {
         let mut request = request();

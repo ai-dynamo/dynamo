@@ -326,8 +326,11 @@ impl pb::control_server::Control for FakeVllm {
 
     async fn abort(
         &self,
-        _request: Request<pb::AbortRequest>,
+        request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
+        let request = request.into_inner();
+        self.record_control("abort", json!({"request_ids": request.request_ids}))
+            .await;
         Ok(Response::new(pb::AbortResponse {}))
     }
 
@@ -1069,6 +1072,40 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
         server.service.data_parallel_rank_metadata.lock().await[0],
         Some("1".to_string())
     );
+}
+
+#[tokio::test]
+async fn reasoning_parser_args_reach_only_an_engine_without_a_reasoning_parser() {
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+
+    // The fixture engine runs vLLM's `deepseek_r1` reasoning parser, which
+    // would gate the JSON schema without these settings.
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let parsing = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    parsing.start(0).await.expect("start");
+    let error = collect_result(&parsing, request.clone())
+        .await
+        .expect_err("an engine reasoning parser needs these settings");
+    assert!(error.to_string().contains("is not supported by vLLM gRPC"));
+    parsing.cleanup().await.expect("cleanup");
+
+    let mut info = model_info();
+    info.reasoning_parser = String::new();
+    let server = FakeServer::start(FakeVllm::default()).await;
+    *server.service.model_info_override.lock().await = Some(info.clone());
+    let token_only = engine(&server.endpoint, DisaggregationMode::Aggregated, 1, info);
+    token_only.start(0).await.expect("start");
+    collect(&token_only, request).await;
+    assert_eq!(server.service.requests.lock().await.len(), 1);
+    token_only.cleanup().await.expect("cleanup");
 }
 
 // Regression: a frontend hosting ranks 4..8 must register and route that local
@@ -2563,6 +2600,27 @@ async fn pool_uses_each_configured_connection() {
             .await
             .iter()
             .all(Option::is_none)
+    );
+}
+
+#[tokio::test]
+async fn abort_sends_control_abort_for_the_request_id() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    engine.abort(context.clone()).await;
+
+    let calls = server.service.control_calls.lock().await;
+    assert_eq!(
+        *calls,
+        vec![("abort".to_string(), json!({"request_ids": [context.id()]}))]
     );
 }
 

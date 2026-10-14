@@ -48,16 +48,38 @@ The default model is `Qwen/Qwen3-0.6B`.
 </Accordion>
 <Accordion title="Qwen3-ASR Realtime Transcription">
 
-**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM 0.30.0's native
-Qwen3-ASR support. The launch script requires an explicit `--hf-overrides` argument:
+**Experimental.** Transcribe audio over `/v1/realtime` using vLLM's native Qwen3-ASR
+support. This example was validated with English audio.
+
+The default model is `Qwen/Qwen3-ASR-0.6B`. The launch script selects its
+`Qwen3ASRRealtimeGeneration` architecture automatically.
+
+Follow the [vLLM installation instructions](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md#installation)
+to use Dynamo's compatible backend version.
+
+**Command-line flags:** `--model` sets the model identifier or path. `--hf-overrides`
+selects the realtime architecture; it is optional for the default model and required
+for other models.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
+Start the default model:
 
 ```bash
-./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
-    --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}' \
-    --max-model-len 4096 --max-num-seqs 2
+./launch/agg_realtime_transcription.sh --max-model-len 4096 --max-num-seqs 2
 ```
 
-In another terminal, send a speech file longer than five seconds to check incremental delivery:
+For another realtime-capable model, replace `MODEL_ID` and `REALTIME_ARCHITECTURE`
+with its model identifier and realtime architecture:
+
+```bash
+./launch/agg_realtime_transcription.sh --model MODEL_ID \
+    --hf-overrides '{"architectures":["REALTIME_ARCHITECTURE"]}'
+```
+
+In another terminal, send a speech file longer than five seconds to check incremental
+delivery from the default model. Replace `speech.wav` with your audio file and set
+`--model` to the served model if you changed it:
 
 ```bash
 python launch/realtime_audio_client.py \
@@ -396,25 +418,6 @@ The default model is `Qwen/Qwen3-0.6B`.
 ```
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_tracing.sh)
-</Accordion>
-<Accordion title="Data-Parallel Attention and Expert Parallelism">
-
-Starts multiple data-parallel workers for a Mixture-of-Experts model and lets Dynamo route among the
-data-parallel ranks. The default Qwen configuration uses four GPUs.
-
-The default model is `Qwen/Qwen3-30B-A3B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/dep.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dep.sh)
 </Accordion>
 <Accordion title="Multi-Node DeepSeek-R1 Expert Parallelism">
 
