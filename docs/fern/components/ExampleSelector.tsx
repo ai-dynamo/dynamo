@@ -4,11 +4,14 @@
  *
  * One selected source bundle, with platform, backend, and optional example rows.
  * Source blocks remain native MDX so Fern embeds files and rewrites their links.
+ * Embedded YAML manifests render through DeploymentCustomizer, which shares its
+ * model, image, storage, and Secret choices across the bundles on the page.
  */
 "use client";
 
 import { useState, type ReactNode } from "react";
 
+import { DeploymentCustomizerProvider, withDeploymentCustomizer } from "./DeploymentCustomizer";
 import { EXAMPLE_BACKENDS, EXAMPLE_PLATFORMS, type ExampleVariant } from "./example-options";
 import { EXAMPLES_LAYOUT_CSS } from "./examples-layout";
 import { LOCAL_SELECTOR_CSS } from "./local-selector-styles";
@@ -93,26 +96,28 @@ export function ExampleSelector({ variants, children }: { variants: ExampleVaria
   ).join("\n");
 
   return (
-    <div className="dynamo-example-viewer" data-selected-example={selected.id}>
-      <style dangerouslySetInnerHTML={{ __html: EXAMPLES_LAYOUT_CSS + LOCAL_SELECTOR_CSS + CSS + selectionCSS }} />
-      <div className="lqs-panel dynamo-example-selector">
-        <ChoiceRow label="Platform" selected={platform} onSelect={choosePlatform}
-          choices={platforms.map((id) => ({ id, label: EXAMPLE_PLATFORMS[id] }))} />
-        <ChoiceRow label="Backend" selected={backend} onSelect={chooseBackend}
-          choices={backends.map((id) => ({
-            id,
-            label: EXAMPLE_BACKENDS[id],
-            disabled: !variants.some((variant) => variant.target === `${platform}:${id}`),
-            description: variants.some((variant) => variant.target === `${platform}:${id}`)
-              ? undefined : `No ${EXAMPLE_PLATFORMS[platform]} example for ${EXAMPLE_BACKENDS[id]}.`,
-          }))} />
-        {choices.length > 1 && (
-          <ChoiceRow label="Example" selected={selected.id} onSelect={setSelectedId}
-            choices={choices.map(({ id, label, description }) => ({ id, label, description }))} />
-        )}
+    <DeploymentCustomizerProvider>
+      <div className="dynamo-example-viewer" data-selected-example={selected.id}>
+        <style dangerouslySetInnerHTML={{ __html: EXAMPLES_LAYOUT_CSS + LOCAL_SELECTOR_CSS + CSS + selectionCSS }} />
+        <div className="lqs-panel dynamo-example-selector">
+          <ChoiceRow label="Platform" selected={platform} onSelect={choosePlatform}
+            choices={platforms.map((id) => ({ id, label: EXAMPLE_PLATFORMS[id] }))} />
+          <ChoiceRow label="Backend" selected={backend} onSelect={chooseBackend}
+            choices={backends.map((id) => ({
+              id,
+              label: EXAMPLE_BACKENDS[id],
+              disabled: !variants.some((variant) => variant.target === `${platform}:${id}`),
+              description: variants.some((variant) => variant.target === `${platform}:${id}`)
+                ? undefined : `No ${EXAMPLE_PLATFORMS[platform]} example for ${EXAMPLE_BACKENDS[id]}.`,
+            }))} />
+          {choices.length > 1 && (
+            <ChoiceRow label="Example" selected={selected.id} onSelect={setSelectedId}
+              choices={choices.map(({ id, label, description }) => ({ id, label, description }))} />
+          )}
+        </div>
+        <p className="dynamo-example-description" role="status" aria-live="polite">{selected.description}</p>
+        <div className="dynamo-example-output">{withDeploymentCustomizer(children)}</div>
       </div>
-      <p className="dynamo-example-description" role="status" aria-live="polite">{selected.description}</p>
-      <div className="dynamo-example-output">{children}</div>
-    </div>
+    </DeploymentCustomizerProvider>
   );
 }
