@@ -1021,6 +1021,91 @@ async def test_engine_data_uses_effective_engine_prompt(
         assert "engine_data" not in chunks[-1]
 
 
+@pytest.mark.asyncio
+async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatch):
+    from dynamo.artifacts.vllm import capture as artifact_capture
+    from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ((3, 8, 2),)
+    handler.config.engine_args.enable_return_routed_experts = True
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["moe_routes", "selected_logprobs"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    routed = np.asarray([[[1, 2]], [[3, 4]]], dtype=np.int64)
+    observed = {}
+
+    async def fake_generate(*args, **kwargs):
+        observed["logprobs"] = args[1].logprobs
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12],
+                    logprobs=[{12: Logprob(logprob=-0.2)}],
+                    routed_experts=routed,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert len(chunks) == 1
+    assert observed["logprobs"] == 1
+    assert chunks[0]["token_ids"] == [12]
+    assert "routed_experts" not in chunks[0].get("engine_data", {})
+    artifact = chunks[0]["engine_data"]["metadata_upload"]
+    assert artifact["kind"] == "generation_artifact"
+    assert artifact["mode"] == "inline_base64"
+    choice = decode_generation_artifact(base64.b64decode(artifact["data_base64"])).choices[0]
+    assert choice.sequence_token_ids.as_array().tolist() == [10, 11, 12]
+    assert {type(component).__name__ for component in choice.components} == {
+        "MoeRoutes",
+        "SelectedLogprobs",
+    }
+
+    monkeypatch.setattr(
+        artifact_capture, "process_capture_budget", lambda: artifact_capture.CaptureBudget(1)
+    )
+    with pytest.raises(mod.WorkerOverloaded, match="capture capacity"):
+        async for _ in handler.generate(request, context):
+            pass
+
+
 @pytest.mark.asyncio(loop_scope="function")
 class TestDecodeWorkerMultimodalBranching:
     """Tests for the mode-aware multimodal branching in _generate_token_mode."""

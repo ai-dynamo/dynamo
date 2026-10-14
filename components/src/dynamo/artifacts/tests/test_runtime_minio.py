@@ -128,21 +128,21 @@ async def test_presigned_acknowledgement_loss_reconciles_without_retry(
 ):
     client, bucket, _, _ = store
     key = "artifacts/delegated.dynexp"
-    url = client.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": bucket, "Key": key, "IfNoneMatch": "*"},
-        ExpiresIn=300,
-    )
     runtime = authority(
         tmp_path,
         store,
         {
             "registration": {
-                "put_url_sha256": hashlib.sha256(url.encode()).hexdigest(),
                 "profile": "minio",
-                "object_key": key,
+                "url_prefix": f"{os.environ['DYN_ARTIFACT_MINIO_ENDPOINT'].rstrip('/')}/{bucket}/artifacts/",
+                "object_key_prefix": "artifacts",
             }
         },
+    )
+    url = client.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": bucket, "Key": key, "IfNoneMatch": "*"},
+        ExpiresIn=300,
     )
     destination = {
         "kind": "presigned_http_put",
