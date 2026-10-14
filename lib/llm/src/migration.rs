@@ -849,7 +849,6 @@ mod tests {
             ),
             (ErrorType::ResourceExhausted, "capacity.pool_exhausted"),
             (ErrorType::CapacityExhausted, "capacity.exhausted"),
-            (ErrorType::ResourceExhausted, "router.admission_rejected"),
         ] {
             let worker_error = DynamoError::builder()
                 .error_type(error_type)

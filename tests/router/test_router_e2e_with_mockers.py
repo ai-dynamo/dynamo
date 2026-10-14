@@ -655,7 +655,6 @@ def test_mocker_kv_router_overload_529(
         # Get unique port for this test
         frontend_port = allocate_frontend_ports(request, 1)[0]
 
-        # Run overload 429 test
         _test_router_overload_529(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
