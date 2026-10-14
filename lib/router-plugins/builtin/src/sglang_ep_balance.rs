@@ -128,33 +128,25 @@ fn projected_load(
     )
 }
 
-/// Within-group spread after admitting the request on `selected_row`, scaled by the global
-/// means so request and block terms are unitless and heavier groups are not forgiven larger
-/// absolute gaps.
+/// The selected rank's own load after admitting the request, scaled by the global means so
+/// request and block terms are unitless. Picking the minimum is "least-loaded rank in the
+/// group"; unlike a max−min spread it is never flat, so 16 ranks do not tie onto one of them.
 fn within_group_cost(
     parameters: &Parameters,
-    candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
     load: &[WorkerLoadInput],
     selected_row: usize,
     request_blocks: usize,
     global_mean_requests: f64,
     global_mean_blocks: f64,
 ) -> f64 {
-    let selected = candidates[selected_row].worker().worker_id;
-    let mut requests = (usize::MAX, 0usize);
-    let mut blocks = (usize::MAX, 0usize);
-    for (row, (candidate, load)) in candidates.iter().zip(load).enumerate() {
-        if candidate.worker().worker_id != selected {
-            continue;
-        }
-        let (r, b) = projected_load(load, row, selected_row, request_blocks);
-        requests = (requests.0.min(r), requests.1.max(r));
-        blocks = (blocks.0.min(b), blocks.1.max(b));
-    }
-    parameters.request_imbalance_weight * requests.1.saturating_sub(requests.0) as f64
-        / (global_mean_requests + 1.0)
-        + parameters.token_imbalance_weight * blocks.1.saturating_sub(blocks.0) as f64
-            / (global_mean_blocks + 1.0)
+    let (requests, blocks) = projected_load(
+        &load[selected_row],
+        selected_row,
+        selected_row,
+        request_blocks,
+    );
+    parameters.request_imbalance_weight * requests as f64 / (global_mean_requests + 1.0)
+        + parameters.token_imbalance_weight * blocks as f64 / (global_mean_blocks + 1.0)
 }
 
 fn group_load(
@@ -259,7 +251,6 @@ fn pick_row(
         .map(|(row, group_load, worker)| {
             let cost = within_group_cost(
                 parameters,
-                candidates,
                 load,
                 row,
                 request_blocks as usize,

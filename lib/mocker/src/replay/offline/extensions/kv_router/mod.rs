@@ -43,8 +43,8 @@ use crate::common::protocols::MockerConfig;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
-    replay_slots, replay_worker_config, replay_workers_with_configs,
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_role, replay_router_config,
+    replay_selector_with_seed, replay_slots, replay_worker_config, replay_workers_with_configs,
 };
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
@@ -651,7 +651,8 @@ impl OfflineReplayRouter {
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
+        let selector =
+            replay_selector_with_seed(&config, selector_seed, replay_role(args.worker_type))?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
