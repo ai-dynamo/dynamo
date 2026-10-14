@@ -11,6 +11,11 @@ on:
         required: false
         type: string
         default: 'ci'
+      dd_flaky_retry_enabled:
+        description: 'Datadog Auto Test Retries (DD_CIVISIBILITY_FLAKY_RETRY_ENABLED). Set "false" to disable client-side flaky-test reruns regardless of the Datadog UI setting.'
+        required: false
+        type: string
+        default: 'true'
       framework:
         description: 'Framework name (vllm, sglang, dynamo)'
         required: false
@@ -42,6 +47,11 @@ on:
         required: false
         type: string
         default: 'ci'
+      dd_flaky_retry_enabled:
+        description: 'Datadog Auto Test Retries (DD_CIVISIBILITY_FLAKY_RETRY_ENABLED). Set "false" to disable client-side flaky-test reruns regardless of the Datadog UI setting.'
+        required: false
+        type: string
+        default: 'true'
       framework:
         description: 'Framework name (vllm, sglang, dynamo)'
         required: false
@@ -161,10 +171,8 @@ jobs:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
       IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
       TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
-      # Datadog Test Optimization. ddtrace ships in the test image already —
-      # the XPU image is built from container/Dockerfile.test — so this is
-      # configuration only. Mirrors shared-test.yml; the pytest action forwards
-      # these into the container it launches.
+      # Datadog Test Optimization, mirroring shared-test.yml. The XPU image is
+      # built from container/Dockerfile.test, so ddtrace is already installed.
       DD_SERVICE: ai-dynamo
       DD_ENV: ${{ inputs.dd_env }}
       DD_TAGS: 'team:dynamo'
@@ -174,8 +182,10 @@ jobs:
       DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
       DD_CIVISIBILITY_ITR_ENABLED: 'false'
       DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
-      # Links the test session to this job in the Datadog UI.
-      JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+      DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+      # ddtrace 4.14.0 defaults the retry count to 5. shared-test.yml pins 2 so
+      # a failing test runs at most 3 times; without this XPU would run it 6.
+      DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -239,10 +249,8 @@ jobs:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
       IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
       TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
-      # Datadog Test Optimization. ddtrace ships in the test image already —
-      # the XPU image is built from container/Dockerfile.test — so this is
-      # configuration only. Mirrors shared-test.yml; the pytest action forwards
-      # these into the container it launches.
+      # Datadog Test Optimization, mirroring shared-test.yml. The XPU image is
+      # built from container/Dockerfile.test, so ddtrace is already installed.
       DD_SERVICE: ai-dynamo
       DD_ENV: ${{ inputs.dd_env }}
       DD_TAGS: 'team:dynamo'
@@ -252,8 +260,10 @@ jobs:
       DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
       DD_CIVISIBILITY_ITR_ENABLED: 'false'
       DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
-      # Links the test session to this job in the Datadog UI.
-      JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+      DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+      # ddtrace 4.14.0 defaults the retry count to 5. shared-test.yml pins 2 so
+      # a failing test runs at most 3 times; without this XPU would run it 6.
+      DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
