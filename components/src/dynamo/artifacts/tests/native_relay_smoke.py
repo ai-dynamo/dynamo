@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native TCP integration; requires an explicitly configured isolated test master.
+"""Manual native TCP smoke test; not included in CI test discovery.
 
 Set DYN_TEST_MOONCAKE_MASTER and DYN_TEST_MOONCAKE_METADATA (including /metadata).
 No services are started by this test. The optional SDK and its CUDA runtime must

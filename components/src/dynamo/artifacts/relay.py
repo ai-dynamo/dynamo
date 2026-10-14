@@ -46,7 +46,9 @@ class NativeByteStore(Protocol):
 
     def unregister_buffer(self, address: int) -> int: ...
 
-    def remove(self, key: str, force: bool = False) -> int: ...
+    def remove(self, key: str) -> int: ...
+
+    def batch_remove(self, keys: list[str], force: bool = False) -> list[int]: ...
 
     def close(self) -> int: ...
 
@@ -141,9 +143,27 @@ class MooncakeByteRelay:
                 len(data),
                 hashlib.sha256(data).hexdigest(),
             )
+            existing = _native(lambda: self._store.get_size(descriptor.key), "stat")
+            _require(
+                existing < 0,
+                "relay_publish_failed",
+                "relay object already exists",
+            )
+            _require(
+                existing == -704,
+                "relay_io_failed",
+                "relay availability check failed",
+            )
             result = _native(lambda: self._store.put(descriptor.key, data), "publish")
             _require(result == 0, "relay_publish_failed", "relay publication failed")
-            self.read(descriptor)
+            try:
+                self.read(descriptor)
+            except RelayError:
+                try:
+                    self.remove(descriptor, force=True)
+                except RelayError:
+                    pass
+                raise
             return descriptor
 
     def read(self, descriptor: RelayDescriptor) -> bytes:
@@ -204,9 +224,21 @@ class MooncakeByteRelay:
             _require(
                 type(force) is bool, "invalid_cleanup", "relay cleanup mode is invalid"
             )
-            result = _native(
-                lambda: self._store.remove(descriptor.key, force=force), "remove"
-            )
+            if force:
+                try:
+                    results = self._store.batch_remove([descriptor.key], force=True)
+                except (RuntimeError, OSError, TypeError, ValueError):
+                    raise RelayError("relay_io_failed", "relay remove failed") from None
+                _require(
+                    isinstance(results, list)
+                    and len(results) == 1
+                    and type(results[0]) is int,
+                    "relay_io_failed",
+                    "relay remove failed",
+                )
+                result = results[0]
+            else:
+                result = _native(lambda: self._store.remove(descriptor.key), "remove")
             _require(result == 0, "relay_remove_failed", "relay object removal failed")
 
     def close(self) -> None:
