@@ -26,7 +26,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
-use super::disconnect::create_connection_monitor;
+use super::disconnect::create_http_connection_monitor;
 use super::error::{SanitizedError, find_canonical_error_in_chain};
 use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
@@ -1003,7 +1003,7 @@ async fn handler_generate(
         endpoint: super::metrics::Endpoint::Generate.to_string(),
         request_type: "unary".to_string(),
     };
-    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+    let (mut connection_handle, _stream_handle) = create_http_connection_monitor(
         engine_context,
         Some(state.metrics_clone()),
         cancellation_labels,

@@ -25,7 +25,7 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::{
-    ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
+    ConnectionHandle, create_http_connection_monitor, monitor_for_disconnects_with_error,
 };
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
@@ -236,6 +236,7 @@ fn preprocessed_request(
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
 
+/// Validate and route SGLang generation requests, monitoring client disconnects.
 async fn handler(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -337,7 +338,7 @@ async fn handler(
         endpoint: super::metrics::Endpoint::Generate.to_string(),
         request_type: "streaming".to_string(),
     };
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         engine_context,
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -480,6 +481,7 @@ async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::service::disconnect::create_connection_monitor;
 
     use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
