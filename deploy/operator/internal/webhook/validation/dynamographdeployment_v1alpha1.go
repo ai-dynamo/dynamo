@@ -60,6 +60,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			service,
 			servicePath,
 			dynamoNamespace,
+			false,
 		)...)
 	}
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {

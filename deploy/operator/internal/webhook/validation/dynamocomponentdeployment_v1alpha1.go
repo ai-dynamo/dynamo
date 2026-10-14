@@ -47,5 +47,6 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoNamespace,
+		true,
 	)
 }
