@@ -1030,6 +1030,7 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
     handler.use_vllm_tokenizer = False
     handler.artifact_router_profile = ((3, 8, 2),)
     handler.config.engine_args.enable_return_routed_experts = True
+    handler.engine_args = handler.config.engine_args
     handler._to_local_dp_rank = MagicMock(return_value=None)
     handler._resolve_lora_request = MagicMock(return_value=None)
     handler._extract_logprobs = MagicMock(return_value=(None, None))
