@@ -62,6 +62,16 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### CRD and admission breaking changes
 
+##### Complete health probes
+
+**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only probes and probes with multiple handlers. An authored probe replaces the applicable operator default as a complete value.
+
+**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main containers, sidecars, and role templates.
+
+**Action:** Before upgrading, supply a complete handler with any custom timing settings, or omit the probe to use the applicable operator default.
+
+**Existing deployments:** Installing the CRDs does not rewrite stored probes. Correct invalid probes before the next specification update; new and updated manifests must satisfy the validation rules.
+
 ##### Reserved runtime init container name
 
 **Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
