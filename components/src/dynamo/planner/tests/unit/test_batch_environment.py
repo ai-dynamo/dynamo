@@ -4,23 +4,31 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+import time
 from collections.abc import Mapping
 from typing import Any, Optional
 
 import pytest
+from redis.crc import key_slot
+from redis.exceptions import ResponseError as RedisResponseError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from dynamo.planner.core.types import (
     BatchDispatcherFeedback,
+    BatchDrainLimitDecision,
     BatchJobDemand,
     PoolTrafficDemand,
 )
+from dynamo.planner.environment import batch as batch_environment
 from dynamo.planner.environment.batch import (
     BatchGatewayJobSource,
     BatchSchedulingCollector,
     LlmdAsyncOpenMetricsSource,
     LlmdAsyncPrometheusSource,
     OpenMetricsOnlineTrafficSource,
+    RedisLeasedDrainLimitActuator,
 )
 
 pytestmark = [
@@ -969,6 +977,151 @@ async def test_batch_gateway_rejects_nonprogressing_pagination() -> None:
 
     with pytest.raises(ValueError, match="has_more=true with an empty page"):
         await source.collect_batch_jobs(observed_at_s=1.0)
+
+
+@pytest.mark.asyncio
+async def test_batch_gateway_fails_closed_when_history_exceeds_job_cap() -> None:
+    base_url = "http://batch.example"
+    listed = [
+        _batch(
+            f"batch-{index}",
+            "completed",
+            total=1,
+            completed=1,
+            failed=0,
+            expires_at=2_000,
+        )
+        for index in range(3)
+    ]
+    session = _FakeSession(
+        {
+            (
+                f"{base_url}/v1/batches",
+                (("after", "0"), ("limit", "100")),
+            ): {"data": listed, "has_more": False}
+        }
+    )
+    source = BatchGatewayJobSource(
+        base_url=base_url,
+        session=session,  # type: ignore[arg-type]
+        pool_resolver=lambda _job: "pool-a",
+        work_class_resolver=lambda _job: "chat",
+        max_jobs=2,
+    )
+
+    with pytest.raises(ValueError, match="exceeded max_jobs=2"):
+        await source.collect_batch_jobs(observed_at_s=1.0)
+
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_gateway_deadline_cancels_bounded_detail_requests() -> None:
+    listed = [
+        _batch(
+            f"batch-{index}",
+            "in_progress",
+            total=2,
+            completed=0,
+            failed=0,
+            expires_at=2_000,
+        )
+        for index in range(20)
+    ]
+    source = BatchGatewayJobSource(
+        base_url="http://batch.example",
+        session=_FakeSession({}),  # type: ignore[arg-type]
+        pool_resolver=lambda _job: "pool-a",
+        work_class_resolver=lambda _job: "chat",
+        collection_timeout_seconds=0.01,
+        detail_concurrency=3,
+    )
+    active = 0
+    max_active = 0
+    started = 0
+    cancelled = 0
+    never = asyncio.Event()
+
+    async def get_json(
+        path: str, *, params: Optional[Mapping[str, str]] = None
+    ) -> object:
+        nonlocal active, max_active, started, cancelled
+        if path == "/v1/batches":
+            return {"data": listed, "has_more": False}
+        active += 1
+        started += 1
+        max_active = max(max_active, active)
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+        finally:
+            active -= 1
+        raise AssertionError("unreachable")
+
+    source._get_json = get_json  # type: ignore[method-assign]
+
+    with pytest.raises(TimeoutError, match="complete Batch Gateway observation"):
+        await source.collect_batch_jobs(observed_at_s=1.0)
+
+    assert started == 3
+    assert max_active == 3
+    assert cancelled == 3
+    assert active == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_gateway_bounds_live_detail_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listed = [
+        _batch(
+            f"batch-{index}",
+            "in_progress",
+            total=2,
+            completed=0,
+            failed=0,
+            expires_at=2_000,
+        )
+        for index in range(25)
+    ]
+    source = BatchGatewayJobSource(
+        base_url="http://batch.example",
+        session=_FakeSession({}),  # type: ignore[arg-type]
+        pool_resolver=lambda _job: "pool-a",
+        work_class_resolver=lambda _job: "chat",
+        detail_concurrency=3,
+    )
+
+    async def get_json(
+        path: str, *, params: Optional[Mapping[str, str]] = None
+    ) -> object:
+        if path == "/v1/batches":
+            return {"data": listed, "has_more": False}
+        job_id = path.rsplit("/", 1)[-1]
+        await asyncio.sleep(0)
+        return next(job for job in listed if job["id"] == job_id)
+
+    source._get_json = get_json  # type: ignore[method-assign]
+    original_create_task = asyncio.create_task
+    live_tasks: set[asyncio.Task[object]] = set()
+    peak_live_tasks = 0
+
+    def tracked_create_task(coro):
+        nonlocal peak_live_tasks
+        task = original_create_task(coro)
+        live_tasks.add(task)
+        peak_live_tasks = max(peak_live_tasks, len(live_tasks))
+        task.add_done_callback(live_tasks.discard)
+        return task
+
+    monkeypatch.setattr(batch_environment.asyncio, "create_task", tracked_create_task)
+
+    jobs = await source._collect_batch_jobs(observed_at_s=1.0)
+
+    assert len(jobs) == 25
+    assert peak_live_tasks <= 3
 
 
 @pytest.mark.asyncio
@@ -1929,3 +2082,540 @@ async def test_llmd_async_prometheus_source_fails_on_missing_or_fractional_count
     )
     with pytest.raises(ValueError, match="queued_requests.*integer"):
         await fractional_source.collect_dispatcher_feedback(observed_at_s=1.0)
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.eval_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fence_epoch = 0
+        self.fence_writer: str | None = None
+        self.fence_last_sequence = -1
+        self.fence_last_payload: dict[str, str] = {}
+        self.redis_now_ms = 1_000_000
+        self.control: dict[str, str] = {}
+        self.expiry_ms: int | None = None
+        self.bootstrap_ack_losses = 0
+        self.apply_ack_losses: dict[str, int] = {}
+        self.delay_decision_id: str | None = None
+        self.delay_entered = asyncio.Event()
+        self.delay_release = asyncio.Event()
+        self._delayed = False
+        self.closed = False
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object:
+        assert numkeys == 2
+        self.eval_calls.append((script, keys_and_args))
+        args = tuple(str(value) for value in keys_and_args[2:])
+        if script == batch_environment._REDIS_WRITER_BOOTSTRAP_SCRIPT:
+            if int(args[4]) <= self.redis_now_ms:
+                raise RuntimeError("drain-limit lease expiry is not in Redis future")
+            self.fence_epoch += 1
+            self.fence_writer = args[0]
+            self.fence_last_sequence = 0
+            self.fence_last_payload = {
+                "api_version": args[1],
+                "pool_id": args[2],
+                "max_admission_rps": args[3],
+                "valid_until_unix_ms": args[4],
+                "decision_id": args[5],
+            }
+            self.control = {
+                "api_version": args[1],
+                "pool_id": args[2],
+                "max_admission_rps": args[3],
+                "valid_until_unix_ms": args[4],
+                "decision_id": args[5],
+                "writer_epoch": str(self.fence_epoch),
+                "writer_id": args[0],
+                "writer_sequence": "0",
+            }
+            self.expiry_ms = int(args[4])
+            if self.bootstrap_ack_losses > 0:
+                self.bootstrap_ack_losses -= 1
+                raise RedisTimeoutError("bootstrap reply lost")
+            return str(self.fence_epoch)
+
+        assert script == batch_environment._REDIS_FENCED_APPLY_SCRIPT
+        if int(args[6]) <= self.redis_now_ms:
+            raise RuntimeError("drain-limit lease expiry is not in Redis future")
+        decision_id = args[7]
+        if decision_id == self.delay_decision_id and not self._delayed:
+            self._delayed = True
+            self.delay_entered.set()
+            await self.delay_release.wait()
+
+        epoch, writer_id, sequence = args[:3]
+        if epoch != str(self.fence_epoch) or writer_id != self.fence_writer:
+            return 0
+        stored_sequence = self.fence_last_sequence
+        numeric_sequence = int(sequence)
+        payload = {
+            "api_version": args[3],
+            "pool_id": args[4],
+            "max_admission_rps": args[5],
+            "valid_until_unix_ms": args[6],
+            "decision_id": args[7],
+            "writer_epoch": epoch,
+            "writer_id": writer_id,
+            "writer_sequence": sequence,
+        }
+        if numeric_sequence < stored_sequence:
+            return 0
+        if numeric_sequence == stored_sequence:
+            if self.fence_last_payload != {
+                key: payload[key]
+                for key in (
+                    "api_version",
+                    "pool_id",
+                    "max_admission_rps",
+                    "valid_until_unix_ms",
+                    "decision_id",
+                )
+            }:
+                raise RuntimeError("writer sequence reused with different payload")
+        self.fence_last_sequence = numeric_sequence
+        self.fence_last_payload = {
+            key: payload[key]
+            for key in (
+                "api_version",
+                "pool_id",
+                "max_admission_rps",
+                "valid_until_unix_ms",
+                "decision_id",
+            )
+        }
+        self.control = payload
+        self.expiry_ms = int(args[6])
+        if self.apply_ack_losses.get(decision_id, 0) > 0:
+            self.apply_ack_losses[decision_id] -= 1
+            raise RedisTimeoutError("apply reply lost")
+        return 2 if numeric_sequence == stored_sequence else 1
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _drain_decision(
+    decision_id: str,
+    max_admission_rps: float,
+    *,
+    valid_until_s: float = 1_030.1259,
+) -> BatchDrainLimitDecision:
+    return BatchDrainLimitDecision(
+        pool_id="pool-a",
+        max_admission_rps=max_admission_rps,
+        valid_until_s=valid_until_s,
+        decision_id=decision_id,
+    )
+
+
+async def _initialize_redis_actuator(
+    redis: _FakeRedis,
+    *,
+    writer_id: str = "writer-a",
+) -> RedisLeasedDrainLimitActuator:
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: f"planner:drain:{pool_id}",
+        clock=lambda: 1_000.0,
+        writer_id=writer_id,
+    )
+    await actuator.initialize_writer(_drain_decision(f"{writer_id}-startup", 0.0))
+    return actuator
+
+
+@pytest.mark.parametrize(
+    "control_key, expected_fence_key",
+    [
+        (
+            "planner:drain:pool-a",
+            "{planner:drain:pool-a}:planner-writer-fence",
+        ),
+        (
+            "planner:{pool-a}:drain",
+            "planner:{pool-a}:drain:planner-writer-fence",
+        ),
+    ],
+)
+def test_redis_fence_key_preserves_cluster_slot(
+    control_key: str, expected_fence_key: str
+) -> None:
+    fence_key = batch_environment._fence_key_for(control_key)
+
+    assert fence_key == expected_fence_key
+    assert key_slot(fence_key.encode()) == key_slot(control_key.encode())
+
+
+@pytest.mark.asyncio
+async def test_redis_actuator_atomically_sets_hash_and_absolute_expiry() -> None:
+    redis = _FakeRedis()
+    actuator = await _initialize_redis_actuator(redis)
+    decision = _drain_decision("decision-7", 0.0)
+
+    await actuator.apply_drain_limit(decision)
+
+    assert len(redis.eval_calls) == 2
+    assert redis.control == {
+        "api_version": "llm-d.ai/v1alpha1",
+        "pool_id": "pool-a",
+        "max_admission_rps": "0",
+        "valid_until_unix_ms": "1030125",
+        "decision_id": "decision-7",
+        "writer_epoch": "1",
+        "writer_id": "writer-a",
+        "writer_sequence": "1",
+    }
+    assert redis.expiry_ms == 1_030_125
+
+
+@pytest.mark.asyncio
+async def test_redis_production_lua_fences_stale_writers_and_sequences() -> None:
+    import fakeredis
+
+    redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+    control_key = "planner:{pool-a}:drain"
+    fence_key = batch_environment._fence_key_for(control_key)
+    now_s = time.time()
+    valid_until_s = now_s + 120.0
+
+    def decision(decision_id: str, max_admission_rps: float) -> BatchDrainLimitDecision:
+        return BatchDrainLimitDecision(
+            pool_id="pool-a",
+            max_admission_rps=max_admission_rps,
+            valid_until_s=valid_until_s,
+            decision_id=decision_id,
+        )
+
+    def actuator(writer_id: str) -> RedisLeasedDrainLimitActuator:
+        return RedisLeasedDrainLimitActuator(
+            client=redis,
+            control_key_resolver=lambda _pool_id: control_key,
+            clock=lambda: now_s,
+            writer_id=writer_id,
+        )
+
+    old_writer = actuator("old-writer")
+    await old_writer.initialize_writer(decision("old-startup", 0.0))
+    old_epoch = await redis.hget(fence_key, "epoch")
+    assert isinstance(old_epoch, str)
+
+    current_writer = actuator("current-writer")
+    await current_writer.initialize_writer(decision("current-startup", 0.0))
+    current_epoch = await redis.hget(fence_key, "epoch")
+    assert isinstance(current_epoch, str)
+    await current_writer.apply_drain_limit(decision("current-positive", 5.0))
+
+    expected_control = await redis.hgetall(control_key)
+    expected_fence = await redis.hgetall(fence_key)
+    expected_expiry = await redis.pexpiretime(control_key)
+    assert expected_control["decision_id"] == "current-positive"
+    assert expected_control["max_admission_rps"] == "5"
+    assert expected_control["writer_sequence"] == "1"
+
+    valid_until_unix_ms = str(math.floor(valid_until_s * 1000.0))
+    stale_writer_result = await redis.eval(
+        batch_environment._REDIS_FENCED_APPLY_SCRIPT,
+        2,
+        control_key,
+        fence_key,
+        old_epoch,
+        "old-writer",
+        "99",
+        batch_environment.DISPATCH_RATE_LIMIT_API_VERSION,
+        "pool-a",
+        "9",
+        valid_until_unix_ms,
+        "stale-writer",
+    )
+    assert stale_writer_result == 0
+    assert await redis.hgetall(control_key) == expected_control
+    assert await redis.hgetall(fence_key) == expected_fence
+    assert await redis.pexpiretime(control_key) == expected_expiry
+
+    lower_sequence_result = await redis.eval(
+        batch_environment._REDIS_FENCED_APPLY_SCRIPT,
+        2,
+        control_key,
+        fence_key,
+        current_epoch,
+        "current-writer",
+        "0",
+        batch_environment.DISPATCH_RATE_LIMIT_API_VERSION,
+        "pool-a",
+        "11",
+        valid_until_unix_ms,
+        "lower-sequence",
+    )
+    assert lower_sequence_result == 0
+    assert await redis.hgetall(control_key) == expected_control
+    assert await redis.hgetall(fence_key) == expected_fence
+    assert await redis.pexpiretime(control_key) == expected_expiry
+
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field_name, invalid_value, error",
+    [
+        ("pool_id", "", "pool_id"),
+        ("max_admission_rps", math.nan, "max_admission_rps"),
+        ("valid_until_s", 999.0, "expired"),
+        ("decision_id", "", "decision_id"),
+    ],
+)
+async def test_redis_actuator_rejects_invalid_decisions_before_writing(
+    field_name: str, invalid_value: object, error: str
+) -> None:
+    decision = BatchDrainLimitDecision("pool-a", 1.0, 2_000.0, "decision")
+    setattr(decision, field_name, invalid_value)
+    redis = _FakeRedis()
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: pool_id,
+        clock=lambda: 1_000.0,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        await actuator.apply_drain_limit(decision)
+
+    assert redis.eval_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bootstrap_result",
+    [True, 1.0, object()],
+    ids=["bool", "float", "opaque"],
+)
+async def test_redis_bootstrap_rejects_invalid_epoch_types(
+    bootstrap_result: object,
+) -> None:
+    class _InvalidBootstrapRedis(_FakeRedis):
+        async def eval(
+            self, script: str, numkeys: int, *keys_and_args: object
+        ) -> object:
+            self.eval_calls.append((script, keys_and_args))
+            return bootstrap_result
+
+    redis = _InvalidBootstrapRedis()
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: f"planner:drain:{pool_id}",
+        clock=lambda: 1_000.0,
+        writer_id="writer-a",
+    )
+
+    with pytest.raises(RuntimeError, match="invalid epoch"):
+        await actuator.initialize_writer(_drain_decision("startup", 0.0))
+
+    assert len(redis.eval_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_redis_bootstrap_ack_loss_retries_with_new_epoch_and_zero(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    redis = _FakeRedis()
+    redis.bootstrap_ack_losses = 1
+
+    with caplog.at_level(logging.WARNING, logger=batch_environment.__name__):
+        actuator = await _initialize_redis_actuator(redis)
+
+    assert actuator._writer_epoch == 2
+    assert redis.control["max_admission_rps"] == "0"
+    assert redis.control["writer_epoch"] == "2"
+    assert caplog.messages == ["Redis drain-limit transport failed; retrying once"]
+    assert caplog.records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_redis_response_error_propagates_without_retry_or_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _ResponseErrorRedis(_FakeRedis):
+        async def eval(
+            self, script: str, numkeys: int, *keys_and_args: object
+        ) -> object:
+            self.eval_calls.append((script, keys_and_args))
+            raise RedisResponseError("script rejected")
+
+    redis = _ResponseErrorRedis()
+
+    with caplog.at_level(logging.WARNING, logger=batch_environment.__name__):
+        with pytest.raises(RedisResponseError, match="script rejected"):
+            await _initialize_redis_actuator(redis)
+
+    assert len(redis.eval_calls) == 1
+    assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_redis_clock_ahead_rejects_expired_lease_before_mutation() -> None:
+    redis = _FakeRedis()
+    redis.redis_now_ms = 1_040_000
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: f"planner:drain:{pool_id}",
+        clock=lambda: 1_000.0,
+        writer_id="writer-a",
+    )
+
+    with pytest.raises(RuntimeError, match="expiry is not in Redis future"):
+        await actuator.initialize_writer(_drain_decision("startup", 0.0))
+
+    assert redis.fence_epoch == 0
+    assert redis.control == {}
+
+
+@pytest.mark.asyncio
+async def test_redis_duplicate_retry_reuses_sequence_after_lost_ack() -> None:
+    redis = _FakeRedis()
+    actuator = await _initialize_redis_actuator(redis)
+    redis.apply_ack_losses["positive"] = 1
+
+    await actuator.apply_drain_limit(_drain_decision("positive", 5.0))
+
+    apply_calls = [
+        call
+        for call in redis.eval_calls
+        if call[0] == batch_environment._REDIS_FENCED_APPLY_SCRIPT
+    ]
+    assert len(apply_calls) == 2
+    assert apply_calls[0][1][4] == apply_calls[1][1][4] == "1"
+    assert redis.control["max_admission_rps"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_redis_old_writer_cannot_resurrect_positive_after_new_zero() -> None:
+    redis = _FakeRedis()
+    old = await _initialize_redis_actuator(redis, writer_id="old")
+    await _initialize_redis_actuator(redis, writer_id="new")
+
+    with pytest.raises(RuntimeError, match="stale"):
+        await old.apply_drain_limit(_drain_decision("old-positive", 5.0))
+
+    assert redis.control["writer_id"] == "new"
+    assert redis.control["max_admission_rps"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_redis_old_shutdown_pause_cannot_overwrite_new_positive() -> None:
+    redis = _FakeRedis()
+    old = await _initialize_redis_actuator(redis, writer_id="old")
+    new = await _initialize_redis_actuator(redis, writer_id="new")
+    await new.apply_drain_limit(_drain_decision("new-positive", 5.0))
+
+    with pytest.raises(RuntimeError, match="stale"):
+        await old.apply_drain_limit(_drain_decision("old-shutdown", 0.0))
+
+    assert redis.control["decision_id"] == "new-positive"
+    assert redis.control["max_admission_rps"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_redis_expired_control_cannot_accept_delayed_older_positive() -> None:
+    redis = _FakeRedis()
+    actuator = await _initialize_redis_actuator(redis)
+    redis.delay_decision_id = "older-positive"
+    older = asyncio.create_task(
+        actuator.apply_drain_limit(_drain_decision("older-positive", 5.0))
+    )
+    await redis.delay_entered.wait()
+
+    await actuator.apply_drain_limit(_drain_decision("newer-zero", 0.0))
+    redis.control = {}
+    redis.expiry_ms = None
+    redis.delay_release.set()
+
+    with pytest.raises(RuntimeError, match="stale"):
+        await older
+    assert redis.fence_last_sequence == 2
+    assert redis.fence_last_payload["decision_id"] == "newer-zero"
+    assert redis.control == {}
+
+
+@pytest.mark.asyncio
+async def test_redis_retry_of_latest_decision_repairs_evicted_control_key() -> None:
+    redis = _FakeRedis()
+    actuator = await _initialize_redis_actuator(redis)
+    latest = _drain_decision("latest", 0.0)
+    await actuator.apply_drain_limit(latest)
+    redis.control = {}
+    redis.expiry_ms = None
+
+    await actuator.apply_drain_limit(latest)
+
+    assert redis.control["decision_id"] == "latest"
+    assert redis.control["max_admission_rps"] == "0"
+    assert redis.control["writer_sequence"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_redis_decision_id_cannot_change_payload_or_leapfrog_pause() -> None:
+    redis = _FakeRedis()
+    actuator = await _initialize_redis_actuator(redis)
+    positive = _drain_decision("stable-id", 5.0)
+    await actuator.apply_drain_limit(positive)
+    await actuator.apply_drain_limit(_drain_decision("pause", 0.0))
+
+    with pytest.raises(ValueError, match="different payload"):
+        await actuator.apply_drain_limit(_drain_decision("stable-id", 7.0))
+    with pytest.raises(RuntimeError, match="stale"):
+        await actuator.apply_drain_limit(positive)
+    assert redis.control["decision_id"] == "pause"
+
+
+@pytest.mark.asyncio
+async def test_redis_fence_loss_rejects_old_writer_and_fresh_nonce_recovers() -> None:
+    redis = _FakeRedis()
+    old = await _initialize_redis_actuator(redis, writer_id="old")
+    await old.apply_drain_limit(_drain_decision("positive", 5.0))
+    redis.fence_epoch = 0
+    redis.fence_writer = None
+
+    with pytest.raises(RuntimeError, match="stale"):
+        await old.apply_drain_limit(_drain_decision("old-after-loss", 7.0))
+
+    new = await _initialize_redis_actuator(redis, writer_id="new")
+    assert new._writer_epoch == 1
+    assert redis.control["writer_id"] == "new"
+    assert redis.control["max_admission_rps"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_redis_control_loss_is_recreated_only_by_current_writer() -> None:
+    redis = _FakeRedis()
+    old = await _initialize_redis_actuator(redis, writer_id="old")
+    current = await _initialize_redis_actuator(redis, writer_id="current")
+    redis.control = {}
+    redis.expiry_ms = None
+
+    with pytest.raises(RuntimeError, match="stale"):
+        await old.apply_drain_limit(_drain_decision("old", 5.0))
+    await current.apply_drain_limit(_drain_decision("current", 0.0))
+
+    assert redis.control["writer_id"] == "current"
+    assert redis.control["max_admission_rps"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_redis_from_url_is_lazy_and_owns_created_client(monkeypatch) -> None:
+    redis = _FakeRedis()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        batch_environment.redis_asyncio,
+        "from_url",
+        lambda redis_url, **options: calls.append((redis_url, options)) or redis,
+    )
+    actuator = RedisLeasedDrainLimitActuator.from_url(
+        "redis://redis.example/0",
+        control_key_resolver=lambda pool_id: pool_id,
+        decode_responses=True,
+    )
+
+    await actuator.aclose()
+
+    assert calls == [("redis://redis.example/0", {"decode_responses": True})]
+    assert redis.closed is True
