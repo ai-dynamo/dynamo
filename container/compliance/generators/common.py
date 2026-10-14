@@ -98,6 +98,45 @@ def spdx_license_text(spdx_expr: str) -> str | None:
     return "\n\n".join(chunks)
 
 
+def normalize_cyclonedx_licenses(licenses_field: list[dict] | None) -> str:
+    """Render a CycloneDX `licenses[]` array to a single SPDX expression.
+
+    CycloneDX 1.5/1.6 each license entry is one of:
+      {"license": {"id": "MIT"}}
+      {"license": {"name": "Some Custom License"}}
+      {"expression": "MIT OR Apache-2.0"}
+
+    Multiple entries are joined with " AND ". Both cargo-cyclonedx (rust) and
+    cyclonedx-gomod (go) emit this schema. Ecosystem-specific fallbacks (Go's
+    evidence.licenses, Rust's license_overrides lookup) stay in the callers.
+    """
+    if not licenses_field:
+        return UNKNOWN
+
+    parts: list[str] = []
+    for entry in licenses_field:
+        if "expression" in entry:
+            parts.append(entry["expression"])
+        elif "license" in entry:
+            inner = entry["license"]
+            if "id" in inner:
+                parts.append(inner["id"])
+            elif "name" in inner:
+                # Custom license name; surface as LicenseRef-* so policy
+                # validation treats it as a deliberate non-SPDX entry.
+                parts.append(f"LicenseRef-{inner['name'].replace(' ', '-')}")
+            else:
+                continue
+        else:
+            continue
+
+    if not parts:
+        return UNKNOWN
+    if len(parts) == 1:
+        return parts[0]
+    return " AND ".join(f"({p})" if " " in p else p for p in parts)
+
+
 @dataclasses.dataclass(frozen=True)
 class Component:
     """One row in the per-ecosystem NOTICES output and *-deps.csv."""
