@@ -161,35 +161,9 @@ kubectl logs -f job/motif3-aiperf-job -n "${NAMESPACE}"
 
 <div data-variant="disagg">
 
-Use AIPerf 0.13.0 with Transformers 5.19.0, Tokenizers 0.23.2, and huggingface-hub 1.33.0. Run the client in an environment with the model cache mounted at `/shared-model-cache` and network access to the frontend. Prepare a separate tokenizer-only cache using the [client helper](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/prepare_disagg_client.py):
+Follow the [disaggregated benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/README.md#disaggregated-3p1d) to prepare the client and reset worker and router caches before each independent run.
 
-```bash
-export HF_HOME=/tmp/motif3-disagg-client-hf
-export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-python3 recipes/motif-3/perf/prepare_disagg_client.py
-```
-
-The [disaggregated AIPerf configuration](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/disagg.yaml) uses concurrency 64 and all 1,805 trace rows. Before each independent run, clear the worker and router state from a terminal with cluster access:
-
-```bash
-kubectl delete pods -n "${NAMESPACE}" \
-  -l nvidia.com/dynamo-graph-deployment-name=motif3-disagg-b200
-kubectl get pods -n "${NAMESPACE}" \
-  -l nvidia.com/dynamo-graph-deployment-name=motif3-disagg-b200 \
-  --watch
-```
-
-Wait for all five replacement pods (one frontend, three prefill workers, and one decode worker) to show Ready, then stop the watch with Ctrl+C.
-
-Keep the tokenizer environment variables above in the benchmark client. Run the [benchmark runner](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/run_disagg.py), which sends a separate 32-request warm-cache burst at concurrency 32, then starts the complete measured trace at concurrency 64. Preserve the worker and router caches between warmup and measurement:
-
-```bash
-export INFERENCE_URL=http://motif3-disagg-b200-frontend:8000/v1/chat/completions
-export AIPERF_ARTIFACT_DIR="/tmp/motif3-3p1d-c64-$(date -u +%Y%m%dT%H%M%SZ)"
-python3 recipes/motif-3/perf/run_disagg.py
-```
-
-Warmup and measurement write separate artifact directories under `AIPERF_ARTIFACT_DIR`; warmup requests are excluded from the measured results. Divide system output throughput by all eight GPUs. Report context-limit rejections separately from unexpected errors.
+The runner sends 32 warmup requests at concurrency 32, then measures all 1,805 trace rows at concurrency 64. It retains worker and router caches between phases and saves separate artifacts; warmup requests are excluded from the results.
 
 </div>
 
