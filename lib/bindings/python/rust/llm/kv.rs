@@ -1295,6 +1295,7 @@ impl KvEventPublisher {
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             liveness: None,
+            expected_rank: None,
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,

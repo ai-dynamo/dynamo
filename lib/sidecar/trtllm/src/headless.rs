@@ -12,8 +12,7 @@ use dynamo_llm::discovery::{RuntimeConfigWatch, runtime_config_watch};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::config::HealthStatus;
-use dynamo_runtime::distributed::{DistributedConfig, DistributedRuntime};
-use dynamo_runtime::{Runtime, logging};
+use dynamo_runtime::distributed::DistributedRuntime;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
@@ -24,36 +23,16 @@ use crate::proto as pb;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-pub(crate) fn run(args: Args, node: NodeMetadata) -> Result<()> {
-    ensure!(
-        !args.sidecar.common.route_to_encoder && !args.sidecar.common.enable_rl,
-        "Telemetry-only sidecars cannot register encoder or RL routes"
-    );
-    logging::init();
-    let runtime = Runtime::from_settings()?;
-    let result = runtime.secondary().block_on(async {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        let cancel = runtime.primary_token();
-        tokio::select! {
-            result = relay(runtime.clone(), args, node, cancel.clone()) => result,
-            _ = terminate.recv() => Ok(()),
-            _ = interrupt.recv() => Ok(()),
-            _ = cancel.cancelled() => Ok(()),
-        }
-    });
-    runtime.shutdown();
-    result
-}
-
-async fn relay(
-    runtime: Runtime,
+pub(crate) async fn relay(
+    drt: DistributedRuntime,
     args: Args,
     node: NodeMetadata,
     cancel: CancellationToken,
 ) -> Result<()> {
+    ensure!(
+        !args.sidecar.common.route_to_encoder && !args.sidecar.common.enable_rl,
+        "Telemetry-only sidecars cannot register encoder or RL routes"
+    );
     let transport = args.sidecar.grpc.config();
     let client = TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
     let info = client
@@ -66,6 +45,7 @@ async fn relay(
     );
     let mut sources = client.kv_event_sources().await?;
     node.select_local_sources(&mut sources)?;
+    sources.sort_by_key(|source| source.data_parallel_rank);
     let block_size = info
         .capacity
         .as_ref()
@@ -81,7 +61,6 @@ async fn relay(
         sources.is_empty() || block_size > 0,
         "Local publisher has no KV block size"
     );
-    let drt = DistributedRuntime::new(runtime, DistributedConfig::from_settings()).await?;
     let common = &args.sidecar.common;
     let component = if common.disaggregation_mode == DisaggregationMode::Aggregated {
         common.component.as_str()
@@ -143,6 +122,7 @@ async fn relay(
                     topic,
                     image_token_id: None,
                     video_token_id: None,
+                    expected_rank: Some(rank),
                     liveness: heartbeat_timeout.map(|timeout| (rank, timeout)),
                 }),
                 leader_config.enable_local_indexer,
@@ -221,7 +201,8 @@ async fn monitor_leader(
                 && current.runtime_data == original.runtime_data
                 && current.enable_local_indexer == original.enable_local_indexer
                 && current.kv_state_endpoint == original.kv_state_endpoint
-                && current.data_parallel_size == original.data_parallel_size,
+                && current.data_parallel_size == original.data_parallel_size
+                && current.data_parallel_start_rank == original.data_parallel_start_rank,
             "Engine leader changed; restart engine and sidecars together"
         );
         configs.changed().await.context("Leader discovery closed")?;
@@ -245,7 +226,10 @@ async fn monitor_engine(
             NodeMetadata::from_info(Some(&info))?.as_ref() == Some(node),
             "Local engine changed; restart engine and sidecars together"
         );
-        if client.kv_event_sources().await? != sources {
+        let mut current_sources = client.kv_event_sources().await?;
+        node.select_local_sources(&mut current_sources)?;
+        current_sources.sort_by_key(|source| source.data_parallel_rank);
+        if current_sources != sources {
             bail!("Local event sources changed; restart engine and sidecars together");
         }
     }

@@ -492,6 +492,9 @@ async fn control_reports_server_identity_and_load() {
         .unwrap()
         .into_inner();
     assert_eq!(load.instance_id, info.instance_id);
+    assert!(load.timestamp_unix_nanos.is_some());
+    assert_eq!(load.ranks.len(), 1);
+    assert_eq!(load.ranks[0].data_parallel_rank, Some(0));
     // KV sessions only exist in the disaggregated roles.
     assert_eq!(load.active_kv_sessions, None);
     assert!(load.total_kv_blocks.is_some());

@@ -1340,6 +1340,7 @@ mod tests_startup_helpers {
                 next_event_id,
                 None,
                 None,
+                Some(1),
                 Some((1, std::time::Duration::from_millis(500))),
             )
         });
@@ -1495,6 +1496,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 None,
+                None,
             )
         });
 
@@ -1595,6 +1597,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 None,
+                None,
             )
         });
 
@@ -1685,6 +1688,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 next_event_id,
+                None,
                 None,
                 None,
                 None,

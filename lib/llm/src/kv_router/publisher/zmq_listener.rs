@@ -56,6 +56,7 @@ pub(super) async fn start_zmq_listener(
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
+    expected_rank: Option<u32>,
     liveness: Option<(u32, std::time::Duration)>,
 ) {
     tracing::debug!(
@@ -146,7 +147,7 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
-                if let Some((expected_rank, _)) = liveness
+                if let Some(expected_rank) = expected_rank
                     && (batch.data_parallel_rank.is_none() || dp_rank != expected_rank)
                 {
                     tracing::warn!(%zmq_endpoint, dp_rank, expected_rank, "Ignoring mismatched KV source rank");
