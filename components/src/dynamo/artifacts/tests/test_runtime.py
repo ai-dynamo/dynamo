@@ -23,10 +23,7 @@ from dynamo.artifacts.runtime import (
     configured_artifact_runtime,
     initialize_configured_artifact_runtime,
 )
-from dynamo.artifacts.storage import (
-    ArtifactStorageError,
-    ManagedProfile,
-)
+from dynamo.artifacts.storage import ArtifactStorageError, ManagedProfile
 
 pytestmark = [
     pytest.mark.unit,
