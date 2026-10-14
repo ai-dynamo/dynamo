@@ -318,6 +318,19 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
+      - name: Wait for MinIO before vLLM artifact tests
+        if: ${{ inputs.framework == 'vllm' && inputs.run_cpu_only_tests }}
+        shell: bash
+        run: |
+          for ((attempt = 0; attempt < 30; attempt++)); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::MinIO was not ready before vLLM CPU tests"
+          exit 1
+
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}

@@ -55,6 +55,7 @@ from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
@@ -147,8 +148,9 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
 
 
-def _configured_artifact_router_profile() -> tuple[tuple[int, int, int], ...]:
-    configured = os.environ.get("DYNAMO_ARTIFACT_ROUTER_PROFILE")
+def _configured_artifact_router_profile(
+    configured: str | None,
+) -> tuple[tuple[int, int, int], ...]:
     if configured is None:
         return ()
     from dynamo.artifacts.vllm.capture import _validated_router_profile
@@ -156,7 +158,9 @@ def _configured_artifact_router_profile() -> tuple[tuple[int, int, int], ...]:
     try:
         return _validated_router_profile(json.loads(configured))
     except (TypeError, ValueError) as exc:
-        raise ValueError("invalid DYNAMO_ARTIFACT_ROUTER_PROFILE") from exc
+        raise ValueError(
+            f"invalid --artifact-router-profile / DYNAMO_ARTIFACT_ROUTER_PROFILE: {exc}"
+        ) from exc
 
 
 def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
@@ -1297,7 +1301,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._served_model_name = config.served_model_name or config.model
         self._served_model_aliases = tuple(config.served_model_aliases or ())
         self.engine_args = config.engine_args
-        self.artifact_router_profile = _configured_artifact_router_profile()
+        self.artifact_router_profile = _configured_artifact_router_profile(
+            config.artifact_router_profile
+        )
         self._lora_state = LoRAState()
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
@@ -4102,8 +4108,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         kv_hints = _build_vllm_kv_hints(request) if kv_params is None else None
 
         artifact_session = None
-        from dynamo.common.metadata_upload import _backend_metadata_upload_settings
-
         artifact_settings = _backend_metadata_upload_settings(request)
         if artifact_settings is not None and "kind" in artifact_settings:
             from dynamo.artifacts.vllm.capture import (

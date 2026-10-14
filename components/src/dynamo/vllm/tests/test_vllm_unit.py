@@ -75,17 +75,15 @@ def _load_vllm_main() -> ModuleType:
 @pytest.mark.parametrize(
     "configured", ["not-json", "{}", "[[1, 0, 1]]", "[[1, 8, 2], [1, 8, 2]]"]
 )
-def test_invalid_artifact_router_profile_fails_startup(monkeypatch, configured):
-    monkeypatch.setenv("DYNAMO_ARTIFACT_ROUTER_PROFILE", configured)
+def test_invalid_artifact_router_profile_fails_startup(configured):
     handlers = importlib.import_module("dynamo.vllm.handlers")
     with pytest.raises(ValueError, match="DYNAMO_ARTIFACT_ROUTER_PROFILE"):
-        handlers._configured_artifact_router_profile()
+        handlers._configured_artifact_router_profile(configured)
 
 
-def test_artifact_router_profile_is_validated_once(monkeypatch):
-    monkeypatch.setenv("DYNAMO_ARTIFACT_ROUTER_PROFILE", "[[3, 8, 2]]")
+def test_artifact_router_profile_is_validated_once():
     handlers = importlib.import_module("dynamo.vllm.handlers")
-    assert handlers._configured_artifact_router_profile() == ((3, 8, 2),)
+    assert handlers._configured_artifact_router_profile("[[3, 8, 2]]") == ((3, 8, 2),)
 
 
 @pytest.mark.parametrize(
