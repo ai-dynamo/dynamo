@@ -53,6 +53,8 @@ Verify the installation:
 aicr --version
 ```
 
+The output should show v1.0.0. The install script always installs the latest release, so if your version is newer, check the [AICR release notes](https://github.com/NVIDIA/aicr/releases) for changed commands.
+
 ## Generate the Recipe
 
 ```bash
