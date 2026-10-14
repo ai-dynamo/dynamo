@@ -2624,7 +2624,6 @@ class WorkerFactory:
         snapshot_engine: Optional[SnapshotEngineSetupResult],
         lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
-        """Initialize and serve a prefill worker."""
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
