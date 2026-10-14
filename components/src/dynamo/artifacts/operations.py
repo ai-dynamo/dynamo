@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import secrets
 import sqlite3
 import threading
@@ -19,8 +20,6 @@ from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
-
-from cryptography.fernet import Fernet
 
 from dynamo.artifacts.storage import ArtifactStorageError
 
@@ -39,23 +38,79 @@ async def _settle(task: asyncio.Future):
 
 
 class ArtifactOperationStore:
-    """SQLite authority with confidential capabilities and fenced terminal writes.
+    """SQLite authority with bounded receipts and fenced terminal writes.
 
     One worker owns a database. Cross-worker recovery requires an external lease
     authority; callers must not run recovery against a live worker's database.
     """
 
-    def __init__(self, path: Path, capability_key: bytes):
+    def __init__(
+        self,
+        path: Path,
+        capability_key: bytes | None = None,
+        *,
+        terminal_ttl_seconds=86400,
+    ):
+        if (
+            isinstance(terminal_ttl_seconds, bool)
+            or not isinstance(terminal_ttl_seconds, (int, float))
+            or not math.isfinite(terminal_ttl_seconds)
+            or terminal_ttl_seconds <= 0
+        ):
+            raise ValueError("invalid terminal receipt retention")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._cipher = Fernet(capability_key)
+        self.terminal_ttl_seconds = terminal_ttl_seconds
         with self._connect() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS operations ("
                 "id TEXT PRIMARY KEY, owner TEXT NOT NULL, result TEXT NOT NULL, "
-                "grant BLOB, created REAL NOT NULL)"
+                "state TEXT NOT NULL, created REAL NOT NULL, terminal_at REAL)"
+            )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
+            if "grant" in columns or "state" not in columns:
+                conn.execute("PRAGMA secure_delete=ON")
+                conn.execute("BEGIN IMMEDIATE")
+                self._migrate_legacy(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS operations_state_idx ON operations(state)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS operations_terminal_idx "
+                "ON operations(terminal_at) WHERE terminal_at IS NOT NULL"
             )
         self.path.chmod(0o600)
+
+    @staticmethod
+    def _migrate_legacy(conn):
+        conn.execute(
+            "CREATE TABLE operations_migrated ("
+            "id TEXT PRIMARY KEY, owner TEXT NOT NULL, result TEXT NOT NULL, "
+            "state TEXT NOT NULL, created REAL NOT NULL, terminal_at REAL)"
+        )
+        for operation_id, owner, result, created in conn.execute(
+            "SELECT id, owner, result, created FROM operations"
+        ):
+            state = json.loads(result)["state"]
+            conn.execute(
+                "INSERT INTO operations_migrated VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    owner,
+                    result,
+                    state,
+                    created,
+                    time.time() if state != "pending" else None,
+                ),
+            )
+        conn.execute("DROP TABLE operations")
+        conn.execute("ALTER TABLE operations_migrated RENAME TO operations")
+
+    def _prune(self, conn):
+        conn.execute(
+            "DELETE FROM operations WHERE terminal_at IS NOT NULL AND terminal_at <= ?",
+            (time.time() - self.terminal_ttl_seconds,),
+        )
 
     @contextmanager
     def _connect(self):
@@ -77,32 +132,24 @@ class ArtifactOperationStore:
             "state": "pending",
             "revision": 1,
         }
-        grant = self._cipher.encrypt(json.dumps(dict(target)).encode())
         with self._connect() as conn:
+            self._prune(conn)
             conn.execute(
-                "INSERT INTO operations VALUES (?, ?, ?, ?, ?)",
-                (operation_id, owner, json.dumps(result), grant, time.time()),
+                "INSERT INTO operations VALUES (?, ?, ?, ?, ?, NULL)",
+                (operation_id, owner, json.dumps(result), "pending", time.time()),
             )
         return result
 
     def get(self, operation_id: str, owner: str):
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT result FROM operations WHERE id=? AND owner=?",
-                (operation_id, owner),
+                "SELECT result FROM operations WHERE id=? AND owner=? "
+                "AND (terminal_at IS NULL OR terminal_at>?)",
+                (operation_id, owner, time.time() - self.terminal_ttl_seconds),
             ).fetchone()
         if row is None:
             raise KeyError("operation not found")
         return json.loads(row[0])
-
-    def grant(self, operation_id: str):
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT grant FROM operations WHERE id=?", (operation_id,)
-            ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return json.loads(self._cipher.decrypt(row[0]))
 
     def finish(self, operation_id: str, state: str, **fields):
         if state not in {"ready", "failed"}:
@@ -138,16 +185,21 @@ class ArtifactOperationStore:
                 **fields,
             }
             conn.execute(
-                "UPDATE operations SET result=?, grant=NULL WHERE id=?",
-                (json.dumps(result), operation_id),
+                "UPDATE operations SET result=?, state=?, terminal_at=? WHERE id=?",
+                (json.dumps(result), state, time.time(), operation_id),
             )
         return result
 
     def recover(self):
         """Fail pending records after this authority has lost all volatile sources."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT id, result FROM operations").fetchall()
-        pending = [key for key, data in rows if json.loads(data)["state"] == "pending"]
+            self._prune(conn)
+            pending = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT id FROM operations WHERE state='pending'"
+                )
+            ]
         for key in pending:
             self.finish(key, "failed", error_code="source_lost")
         return len(pending)
@@ -299,6 +351,7 @@ class ArtifactService:
             await self._finish(operation_id, "failed", error_code="source_lost")
             raise
         except (
+            ArtifactStorageError,
             ValueError,
             RuntimeError,
             TypeError,
@@ -306,7 +359,9 @@ class ArtifactService:
             asyncio.TimeoutError,
         ) as exc:
             code = (
-                "verification_failed"
+                "commit_unknown"
+                if isinstance(exc, ArtifactStorageError) and exc.outcome == "ambiguous"
+                else "verification_failed"
                 if isinstance(exc, ValueError)
                 else "delivery_failed"
             )
@@ -317,7 +372,7 @@ class ArtifactService:
     async def _bounded_transfer(self, data, target):
         child = asyncio.create_task(self._transfer_and_verify(data, target))
         try:
-            return await asyncio.wait_for(asyncio.shield(child), self.timeout_seconds)
+            return await asyncio.shield(child)
         except BaseException:
             child.cancel()
             # Repeated caller cancellation cannot detach transfer cleanup.
@@ -326,22 +381,46 @@ class ArtifactService:
 
     async def _transfer_and_verify(self, data, target):
         async with self._semaphore:
+            ambiguous = False
             try:
-                receipt = await self.transfer(data, target)
+                receipt = await asyncio.wait_for(
+                    self.transfer(data, target), self.timeout_seconds
+                )
             except ArtifactStorageError as exc:
                 if exc.outcome != "ambiguous":
                     raise
-                # Verify the exact destination without repeating a possibly committed PUT.
+                # Read back once; never retry an uncertain PUT.
+                ambiguous = True
+                receipt = {}
+            except asyncio.TimeoutError:
+                ambiguous = True
                 receipt = {}
             if self.verify is None:
+                if ambiguous:
+                    raise ArtifactStorageError(
+                        "commit_unknown",
+                        "write outcome cannot be verified",
+                        outcome="ambiguous",
+                    )
                 raise ValueError("verification unavailable")
-            verified = await self.verify(data, target, receipt)
-            if (
-                verified.get("sha256") != hashlib.sha256(data).hexdigest()
-                or verified.get("actual_bytes") != len(data)
-                or not verified.get("object_id")
-            ):
-                raise ValueError("verification failed")
+            try:
+                verified = await asyncio.wait_for(
+                    self.verify(data, target, receipt), self.timeout_seconds
+                )
+                if (
+                    verified.get("sha256") != hashlib.sha256(data).hexdigest()
+                    or verified.get("actual_bytes") != len(data)
+                    or not verified.get("object_id")
+                ):
+                    raise ValueError("verification failed")
+            except (ValueError, RuntimeError, TypeError, OSError, asyncio.TimeoutError):
+                if ambiguous:
+                    raise ArtifactStorageError(
+                        "commit_unknown",
+                        "write outcome cannot be verified",
+                        outcome="ambiguous",
+                    ) from None
+                raise
             return {
                 key: verified[key]
                 for key in ("actual_bytes", "sha256", "object_id", "provider_identity")
