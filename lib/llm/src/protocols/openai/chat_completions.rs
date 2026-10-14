@@ -302,8 +302,14 @@ pub struct NvCreateChatCompletionStreamResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
     /// Internal prompt logprobs payload for non-streaming response aggregation.
-    /// This must never be serialized to client-facing streams.
-    #[serde(skip)]
+    /// Deserializable so Python chat processors can set it; this must never be
+    /// serialized to client-facing streams.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::protocols::common::llm_backend::deserialize_prompt_logprobs"
+    )]
+    #[schema(ignore)]
     pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
@@ -2193,5 +2199,41 @@ mod tests {
             .extract_stop_conditions()
             .expect("Failed to extract stop conditions");
         assert_eq!(stop_conditions.max_thinking_tokens, None);
+    }
+
+    #[test]
+    fn test_stream_prompt_logprobs_deserialize_but_never_serialize() {
+        let chunk: NvCreateChatCompletionStreamResponse = serde_json::from_value(json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "test-model",
+            "choices": [],
+            "prompt_logprobs": [null, {"17": {"logprob": -0.25, "rank": 1}}]
+        }))
+        .expect("Failed to deserialize stream chunk");
+
+        let prompt_logprobs = chunk.prompt_logprobs.as_deref().expect("prompt_logprobs");
+        assert_eq!(prompt_logprobs.len(), 2);
+        assert!(prompt_logprobs[0].is_none());
+        assert_eq!(prompt_logprobs[1].as_ref().unwrap()[&17].logprob, -0.25);
+
+        let serialized = serde_json::to_value(&chunk).expect("Failed to serialize stream chunk");
+        assert!(serialized.get("prompt_logprobs").is_none());
+
+        let error = serde_json::from_value::<NvCreateChatCompletionStreamResponse>(json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "test-model",
+            "choices": [],
+            "prompt_logprobs": [null, {"not-a-token": {"logprob": -0.25}}]
+        }))
+        .expect_err("Malformed prompt_logprobs must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid prompt_logprobs payload")
+        );
     }
 }

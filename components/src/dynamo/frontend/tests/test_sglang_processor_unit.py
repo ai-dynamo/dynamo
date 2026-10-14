@@ -647,6 +647,12 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] == 0
 
+    @pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])
+    def test_prompt_logprobs_forwarded(self, prompt_logprobs):
+        request = {"model": "test", "prompt_logprobs": prompt_logprobs}
+        result = _build_dynamo_preproc(request, [1], "test", None)
+        assert result["output_options"]["prompt_logprobs"] == prompt_logprobs
+
     def test_logprobs_true_without_top_logprobs(self):
         """logprobs=True without top_logprobs yields 1."""
         result = _build_dynamo_preproc(
@@ -4996,6 +5002,63 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         chunk = items[0]["data"]
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
+
+    @pytest.mark.parametrize(
+        ("request_fields", "expect_root", "expect_nvext"),
+        [
+            ({"prompt_logprobs": 0}, True, False),
+            (
+                {
+                    "prompt_logprobs": 3,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                True,
+                True,
+            ),
+            ({"nvext": {"extra_fields": ["prompt_logprobs"]}}, False, True),
+            ({}, False, False),
+        ],
+    )
+    def test_prompt_logprobs_attach_to_finish_chunk(
+        self, tokenizer, request_fields, expect_root, expect_nvext
+    ):
+        payload = [None, {"17": {"logprob": -0.25}}]
+
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {"token_ids": tokenizer.encode("Hi")},
+                        {
+                            "token_ids": [],
+                            "finish_reason": "stop",
+                            "engine_data": {"prompt_logprobs": payload},
+                        },
+                    ]
+                ),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            request = {"model": "test-model", **request_fields}
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-prompt-logprobs", request, {}, [], post
+                )
+            ]
+
+        first, final = (item["data"] for item in asyncio.run(collect()))
+
+        assert "prompt_logprobs" not in first
+        assert final.get("prompt_logprobs") == (payload if expect_root else None)
+        assert final.get("nvext", {}).get("prompt_logprobs") == (
+            payload if expect_nvext else None
+        )
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(

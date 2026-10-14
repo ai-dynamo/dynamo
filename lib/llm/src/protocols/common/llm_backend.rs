@@ -429,15 +429,38 @@ impl LLMEngineOutput {
     }
 }
 
+/// Parse a prompt logprobs payload whose token-id keys are JSON strings.
+fn parse_prompt_logprobs(value: serde_json::Value) -> Result<PromptLogprobs, String> {
+    serde_json::from_value(value)
+        .map_err(|error| format!("invalid prompt_logprobs payload: {error}"))
+}
+
 pub(crate) fn prompt_logprobs_from_engine_data(
     engine_data: Option<&serde_json::Value>,
 ) -> anyhow::Result<Option<PromptLogprobs>> {
     let Some(value) = engine_data.and_then(|data| data.get("prompt_logprobs")) else {
         return Ok(None);
     };
-    serde_json::from_value(value.clone())
+    parse_prompt_logprobs(value.clone())
         .map(Some)
-        .map_err(|error| anyhow::anyhow!("invalid prompt_logprobs payload: {error}"))
+        .map_err(anyhow::Error::msg)
+}
+
+/// Deserialize prompt logprobs through `serde_json::Value`, so the string
+/// token-id keys workers emit parse in any format, including pythonize.
+pub(crate) fn deserialize_prompt_logprobs<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::sync::Arc<PromptLogprobs>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(|value| {
+            parse_prompt_logprobs(value)
+                .map(std::sync::Arc::new)
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
 }
 
 impl MaybeError for LLMEngineOutput {

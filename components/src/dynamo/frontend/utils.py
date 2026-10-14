@@ -123,6 +123,36 @@ def nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
     return isinstance(extra_fields, list) and field in extra_fields
 
 
+def prompt_logprobs_from_engine_data(engine_data: Any) -> list[Any] | None:
+    """Return prompt logprobs a worker attached to a finish frame.
+
+    Workers attach them to each finishing choice. Callers hold the payload
+    until the next chunk with a ``finish_reason``, as the Rust delta generator
+    does.
+    """
+    if not isinstance(engine_data, dict):
+        return None
+    return engine_data.get("prompt_logprobs")
+
+
+def attach_prompt_logprobs(
+    chunk: dict[str, Any], request: dict[str, Any], prompt_logprobs: list[Any]
+) -> None:
+    """Project prompt logprobs onto a finish chunk as the Rust path does.
+
+    The root field is returned when the request set ``prompt_logprobs``
+    (``0`` included), and ``nvext.prompt_logprobs`` when ``nvext.extra_fields``
+    selects it.
+    """
+    if request.get("prompt_logprobs") is not None:
+        chunk["prompt_logprobs"] = prompt_logprobs
+    if nvext_extra_field_requested(request, "prompt_logprobs"):
+        chunk["nvext"] = {
+            **(chunk.get("nvext") or {}),
+            "prompt_logprobs": prompt_logprobs,
+        }
+
+
 def worker_warmup() -> bool:
     """Dummy task to ensure a ProcessPoolExecutor worker is fully initialized."""
     return True

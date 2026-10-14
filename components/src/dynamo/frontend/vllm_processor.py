@@ -52,10 +52,12 @@ from .structural_tag_policy import (
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     as_error_envelope,
+    attach_prompt_logprobs,
     backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    prompt_logprobs_from_engine_data,
     random_uuid,
     resolve_chat_template,
 )
@@ -1268,6 +1270,7 @@ class VllmProcessor:
             request.get("top_logprobs"),
         )
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
+        prompt_logprobs: list[Any] | None = None
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1348,6 +1351,10 @@ class VllmProcessor:
                     engine_response.get("log_probs"),
                     engine_response.get("top_logprobs"),
                 )
+                if prompt_logprobs is None:
+                    prompt_logprobs = prompt_logprobs_from_engine_data(
+                        engine_response.get("engine_data")
+                    )
 
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
@@ -1426,6 +1433,11 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
+                    if prompt_logprobs is not None and any(
+                        choice.get("finish_reason") is not None for choice in choices
+                    ):
+                        attach_prompt_logprobs(dynamo_out, request, prompt_logprobs)
+                        prompt_logprobs = None
                     envelope["data"] = dynamo_out
 
                 metrics = {

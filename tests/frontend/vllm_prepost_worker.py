@@ -27,6 +27,13 @@ from tests.frontend.test_vllm_prepost_integration import CAPTURE_PATH_ENV
 from tests.utils.constants import QWEN
 
 
+def _prompt_logprobs(token_ids: list[int]) -> list[dict[str, Any] | None]:
+    """Mirror the vLLM worker's engine_data.prompt_logprobs string-keyed shape."""
+    return [None] + [
+        {str(token_id): {"logprob": -1.0, "rank": 1}} for token_id in token_ids[1:]
+    ]
+
+
 class VllmPrepostTestHandler:
     """Captures tokenized requests and streams a fixed token response."""
 
@@ -60,11 +67,16 @@ class VllmPrepostTestHandler:
 
     async def generate(self, request: dict[str, Any], context):
         self._write_capture(request)
+        output_options = request.get("output_options") or {}
 
         for output in OUTPUTS_INTERVAL_20:
             chunk = {"token_ids": list(output.token_ids)}
             if output.finish_reason is not None:
                 chunk["finish_reason"] = output.finish_reason
+                if output_options.get("prompt_logprobs") is not None:
+                    chunk["engine_data"] = {
+                        "prompt_logprobs": _prompt_logprobs(request["token_ids"])
+                    }
             if output.stop_reason is not None:
                 chunk["stop_reason"] = output.stop_reason
             yield chunk

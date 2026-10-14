@@ -369,6 +369,75 @@ def test_vllm_chat_processor_thinking_token_budget_overrides_nvext(
 
 
 @pytest.mark.timeout(180)
+def test_vllm_chat_processor_returns_prompt_logprobs(
+    start_services: tuple[int, Path],
+) -> None:
+    """Worker prompt logprobs reach the unary response root and the requested
+    nvext projection after Rust aggregates the Python processor's chunks."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "prompt_logprobs": 0,
+        "nvext": {"extra_fields": ["prompt_logprobs"]},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    body = response.json()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["output_options"]["prompt_logprobs"] == 0
+    prompt_logprobs = body["prompt_logprobs"]
+    token_ids = captured["token_ids"]
+    assert len(prompt_logprobs) == len(token_ids)
+    assert prompt_logprobs[0] is None
+    assert prompt_logprobs[1] == {str(token_ids[1]): {"logprob": -1.0, "rank": 1}}
+    assert body["nvext"]["prompt_logprobs"] == prompt_logprobs
+
+
+@pytest.mark.timeout(180)
+def test_vllm_chat_processor_streams_prompt_logprobs_only_in_nvext(
+    start_services: tuple[int, Path],
+) -> None:
+    """Streaming keeps root prompt logprobs internal and sends the requested
+    nvext projection once."""
+    frontend_port, _ = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "stream": True,
+        "prompt_logprobs": 0,
+        "nvext": {"extra_fields": ["prompt_logprobs"]},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+        stream=True,
+    )
+    chunks = _collect_stream_chunks(response)
+
+    assert all("prompt_logprobs" not in chunk for chunk in chunks)
+    nvext_prompt_logprobs = [
+        chunk["nvext"]["prompt_logprobs"]
+        for chunk in chunks
+        if "prompt_logprobs" in (chunk.get("nvext") or {})
+    ]
+    assert len(nvext_prompt_logprobs) == 1
+    assert nvext_prompt_logprobs[0][0] is None
+
+
+@pytest.mark.timeout(180)
 def test_vllm_responses_processor_forwards_thinking_token_budget(
     start_services: tuple[int, Path],
 ) -> None:

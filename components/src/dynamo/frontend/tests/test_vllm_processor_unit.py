@@ -1825,19 +1825,42 @@ def _base_preproc():
     }
 
 
-async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+class _FinishingPostProcessor(_FakePostProcessor):
+    """Marks the choice finished on the given process_output call."""
+
+    def __init__(self, finish_on_call: int):
+        self._calls = 0
+        self._finish_on_call = finish_on_call
+
+    def process_output(self, output):
+        self._calls += 1
+        choice = super().process_output(output)
+        if self._calls == self._finish_on_call:
+            choice["finish_reason"] = "stop"
+        return choice
+
+
+async def _run_generate(
+    processor,
+    preproc,
+    *,
+    mm_routing_info=None,
+    context=None,
+    request=None,
+    post_processor=None,
+):
     vllm_preproc = SimpleNamespace(
         sampling_params=SimpleNamespace(n=1),
         request_id="vllm-request",
         external_req_id=None,
     )
-    post_processors = {0: _FakePostProcessor()}
+    post_processors = {0: post_processor or _FakePostProcessor()}
 
     return [
         item
         async for item in processor._generate_and_stream(
             "request-id",
-            {"model": MODEL},
+            request or {"model": MODEL},
             preproc,
             preproc["token_ids"],
             vllm_preproc,
@@ -2040,6 +2063,54 @@ class TestRoutedEnginePath:
 
         assert "event" not in envelope
         assert "comment" not in envelope
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_fields", "expect_root", "expect_nvext"),
+        [
+            ({"prompt_logprobs": 0}, True, False),
+            (
+                {
+                    "prompt_logprobs": 3,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                True,
+                True,
+            ),
+            ({"nvext": {"extra_fields": ["prompt_logprobs"]}}, False, True),
+            ({}, False, False),
+        ],
+    )
+    async def test_prompt_logprobs_attach_to_finish_chunk(
+        self, vllm_processor_module, request_fields, expect_root, expect_nvext
+    ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {
+                    "token_ids": [102],
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "engine_data": {"prompt_logprobs": payload},
+                },
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={"model": MODEL, **request_fields},
+            post_processor=_FinishingPostProcessor(finish_on_call=2),
+        )
+
+        first, final = (chunk["data"] for chunk in chunks)
+        assert "prompt_logprobs" not in first
+        assert final.get("prompt_logprobs") == (payload if expect_root else None)
+        assert final.get("nvext", {}).get("prompt_logprobs") == (
+            payload if expect_nvext else None
+        )
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):

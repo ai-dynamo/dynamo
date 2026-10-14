@@ -45,10 +45,12 @@ from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
     as_error_envelope,
+    attach_prompt_logprobs,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
+    prompt_logprobs_from_engine_data,
     random_uuid,
     read_jinja_chat_template,
     resolve_chat_template,
@@ -494,7 +496,7 @@ def _build_dynamo_preproc(
         },
         "output_options": {
             "logprobs": logprobs_val,
-            "prompt_logprobs": None,
+            "prompt_logprobs": request.get("prompt_logprobs"),
             # Preserve special tokens when a parser is active so delimiters
             # remain visible. Mirrors the post-processor's decode behavior.
             "skip_special_tokens": resolve_skip_special_tokens(
@@ -797,6 +799,7 @@ class SglangProcessor:
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             pending_usage: dict[str, Any] | None = None
+            prompt_logprobs: list[Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -819,6 +822,7 @@ class SglangProcessor:
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
                 nonlocal pending_usage
+                nonlocal prompt_logprobs
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
                 nonlocal token_count
@@ -881,6 +885,12 @@ class SglangProcessor:
                         response_nvext["engine_data"] = engine_data
                     if response_nvext:
                         dynamo_out["nvext"] = response_nvext
+                    if (
+                        choice.get("finish_reason") is not None
+                        and prompt_logprobs is not None
+                    ):
+                        attach_prompt_logprobs(dynamo_out, request, prompt_logprobs)
+                        prompt_logprobs = None
 
                     envelope["data"] = dynamo_out
 
@@ -974,6 +984,8 @@ class SglangProcessor:
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
                 engine_data = engine_response.get("engine_data")
+                if prompt_logprobs is None:
+                    prompt_logprobs = prompt_logprobs_from_engine_data(engine_data)
 
                 pending_token_ids.extend(new_ids)
                 if log_probs is not None:
