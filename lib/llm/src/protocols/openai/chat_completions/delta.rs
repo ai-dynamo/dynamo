@@ -409,7 +409,7 @@ mod tests {
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CompletionTokensDetails, CompletionUsage,
-        CreateChatCompletionRequest,
+        CreateChatCompletionRequest, PromptTokensDetails,
     };
 
     fn create_test_request() -> NvCreateChatCompletionRequest {
@@ -546,6 +546,50 @@ mod tests {
             .expect("completion token details should be propagated");
 
         assert_eq!(completion_details.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn test_completion_token_details_follow_the_latest_usage_snapshot() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-token-details".to_string());
+        let snapshot = |cached_tokens: Option<u32>, reasoning_tokens: Option<u32>| {
+            let mut backend_output = final_backend_output();
+            backend_output.completion_usage = Some(CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+                prompt_tokens_details: cached_tokens.map(|cached_tokens| PromptTokensDetails {
+                    cached_tokens: Some(cached_tokens),
+                    ..Default::default()
+                }),
+                completion_tokens_details: reasoning_tokens.map(|reasoning_tokens| {
+                    CompletionTokensDetails {
+                        reasoning_tokens: Some(reasoning_tokens),
+                        ..Default::default()
+                    }
+                }),
+            });
+            backend_output
+        };
+
+        for output in [snapshot(Some(4), Some(3)), snapshot(None, None)] {
+            generator
+                .choice_from_postprocessor(output)
+                .expect("choice generation");
+        }
+
+        let usage = generator.get_usage();
+        assert_eq!(
+            usage.completion_tokens_details, None,
+            "a later snapshot without a breakdown withdraws the stale one"
+        );
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(4),
+            "the prompt breakdown survives a snapshot that omits it"
+        );
     }
 
     #[test]

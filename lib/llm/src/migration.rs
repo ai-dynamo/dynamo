@@ -25,6 +25,7 @@ use crate::{
 };
 
 use dynamo_kv_router::scheduling::AbortCause;
+use dynamo_protocols::types::CompletionUsage;
 use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
@@ -39,11 +40,13 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
 /// `migration_link`; `decoder_checkpoint` carries the Backend's in-process incremental
-/// decoder state so a retry can restore withheld text and buffered token IDs.
+/// decoder state so a retry can restore withheld text and buffered token IDs;
+/// `completion_usage_mut` lets it restate a retried attempt's usage for the whole request.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint>;
+    fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage>;
 }
 
 impl HasTokenIds for BackendOutput {
@@ -55,6 +58,9 @@ impl HasTokenIds for BackendOutput {
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
         self.jailed_text.as_ref()
+    }
+    fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
+        self.completion_usage.as_mut()
     }
 }
 
@@ -68,6 +74,36 @@ impl HasTokenIds for LLMEngineOutput {
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
         self.jailed_text.as_ref()
     }
+    fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
+        self.completion_usage.as_mut()
+    }
+}
+
+/// Restates a retried attempt's usage for the logical request.
+///
+/// The retry received `replayed` delivered tokens as prompt, so the worker counts them in
+/// `prompt_tokens` while its `completion_tokens` covers only the tokens it generated. Both
+/// counts move the replayed tokens to completion, and `total_tokens` follows the net change.
+/// Cached tokens are a prefix of the attempt's prompt, which begins with the client's prompt,
+/// so capping them at the restated prompt keeps them a subset of it. The completion breakdown
+/// describes only this attempt and cannot be restated, so it is dropped; the frontends'
+/// reasoning-token estimates, which see every delivered token, fill in instead.
+fn rebase_replayed_usage(usage: &mut CompletionUsage, replayed: u32) {
+    let removed = usage.prompt_tokens.min(replayed);
+    usage.prompt_tokens -= removed;
+    usage.completion_tokens = usage.completion_tokens.saturating_add(replayed);
+    usage.total_tokens = usage
+        .total_tokens
+        .saturating_sub(removed)
+        .saturating_add(replayed);
+    if let Some(cached) = usage
+        .prompt_tokens_details
+        .as_mut()
+        .and_then(|details| details.cached_tokens.as_mut())
+    {
+        *cached = (*cached).min(usage.prompt_tokens);
+    }
+    usage.completion_tokens_details = None;
 }
 
 /// A classifier decision is terminal even when its client-visible error type
@@ -328,6 +364,11 @@ where
     completed_tokens: usize,
     /// Failure that caused the next physical dispatch to be a migration retry.
     pending_migration: Option<MigrationCause>,
+    /// Length of the client's prompt, before any delivered tokens are replayed onto it.
+    prompt_len: usize,
+    /// Delivered tokens the active attempt received as prompt. Fixed at dispatch, because
+    /// the replay prompt is released once no retry remains.
+    replayed_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -395,6 +436,7 @@ where
         if retries_left > 0 {
             preprocessed_request.migration_state = Some(Default::default());
         }
+        let prompt_len = preprocessed_request.token_ids.len();
         let mut slf = Self {
             context,
             metadata,
@@ -411,6 +453,8 @@ where
             next_attempt: 0,
             completed_tokens: 0,
             pending_migration: None,
+            prompt_len,
+            replayed_tokens: 0,
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -427,7 +471,7 @@ where
                     return Some(Annotated::from_error("next_stream is None"));
                 }
             };
-            if let Some(response) = response_stream.next().await {
+            if let Some(mut response) = response_stream.next().await {
                 // Check if this is a migratable error that should trigger stream recreation.
                 if let Some(err) = response.error.as_ref() {
                     if is_migratable_for_request(&self.request, err) {
@@ -478,6 +522,14 @@ where
                     }
                 }
                 self.track_response(&response);
+                if self.replayed_tokens > 0
+                    && let Some(usage) = response
+                        .data
+                        .as_mut()
+                        .and_then(HasTokenIds::completion_usage_mut)
+                {
+                    rebase_replayed_usage(usage, self.replayed_tokens);
+                }
                 return Some(response);
             }
             return None;
@@ -587,6 +639,14 @@ where
             if !source_guards.is_empty() {
                 attach_first_response_guard(&mut request, Arc::new(source_guards));
             }
+            // Prompt embeddings take precedence over replayed token IDs, so the worker does
+            // not count those IDs as prompt.
+            let replayed_tokens = if self.request.prompt_embeds.is_some() {
+                0
+            } else {
+                let replayed = self.request.token_ids.len().saturating_sub(self.prompt_len);
+                u32::try_from(replayed).unwrap_or(u32::MAX)
+            };
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -596,6 +656,7 @@ where
                     );
                     self.active_route_trace = Some(route_trace);
                     self.next_stream = Some(next_stream);
+                    self.replayed_tokens = replayed_tokens;
                     return Ok(());
                 }
                 Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
@@ -3497,6 +3558,410 @@ mod tests {
                 (2, Some("�"), 2.0),
                 (3, Some("!"), 3.0)
             ]
+        );
+    }
+
+    // --- Replayed-token usage (#15255) ---------------------------------------------------
+    //
+    // A retry replays every delivered token as prompt. Workers count that whole prompt in
+    // `prompt_tokens` and only their own tokens in `completion_tokens`, so the migration
+    // layer must restate a retried attempt's usage for the request the client sent.
+
+    /// The response types the migration layer serves: `BackendOutput` feeds the Rust OpenAI
+    /// frontend, and `LLMEngineOutput` feeds the Python chat processors, which forward
+    /// `completion_usage` as the client's usage.
+    trait UsageTestOutput: Data + HasTokenIds + serde::Serialize + serde::de::DeserializeOwned {
+        fn generated(token_id: TokenIdType, usage: Option<CompletionUsage>) -> Self;
+        fn usage(&self) -> Option<&CompletionUsage>;
+    }
+
+    impl UsageTestOutput for BackendOutput {
+        fn generated(token_id: TokenIdType, usage: Option<CompletionUsage>) -> Self {
+            BackendOutput {
+                completion_usage: usage,
+                ..create_mock_output(token_id).data.unwrap()
+            }
+        }
+        fn usage(&self) -> Option<&CompletionUsage> {
+            self.completion_usage.as_ref()
+        }
+    }
+
+    impl UsageTestOutput for LLMEngineOutput {
+        fn generated(token_id: TokenIdType, usage: Option<CompletionUsage>) -> Self {
+            LLMEngineOutput {
+                token_ids: vec![token_id],
+                completion_usage: usage,
+                ..Default::default()
+            }
+        }
+        fn usage(&self) -> Option<&CompletionUsage> {
+            self.completion_usage.as_ref()
+        }
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    enum UsageReport {
+        /// Only on the final attempt's last chunk, as the built-in workers report it.
+        #[default]
+        Terminal,
+        /// Cumulative usage on every chunk.
+        EveryChunk,
+        Never,
+    }
+
+    /// Usage as a worker reports it: against the prompt it was sent, counting only the tokens
+    /// it generated, with all but two prompt tokens cache hits and every generated token
+    /// counted as reasoning.
+    fn worker_usage(prompt_tokens: u32, completion_tokens: u32) -> CompletionUsage {
+        CompletionUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                cached_tokens: Some(prompt_tokens.saturating_sub(2)),
+                ..Default::default()
+            }),
+            completion_tokens_details: Some(dynamo_protocols::types::CompletionTokensDetails {
+                reasoning_tokens: Some(completion_tokens),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Streams `attempt_tokens[i]` tokens on attempt `i` with `worker_usage`, disconnecting
+    /// after every attempt but the last. The first `rejected_dispatches` calls fail to connect.
+    #[derive(Default)]
+    struct UsageEngine {
+        attempt_tokens: Vec<u32>,
+        report: UsageReport,
+        rejected_dispatches: u32,
+        /// Prompt length reported by a prompt-embedding worker, which ignores token IDs.
+        embedded_prompt_tokens: Option<u32>,
+        calls: AtomicU32,
+        /// Prompt length each streamed attempt was dispatched with.
+        prompt_lens: std::sync::Mutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl<T: UsageTestOutput>
+        AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<T>>, Error> for UsageEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<T>>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.rejected_dispatches {
+                return Err(anyhow::anyhow!(migratable_error(ErrorType::CannotConnect)));
+            }
+            let attempt = (call - self.rejected_dispatches) as usize;
+            let (request, context) = request.transfer(());
+            self.prompt_lens
+                .lock()
+                .unwrap()
+                .push(request.token_ids.len());
+            let prompt_tokens = self
+                .embedded_prompt_tokens
+                .unwrap_or(request.token_ids.len() as u32);
+            let generated = self.attempt_tokens[attempt];
+            let last_attempt = attempt + 1 == self.attempt_tokens.len();
+            let mut chunks: Vec<_> = (1..=generated)
+                .map(|completion_tokens| {
+                    let reports = match self.report {
+                        UsageReport::Terminal => last_attempt && completion_tokens == generated,
+                        UsageReport::EveryChunk => true,
+                        UsageReport::Never => false,
+                    };
+                    let usage = reports.then(|| worker_usage(prompt_tokens, completion_tokens));
+                    Annotated::from_data(T::generated(1000 + completion_tokens, usage))
+                })
+                .collect();
+            if !last_attempt {
+                chunks.push(Annotated::from_err(migratable_error(
+                    ErrorType::Disconnected,
+                )));
+            }
+            let ctx = Arc::new(Controller::new(context.id().to_string()));
+            Ok(ResponseStream::new(Box::pin(stream::iter(chunks)), ctx))
+        }
+    }
+
+    fn usage_request(prompt_len: u32, max_tokens: u32) -> PreprocessedRequest {
+        let mut request = create_mock_request(max_tokens);
+        request.token_ids = (1..=prompt_len).collect::<Vec<_>>().into();
+        request
+    }
+
+    /// Drives one request through a `RetryManager` and returns its data chunks.
+    async fn run_usage_engine<T: UsageTestOutput>(
+        engine: Arc<UsageEngine>,
+        request: PreprocessedRequest,
+        migration_limit: u32,
+        max_seq_len: Option<u32>,
+    ) -> (Vec<T>, RetryManager<T>) {
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<T>> = engine;
+        let mut retry_manager = RetryManager::build(
+            Arc::new(Controller::new(uuid::Uuid::new_v4().to_string())),
+            BTreeMap::new(),
+            request,
+            next_generate,
+            migration_limit,
+            max_seq_len,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+        let mut outputs = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            assert!(
+                response.error.is_none(),
+                "unexpected error: {:?}",
+                response.error
+            );
+            outputs.extend(response.data);
+        }
+        (outputs, retry_manager)
+    }
+
+    fn token_counts(usage: &CompletionUsage) -> (u32, u32, u32) {
+        (
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.total_tokens,
+        )
+    }
+
+    fn cached_tokens(usage: &CompletionUsage) -> Option<u32> {
+        usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+    }
+
+    /// Usage the Rust OpenAI frontend reports after `outputs` for a `prompt_len`-token prompt.
+    fn openai_frontend_usage(outputs: Vec<BackendOutput>, prompt_len: u32) -> CompletionUsage {
+        use crate::protocols::openai::{
+            DeltaGeneratorExt, completions::DeltaGenerator, delta_common::DeltaGeneratorOptions,
+        };
+
+        let mut generator = DeltaGenerator::new(
+            TEST_MODEL.to_string(),
+            DeltaGeneratorOptions::default(),
+            "usage-request".to_string(),
+        );
+        generator.update_isl(prompt_len);
+        for output in outputs {
+            generator
+                .choice_from_postprocessor(output)
+                .expect("choice generation");
+        }
+        generator.get_usage()
+    }
+
+    /// The #15255 report: a 6-token prompt migrates after 12 of its 40 tokens, and the retry
+    /// generates the other 28 against an 18-token prompt. The Rust OpenAI frontend counts the
+    /// 40 delivered tokens itself but takes `prompt_tokens` from the worker, which reported
+    /// 18/40/58 before the fix. With a migration limit of 1 the retry is the final attempt,
+    /// whose replay prompt is released as soon as it is dispatched.
+    #[tokio::test]
+    async fn migrated_usage_reports_the_client_prompt_through_the_openai_frontend() {
+        for migration_limit in [3, 1] {
+            let engine = Arc::new(UsageEngine {
+                attempt_tokens: vec![12, 28],
+                ..Default::default()
+            });
+            let (outputs, retry_manager) = run_usage_engine::<BackendOutput>(
+                engine.clone(),
+                usage_request(6, 40),
+                migration_limit,
+                None,
+            )
+            .await;
+            assert_eq!(*engine.prompt_lens.lock().unwrap(), vec![6, 18]);
+            assert_eq!(
+                retry_manager.request.token_ids.is_empty(),
+                migration_limit == 1,
+                "the replay prompt is released only once no retry remains"
+            );
+
+            let usage = openai_frontend_usage(outputs, 6);
+            assert_eq!(
+                token_counts(&usage),
+                (6, 40, 46),
+                "migration_limit={migration_limit}"
+            );
+            assert_eq!(
+                cached_tokens(&usage),
+                Some(6),
+                "the retry's 16 cache hits are capped at the 6-token prompt"
+            );
+        }
+    }
+
+    /// The Python chat processors forward `completion_usage` itself, so every count must be
+    /// restated, not only `prompt_tokens`. Over two migrations with cumulative usage on every
+    /// chunk, each attempt's usage is restated by its own replay, so the counts continue
+    /// across both migrations and end at 6/40/46. The final attempt's replay prompt was
+    /// released at dispatch.
+    #[tokio::test]
+    async fn migrated_usage_snapshots_count_every_attempt_across_two_migrations() {
+        let engine = Arc::new(UsageEngine {
+            attempt_tokens: vec![12, 10, 18],
+            report: UsageReport::EveryChunk,
+            ..Default::default()
+        });
+        let (outputs, retry_manager) =
+            run_usage_engine::<LLMEngineOutput>(engine.clone(), usage_request(6, 40), 2, None)
+                .await;
+        assert_eq!(*engine.prompt_lens.lock().unwrap(), vec![6, 18, 28]);
+        assert!(retry_manager.request.token_ids.is_empty());
+
+        assert_eq!(outputs.len(), 40);
+        for (delivered, output) in (1..=40).zip(&outputs) {
+            let usage = output.usage().expect("usage on every chunk");
+            assert_eq!(token_counts(usage), (6, delivered, 6 + delivered));
+            let first_attempt = delivered <= 12;
+            assert_eq!(
+                cached_tokens(usage),
+                Some(if first_attempt { 4 } else { 6 }),
+                "a retry's cache hits are capped at the client's prompt"
+            );
+            assert_eq!(
+                usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.reasoning_tokens),
+                first_attempt.then_some(delivered),
+                "a retry's completion breakdown covers only its own tokens"
+            );
+        }
+    }
+
+    /// The Rust OpenAI frontend accumulates usage across chunks, so a completion breakdown the
+    /// first attempt reported must not outlive the migration that withdrew it. Otherwise the
+    /// chat frontend's reasoning estimate, which only fills a missing count, would defer to a
+    /// breakdown covering 12 of the 40 tokens.
+    #[tokio::test]
+    async fn migrated_usage_withdraws_the_first_attempts_breakdown_from_the_openai_frontend() {
+        let engine = Arc::new(UsageEngine {
+            attempt_tokens: vec![12, 28],
+            report: UsageReport::EveryChunk,
+            ..Default::default()
+        });
+        let (outputs, _) =
+            run_usage_engine::<BackendOutput>(engine, usage_request(6, 40), 3, None).await;
+        assert_eq!(
+            outputs[11]
+                .usage()
+                .and_then(|usage| usage.completion_tokens_details.as_ref())
+                .and_then(|details| details.reasoning_tokens),
+            Some(12),
+            "the first attempt reports its own breakdown"
+        );
+
+        let usage = openai_frontend_usage(outputs, 6);
+        assert_eq!(token_counts(&usage), (6, 40, 46));
+        assert_eq!(usage.completion_tokens_details, None);
+    }
+
+    /// A retry's replay is fixed when it is dispatched. Here max_seq_len disables migration
+    /// on the retry's third token, releasing the replay prompt while the attempt is still
+    /// reporting usage.
+    #[tokio::test]
+    async fn migrated_usage_survives_replay_prompt_release_mid_attempt() {
+        let engine = Arc::new(UsageEngine {
+            attempt_tokens: vec![12, 28],
+            report: UsageReport::EveryChunk,
+            ..Default::default()
+        });
+        let (outputs, retry_manager) =
+            run_usage_engine::<BackendOutput>(engine.clone(), usage_request(6, 40), 3, Some(20))
+                .await;
+        assert_eq!(*engine.prompt_lens.lock().unwrap(), vec![6, 18]);
+        assert!(retry_manager.request.token_ids.is_empty());
+
+        assert_eq!(outputs.len(), 40);
+        for (delivered, output) in (1..=40).zip(&outputs) {
+            let usage = output.usage().expect("usage on every chunk");
+            assert_eq!(token_counts(usage), (6, delivered, 6 + delivered));
+        }
+    }
+
+    /// Usage without a replayed prompt passes through as the worker reported it: a single
+    /// attempt, a retry after a failed dispatch delivered nothing, a request whose worker
+    /// reports no usage, and prompt embeddings. Embeddings take precedence over replayed
+    /// token IDs, so the worker never counts them; that continuation is unsupported and
+    /// keeps the worker's usage.
+    #[tokio::test]
+    async fn usage_without_a_replayed_prompt_is_unchanged() {
+        for (attempt_tokens, rejected_dispatches) in [(vec![40], 0), (vec![40], 1)] {
+            let engine = Arc::new(UsageEngine {
+                attempt_tokens,
+                rejected_dispatches,
+                ..Default::default()
+            });
+            let (outputs, _) =
+                run_usage_engine::<LLMEngineOutput>(engine, usage_request(6, 40), 3, None).await;
+            assert_eq!(outputs.len(), 40);
+            assert_eq!(outputs[39].usage(), Some(&worker_usage(6, 40)));
+        }
+
+        let engine = Arc::new(UsageEngine {
+            attempt_tokens: vec![12, 28],
+            report: UsageReport::Never,
+            ..Default::default()
+        });
+        let (outputs, _) =
+            run_usage_engine::<BackendOutput>(engine, usage_request(6, 40), 3, None).await;
+        assert_eq!(outputs.len(), 40);
+        assert!(outputs.iter().all(|output| output.usage().is_none()));
+
+        let mut request = usage_request(0, 40);
+        request.prompt_embeds = Some("base64-tensor".to_string());
+        let engine = Arc::new(UsageEngine {
+            attempt_tokens: vec![12, 28],
+            embedded_prompt_tokens: Some(10),
+            ..Default::default()
+        });
+        let (outputs, _) =
+            run_usage_engine::<LLMEngineOutput>(engine.clone(), request, 3, None).await;
+        assert_eq!(
+            *engine.prompt_lens.lock().unwrap(),
+            vec![0, 12],
+            "delivered token IDs are still replayed"
+        );
+        assert_eq!(outputs[39].usage(), Some(&worker_usage(10, 28)));
+    }
+
+    #[test]
+    fn rebase_replayed_usage_saturates_inconsistent_worker_counts() {
+        // A worker reporting fewer prompt tokens than were replayed loses only what it
+        // reported, while completion still gains every replayed token.
+        let mut usage = worker_usage(5, 3);
+        rebase_replayed_usage(&mut usage, 12);
+        assert_eq!(token_counts(&usage), (0, 15, 15));
+        assert_eq!(cached_tokens(&usage), Some(0));
+        assert!(usage.completion_tokens_details.is_none());
+
+        // Cache hits already inside the client's prompt are kept.
+        let mut usage = worker_usage(18, 28);
+        usage.prompt_tokens_details = Some(dynamo_protocols::types::PromptTokensDetails {
+            cached_tokens: Some(4),
+            image_tokens: Some(2),
+            ..Default::default()
+        });
+        rebase_replayed_usage(&mut usage, 12);
+        assert_eq!(token_counts(&usage), (6, 40, 46));
+        assert_eq!(
+            usage.prompt_tokens_details,
+            Some(dynamo_protocols::types::PromptTokensDetails {
+                cached_tokens: Some(4),
+                image_tokens: Some(2),
+                ..Default::default()
+            })
         );
     }
 }

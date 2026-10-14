@@ -157,9 +157,11 @@ impl DeltaGeneratorState {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
             }
 
-            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
-                self.usage.completion_tokens_details = Some(completion_details.clone());
-            }
+            // Unlike the prompt, the completion grows between snapshots, so an earlier
+            // breakdown is stale once a later snapshot omits it. Migration omits it for a
+            // retried attempt, whose breakdown would cover only that attempt.
+            self.usage.completion_tokens_details =
+                completion_usage.completion_tokens_details.clone();
         }
     }
 
