@@ -88,6 +88,9 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
     monkeypatch.setattr(vllm_main, "install_signal_handlers", signal_handlers)
     monkeypatch.setattr(vllm_main, "StateAgentLifecycle", Mock(return_value=lifecycle))
     monkeypatch.setattr(vllm_main, "WorkerFactory", Mock(return_value=factory))
+    monkeypatch.setattr(
+        vllm_main, "initialize_configured_artifact_runtime", AsyncMock()
+    )
     return lifecycle, signal_handlers
 
 

@@ -108,6 +108,7 @@ def _make_config(
     config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.enable_rl = False
+    config.artifact_router_profile = None
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
