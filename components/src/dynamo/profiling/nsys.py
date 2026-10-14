@@ -4,6 +4,7 @@
 """In-process Nsight triggers and automatic report discovery; no CLI control."""
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import re
@@ -55,6 +56,7 @@ class NsysFrontendCollector:
     def __init__(self, runtime: RuntimeSnapshot, prefix: str):
         self.runtime = runtime
         self.range_handle = None
+        self.starting: asyncio.Future | None = None
         self.evidence = {
             "target_id": "frontend",
             "process_epoch": runtime.frontend_epoch,
@@ -78,12 +80,19 @@ class NsysFrontendCollector:
         # Nsight can block range transitions while it starts or ends a capture;
         # keep that off the serving loop so worker controls are not delayed.
         self.evidence["start_requested_at_ns"] = time.time_ns()
-        self.range_handle = await asyncio.to_thread(
-            nvtx.start_range, message="ROI", domain="app"
+        # A start timeout cancels this await but not the thread, which may still
+        # open the range; keep its future so stop() can close it.
+        self.starting = asyncio.ensure_future(
+            asyncio.to_thread(nvtx.start_range, message="ROI", domain="app")
         )
+        self.range_handle = await asyncio.shield(self.starting)
         self.evidence.update(started_at_ns=time.time_ns(), coverage="recording")
 
     async def stop(self) -> None:
+        if self.range_handle is None and self.starting is not None:
+            with contextlib.suppress(Exception):  # a failed start opened nothing
+                self.range_handle = await self.starting
+        self.starting = None
         if self.range_handle is not None:
             self.evidence["stop_requested_at_ns"] = time.time_ns()
             await asyncio.to_thread(nvtx.end_range, self.range_handle)

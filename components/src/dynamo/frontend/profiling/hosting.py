@@ -43,8 +43,17 @@ async def host(coordinator: Coordinator) -> AsyncIterator[Coordinator]:
     endpoint = Path(coordinator.config.socket_path)
     private_directory(endpoint.parent)
     private_directory(Path(coordinator.config.output_dir))
-    if endpoint.exists():
-        raise ValueError("Profiling socket already exists; refusing to replace it")
+    if endpoint.exists() or endpoint.is_symlink():
+        if not endpoint.is_socket():
+            raise ValueError("Profiling socket path exists and is not a socket")
+        # A crashed host leaves its socket behind; only a live listener owns it.
+        with socket.socket(socket.AF_UNIX) as probe:
+            try:
+                probe.connect(str(endpoint))
+            except ConnectionRefusedError:
+                endpoint.unlink()
+            else:
+                raise ValueError("Profiling socket is owned by a running host")
     runner = web.AppRunner(application(coordinator))
     await runner.setup()
     try:

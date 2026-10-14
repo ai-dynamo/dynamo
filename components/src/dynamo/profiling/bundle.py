@@ -17,11 +17,13 @@ A request is selected when its `worker.operation.<phase>` span ran on a captured
 target during that target's recording interval, or when the plan named its
 trace ID. Worker spans are assigned through router decisions
 (`kv_router.route_request` worker_id = `handle_payload` instance_id) and joined
-to captured processes by the PID in `dynamo.process.epoch`. Each request gets
-its own Perfetto timeline: its lifecycle span tree plus the native events of its
-assigned workers that overlap its operation spans. The frontend recording
-window and control events are drawn; its detailed host trace is listed only. Engine work inside an
-operation span is shared batch work and is not attributed per kernel.
+to captured processes by the PID in `dynamo.process.epoch`. The overall
+timeline draws every selected request's lifecycle span tree and each captured
+worker's native events over its recording window; per-request timelines keep
+only the native events overlapping that request's operation spans. The frontend
+recording window and control events are drawn; its detailed host trace is listed
+only. Engine work inside an operation span is shared batch work and is not
+attributed per kernel.
 """
 
 import argparse
@@ -536,40 +538,40 @@ def build(
         "".join(json.dumps(e) + "\n" for e in controls)
     )
 
-    # One timeline per request, sharing one origin so files line up.
+    # All timelines share one origin so files line up; spans use their drawn lane.
+    lanes = {
+        e["trace_id"]: request_lanes(traces[e["trace_id"]], workers) for e in index
+    }
     origin = min(
         [
-            start_end(s)[0]
-            - offsets.get(
-                workers.get(router_worker(s, traces[e["trace_id"]])) or "frontend", 0
-            )
+            start_end(s)[0] - offsets.get(lanes[e["trace_id"]][s["spanId"]][0], 0)
             for e in index
             for s in traces[e["trace_id"]].values()
         ]
         + [low - offsets.get(t, 0) for t, (low, _) in intervals.items()]
-        + [e["unix_ns"] for e in controls]
+        + [e["unix_ns"] for e in controls],
+        default=manifest.get("accepted_at_ns", 0),
     )
     # The window timeline (default) shows every request and every captured
     # worker for its whole recording; per-request timelines are optional.
     window = Timeline(output / "timeline.json.gz", origin)
     views, windows = [], defaultdict(list)
     for entry in index:
-        spans = traces[entry["trace_id"]]
-        lanes = request_lanes(spans, workers)
+        spans, request = traces[entry["trace_id"]], lanes[entry["trace_id"]]
         route = " → ".join(
             p["target_id"] or f"{p['phase']} (not captured)" for p in entry["phases"]
         )
         label = f"req {(entry['request_id'] or entry['trace_id'])[:8]} · {route}"
         label += " (trigger)" if entry["trigger"] else ""
-        window.groups.update(dict(set(lanes.values())))
-        draw_request(window, spans, lanes, offsets, label)
+        window.groups.update(dict(set(request.values())))
+        draw_request(window, spans, request, offsets, label)
         if not per_request:
             continue
         name = entry["request_id"] or entry["trace_id"]
         entry["timeline"] = f"timelines/{name}.json.gz"
         timeline = Timeline(output / entry["timeline"], origin)
-        timeline.groups = dict(set(lanes.values()))
-        draw_request(timeline, spans, lanes, offsets, label)
+        timeline.groups = dict(set(request.values()))
+        draw_request(timeline, spans, request, offsets, label)
         recorded = {}
         roots = [s for s in spans.values() if s["name"] == "http-request"]
         if "frontend" in intervals and roots:
@@ -619,6 +621,10 @@ def build(
                 else f"artifacts {item['status']}",
             }
             continue
+        if target not in intervals:
+            native[target] = {"status": "omitted", "reason": "recording bounds unknown"}
+            continue
+        recorded_low, recorded_high = intervals[target]
         shift, routed, read = offsets.get(target, 0), 0, 0
         for artifact in item.get("artifacts", []):
             names, labels, threads = {}, {}, defaultdict(list)
@@ -636,9 +642,10 @@ def build(
                 if "start_ns" not in event:
                     continue
                 start, end = event.pop("start_ns"), event.pop("end_ns")
+                if end < recorded_low or start > recorded_high:
+                    continue
                 # Native data exists only inside recording; clip events that
                 # began before or ended after it and keep their original bounds.
-                recorded_low, recorded_high = intervals[target]
                 if start < recorded_low or end > recorded_high:
                     event["args"] = {
                         **event.get("args", {}),

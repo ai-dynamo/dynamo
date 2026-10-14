@@ -323,7 +323,7 @@ class Coordinator:
         # a successful manifest write through persist().
         try:
             self.persist(session)
-        except OSError as exc:
+        except Exception as exc:
             error = f"Manifest persistence failed: {exc}"
             if error not in session.errors:
                 session.errors.append(error)
@@ -404,43 +404,48 @@ class Coordinator:
             )
             session.errors.append(str(exc) or type(exc).__name__)
         finally:
-            if not capture_ok and not session.errors:
-                session.errors.append("Capture interrupted by an unexpected failure")
-            session.state = "finalizing"
-            self.persist_progress(session)
-            # Stop all collectors concurrently: slow worker trace serialization
-            # must not keep other targets recording beyond their lease.
-            stop_errors = await errors_of(
-                self.stop_collector(c) for c in session.collectors
-            )
-            session.errors.extend(stop_errors)
-            self.cleanup_uncertain |= bool(stop_errors)
-            session.errors.extend(
-                await errors_of(
-                    self.measure_end(session, workers[target_id])
-                    for target_id in session.clocks
-                    if workers[target_id].verify_runtime
-                )
-            )
-            validations = await asyncio.gather(
-                *(
-                    self.validate_artifacts(collector)
-                    for collector in session.collectors
-                )
-            )
-            for collector, validation in zip(session.collectors, validations):
-                session.artifact_validation.append(validation)
-                if validation["status"] in ("partial", "invalid"):
-                    if collector.evidence.get("collector") == "nsys":
-                        # An unfinished export could be misassociated with the
-                        # next window; require reconciliation before admitting it.
-                        self.cleanup_uncertain = True
+            try:
+                if not capture_ok and not session.errors:
                     session.errors.append(
-                        f"{validation['target_id']}: artifacts {validation['status']}"
+                        "Capture interrupted by an unexpected failure"
                     )
-            session.state = "failed" if session.errors else "completed"
-            self.persist_progress(session)
-            self.active = None
+                session.state = "finalizing"
+                self.persist_progress(session)
+                # Stop all collectors concurrently: slow worker trace serialization
+                # must not keep other targets recording beyond their lease.
+                stop_errors = await errors_of(
+                    self.stop_collector(c) for c in session.collectors
+                )
+                session.errors.extend(stop_errors)
+                self.cleanup_uncertain |= bool(stop_errors)
+                session.errors.extend(
+                    await errors_of(
+                        self.measure_end(session, workers[target_id])
+                        for target_id in session.clocks
+                        if workers[target_id].verify_runtime
+                    )
+                )
+                validations = await asyncio.gather(
+                    *(
+                        self.validate_artifacts(collector)
+                        for collector in session.collectors
+                    )
+                )
+                for collector, validation in zip(session.collectors, validations):
+                    session.artifact_validation.append(validation)
+                    if validation["status"] in ("partial", "invalid"):
+                        if collector.evidence.get("collector") == "nsys":
+                            # An unfinished export could be misassociated with the
+                            # next window; require reconciliation before admitting it.
+                            self.cleanup_uncertain = True
+                        session.errors.append(
+                            f"{validation['target_id']}: artifacts {validation['status']}"
+                        )
+                session.state = "failed" if session.errors else "completed"
+                self.persist_progress(session)
+            finally:
+                # Release the lease even if finalization fails unexpectedly.
+                self.active = None
 
     async def measure_end(self, session: Session, worker) -> str | None:
         measurements = session.clocks[worker.target_id]
@@ -449,7 +454,7 @@ class Coordinator:
                 self.clock_sampler.measure(worker, self.config),
                 self.config.start_timeout_s,
             )
-        except COLLECTION_ERRORS as exc:
+        except Exception as exc:
             measurements["end"] = {"alignment": "unknown", "error": str(exc)}
             return f"{worker.target_id}: final runtime verification failed: {exc}"
         start, end = measurements["start"], measurements["end"]
@@ -462,21 +467,21 @@ class Coordinator:
             validation = await self.artifact_validator.validate(
                 collector.evidence, self.config
             )
-        except COLLECTION_ERRORS as exc:
+        except Exception as exc:
             validation = {"status": "invalid", "coverage": "partial", "error": str(exc)}
         return {"target_id": collector.evidence.get("target_id"), **validation}
 
     async def start_collector(self, collector: Collector) -> str | None:
         try:
             await collector.start()
-        except COLLECTION_ERRORS as exc:
+        except Exception as exc:
             return str(exc) or type(exc).__name__
         return None
 
     async def stop_collector(self, collector: Collector) -> str | None:
         try:
             await asyncio.wait_for(collector.stop(), self.config.finalize_timeout_s)
-        except COLLECTION_ERRORS as exc:
+        except Exception as exc:
             collector.evidence["coverage"] = "partial_or_unknown"
             logger.warning("Profiling finalization failed: %s", exc)
             return str(exc) or type(exc).__name__

@@ -8,11 +8,13 @@ import gzip
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1125,7 +1127,11 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
             "ts": ts,
             "dur": 2,
         }
-        for name, ts in (("before_operation", 1000), ("inside_operation", 2500.5))
+        for name, ts in (
+            ("before_recording", 100),
+            ("before_operation", 1000),
+            ("inside_operation", 2500.5),
+        )
     ]
     metadata = [
         {
@@ -1331,6 +1337,91 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     # earliest control event at base+0.9 ms.
     assert kernel["ts"] == 1599.5
     assert all(isinstance(e.get("tid", 0), int) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_stop_failure_releases_lease(controller, collector):
+    collector.stop.side_effect = RuntimeError("unexpected stop failure")
+    session = controller.submit(plan())
+    await session.task
+    assert session.state == "failed"
+    assert controller.active is None
+    assert controller.cleanup_uncertain
+    assert any("unexpected stop failure" in error for error in session.errors)
+
+
+@pytest.mark.asyncio
+async def test_timed_out_frontend_range_start_is_closed_on_stop(tmp_path, monkeypatch):
+    opened, closed, handle = threading.Event(), [], object()
+
+    def start_range(**kwargs):
+        time.sleep(0.2)  # Nsight blocking the range transition past the budget
+        opened.set()
+        return handle
+
+    monkeypatch.setattr(
+        nsys, "nvtx", SimpleNamespace(start_range=start_range, end_range=closed.append)
+    )
+    monkeypatch.setattr(nsys, "process_epoch", lambda pid: "epoch")
+    collector = nsys.NsysFrontendCollector(
+        RuntimeSnapshot(os.getpid(), "epoch", "host"), str(tmp_path / "frontend")
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(collector.start(), 0.05)
+    await collector.stop()
+    assert opened.is_set() and closed == [handle]
+
+
+@pytest.mark.asyncio
+async def test_host_replaces_stale_socket_but_not_a_live_one(
+    socket_directory, provider_controller
+):
+    path = socket_directory / "admin.sock"
+    with socket.socket(socket.AF_UNIX) as stale:
+        stale.bind(str(path))  # left behind by a crashed host
+    controller = provider_controller
+    controller.config = msgspec.structs.replace(
+        controller.config, socket_path=str(path)
+    )
+    async with host(controller):
+        with pytest.raises(ValueError, match="running host"):
+            async with host(controller):
+                pass
+    assert not path.exists()
+
+
+def test_bundle_without_observed_bounds_or_requests(tmp_path):
+    trace = tmp_path / "capture_dp0.1.pt.trace.json"
+    kernel = {"ph": "X", "cat": "kernel", "name": "k", "pid": 1, "tid": 1, "ts": 1}
+    trace.write_text(
+        json.dumps({"baseTimeNanoseconds": 10**18, "traceEvents": [kernel]})
+    )
+    session = tmp_path / "session"
+    session.mkdir()
+    manifest = {
+        "session_id": "s",
+        "state": "completed",
+        "artifact_status": "present",
+        "accepted_at_ns": 5,
+        "plan": {"trace_ids": []},
+        "profiles": [{"target_id": "decode-0", "collector": "torch_profiler"}],
+        "clock": {"workers": {}},
+        "artifact_validation": [
+            {
+                "target_id": "decode-0",
+                "status": "present",
+                "artifacts": [{"location": str(trace), "rank_id": "dp0"}],
+            }
+        ],
+    }
+    (session / "manifest.json").write_text(json.dumps(manifest))
+    otel = tmp_path / "otel.jsonl"
+    otel.write_text("")
+    summary = bundle.build(session, [otel], tmp_path / "out")
+    # No profiler marker: verified, but without bounds its events are not drawn.
+    assert summary["artifact_verification"]["decode-0"]["status"] == "verified"
+    assert summary["coverage"]["native_timeline"]["decode-0"]["status"] == "omitted"
+    assert summary["timeline_origin_unix_ns"] == 5
 
 
 def test_bundle_reads_nsight_worker_exports(tmp_path):
