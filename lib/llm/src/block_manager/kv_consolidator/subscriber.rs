@@ -284,6 +284,7 @@ mod tests {
 
     fn stored_event(medium: Option<&str>, locality: Option<Locality>) -> RawKvEvent {
         RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(1)],
             parent_block_hash: None,
             token_ids: vec![10, 11],
