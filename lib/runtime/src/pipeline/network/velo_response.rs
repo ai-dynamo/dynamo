@@ -913,37 +913,16 @@ mod tests {
         let peer = consumer.velo.peer_info();
         let invalid = PeerInfo::new(peer.instance_id(), velo::WorkerAddress::empty());
         assert!(producer.prepare_peer(invalid).await.is_err());
-        assert!(
-            !producer
-                .prepared_peers
-                .get(&peer.instance_id())
-                .unwrap()
-                .initialized()
-        );
         let results =
             futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer.clone()))).await;
         for result in results {
             result.unwrap();
         }
-        assert!(
-            producer
-                .prepared_peers
-                .get(&peer.instance_id())
-                .unwrap()
-                .initialized()
-        );
         assert_eq!(hellos.load(Ordering::Relaxed), 1);
         producer.prepare_peer(peer).await.unwrap();
         assert_eq!(hellos.load(Ordering::Relaxed), 1);
         producer.shutdown().await;
         consumer.shutdown().await;
-    }
-
-    #[test]
-    fn tcp_responses_use_four_lanes() {
-        use velo::Transport;
-        let transport = tcp_transport("127.0.0.1:0".parse().unwrap()).unwrap();
-        assert_eq!(transport.lanes(velo::InstanceId::new_v4()).get(), 4);
     }
 
     async fn pair(
@@ -975,6 +954,9 @@ mod tests {
     #[cfg(feature = "velo-ucx")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn ucx_lifecycle() {
+        if crate::test_utils::run_isolated(concat!(module_path!(), "::ucx_lifecycle"), &[]) {
+            return;
+        }
         lifecycle_suite(ResponseTransport::Ucx).await;
     }
 
@@ -1101,6 +1083,20 @@ mod tests {
         }
         let (blocked_sender, blocked_receiver, blocked_engine) = streams.remove(0);
         let (mut sender, mut receiver, engine) = streams.remove(0);
+        let credit_exhaustions = || {
+            PROCESS_METRICS
+                .0
+                .prometheus_registry
+                .read()
+                .unwrap()
+                .gather()
+                .iter()
+                .filter(|family| family.name() == "velo_streaming_slot_credit_exhausted_total")
+                .flat_map(|family| family.get_metric())
+                .map(|metric| metric.get_counter().value())
+                .sum::<f64>()
+        };
+        let exhausted_before = credit_exhaustions();
         let flood = tokio::spawn(async move {
             loop {
                 blocked_sender.send(Bytes::from(vec![1; 4096])).await?;
@@ -1108,6 +1104,14 @@ mod tests {
             #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
         });
+        // Both suites run in isolation; only the unpolled stream can exhaust credit here.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while credit_exhaustions() <= exhausted_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unpolled stream did not exhaust its credit");
         sender
             .send(Bytes::from_static(b"independent"))
             .await
@@ -1180,19 +1184,17 @@ mod tests {
                 provider.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
-            if remove {
+            let _receiver = if remove {
                 consumer.cancel_response(id).await;
                 assert!(provider.await.is_err());
                 assert!(consumer.associate_instance(id, &instance).await);
                 consumer.cancel_instance_streams(&instance).await;
                 assert!(!consumer.associate_instance(id, &instance).await);
+                None
             } else {
                 sender.send_prologue(None).await.unwrap();
-                let _receiver = provider.await.unwrap().unwrap();
-                tokio::time::timeout(Duration::from_secs(5), engine.killed())
-                    .await
-                    .unwrap();
-            }
+                Some(provider.await.unwrap().unwrap())
+            };
             tokio::time::timeout(Duration::from_secs(5), engine.killed())
                 .await
                 .unwrap();

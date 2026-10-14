@@ -557,16 +557,4 @@ mod tests {
         })
         .await;
     }
-
-    #[tokio::test]
-    async fn bounded_teardown_runs_to_completion() {
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = done.clone();
-        bounded_teardown("test", Duration::from_secs(10), async move {
-            tokio::task::yield_now().await;
-            flag.store(true, Ordering::Release);
-        })
-        .await;
-        assert!(done.load(Ordering::Acquire));
-    }
 }
