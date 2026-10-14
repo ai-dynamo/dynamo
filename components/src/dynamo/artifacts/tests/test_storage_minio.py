@@ -38,7 +38,9 @@ from dynamo.artifacts.vllm.format import (  # noqa: E402 -- optional dependency 
 )
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.integration,
+    pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.post_merge,
     pytest.mark.timeout(60),
