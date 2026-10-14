@@ -7,7 +7,6 @@ from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
-
 from dynamo.artifacts.relay import MooncakeByteRelay, RelayError
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]

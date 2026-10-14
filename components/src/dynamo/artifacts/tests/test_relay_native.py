@@ -19,11 +19,11 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("msgspec")
 pytest.importorskip("zstandard")
 
-from dynamo.artifacts.relay import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.relay import (
     MooncakeByteRelay,
     RelayError,
 )
-from dynamo.artifacts.vllm.format import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.vllm.format import (
     GenerationArtifactChoice,
     GenerationArtifactView,
     Tensor,
