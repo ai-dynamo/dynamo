@@ -16,6 +16,8 @@ mod queue_admission;
 pub mod request_classifier;
 pub mod selector;
 
+#[cfg(all(test, feature = "runtime-protocols"))]
+mod test_capture;
 mod types;
 pub use filter::*;
 pub use local::LocalScheduler;
