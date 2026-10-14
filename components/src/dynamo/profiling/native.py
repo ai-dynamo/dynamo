@@ -8,29 +8,102 @@ into plain JSON shards (one per timeline view), which the bundle concatenates.
 Kept importable so a process pool works when the bundle runs as ``__main__``.
 """
 
+import codecs
 import gzip
 import json
 import re
 import sqlite3
 from bisect import bisect_left
 from contextlib import ExitStack, closing
+from functools import partial
 from pathlib import Path
 
 import ijson
 
 
-def kineto_events(path: Path):
-    """Yield Kineto events with raw worker-clock nanosecond start/end."""
-    with gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb") as stream:
-        header = stream.read(1 << 20).decode(errors="replace")
-        match = re.search(r'"baseTimeNanoseconds"\s*:\s*(\d+)', header)
-        if not match or not 0 <= match.start() < header.find('"traceEvents"'):
-            raise ValueError(f"{path}: baseTimeNanoseconds must precede traceEvents")
-        base = int(match.group(1))
-        stream.seek(0)
-        # Kineto ts/dur are microseconds relative to baseTimeNanoseconds: small
-        # enough that floats keep nanosecond resolution.
-        for event in ijson.items(stream, "traceEvents.item", use_float=True):
+class Layout(ValueError):
+    """The trace is not in Kineto's own writer layout; use the token parser."""
+
+
+# Kineto writes each traceEvents item as a block from a "  {" line to a "  },"
+# line; nested objects are indented further and JSON strings hold no newlines.
+BLOCK_END = "\n  },\n"
+ARRAY_END = "\n  }\n  ]"
+
+
+def kineto_blocks(stream, chunk: int = 1 << 22):
+    """Yield the header dict, then each traceEvents item as JSON text.
+
+    Splitting Kineto's fixed layout and decoding blocks with the C json module
+    is several times faster than token streaming. Raises Layout on any
+    deviation so callers can fall back to ijson.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    text, marker = "", '"traceEvents": ['
+    while marker not in text:
+        data = stream.read(chunk)
+        if not data or len(text) > (16 << 20):
+            raise Layout("no traceEvents array near the start")
+        text += decoder.decode(data)
+    head, text = text.split(marker, 1)
+    try:
+        yield json.loads(head + '"traceEvents": []}')
+    except ValueError as exc:
+        raise Layout(f"header: {exc}") from exc
+    while True:
+        data = stream.read(chunk)
+        text += decoder.decode(data, final=not data)
+        *blocks, text = text.split(BLOCK_END)
+        for block in blocks:
+            if not block.lstrip().startswith("{"):
+                raise Layout("unexpected text between events")
+            yield block + "\n  }"
+        if not data:
+            break
+    last, end, trailer = text.rpartition(ARRAY_END)
+    if end:
+        if not last.lstrip().startswith("{"):
+            raise Layout("unexpected text before the last event")
+        yield last + "\n  }"
+    elif text.strip().startswith("]"):
+        trailer = text.strip()[1:]  # an empty traceEvents array
+    else:
+        raise Layout("traceEvents does not end in the writer layout")
+    try:
+        json.loads('{"traceEvents": []' + trailer)
+    except ValueError as exc:
+        raise Layout(f"trailer: {exc}") from exc
+
+
+def open_trace(path: Path):
+    return gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb")
+
+
+def kineto_events(path: Path, fast: bool = True):
+    """Yield Kineto events with raw worker-clock nanosecond start/end.
+
+    With fast=True a layout deviation raises Layout (possibly after yielding
+    events); the caller restarts with fast=False, the ijson token parser.
+    """
+    # ts/dur are microseconds near 1e12: float spacing there is ~0.1 ns.
+    with open_trace(path) as stream:
+        if fast:
+            blocks = kineto_blocks(stream)
+            base = next(blocks).get("baseTimeNanoseconds")
+            if type(base) is not int:
+                raise Layout("no integer baseTimeNanoseconds")
+            events = map(json.loads, blocks)
+        else:
+            header = stream.read(1 << 20).decode(errors="replace")
+            match = re.search(r'"baseTimeNanoseconds"\s*:\s*(\d+)', header)
+            if not match or not 0 <= match.start() < header.find('"traceEvents"'):
+                raise ValueError(
+                    f"{path}: baseTimeNanoseconds must precede traceEvents"
+                )
+            base = int(match.group(1))
+            stream.seek(0)
+            events = ijson.items(stream, "traceEvents.item", use_float=True)
+        for event in events:
             if "ts" in event:
                 event["start_ns"] = base + round(event["ts"] * 1000)
                 event["end_ns"] = event["start_ns"] + round(event.get("dur", 0) * 1000)
@@ -152,7 +225,19 @@ NATIVE_READERS = {"torch_profiler": kineto_events, "nsys": nsys_events}
 def draw_shard(task: dict) -> dict:
     """Draw one native file into per-view shards of comma-joined JSON events.
 
-    task: collector, location, target, recorded (low, high), shift, origin,
+    Kineto traces use the fast block reader; on a layout deviation the shards
+    are rewritten from scratch with the ijson reader.
+    """
+    if task["collector"] != "torch_profiler":
+        return draw_views(task, NATIVE_READERS[task["collector"]])
+    try:
+        return draw_views(task, kineto_events)
+    except Layout:
+        return draw_views(task, partial(kineto_events, fast=False))
+
+
+def draw_views(task: dict, reader) -> dict:
+    """task: collector, location, target, recorded (low, high), shift, origin,
     sort (process sort-index base), pid_base, views [(low, high, view)], and
     directory. Processes get pids from pid_base so shards never collide.
     """
@@ -175,7 +260,7 @@ def draw_shard(task: dict) -> dict:
             files[view].write(line if not counts[view] else ",\n" + line)
             counts[view] += 1
 
-        for event in NATIVE_READERS[task["collector"]](Path(task["location"])):
+        for event in reader(Path(task["location"])):
             read += 1
             key = event.get("pid")
             if event.get("ph") == "M":

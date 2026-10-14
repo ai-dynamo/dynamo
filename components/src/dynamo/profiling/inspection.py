@@ -8,8 +8,8 @@ hashing, recording bounds and required-activity checks live here so the serving
 frontend never imports or runs them.
 """
 
-import gzip
 import hashlib
+import json
 import sqlite3
 import time
 from contextlib import closing
@@ -19,6 +19,7 @@ from pathlib import Path
 import ijson
 
 from .models import Config
+from .native import Layout, kineto_blocks, open_trace
 from .nsys import open_export, report_bounds
 
 CPU_TABLES = ("COMPOSITE_EVENTS", "SCHED_EVENTS", "OSRT_API", "NVTX_EVENTS")
@@ -55,7 +56,7 @@ class BoundedReader:
     def read(self, size: int = -1) -> bytes:
         if time.monotonic() >= self.deadline:
             raise TimeoutError("Artifact validation deadline expired")
-        data = self.stream.read(min(size if size >= 0 else 65536, 65536))
+        data = self.stream.read(size if 0 <= size <= 1 << 22 else 1 << 22)
         self.bytes += len(data)
         if self.bytes > self.limit:
             raise ValueError("Trace exceeds uncompressed byte limit")
@@ -88,47 +89,81 @@ def recording_bounds(base_time_ns: int | None, markers: list[dict]) -> dict:
     }
 
 
-def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
-    before = path.stat()
+def is_marker(event: dict) -> bool:
+    """The profiler's own recording-window event."""
+    return (
+        event.get("cat") == "Trace"
+        and event.get("ph") == "X"
+        and isinstance(event.get("name"), str)
+        and event["name"].startswith("PyTorch Profiler")
+    )
+
+
+def scan_blocks(reader) -> tuple:
+    """Count events from Kineto's writer layout; raise Layout to fall back."""
+    blocks = kineto_blocks(reader)
+    base = next(blocks).get("baseTimeNanoseconds")
+    events = kernels = 0
+    markers = []
+    for block in blocks:
+        try:
+            event = json.loads(block)
+            events += 1
+            if event.get("cat") == "kernel":
+                kernels += 1
+            elif is_marker(event) and len(markers) < 2:
+                # Keep the marker's microsecond values exact for ns bounds.
+                markers.append(json.loads(block, parse_float=Decimal))
+        except ValueError as exc:
+            raise Layout(str(exc)) from exc
+    return True, events, kernels, base if type(base) is int else None, markers
+
+
+def scan_tokens(reader) -> tuple:
+    """Count events with the ijson token parser (any valid trace layout)."""
     events = kernels = 0
     has_events = False
     base_time_ns = None
     markers = []
     current = {}
-    opener = gzip.open if path.suffix == ".gz" else open
-    with opener(path, "rb") as stream:
+    for prefix, event, value in ijson.parse(reader):
+        if (prefix, event) == ("traceEvents", "start_array"):
+            has_events = True
+        elif (prefix, event) == ("traceEvents.item", "start_map"):
+            events += 1
+            current = {}
+        elif prefix == "traceEvents.item" and event == "end_map":
+            if is_marker(current) and len(markers) < 2:
+                markers.append(current)
+        elif prefix in (
+            "traceEvents.item.name",
+            "traceEvents.item.cat",
+            "traceEvents.item.ph",
+            "traceEvents.item.ts",
+            "traceEvents.item.dur",
+        ) and event in ("string", "number"):
+            current[prefix.rsplit(".", 1)[1]] = value
+            if prefix == "traceEvents.item.cat" and value == "kernel":
+                kernels += 1
+        elif (
+            prefix == "baseTimeNanoseconds" and event == "number" and type(value) is int
+        ):
+            base_time_ns = value
+    return has_events, events, kernels, base_time_ns, markers
+
+
+def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
+    try:
+        return scan_trace(path, config, deadline, scan_blocks)
+    except Layout:  # not Kineto's own writer layout: parse tokens instead
+        return scan_trace(path, config, deadline, scan_tokens)
+
+
+def scan_trace(path: Path, config: Config, deadline: float, scan) -> dict:
+    before = path.stat()
+    with open_trace(path) as stream:
         reader = BoundedReader(stream, config.max_trace_bytes, deadline)
-        for prefix, event, value in ijson.parse(reader):
-            if (prefix, event) == ("traceEvents", "start_array"):
-                has_events = True
-            elif (prefix, event) == ("traceEvents.item", "start_map"):
-                events += 1
-                current = {}
-            elif prefix == "traceEvents.item" and event == "end_map":
-                if (
-                    current.get("cat") == "Trace"
-                    and current.get("ph") == "X"
-                    and isinstance(current.get("name"), str)
-                    and current["name"].startswith("PyTorch Profiler")
-                    and len(markers) < 2
-                ):
-                    markers.append(current)
-            elif prefix in (
-                "traceEvents.item.name",
-                "traceEvents.item.cat",
-                "traceEvents.item.ph",
-                "traceEvents.item.ts",
-                "traceEvents.item.dur",
-            ) and event in ("string", "number"):
-                current[prefix.rsplit(".", 1)[1]] = value
-                if prefix == "traceEvents.item.cat" and value == "kernel":
-                    kernels += 1
-            elif (
-                prefix == "baseTimeNanoseconds"
-                and event == "number"
-                and type(value) is int
-            ):
-                base_time_ns = value
+        has_events, events, kernels, base_time_ns, markers = scan(reader)
         # Consuming the whole stream also verifies the gzip trailer and CRC.
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -37,6 +38,7 @@ from dynamo.profiling import (
     collectors,
     errors,
     inspection,
+    native,
     nsys,
 )
 from dynamo.profiling.adapters import CollectorRegistry
@@ -1422,6 +1424,63 @@ def test_bundle_without_observed_bounds_or_requests(tmp_path):
     assert summary["artifact_verification"]["decode-0"]["status"] == "verified"
     assert summary["coverage"]["native_timeline"]["decode-0"]["status"] == "omitted"
     assert summary["timeline_origin_unix_ns"] == 5
+
+
+def kineto_layout(base: int, events: list[dict]) -> str:
+    """A trace laid out the way Kineto's writer emits it."""
+    blocks = ",\n".join(textwrap.indent(json.dumps(e, indent=2), "  ") for e in events)
+    return (
+        f'{{\n  "schemaVersion": 1,\n  "baseTimeNanoseconds": {base},\n'
+        f'  "traceEvents": [\n{blocks}\n  ],"traceName": "t"\n}}\n'
+    )
+
+
+@pytest.mark.parametrize("suffix", [".json", ".json.gz"])
+def test_kineto_block_reader_matches_token_parser(tmp_path, suffix):
+    base = 1_790_857_026_000_000_000
+    events = [
+        {"ph": "M", "name": "process_name", "pid": 7, "tid": 0, "args": {"name": "x"}},
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "k",
+            "pid": 7,
+            "tid": 1,
+            "ts": 5.5,
+            "dur": 2,
+        },
+        {
+            "ph": "X",
+            "cat": "Trace",
+            "name": "PyTorch Profiler (0)",
+            "pid": "Spans",
+            "tid": 0,
+            "ts": 1075990243460.021,
+            "dur": 10000.123,
+        },
+    ]
+    path = tmp_path / f"rank{suffix}"
+    data = kineto_layout(base, events).encode()
+    path.write_bytes(gzip.compress(data) if suffix.endswith(".gz") else data)
+    assert list(native.kineto_events(path)) == list(
+        native.kineto_events(path, fast=False)
+    )
+    config = Config("unused", str(tmp_path))
+    deadline = time.monotonic() + 60
+    fast = inspection.inspect_trace(path, config, deadline)
+    assert fast == inspection.scan_trace(path, config, deadline, inspection.scan_tokens)
+    assert (fast["events"], fast["cuda_kernels"]) == (3, 1)
+    assert fast["recording_bounds"]["start_unix_ns"] == base + 1075990243460021
+    # Any other layout falls back to the token parser instead of failing.
+    path.write_bytes(
+        gzip.compress(
+            json.dumps({"baseTimeNanoseconds": base, "traceEvents": events}).encode()
+        )
+        if suffix.endswith(".gz")
+        else json.dumps({"baseTimeNanoseconds": base, "traceEvents": events}).encode()
+    )
+    assert inspection.inspect_trace(path, config, deadline)["events"] == 3
+    assert len(list(native.kineto_events(path, fast=False))) == 3
 
 
 def test_bundle_reads_nsight_worker_exports(tmp_path):
