@@ -40,22 +40,27 @@ MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 def _gpu0_compute_capability() -> Optional[tuple[int, int]]:
     """Return GPU 0's CUDA compute capability, or None if it cannot be read."""
-    # Runs at import time, also under tests/report_pytest_markers.py, which
-    # replaces pynvml with a MagicMock; so any failure means "unknown".
     try:
         import pynvml
-
+    except ImportError:
+        return None
+    try:
         pynvml.nvmlInit()
-    except Exception:
+    except pynvml.NVMLError:
         return None
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-        return (int(major), int(minor))
-    except Exception:
+        capability = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+    except pynvml.NVMLError:
         return None
     finally:
         pynvml.nvmlShutdown()
+    # Runs at import time, also under tests/report_pytest_markers.py, which
+    # replaces pynvml with a stub whose calls return placeholder objects.
+    if not isinstance(capability, tuple):
+        return None
+    major, minor = capability
+    return (int(major), int(minor))
 
 
 # MODEL_NAME's MoE gating needs flashinfer fused_topk_deepseek, which fails below
