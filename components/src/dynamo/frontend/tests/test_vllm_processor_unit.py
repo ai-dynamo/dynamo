@@ -1676,9 +1676,10 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
     request_for_sampling = RequestForSampling(
         max_completion_tokens=None,
         max_tokens=1,
+        logprobs=None,
+        top_logprobs=None,
         cache_salt=None,
         mm_processor_kwargs=None,
-        logprobs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
     )
     monkeypatch.setattr(

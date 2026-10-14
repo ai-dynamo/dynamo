@@ -80,7 +80,6 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Log("Project a split-I/O selected workload")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.numLPUNodes = 1
 	fixture.partitions[0].topology = registryTestTopology
 	fixture.partitions[0].numChips = 8
 	fixture.partitions[0].devicesPerNode = 8
