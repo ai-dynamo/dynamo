@@ -62,7 +62,9 @@ def has_completed_output(chunk: dict[str, Any], request_type: RequestType) -> bo
     """
     if request_type == RequestType.CHAT_COMPLETION:
         choices = chunk.get("choices")
-        return bool(choices) and all(
+        if not choices:
+            return False
+        return all(
             choice.get("finish_reason") in ("stop", "length", "tool_calls")
             for choice in choices
         )

@@ -137,3 +137,12 @@ def test_file_override_preserves_model_specific_fields(monkeypatch, tmp_path):
 )
 def test_formatted_terminal_results_are_recognized(request_type, chunk):
     assert has_completed_output(chunk, request_type)
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [{}, {"choices": None}, {"choices": []}],
+    ids=["missing", "null", "empty"],
+)
+def test_chat_without_choices_is_not_complete(chunk):
+    assert has_completed_output(chunk, RequestType.CHAT_COMPLETION) is False
