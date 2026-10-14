@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Writes CI failure classifications (code / infra / unclear) decided by the
+# Devin batch classifier to Datadog Logs, so dashboards can chart them.
+name: CI Failure Labels
+
+on:
+  workflow_dispatch:
+    inputs:
+      verdicts:
+        description: 'JSON array of {job_id, failure_class, cause, confidence, evidence}'
+        required: true
+        type: string
+      decided_by:
+        description: 'Who produced the verdicts'
+        required: false
+        default: devin
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ci-failure-labels
+  cancel-in-progress: false
+
+jobs:
+  write-labels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          sparse-checkout: .github/scripts
+      - name: Validate and send labels to Datadog
+        env:
+          VERDICTS: ${{ inputs.verdicts }}
+          DECIDED_BY: ${{ inputs.decided_by }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: datadoghq.com
+        run: python3 .github/scripts/ci_failure_labels.py
