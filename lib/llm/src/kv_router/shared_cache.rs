@@ -239,13 +239,18 @@ impl HicacheSharedKvCache {
 
     fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
         let config = self.resolve_mooncake_config_and_endpoint();
-        let tenant = config
-            .as_ref()
-            .map_or("default", |(config, _)| config.tenant_id());
         // SGLang's ZmqEventPublisher increments this sequence once per published batch, so a
         // non-consecutive value means one or more whole batches were missed.
         let has_previous = self.has_sequence.swap(true, Ordering::AcqRel);
         let previous = self.last_sequence.swap(sequence, Ordering::AcqRel);
+        let Some((config, _)) = config else {
+            // Removals cannot be applied without a consistent configuration, so
+            // discard old evidence while retaining the stream's sequence position.
+            self.present_keys.clear();
+            self.group_states.clear();
+            return;
+        };
+        let tenant = config.tenant_id();
         if has_previous && sequence == previous {
             return;
         }
@@ -1152,6 +1157,17 @@ mod tests {
         tx.send(HashMap::from([(1, runtime), (2, default_runtime)]))
             .unwrap();
         assert!(cache.kv_events_endpoint().is_none());
+        cache.apply_batch(
+            2,
+            stored_events(
+                &expand_actual_query_keys(&hash, &mooncake_config()),
+                &sglang_group_id(&hash, &mooncake_config()),
+            ),
+        );
+        assert!(cache.present_keys.is_empty());
+        assert!(cache.group_states.is_empty());
+        assert!(cache.has_sequence.load(Ordering::Acquire));
+        assert_eq!(cache.last_sequence.load(Ordering::Acquire), 2);
 
         let mut current = serde_json::to_value(mooncake_config()).unwrap();
         current["tenant_id"] = "default".into();
@@ -1163,6 +1179,45 @@ mod tests {
         tx.send(HashMap::from([(1, current_runtime), (2, legacy_runtime)]))
             .unwrap();
         assert!(cache.kv_events_endpoint().is_some());
+        assert_eq!(
+            cache
+                .check_blocks(&[1, 2, 3, 4], 4, None)
+                .await
+                .unwrap()
+                .total_hits,
+            0
+        );
+    }
+
+    #[test]
+    fn test_batches_without_workers_clear_evidence_and_advance_sequence() {
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(mooncake_config());
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+        let keys = vec!["key".to_string()];
+        cache.apply_batch(1, stored_events(&keys, "group"));
+        assert!(!cache.present_keys.is_empty());
+        assert!(!cache.group_states.is_empty());
+
+        tx.send(HashMap::new()).unwrap();
+        // Even a duplicate batch must invalidate evidence after workers disappear.
+        cache.apply_batch(1, stored_events(&keys, "group"));
+        assert!(cache.present_keys.is_empty());
+        assert!(cache.group_states.is_empty());
+        cache.apply_batch(2, stored_events(&keys, "group"));
+        assert_eq!(cache.last_sequence.load(Ordering::Acquire), 2);
+        assert!(cache.has_sequence.load(Ordering::Acquire));
+        assert!(cache.present_keys.is_empty());
+        assert!(cache.group_states.is_empty());
+
+        let mut runtime = ModelRuntimeConfig::new();
+        runtime
+            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, mooncake_config())
+            .unwrap();
+        tx.send(HashMap::from([(1, runtime)])).unwrap();
+        cache.apply_batch(3, stored_events(&keys, "group"));
+        assert_eq!(cache.last_sequence.load(Ordering::Acquire), 3);
+        assert_eq!(cache.present_keys.len(), 1);
+        assert_eq!(cache.group_states.len(), 1);
     }
 
     // Key names as stored by an SGLang worker serving `Qwen/Qwen3-0.6B` with no
@@ -1366,7 +1421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscriber_clears_state_when_runtime_config_watch_closes() {
-        let (tx, runtime_configs) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(mooncake_config());
         let cache = HicacheSharedKvCache::new(runtime_configs);
         cache.apply_batch(
             1,
@@ -1377,8 +1432,10 @@ mod tests {
                 group_id: None,
             }],
         );
+        assert!(!cache.present_keys.is_empty());
         let task = tokio::spawn(cache.clone().run_subscriber(CancellationToken::new()));
 
+        tx.send(HashMap::new()).unwrap();
         drop(tx);
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
