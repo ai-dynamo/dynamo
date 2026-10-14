@@ -345,7 +345,7 @@ mod kv_cache_tests {
 ```
 
 ### CI Integration
-- CI runs the commands listed in [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace directories: `.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`. See [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml) for the exact steps.
+- CI runs the commands listed in [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 3 workspace directories: `.`, `lib/bindings/python`, `lib/runtime/examples`. See [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml) for the exact steps.
 
 ---
 
@@ -476,7 +476,7 @@ Source workflow files (see [`.github/workflows/`](../.github/workflows/) for the
 
 Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
 
-**Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
+**Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 3 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
 
 **Python tests** (framework-agnostic, CPU-only, inside a dynamo container):
 

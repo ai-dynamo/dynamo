@@ -1,6 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Requires Dynamo <= 1.6.x: later releases no longer ship KVBM.
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 

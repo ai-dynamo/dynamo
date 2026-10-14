@@ -23,7 +23,7 @@ Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to 
 | Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
 | Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)                       |
 | Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
-| Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
+| Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh) (Dynamo <= 1.6.x) |
 
 
 For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloading/overview.mdx).
@@ -39,7 +39,7 @@ For Kubernetes deployment, see [Deploy LMCache MP](../../../../../kubernetes/kv-
 | ----------------------- | ------------------------------------------------------------------------------------- |
 | Aggregated              | [`agg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv.sh)               |
 | Aggregated + KV routing | [`agg_flexkv_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh) |
-| Disaggregated           | [`disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)         |
+| Disaggregated           | [`disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh) (Dynamo <= 1.6.x) |
 
 
 For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloading/overview.mdx).
