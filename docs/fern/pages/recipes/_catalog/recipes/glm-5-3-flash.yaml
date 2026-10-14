@@ -9,7 +9,7 @@ model:
   name: GLM-5.3-Flash
   hf_id: zai-org/GLM-5.3-Flash
   precision: FP8 (vLLM) or NVFP4 (SGLang)
-status: validated
+status: experimental
 targets:
 - id: vllm-agg-gb200
   recommended: true
