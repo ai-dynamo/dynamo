@@ -12,6 +12,7 @@ from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connec
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.output_modalities import (
     RequestType,
@@ -19,11 +20,15 @@ from dynamo.common.utils.output_modalities import (
     parse_request_type,
 )
 from dynamo.llm import ModelInput, WorkerType, register_model
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import (
+    OutputFormatter,
+    _normalize_image_output_options,
+)
 from dynamo.vllm.omni.stage_worker import (
     _connector_key,
     _ensure_stage_connectors,
@@ -108,7 +113,22 @@ class OmniStageRouter:
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
         request_id = str(uuid.uuid4())
-        _, request_type = parse_request_type(request, self.config.output_modalities)
+        parsed_request, request_type = parse_request_type(
+            request, self.config.output_modalities
+        )
+        image_output_format = None
+        if request_type == RequestType.IMAGE_GENERATION:
+            if not isinstance(parsed_request, NvCreateImageRequest):
+                raise InvalidArgument("Invalid image-generation request")
+            try:
+                image_output_format = _normalize_image_output_options(
+                    parsed_request.output_format,
+                    parsed_request.response_format,
+                    quality=parsed_request.quality,
+                    background=parsed_request.background,
+                )
+            except ValueError as exc:
+                raise InvalidArgument(str(exc)) from exc
 
         stage_outputs: List[StageOutput] = []
         for stage_idx, stage_cfg in enumerate(self.stage_configs):
@@ -185,7 +205,11 @@ class OmniStageRouter:
         output_format = (
             request.get("response_format")
             if request_type == RequestType.AUDIO_GENERATION
-            else request.get("output_format")
+            else (
+                image_output_format
+                if request_type == RequestType.IMAGE_GENERATION
+                else request.get("output_format")
+            )
         )
         if response_format is not None:
             fmt_ctx["response_format"] = response_format

@@ -1404,6 +1404,7 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       DOCKERHUB_LOGIN_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
@@ -1732,6 +1733,7 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1806,6 +1808,7 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1880,6 +1883,7 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}

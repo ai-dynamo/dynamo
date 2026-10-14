@@ -59,6 +59,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
@@ -72,6 +74,8 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		leaderworkersetv1.AddToScheme,
+		disaggregatedsetv1.AddToScheme,
 		apiextensionsv1.AddToScheme,
 		snapshotv1alpha1.AddToScheme,
 	} {
