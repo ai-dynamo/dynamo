@@ -29,8 +29,37 @@ import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
 from vllm.v1.executor import Executor
+
+# Resolved on first use, not at import: vLLM renamed get_engine_zmq_addresses in
+# vllm-project/vllm#54113, and this module is imported by every dynamo.vllm worker
+# while only --embedding-worker-processes > 1 calls into it. Module attributes so
+# tests can substitute them.
+get_engine_zmq_addresses: Callable[..., Any] | None = None
+launch_core_engines: Callable[..., Any] | None = None
+
+
+def _resolve_engine_utils() -> None:
+    """Bind the vLLM engine-launch helpers this pool needs, failing with a clear message."""
+    global get_engine_zmq_addresses, launch_core_engines
+    import vllm.v1.engine.utils as engine_utils
+
+    if launch_core_engines is None:
+        launch_core_engines = engine_utils.launch_core_engines
+    if get_engine_zmq_addresses is None:
+        resolved = getattr(engine_utils, "get_engine_zmq_addresses", None)
+        if resolved is None:
+            # vllm#54113: the supervisor now binds the frontend listeners up front and
+            # children adopt them; this pool still lets children bind the addresses
+            # themselves, so refuse rather than hand out addresses that are already bound.
+            raise RuntimeError(
+                "--embedding-worker-processes > 1 is not yet supported on this vLLM: "
+                f"vLLM {vllm.__version__} has no get_engine_zmq_addresses (it binds "
+                "frontend listeners in the supervisor since vllm-project/vllm#54113). "
+                "Run with --embedding-worker-processes 1 until the pool adopts inherited listeners."
+            )
+        get_engine_zmq_addresses = resolved
+
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +492,7 @@ def create_shared_embedding_engine_client(
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
+        _resolve_engine_utils()
         addresses = get_engine_zmq_addresses(vllm_config, process_count)
 
         parent_logger_config = _client_config(
