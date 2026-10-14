@@ -93,6 +93,7 @@ jobs:
             echo "PERF_CONTAINER=$container"
             echo "RESOURCE_KINDS=$resources"
             echo "ARTIFACTS=$RUNNER_TEMP/$RUN_KEY-artifacts"
+            echo "AIPERF_OUTPUT_DIR=/aiperf"
             echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/$RUN_KEY-registry-auth.json"
           } >> "$GITHUB_ENV"
       - timeout-minutes: 5
@@ -107,8 +108,26 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
           ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
-          PERF_CLEANUP: |
-            trap 'find "$ARTIFACT_ROOT" -type f -name inputs.json -delete || true' EXIT
+          PERF_LIFECYCLE: |
+            set -euo pipefail
+            mkdir -p "$AIPERF_OUTPUT_DIR/results"
+            retain_perf_artifacts() {
+              status=$?
+              trap - EXIT
+              find "$AIPERF_OUTPUT_DIR/results" -type f -name inputs.json -delete || true
+              printf '%s\n' "$status" > "$AIPERF_OUTPUT_DIR/exit-code"
+              # Keep emptyDir accessible until CI exports results, even on failure.
+              deadline=$((SECONDS + ${AIPERF_COLLECTION_TIMEOUT:-600}))
+              until [[ -f "$AIPERF_OUTPUT_DIR/collected" ]]; do
+                if (( SECONDS >= deadline )); then
+                  echo "Timed out waiting for artifact collection" >&2
+                  exit "$((status == 0 ? 1 : status))"
+                fi
+                sleep 1
+              done
+              exit "$status"
+            }
+            trap retain_perf_artifacts EXIT
         run: |
           image="${ACR_HOST}/${ACR_REPOSITORY}:${IMAGE_TAG}"
           digest=$(skopeo inspect --raw "docker://$image" | jq -er '
@@ -125,15 +144,14 @@ jobs:
           kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
           yq -i 'with(select(.kind == "Job");
             (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
-            (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET) |
-            (.spec.template.spec.containers[].env[]? | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
-          if [[ "$RECIPE" == kimi-k25-agg || "$RECIPE" == kimi-k25-disagg ]]; then
-            yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
-              (.spec.template.spec.containers[].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
-          elif [[ "$RECIPE" == deepseek-v4-pro-agg || "$RECIPE" == deepseek-v4-pro-disagg ]]; then
-            yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
-              .spec.template.spec.containers[0].command[2] = strenv(PERF_CLEANUP) + "\n" + .spec.template.spec.containers[0].command[2])' "$ARTIFACTS/rendered.yaml"
-          fi
+            (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET))' "$ARTIFACTS/rendered.yaml"
+          # Reserve ten minutes for collection plus termination grace after the benchmark timeout.
+          yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
+            .spec.template.spec.containers[0].env += [{"name": "AIPERF_BENCHMARK_TIMEOUT", "value": (.spec.activeDeadlineSeconds | tostring)}] |
+            .spec.activeDeadlineSeconds += 660 |
+            .spec.template.spec.containers[0].command[4] = .spec.template.spec.containers[0].command[2] |
+            .spec.template.spec.containers[0].command[3] = "aiperf-ci" |
+            .spec.template.spec.containers[0].command[2] = strenv(PERF_LIFECYCLE) + "\ntimeout --kill-after=30s \"$AIPERF_BENCHMARK_TIMEOUT\" /bin/bash -c \"$1\"")' "$ARTIFACTS/rendered.yaml"
           yq 'select(.kind == "DynamoGraphDeployment")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
           yq 'select(.kind == "Job" and .metadata.name == strenv(BENCHMARK))' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
           yq 'select(.kind != "DynamoGraphDeployment" and .metadata.name != strenv(BENCHMARK))' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/prerequisites.yaml"
@@ -211,13 +229,20 @@ jobs:
           done
       - name: Run AIPerf
         if: ${{ !inputs.preflight_only }}
-        # The Kubernetes Job deadline bounds the run.
+        # The exit marker precedes container termination so emptyDir can be exported.
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
           while true; do
-            if "${k[@]}" wait "job/$BENCHMARK" --for=condition=Complete --timeout=5s; then
-              break
+            pod=$("${k[@]}" get pods -l "job-name=$BENCHMARK" -o json |
+              jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] |
+                sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')
+            if [[ -n "$pod" ]]; then
+              echo "PERF_POD=$pod" >> "$GITHUB_ENV"
+              if status=$("${k[@]}" exec "$pod" -c "$PERF_CONTAINER" -- cat "$AIPERF_OUTPUT_DIR/exit-code" 2>/dev/null); then
+                [[ "$status" =~ ^[0-9]+$ ]] || { echo "Invalid benchmark exit status: $status" >&2; exit 1; }
+                exit "$status"
+              fi
             fi
             "${k[@]}" get job "$BENCHMARK" -o json |
               jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
@@ -247,18 +272,17 @@ jobs:
           for job in $("${k[@]}" get job -l "$selector" -o name); do
             "${k[@]}" logs "$job" --all-containers > "$ARTIFACTS/${job##*/}.log" 2>&1 || true
           done
-          pod_selector="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type=frontend"
-          container=main
-          directory="/opt/models/perf/$RUN_KEY"
-          if [[ -z "$("${k[@]}" get dgd -l "$selector" -o name)" ]]; then
-            exit 0
+          pod=${PERF_POD:-}
+          if [[ -z "$pod" ]]; then
+            pod=$("${k[@]}" get pods -l "job-name=$BENCHMARK" -o json |
+              jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] |
+                sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')
           fi
-          pod=$("${k[@]}" get pods -l "$pod_selector" -o json |
-            jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
-          if [[ -n "$pod" ]] && "${k[@]}" exec -c "$container" "$pod" -- test -d "$directory"; then
+          if [[ -n "$pod" ]]; then
+            trap '"${k[@]}" exec -c "$PERF_CONTAINER" "$pod" -- touch "$AIPERF_OUTPUT_DIR/collected" || true' EXIT
             mkdir -p "$ARTIFACTS/perf"
-            "${k[@]}" exec -c "$container" "$pod" -- \
-              tar -C "$directory" --exclude=inputs.json -cf - . | tar -C "$ARTIFACTS/perf" -xf -
+            "${k[@]}" exec -c "$PERF_CONTAINER" "$pod" -- \
+              tar -C "$AIPERF_OUTPUT_DIR/results" --exclude=inputs.json -cf - . | tar -C "$ARTIFACTS/perf" -xf -
           fi
       - name: Verify AIPerf results
         if: ${{ success() && !inputs.preflight_only }}
@@ -280,6 +304,14 @@ jobs:
               .request_count.avg == $requests and (.error_request_count.avg // 0) == 0 and
               .output_sequence_length.avg > 0' "$ARTIFACTS/perf/c$concurrency/profile_export_aiperf.json"
           done
+      - timeout-minutes: 5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        with:
+          name: ${{ inputs.recipe }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACTS }}
+          retention-days: 14
+          if-no-files-found: error
       - name: Clean up recipe resources
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         timeout-minutes: 20
@@ -302,11 +334,3 @@ jobs:
             fi
           done
           exit "$failed"
-      - timeout-minutes: 5
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
-        with:
-          name: ${{ inputs.recipe }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ARTIFACTS }}
-          retention-days: 14
-          if-no-files-found: error
