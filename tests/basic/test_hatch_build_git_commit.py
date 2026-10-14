@@ -32,9 +32,11 @@ COMPONENTS = ("alpha", "beta")
 
 class _FakeApp:
     def __init__(self) -> None:
+        """Collect build warnings without requiring a Hatch application."""
         self.warnings: list[str] = []
 
     def display_warning(self, message: str) -> None:
+        """Keep warning text so tests can check the missing-commit message."""
         self.warnings.append(message)
 
 
@@ -62,7 +64,8 @@ def _load_hook(tree: Path, monkeypatch: pytest.MonkeyPatch, app: _FakeApp):
     spec = importlib.util.spec_from_file_location(
         f"hatch_build_under_test_{id(tree)}", tree / "hatch_build.py"
     )
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load the build hook from {tree / 'hatch_build.py'}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
@@ -74,6 +77,7 @@ def _load_hook(tree: Path, monkeypatch: pytest.MonkeyPatch, app: _FakeApp):
 
 
 def _read_versions(tree: Path) -> dict[str, tuple[str | None, str | None]]:
+    """Read each component's version and commit without importing its package."""
     result = {}
     for component in COMPONENTS:
         text = (
@@ -90,6 +94,7 @@ def _read_versions(tree: Path) -> dict[str, tuple[str | None, str | None]]:
 
 @pytest.fixture
 def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Provide an isolated source tree with no inherited commit metadata."""
     root = tmp_path / "src"
     root.mkdir()
     monkeypatch.delenv("DYNAMO_GIT_COMMIT", raising=False)
@@ -102,6 +107,7 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_explicit_commit_without_git(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Normalize an explicit SHA and write it to every component without Git."""
     monkeypatch.setenv("DYNAMO_GIT_COMMIT", VALID_SHA.upper())
     app = _FakeApp()
     _load_hook(tree, monkeypatch, app).initialize("standard", {})
@@ -113,6 +119,7 @@ def test_explicit_commit_without_git(
 
 
 def test_falls_back_to_git_head(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the source checkout's HEAD while preserving the version suffix."""
     git = [
         "git",
         "-c",
@@ -152,6 +159,7 @@ def test_falls_back_to_git_head(tree: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_no_commit_writes_empty_and_warns(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Keep builds usable without a commit and explain how to supply one."""
     app = _FakeApp()
     _load_hook(tree, monkeypatch, app).initialize("standard", {})
 
@@ -163,6 +171,7 @@ def test_no_commit_writes_empty_and_warns(
 def test_malformed_explicit_commit_raises(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Reject a short explicit SHA instead of recording ambiguous metadata."""
     monkeypatch.setenv("DYNAMO_GIT_COMMIT", VALID_SHA[:7])
     hook = _load_hook(tree, monkeypatch, _FakeApp())
     with pytest.raises(ValueError, match="DYNAMO_GIT_COMMIT"):
@@ -172,6 +181,7 @@ def test_malformed_explicit_commit_raises(
 def test_keeps_commit_from_existing_version_file(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Carry the sdist's recorded commit into every wheel component."""
     # Models a wheel built from an unpacked sdist: no .git, no env var, but the
     # sdist build already wrote the commit into _version.py.
     hook = _load_hook(tree, monkeypatch, _FakeApp())
@@ -191,6 +201,7 @@ def test_keeps_commit_from_existing_version_file(
 def test_conflicting_existing_commits_raise(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Fail when existing component files disagree about their source commit."""
     hook = _load_hook(tree, monkeypatch, _FakeApp())
     other_sha = "f" * 40
     for component, sha in zip(COMPONENTS, (VALID_SHA, other_sha)):
@@ -205,6 +216,7 @@ def test_conflicting_existing_commits_raise(
 def test_unreadable_existing_version_file_raises(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Propagate read errors so an unreadable commit is not treated as absent."""
     hook = _load_hook(tree, monkeypatch, _FakeApp())
     # A directory in place of _version.py: opening it fails with an error
     # other than "file not found".
@@ -219,6 +231,7 @@ def test_unreadable_existing_version_file_raises(
 def test_ignores_commit_of_enclosing_checkout(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Avoid attributing an unpacked source tree to an unrelated parent checkout."""
     # Models an unpacked source tree placed inside an unrelated checkout.
     outer = tree.parent
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outer.parent))

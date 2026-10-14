@@ -93,6 +93,7 @@ def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:
 
 
 def test_ai_dynamo_wheel_records_git_commit(wheelhouse: Path) -> None:
+    """Check that wheel metadata identifies the source used to build the image."""
     # CI images set DYNAMO_COMMIT_SHA to the same build arg that the wheel build
     # receives, so this checks the published wheel against the built source.
     expected = os.environ.get(COMMIT_SHA_ENV, "").strip().lower()
