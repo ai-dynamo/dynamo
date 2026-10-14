@@ -230,7 +230,52 @@ Each entry returned by `workers()` is a `RequestClassifierWorker`:
 | `worker()` | Worker ID and data-parallel rank, returned as `WorkerWithDpRank` |
 | `total_kv_blocks()` | Advertised total KV-block capacity for this rank, or `None` when unavailable; this is not the number of free blocks |
 
-Classifiers do not currently receive the per-worker cache and load views exposed to worker-selection plugins through `WorkerInputs`.
+### Worker Inputs
+
+A classifier can read the per-worker cache and load data that [worker-selection plugins](custom-worker-selection.mdx) receive. Declare the groups in `required_worker_inputs`, then read them with `read_worker_inputs`:
+
+```rust
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifyFuture, ClassifyRequest, RequestClassifier,
+};
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+
+struct LoadAwareClass {
+    max_active_requests: usize,
+}
+
+impl RequestClassifier for LoadAwareClass {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
+
+    fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+        let saturated = request
+            .read_worker_inputs(|workers| {
+                // Count only observed loads, and require at least one.
+                let mut loads = workers
+                    .iter()
+                    .filter_map(|worker| worker.load())
+                    .filter(|load| load.is_available())
+                    .peekable();
+                loads.peek().is_some()
+                    && loads.all(|load| load.active_requests() >= self.max_active_requests)
+            })
+            .unwrap_or(false);
+        if saturated {
+            request.set_policy_class("batch");
+        }
+        Box::pin(async move { Ok(request) })
+    }
+}
+```
+
+Dynamo builds these rows with the same code that worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` have the same meaning in both plugins. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `read_worker_inputs` returns `None`.
+
+- Rows cover each worker rank that is eligible for the request, including overloaded workers. Row order is unspecified.
+- The rows are a snapshot taken before `classify`. Dynamo does not refresh them while the classifier holds the request, so do not treat them as current load when a deferred request is admitted later.
+- Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
+- Do not keep the view after the callback returns.
 
 ### Admission Decisions
 

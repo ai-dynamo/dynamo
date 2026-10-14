@@ -8,7 +8,7 @@ mod context;
 mod inputs;
 
 pub use context::WorkerSelectionContext;
-pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData};
+pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
     WorkerInputView, WorkerInputs, WorkerLoadInput,
