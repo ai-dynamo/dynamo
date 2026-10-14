@@ -242,10 +242,22 @@ impl SelectionCore {
 
     /// Run one selection: resolve the session, look the prompt up, schedule,
     /// and (for `Book`) install the reservation. Every host's selection goes
-    /// through here.
+    /// through the same core path.
     pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+        self.run_selection_with_backend_max_output_tokens(operation, None)
+            .await
+    }
+
+    /// Run selection with the host's enforced backend stop limit, independent of routing hints.
+    pub async fn run_selection_with_backend_max_output_tokens(
+        &self,
+        operation: SelectionOperation<'_>,
+        backend_max_output_tokens: Option<u32>,
+    ) -> SelectionRun {
         let mut lookup = None;
-        let result = self.run_selection_inner(operation, &mut lookup).await;
+        let result = self
+            .run_selection_inner(operation, &mut lookup, backend_max_output_tokens)
+            .await;
         SelectionRun { result, lookup }
     }
 
@@ -253,6 +265,7 @@ impl SelectionCore {
         &self,
         operation: SelectionOperation<'_>,
         lookup: &mut Option<LookupTimings>,
+        backend_max_output_tokens: Option<u32>,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
@@ -450,7 +463,7 @@ impl SelectionCore {
                 } else {
                     entry
                         .scheduler
-                        .schedule_request_with_booking(schedule_request)
+                        .schedule_request_with_booking_and_context(schedule_request, tokio::time::Instant::now(), backend_max_output_tokens)
                         .instrument(tracing::info_span!("kv_router.schedule"))
                         .await
                         .map(|(admitted, booking)| (admitted.response, None, booking))

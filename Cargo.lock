@@ -2479,6 +2479,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "dynamo-kv-router",
+ "dynamo-runtime",
  "fastrand",
  "parking_lot",
  "rustc-hash 2.1.2",

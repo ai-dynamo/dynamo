@@ -38,6 +38,7 @@ pub struct ClassifyRequest {
     pub(crate) overrides: ClassificationOverrides,
     ingress_at: Instant,
     input_tokens: usize,
+    backend_max_output_tokens: Option<u32>,
     initial_cached_tokens: usize,
     sequence_hashes: Option<Vec<SequenceHash>>,
     pub(crate) progress: RequestProgress,
@@ -71,6 +72,7 @@ impl ClassifyRequest {
             overrides: ClassificationOverrides::default(),
             ingress_at,
             input_tokens,
+            backend_max_output_tokens: None,
             initial_cached_tokens,
             sequence_hashes: None,
             progress: RequestProgress::new(input_tokens).0,
@@ -99,6 +101,13 @@ impl ClassifyRequest {
         self
     }
 
+    /// Set the backend stop limit from a trusted preprocessed request host.
+    /// A routing expected-output hint must not be used here.
+    pub(crate) fn with_backend_max_output_tokens(mut self, limit: Option<u32>) -> Self {
+        self.backend_max_output_tokens = limit;
+        self
+    }
+
     /// Copy tracking hashes into storage owned by this classification attempt.
     pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
@@ -122,6 +131,12 @@ impl ClassifyRequest {
 
     pub fn input_tokens(&self) -> usize {
         self.input_tokens
+    }
+
+    /// Backend generation limit from the preprocessed request. Routing hints
+    /// and standalone selection requests leave this unset.
+    pub fn backend_max_output_tokens(&self) -> Option<u32> {
+        self.backend_max_output_tokens
     }
 
     /// Return the request's ordered active-tracking sequence hashes.

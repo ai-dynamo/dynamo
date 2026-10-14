@@ -98,6 +98,7 @@ struct BestMatchArgs<'a> {
     policy_class: Option<String>,
     session_context: Option<dynamo_kv_router::SessionContext>,
     expected_output_tokens: Option<u32>,
+    backend_max_output_tokens: Option<u32>,
     affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -123,6 +124,7 @@ impl RoutingHost {
                 args.policy_class,
                 args.session_context,
                 args.expected_output_tokens,
+                args.backend_max_output_tokens,
                 args.affinity_target,
                 args.pinned_worker,
                 args.allowed_worker_ids,
@@ -183,6 +185,7 @@ impl RoutingHost {
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
+        let backend_max_output_tokens = request.stop_conditions.max_tokens;
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
@@ -289,6 +292,7 @@ impl RoutingHost {
                     policy_class,
                     session_context,
                     expected_output_tokens,
+                    backend_max_output_tokens,
                     affinity_target: affinity_target
                         .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
                     pinned_worker: None,
@@ -357,6 +361,7 @@ impl RoutingHost {
             policy_class,
             session_context,
             expected_output_tokens,
+            backend_max_output_tokens,
             affinity_target: None,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
