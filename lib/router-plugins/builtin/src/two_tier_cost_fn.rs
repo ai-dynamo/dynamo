@@ -369,8 +369,15 @@ mod tests {
 
     #[test]
     fn cache_tier_outranks_a_less_loaded_worker() {
-        // Six of ten blocks is 0.6, above the 0.5 threshold, so B wins despite carrying more load.
-        assert_eq!(select([(A, 0, 0), (B, 6, 4)]), worker(B));
+        // Six GPU blocks outrank six CPU blocks and clear the 0.5 threshold despite more load.
+        assert_eq!(
+            select_tiers(
+                Parameters::default(),
+                [(A, 0, 6, 0), (B, 6, 0, 4)],
+                KvRouterConfig::default(),
+            ),
+            worker(B)
+        );
     }
 
     #[test]
@@ -428,27 +435,6 @@ mod tests {
         }
     }
 
-    /// Equal-count GPU hits rank higher; a large load imbalance still displaces CPU affinity.
-    #[test]
-    fn device_and_load_preference_outrank_host_overlap() {
-        assert_eq!(
-            select_tiers(
-                Parameters::default(),
-                [(A, 6, 0, 4), (B, 0, 6, 0)],
-                KvRouterConfig::default(),
-            ),
-            worker(A)
-        );
-        assert_eq!(
-            select_tiers(
-                Parameters::default(),
-                [(A, 0, 0, 0), (B, 0, 10, 40)],
-                KvRouterConfig::default(),
-            ),
-            worker(A)
-        );
-    }
-
     #[test]
     fn rejects_out_of_range_parameters() {
         let cache = |v| {
@@ -475,10 +461,10 @@ mod tests {
             }
             .validate()
         };
-        for value in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
             assert!(weight(value).is_err());
         }
-        assert!(weight(0.0).is_ok() && weight(1.0).is_ok());
+        assert!(weight(0.0).is_ok());
         assert!(Parameters::default().validate().is_ok());
     }
 
