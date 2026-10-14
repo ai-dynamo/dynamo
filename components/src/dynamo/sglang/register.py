@@ -46,6 +46,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
+    effective_max_running_requests,
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     kv_event_block_size,
@@ -487,6 +488,40 @@ def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudge
     )
 
 
+# Bounds the startup read of SGLang's resolved request cap. The scheduler
+# answers a control request between batches, which happens before any traffic
+# here; the bound only prevents a stuck scheduler from blocking registration.
+# If it fires, a late reply can still reach SGLang's communicator, so keep it
+# generous rather than tight.
+_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S = 10.0
+
+
+async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
+    """Read SGLang's resolved per-rank request cap, or ``None``.
+
+    SGLang does not put this value in ``scheduler_info``; it is only available
+    from ``get_internal_state``. A failure is logged and leaves the CLI value in
+    place, so registration never depends on this read.
+    """
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    get_internal_state = getattr(tokenizer_manager, "get_internal_state", None)
+    if get_internal_state is None:
+        return None
+    try:
+        internal_states = await asyncio.wait_for(
+            get_internal_state(), _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S
+        )
+    except Exception as e:
+        logging.warning(
+            "Could not read SGLang's resolved max_running_requests (%s: %s); "
+            "publishing the configured value instead.",
+            type(e).__name__,
+            e,
+        )
+        return None
+    return effective_max_running_requests(internal_states)
+
+
 async def get_runtime_config(
     engine: Optional[sgl.Engine],
     server_args: ServerArgs,
@@ -652,6 +687,17 @@ async def get_runtime_config(
 
     if engine is None:
         return runtime_config
+
+    effective_max_seqs = await _get_effective_max_running_requests(engine)
+    if effective_max_seqs is not None:
+        if effective_max_seqs != runtime_config.max_num_seqs:
+            logging.info(
+                "Publishing SGLang's resolved max_running_requests per DP rank "
+                "as max_num_seqs: %s (requested: %s)",
+                effective_max_seqs,
+                runtime_config.max_num_seqs,
+            )
+        runtime_config.max_num_seqs = effective_max_seqs
 
     try:
         # TODO(rank-aware-kv-capacity): scheduler_infos[0] is only a representative rank.

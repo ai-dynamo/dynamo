@@ -112,6 +112,35 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
     return max_running_requests // dp_size
 
 
+def effective_max_running_requests(internal_states: Any) -> int | None:
+    """Return SGLang's resolved per-rank request cap from ``get_internal_state``.
+
+    ``--max-running-requests`` is only a request. SGLang clamps it at startup
+    to the KV token capacity and, on hybrid (Mamba / linear-attention) models,
+    to the Mamba state cache, and it picks its own value when the flag is
+    unset. Each scheduler reports the result as
+    ``effective_max_running_requests_per_dp``. The value is per DP rank, the
+    unit ``max_num_seqs`` uses. When ranks disagree, the smallest one is
+    returned, because it is the one that binds first.
+
+    Returns ``None`` when no scheduler reports a positive integer (older SGLang
+    or an unexpected payload). The caller then keeps the CLI value.
+    """
+    if isinstance(internal_states, dict):
+        internal_states = [internal_states]
+    if not isinstance(internal_states, (list, tuple)):
+        return None
+
+    values = []
+    for state in internal_states:
+        if not isinstance(state, dict):
+            continue
+        value = state.get("effective_max_running_requests_per_dp")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            values.append(value)
+    return min(values) if values else None
+
+
 def tokens_to_kv_blocks(tokens: int, page_size: int | None) -> int:
     if not page_size or page_size <= 1:
         return tokens

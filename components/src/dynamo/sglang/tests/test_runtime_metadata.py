@@ -10,6 +10,7 @@ import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.sglang.capacity import (
+    effective_max_running_requests,
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     kv_event_block_size,
@@ -506,3 +507,141 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+@pytest.mark.parametrize(
+    "internal_states, expected",
+    [
+        ([{"effective_max_running_requests_per_dp": 101}], 101),
+        ({"effective_max_running_requests_per_dp": 64}, 64),
+        # Ranks can resolve differently; the smallest binds first.
+        (
+            [
+                {"effective_max_running_requests_per_dp": 128},
+                {"effective_max_running_requests_per_dp": 96},
+            ],
+            96,
+        ),
+        ([{}], None),
+        ([{"effective_max_running_requests_per_dp": 0}], None),
+        ([{"effective_max_running_requests_per_dp": True}], None),
+        ([{"effective_max_running_requests_per_dp": "101"}], None),
+        (["not-a-dict"], None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_effective_max_running_requests_parses_internal_state(
+    internal_states, expected
+):
+    assert effective_max_running_requests(internal_states) == expected
+
+
+def _effective_cap_server_args(max_running_requests):
+    return SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=None,
+        max_prefill_tokens=None,
+        max_running_requests=max_running_requests,
+        page_size=16,
+        speculative_algorithm="NONE",
+        speculative_num_steps=None,
+    )
+
+
+def _effective_cap_engine(get_internal_state):
+    tokenizer_manager = SimpleNamespace(
+        context_len=4096,
+        validate_total_tokens=True,
+        num_reserved_tokens=0,
+    )
+    if get_internal_state is not None:
+        tokenizer_manager.get_internal_state = get_internal_state
+    return SimpleNamespace(
+        _scheduler_init_result=SimpleNamespace(
+            scheduler_infos=[{"max_total_num_tokens": 1024}]
+        ),
+        tokenizer_manager=tokenizer_manager,
+    )
+
+
+def _patch_runtime_config_dependencies(register, monkeypatch, cli_max_num_seqs):
+    capacity = SimpleNamespace(
+        max_num_seqs=cli_max_num_seqs,
+        max_num_batched_tokens=1024,
+        total_kv_blocks=64,
+    )
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cli_value, resolved_value, expected",
+    [
+        # Hybrid Mamba model: a requested 256 resolves to 101 state slots.
+        (256, 101, 101),
+        # Unset flag: SGLang's own default is published instead of nothing.
+        (None, 2048, 2048),
+        # Older SGLang without the field keeps the configured value.
+        (256, None, 256),
+        (None, None, None),
+    ],
+)
+async def test_runtime_config_publishes_resolved_max_running_requests(
+    register, monkeypatch, cli_value, resolved_value, expected
+):
+    _patch_runtime_config_dependencies(register, monkeypatch, cli_value)
+
+    async def get_internal_state():
+        if resolved_value is None:
+            return [{}]
+        return [{"effective_max_running_requests_per_dp": resolved_value}]
+
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    runtime_config = await register.get_runtime_config(
+        _effective_cap_engine(get_internal_state),
+        _effective_cap_server_args(cli_value),
+        dynamo_args,
+    )
+
+    assert runtime_config.max_num_seqs == expected
+    assert runtime_config.total_kv_blocks == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["raises", "times_out", "missing"])
+async def test_resolved_max_running_requests_read_failure_keeps_cli_value(
+    register, monkeypatch, caplog, failure
+):
+    _patch_runtime_config_dependencies(register, monkeypatch, 256)
+    monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
+
+    async def raises():
+        raise RuntimeError("scheduler unavailable")
+
+    async def times_out():
+        await asyncio.sleep(1)
+
+    get_internal_state = {"raises": raises, "times_out": times_out}.get(failure)
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    runtime_config = await register.get_runtime_config(
+        _effective_cap_engine(get_internal_state),
+        _effective_cap_server_args(256),
+        dynamo_args,
+    )
+
+    assert runtime_config.max_num_seqs == 256
+    assert runtime_config.total_kv_blocks == 64
+    if failure != "missing":
+        assert "Could not read SGLang's resolved max_running_requests" in caplog.text
