@@ -22,6 +22,7 @@ use crate::metrics::request_plane::{
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::RegisteredResponsePlane;
 use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestPlanePayloadCodec;
@@ -675,8 +676,8 @@ pub struct AddressedPushRouter {
 #[derive(Clone)]
 enum ResponseServer {
     Tcp(Arc<tcp::server::TcpStreamServer>),
-    Quic(Arc<quic_response::QuicResponseServer>),
-    Velo(Arc<velo_response::VeloResponseService>),
+    /// QUIC or Velo. Request streams still use `request_callbacks`.
+    Registered(Arc<dyn RegisteredResponsePlane>),
 }
 
 impl AddressedPushRouter {
@@ -703,7 +704,7 @@ impl AddressedPushRouter {
         Arc::new(Self {
             req_client,
             request_callbacks,
-            responses: ResponseServer::Quic(responses),
+            responses: ResponseServer::Registered(responses),
         })
     }
 
@@ -726,7 +727,7 @@ impl AddressedPushRouter {
                 Ok(Arc::new(Self {
                     req_client,
                     request_callbacks,
-                    responses: ResponseServer::Velo(responses),
+                    responses: ResponseServer::Registered(responses),
                 }))
             }
             ResponsePlaneMode::Quic => {
@@ -742,15 +743,7 @@ impl AddressedPushRouter {
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         match &self.responses {
             ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
-            ResponseServer::Quic(responses) => {
-                let response_count = responses.cancel_instance_streams(instance_id).await;
-                response_count
-                    + self
-                        .request_callbacks
-                        .cancel_instance_streams(instance_id)
-                        .await
-            }
-            ResponseServer::Velo(responses) => {
+            ResponseServer::Registered(responses) => {
                 let response_count = responses.cancel_instance_streams(instance_id).await;
                 response_count
                     + self
@@ -767,13 +760,7 @@ impl AddressedPushRouter {
             ResponseServer::Tcp(responses) => {
                 responses.clear_instance_tombstone(instance_id).await;
             }
-            ResponseServer::Quic(responses) => {
-                responses.clear_instance_tombstone(instance_id).await;
-                self.request_callbacks
-                    .clear_instance_tombstone(instance_id)
-                    .await;
-            }
-            ResponseServer::Velo(responses) => {
+            ResponseServer::Registered(responses) => {
                 responses.clear_instance_tombstone(instance_id).await;
                 self.request_callbacks
                     .clear_instance_tombstone(instance_id)
@@ -874,29 +861,7 @@ impl AddressedPushRouter {
                     }
                     None => false,
                 },
-                ResponseServer::Quic(responses) => {
-                    let response_ok = match response_registration {
-                        Some(registration_id) => {
-                            responses
-                                .associate_instance(registration_id, &instance_id)
-                                .await
-                        }
-                        None => false,
-                    };
-                    let request_ok = match send_subject.as_deref() {
-                        Some(subject) => {
-                            self.request_callbacks
-                                .associate_request_instance(subject, &instance_id)
-                                .await
-                        }
-                        None => true,
-                    };
-                    if !request_ok && let Some(registration_id) = response_registration {
-                        responses.cancel_response(registration_id).await;
-                    }
-                    response_ok && request_ok
-                }
-                ResponseServer::Velo(responses) => {
+                ResponseServer::Registered(responses) => {
                     let response_ok = match response_registration {
                         Some(registration_id) => {
                             responses
@@ -1065,22 +1030,7 @@ impl AddressedPushRouter {
                 let pending: PendingConnections = responses.register(options).await;
                 pending.into_parts()
             }
-            ResponseServer::Quic(responses) => {
-                let send_stream = if enable_request_stream {
-                    let options = StreamOptions::builder()
-                        .context(engine_ctx.clone())
-                        .enable_request_stream(true)
-                        .enable_response_stream(false)
-                        .build()?;
-                    let pending: PendingConnections =
-                        self.request_callbacks.register(options).await;
-                    pending.send_stream
-                } else {
-                    None
-                };
-                (send_stream, Some(responses.register_response(engine_ctx)))
-            }
-            ResponseServer::Velo(responses) => {
+            ResponseServer::Registered(responses) => {
                 let send_stream = if enable_request_stream {
                     let options = StreamOptions::builder()
                         .context(engine_ctx.clone())
@@ -1097,7 +1047,8 @@ impl AddressedPushRouter {
                     send_stream,
                     Some(
                         responses
-                            .register_response(engine_ctx, defer_cancellation_until_prologue)?,
+                            .clone()
+                            .register_stream(engine_ctx, defer_cancellation_until_prologue)?,
                     ),
                 )
             }
@@ -1765,7 +1716,7 @@ mod tests {
                             Arc::new(AddressedPushRouter {
                                 req_client: client,
                                 request_callbacks: server,
-                                responses: super::ResponseServer::Velo(service.clone()),
+                                responses: super::ResponseServer::Registered(service.clone()),
                             })
                         } else {
                             AddressedPushRouter::new(client, server).unwrap()

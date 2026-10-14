@@ -46,6 +46,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use super::{
     ConnectionInfo, RegisteredStream, ResponseStreamPrologue, StreamPrologueError, StreamReceiver,
+    tombstones::InstanceTombstones,
 };
 use crate::{
     config::environment_names::quic_response, discovery::EndpointInstanceId,
@@ -86,7 +87,6 @@ const RESPONSE_BUFFER_CAPACITY: usize = 16_384;
 const MAX_RESPONSE_BUFFER_CAPACITY: usize = 65_536;
 const MAX_DEFERRED_RESPONSE_FRAMES: usize = 1_024;
 const MAX_DEFERRED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 const CLOSE_CODE_INVARIANT: quinn::VarInt = quinn::VarInt::from_u32(1);
 
 #[derive(Debug, Clone, Copy)]
@@ -551,7 +551,7 @@ struct RegistrationShard {
 struct ServerIndexes {
     registration_instance: HashMap<Uuid, EndpointInstanceId>,
     instance_registrations: HashMap<EndpointInstanceId, Vec<Uuid>>,
-    removed_instances: HashMap<EndpointInstanceId, Instant>,
+    removed_instances: InstanceTombstones,
     connection_bundles: HashMap<usize, Uuid>,
     bundle_connections: HashMap<Uuid, HashMap<usize, quinn::Connection>>,
 }
@@ -618,12 +618,6 @@ struct ActiveResponse {
     priority_ready: bool,
     priority_draining: bool,
     deferred: DeferredResponse,
-}
-
-fn prune_tombstones(indexes: &mut ServerIndexes, now: Instant) {
-    indexes
-        .removed_instances
-        .retain(|_, inserted| now.saturating_duration_since(*inserted) < TOMBSTONE_TTL);
 }
 
 pub struct QuicResponseServer {
@@ -845,9 +839,7 @@ impl QuicResponseServer {
 
     pub async fn associate_instance(&self, registration_id: Uuid, id: &EndpointInstanceId) -> bool {
         let mut indexes = self.state.indexes.lock();
-        let now = Instant::now();
-        prune_tombstones(&mut indexes, now);
-        if indexes.removed_instances.contains_key(id) {
+        if indexes.removed_instances.contains(id) {
             drop(indexes);
             remove_registration(&self.state, registration_id);
             return false;
@@ -870,9 +862,7 @@ impl QuicResponseServer {
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let registrations = {
             let mut indexes = self.state.indexes.lock();
-            let now = Instant::now();
-            prune_tombstones(&mut indexes, now);
-            indexes.removed_instances.insert(id.clone(), now);
+            indexes.removed_instances.insert(id);
             let registrations = indexes
                 .instance_registrations
                 .remove(id)
@@ -891,6 +881,33 @@ impl QuicResponseServer {
 
     pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
         self.state.indexes.lock().removed_instances.remove(id);
+    }
+}
+
+#[async_trait::async_trait]
+impl super::RegisteredResponsePlane for QuicResponseServer {
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        _defer_cancellation_until_prologue: bool,
+    ) -> anyhow::Result<RegisteredStream<StreamReceiver>> {
+        Ok(QuicResponseServer::register_response(&self, context))
+    }
+
+    async fn associate_instance(&self, registration_id: Uuid, id: &EndpointInstanceId) -> bool {
+        QuicResponseServer::associate_instance(self, registration_id, id).await
+    }
+
+    async fn cancel_response(&self, registration_id: Uuid) {
+        QuicResponseServer::cancel_response(self, registration_id).await;
+    }
+
+    async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
+        QuicResponseServer::cancel_instance_streams(self, id).await
+    }
+
+    async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
+        QuicResponseServer::clear_instance_tombstone(self, id).await;
     }
 }
 

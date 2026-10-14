@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     pin::Pin,
     sync::{
@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -31,7 +31,8 @@ use velo::{
 };
 
 use super::{
-    ConnectionInfo, RegisteredStream, ResponseStreamPrologue, StreamPrologueError, StreamReceiver,
+    ConnectionInfo, RegisteredResponsePlane, RegisteredStream, ResponseStreamPrologue,
+    StreamPrologueError, StreamReceiver, tombstones::InstanceTombstones,
 };
 use crate::{
     discovery::EndpointInstanceId,
@@ -41,7 +42,6 @@ use crate::{
 
 pub const TRANSPORT_NAME: &str = "velo_response";
 const VERSION: u32 = 3;
-const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 static PROCESS_SERVICE: tokio::sync::Mutex<Weak<SharedService>> =
     tokio::sync::Mutex::const_new(Weak::new());
 static PROCESS_METRICS: LazyLock<(crate::MetricsRegistry, Arc<velo::VeloMetrics>)> =
@@ -147,10 +147,34 @@ struct Registration {
     instance: Option<EndpointInstanceId>,
 }
 
+impl Registration {
+    fn cancel(&self) {
+        self.done.cancel();
+        self.controller.cancel();
+    }
+}
+
 #[derive(Default)]
 struct Registrations {
     requests: HashMap<Uuid, Registration>,
-    tombstones: HashMap<EndpointInstanceId, Instant>,
+    /// Lets `cancel_instance_streams` find an instance's requests without a full scan.
+    instance_requests: HashMap<EndpointInstanceId, HashSet<Uuid>>,
+    tombstones: InstanceTombstones,
+}
+
+impl Registrations {
+    fn take(&mut self, id: Uuid) -> Option<Registration> {
+        let registration = self.requests.remove(&id)?;
+        if let Some(instance) = &registration.instance
+            && let Some(ids) = self.instance_requests.get_mut(instance)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.instance_requests.remove(instance);
+            }
+        }
+        Some(registration)
+    }
 }
 
 /// One owner per Dynamo Runtime, shared by all of that runtime's clones.
@@ -313,10 +337,13 @@ impl VeloResponseService {
         self.closed
             .get_or_init(|| async {
                 self.closing.store(true, Ordering::Release);
-                let requests = std::mem::take(&mut self.registrations.lock().requests);
+                let requests = {
+                    let mut state = self.registrations.lock();
+                    state.instance_requests.clear();
+                    std::mem::take(&mut state.requests)
+                };
                 for registration in requests.into_values() {
-                    registration.done.cancel();
-                    registration.controller.cancel();
+                    registration.cancel();
                 }
                 // Bound the drain to five seconds, then await transport close.
                 self.velo
@@ -460,15 +487,14 @@ impl VeloResponseService {
     }
 
     fn remove(&self, id: Uuid) {
-        let registration = self.registrations.lock().requests.remove(&id);
+        let registration = self.registrations.lock().take(id);
         if let Some(registration) = registration {
-            registration.done.cancel();
-            registration.controller.cancel();
+            registration.cancel();
         }
     }
 
     fn complete(&self, id: Uuid) {
-        let registration = self.registrations.lock().requests.remove(&id);
+        let registration = self.registrations.lock().take(id);
         if let Some(registration) = registration {
             registration.done.cancel();
         }
@@ -476,14 +502,22 @@ impl VeloResponseService {
 
     pub async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
         let mut state = self.registrations.lock();
-        state
-            .tombstones
-            .retain(|_, when| when.elapsed() < TOMBSTONE_TTL);
-        if state.tombstones.contains_key(instance) {
+        if state.tombstones.contains(instance) {
+            let registration = state.take(id);
+            drop(state);
+            if let Some(registration) = registration {
+                registration.cancel();
+            }
             return false;
         }
         if let Some(request) = state.requests.get_mut(&id) {
+            debug_assert!(request.instance.is_none(), "registration associated twice");
             request.instance = Some(instance.clone());
+            state
+                .instance_requests
+                .entry(instance.clone())
+                .or_default()
+                .insert(id);
         }
         true
     }
@@ -493,22 +527,18 @@ impl VeloResponseService {
     }
 
     pub async fn cancel_instance_streams(&self, instance: &EndpointInstanceId) -> usize {
-        let ids = {
+        let registrations = {
             let mut state = self.registrations.lock();
-            state
-                .tombstones
-                .retain(|_, when| when.elapsed() < TOMBSTONE_TTL);
-            state.tombstones.insert(instance.clone(), Instant::now());
-            state
-                .requests
-                .iter()
-                .filter_map(|(id, r)| (r.instance.as_ref() == Some(instance)).then_some(*id))
+            state.tombstones.insert(instance);
+            let ids = state.instance_requests.remove(instance).unwrap_or_default();
+            ids.into_iter()
+                .filter_map(|id| state.requests.remove(&id))
                 .collect::<Vec<_>>()
         };
-        for id in &ids {
-            self.remove(*id);
+        for registration in &registrations {
+            registration.cancel();
         }
-        ids.len()
+        registrations.len()
     }
 
     pub async fn clear_instance_tombstone(&self, instance: &EndpointInstanceId) {
@@ -630,6 +660,33 @@ impl VeloResponseService {
             finished,
             prologue_sent: false,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl RegisteredResponsePlane for VeloResponseService {
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<RegisteredStream<StreamReceiver>> {
+        VeloResponseService::register_response(&self, context, defer_cancellation_until_prologue)
+    }
+
+    async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
+        VeloResponseService::associate_instance(self, id, instance).await
+    }
+
+    async fn cancel_response(&self, id: Uuid) {
+        VeloResponseService::cancel_response(self, id).await;
+    }
+
+    async fn cancel_instance_streams(&self, instance: &EndpointInstanceId) -> usize {
+        VeloResponseService::cancel_instance_streams(self, instance).await
+    }
+
+    async fn clear_instance_tombstone(&self, instance: &EndpointInstanceId) {
+        VeloResponseService::clear_instance_tombstone(self, instance).await;
     }
 }
 
