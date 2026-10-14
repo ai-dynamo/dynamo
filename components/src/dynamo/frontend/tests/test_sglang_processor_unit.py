@@ -2162,7 +2162,6 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         ]
         seen = {}
 
-        # Test double: capture the tool_choice handed to SGLang's tag builder.
         class FakeFunctionCallParser:
             def __init__(self, *, tools, tool_call_parser):
                 pass
