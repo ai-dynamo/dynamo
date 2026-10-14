@@ -2337,6 +2337,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
@@ -8743,6 +8744,8 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.117",
+ "url",
+ "uuid",
 ]
 
 [[package]]
