@@ -458,6 +458,10 @@ def test_public_embedded_ipv4_addresses_allowed(address):
     StoragePolicy().check_address(address)
 
 
+def test_native_ipv6_loopback_can_be_explicitly_allowed():
+    StoragePolicy(allowed_networks=("::1/128",)).check_address("::1")
+
+
 @pytest.mark.asyncio
 async def test_operator_limit_rejected_before_io(target, policy, http_transport):
     with pytest.raises(ArtifactStorageError, match="operator byte"):
