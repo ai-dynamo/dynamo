@@ -15,7 +15,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, LazyLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -87,6 +87,12 @@ const RESPONSE_CREDIT_WINDOW: u32 = 32;
 /// against 15.0 ms, end-to-end p99 4.5 against 13.5 s, and 20.0 against
 /// 37.4 ms of frontend CPU per request.
 const RESPONSE_TCP_LANES: u16 = 4;
+
+/// A worker forgets a frontend that has had no open response stream for this
+/// long. A restarted frontend comes back with a new instance ID, so without it
+/// a long-lived worker keeps every frontend it ever served.
+const PEER_IDLE_TTL: Duration = Duration::from_secs(600);
+const PEER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 fn response_mux_config() -> Result<MuxConfig> {
     use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS;
@@ -303,15 +309,53 @@ impl Drop for SharedService {
     }
 }
 
+/// A frontend this worker has registered with Velo.
+#[derive(Default)]
+struct PreparedPeer {
+    /// Registration and the lifecycle handshake, shared by concurrent requests.
+    ready: OnceCell<()>,
+    /// Open senders to this frontend. Only a peer with none is evicted.
+    active: AtomicUsize,
+    /// When its last sender finished, in seconds since the service started.
+    last_used: AtomicU64,
+}
+
+/// Keeps a prepared frontend from eviction while one sender uses it.
+struct PeerLease {
+    peer: Arc<PreparedPeer>,
+    started: tokio::time::Instant,
+}
+
+impl PeerLease {
+    fn new(peer: &Arc<PreparedPeer>, started: tokio::time::Instant) -> Self {
+        peer.active.fetch_add(1, Ordering::AcqRel);
+        Self {
+            peer: peer.clone(),
+            started,
+        }
+    }
+}
+
+impl Drop for PeerLease {
+    fn drop(&mut self) {
+        // Stamp before releasing, so a sweep that sees no senders also sees the time.
+        self.peer
+            .last_used
+            .store(self.started.elapsed().as_secs(), Ordering::Relaxed);
+        self.peer.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub struct VeloResponseService {
     velo: Arc<Velo>,
     transport: ResponseTransport,
     /// This service's `ResponseAddress::peer_address`, encoded once.
     peer_address: String,
     registrations: Mutex<Registrations>,
-    /// Share initial peer registration and the lifecycle handshake across
-    /// concurrent requests. A restarted frontend has a new instance ID.
-    prepared_peers: dashmap::DashMap<velo::InstanceId, Arc<OnceCell<()>>>,
+    /// Frontends this worker serves, by instance ID. Idle ones are evicted.
+    prepared_peers: dashmap::DashMap<velo::InstanceId, Arc<PreparedPeer>>,
+    started: tokio::time::Instant,
+    stop_sweep: CancellationToken,
     closing: AtomicBool,
     closed: OnceCell<()>,
 }
@@ -351,21 +395,68 @@ impl VeloResponseService {
         // stream and report the mismatch instead of leaving the frontend to wait.
         builder = builder.add_transport(Arc::new(tcp_transport(address)?));
         let velo = builder.build().await?;
-        Ok(Arc::new(Self {
+        let service = Arc::new(Self {
             peer_address: BASE64.encode(velo.peer_info().worker_address().as_bytes()),
             velo,
             transport,
             registrations: Mutex::new(Registrations::default()),
             prepared_peers: dashmap::DashMap::new(),
+            started: tokio::time::Instant::now(),
+            stop_sweep: CancellationToken::new(),
             closing: AtomicBool::new(false),
             closed: OnceCell::new(),
-        }))
+        });
+        let weak = Arc::downgrade(&service);
+        let stop = service.stop_sweep.clone();
+        tokio::spawn(async move {
+            let mut sweep = tokio::time::interval(PEER_SWEEP_INTERVAL);
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            sweep.tick().await;
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = sweep.tick() => {}
+                }
+                let Some(service) = weak.upgrade() else {
+                    return;
+                };
+                let evicted = service.evict_idle_peers(service.started.elapsed().as_secs());
+                if evicted > 0 {
+                    tracing::debug!(evicted, "Forgot idle Velo response peers");
+                }
+            }
+        });
+        Ok(service)
+    }
+
+    /// Forget frontends with no open sender that have been idle for
+    /// [`PEER_IDLE_TTL`], or whose preparation failed. `now` is in seconds
+    /// since the service started.
+    fn evict_idle_peers(&self, now: u64) -> usize {
+        let own = self.velo.instance_id();
+        let mut evicted = 0;
+        self.prepared_peers.retain(|peer_id, peer| {
+            let idle = *peer_id != own
+                && peer.active.load(Ordering::Acquire) == 0
+                && (!peer.ready.initialized()
+                    || now.saturating_sub(peer.last_used.load(Ordering::Relaxed))
+                        >= PEER_IDLE_TTL.as_secs());
+            if idle {
+                // Under the shard lock, so no request can prepare this peer
+                // again until Velo has forgotten it.
+                self.velo.unregister_peer(*peer_id);
+                evicted += 1;
+            }
+            !idle
+        });
+        evicted
     }
 
     async fn shutdown(&self) {
         self.closed
             .get_or_init(|| async {
                 self.closing.store(true, Ordering::Release);
+                self.stop_sweep.cancel();
                 let requests = {
                     let mut state = self.registrations.lock();
                     state.instance_requests.clear();
@@ -582,24 +673,24 @@ impl VeloResponseService {
     }
 
     /// `address` is the peer's base64 `WorkerAddress`, decoded only if the peer
-    /// is not prepared yet.
-    async fn prepare_peer(&self, peer_id: InstanceId, address: &str) -> Result<()> {
+    /// is not prepared yet. The lease is taken under the map guard, so the
+    /// sweep cannot evict the peer while it is in use.
+    async fn prepare_peer(&self, peer_id: InstanceId, address: &str) -> Result<PeerLease> {
         // Steady state: the peer is already prepared, so skip the shard write lock.
-        if self
-            .prepared_peers
-            .get(&peer_id)
-            .is_some_and(|ready| ready.initialized())
+        if let Some(peer) = self.prepared_peers.get(&peer_id)
+            && peer.ready.initialized()
         {
-            return Ok(());
+            return Ok(PeerLease::new(&peer, self.started));
         }
-        let ready = self
-            .prepared_peers
-            .entry(peer_id)
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone();
+        let lease = PeerLease::new(
+            &self.prepared_peers.entry(peer_id).or_default(),
+            self.started,
+        );
         // Release the map guard before awaiting. A failed or cancelled attempt
         // leaves the cell empty, so the next caller can retry.
-        ready
+        lease
+            .peer
+            .ready
             .get_or_try_init(|| async {
                 let address = WorkerAddress::from_encoded(BASE64.decode(address)?);
                 self.velo.register_peer(PeerInfo::new(peer_id, address))?;
@@ -614,7 +705,7 @@ impl VeloResponseService {
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
-        Ok(())
+        Ok(lease)
     }
 
     pub async fn sender(
@@ -640,7 +731,8 @@ impl VeloResponseService {
             address.anchor.unpack().0 == address.peer_id.worker_id(),
             "Velo anchor and peer identity differ"
         );
-        self.prepare_peer(address.peer_id, address.peer_address)
+        let peer = self
+            .prepare_peer(address.peer_id, address.peer_address)
             .await
             .inspect_err(|error| {
             tracing::warn!(context_id = %context.id(), %error, "Failed to prepare Velo response peer");
@@ -711,6 +803,7 @@ impl VeloResponseService {
         });
         Ok(VeloResponseSender {
             sender: Some(sender),
+            _peer: peer,
             _service: self.clone(),
             finished,
             prologue_sent: false,
@@ -802,6 +895,7 @@ impl Stream for VeloResponseReceiver {
 
 pub struct VeloResponseSender {
     sender: Option<StreamSender<ResponseFrame>>,
+    _peer: PeerLease,
     _service: Arc<VeloResponseService>,
     finished: CancellationToken,
     prologue_sent: bool,
@@ -1179,6 +1273,56 @@ mod tests {
         for service in [ucx, ucx_peer, tcp] {
             service.shutdown().await;
         }
+    }
+
+    /// A worker forgets a frontend that is idle or failed to prepare, in its
+    /// own map and in Velo, and prepares it again on its next request. An open
+    /// sender keeps its frontend.
+    #[tokio::test]
+    async fn idle_peers_are_forgotten_and_prepared_again() {
+        let (consumer, producer) = pair(ResponseTransport::Tcp).await;
+        let peer = consumer.velo.instance_id();
+        assert!(producer.prepare_peer(peer, "").await.is_err());
+        assert_eq!(producer.evict_idle_peers(0), 1);
+
+        let lease = producer
+            .prepare_peer(peer, &consumer.peer_address)
+            .await
+            .unwrap();
+        assert_eq!(producer.evict_idle_peers(u64::MAX), 0);
+        drop(lease);
+        let used = producer
+            .prepared_peers
+            .get(&peer)
+            .unwrap()
+            .last_used
+            .load(Ordering::Relaxed);
+        let ttl = PEER_IDLE_TTL.as_secs();
+        assert_eq!(producer.evict_idle_peers(used + ttl - 1), 0);
+        assert_eq!(producer.evict_idle_peers(used + ttl), 1);
+        assert!(producer.prepared_peers.is_empty());
+        assert_eq!(producer.velo.primary_transport_key(peer), None);
+
+        let registered = consumer
+            .register_response(EngineContext::new(()).context(), false)
+            .unwrap();
+        let mut sender = producer
+            .sender(
+                EngineContext::new(()).context(),
+                registered.connection_info.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        sender.send_prologue(None).await.unwrap();
+        registered.wait().await.unwrap().unwrap();
+        assert_eq!(
+            producer.velo.primary_transport_key(peer).as_deref(),
+            Some("tcp")
+        );
+        sender.finish().await.unwrap();
+        producer.shutdown().await;
+        consumer.shutdown().await;
     }
 
     async fn lifecycle_suite(transport: ResponseTransport) {
