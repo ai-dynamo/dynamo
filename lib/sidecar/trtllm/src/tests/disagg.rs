@@ -67,12 +67,7 @@ async fn prefill_ready_is_the_terminal_handoff() {
     let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Prefill);
     engine.start(0).await.expect("start");
 
-    let mut req = request();
-    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
-        prefill_dp_rank: Some(0),
-        ..Default::default()
-    });
-    let outputs = collect(&engine, req).await;
+    let outputs = collect(&engine, request()).await;
     let terminal = outputs
         .iter()
         .find(|output| output.finish_reason.is_some())

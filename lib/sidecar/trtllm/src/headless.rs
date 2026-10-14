@@ -128,6 +128,7 @@ async fn relay(
                 topic,
                 dp_rank: rank,
                 heartbeat_timeout,
+                ..
             } = crate::engine::to_kv_event_source(source, heartbeat)?
             else {
                 bail!("Local KV event source must use ZMQ")
