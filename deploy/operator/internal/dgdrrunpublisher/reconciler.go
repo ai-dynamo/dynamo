@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -73,17 +72,20 @@ const (
 // Job pod names cannot be listed in resourceNames).
 //
 // Write echoes and cache lag: the publisher's own writes come back as watch events, and
-// the cache can trail them. The reconciler therefore remembers what it has written (the
-// candidates it created and populated, the last run status it applied, the latest
-// progress time) and does not redo that work while the cache catches up. A retry after a
-// partial success repeats only the unfinished writes, and an event that merely echoes a
-// write finds nothing to do and produces no further write, so it cannot start a loop.
+// the cache can trail them. The reconciler keeps no record of its writes. Every pass
+// decides from the current observations (the cached run and candidates, the latest input
+// snapshot), so a repeated pass while the cache catches up may repeat an idempotent
+// write, which is harmless, and an echo of a write finds nothing left to do. Anything
+// that changes behind the publisher's back (a deleted candidate, a modified run status)
+// is repaired on the next pass.
 //
 // Stale reads: every status write is constrained to the resourceVersion the decision was
 // based on (the cached run, the cached candidate, or the version read back from the API
-// server for a candidate created a moment ago). A decision made from an older cache
+// server for a candidate applied a moment ago). A decision made from an older cache
 // observation fails with a conflict instead of overwriting newer state, and is retried
-// once the informer has delivered the newer version.
+// through the workqueue once the informer has delivered the newer version. A candidate's
+// status is only populated when the API server's own copy, read right after the apply,
+// has none yet, so a stale cache can never make the publisher rewrite populated status.
 type Reconciler struct {
 	Client           client.Client
 	Writer           writer
@@ -102,12 +104,6 @@ type Reconciler struct {
 
 	// finalFailures counts failed reconciles after the Sweeper exited.
 	finalFailures int
-	// written holds the candidates this process has created and populated.
-	written map[string]struct{}
-	// applied is the last run status written successfully.
-	applied *RunStatus
-	// lastProgress is the latest progress time written.
-	lastProgress time.Time
 }
 
 func (r *Reconciler) key() types.NamespacedName {
@@ -222,33 +218,31 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	if err != nil {
 		return err
 	}
-	if r.written == nil {
-		r.written = map[string]struct{}{}
-	}
-
+	// populated names the candidates whose status the API server already has; they are
+	// known from the live read that follows each apply, not from the cache.
+	populated := map[string]struct{}{}
 	for _, candidate := range actions.Creates {
 		name := desired.Names[candidate.ID]
-		if _, done := r.written[name]; done {
-			continue // created and populated by this process; the cache has not caught up yet
-		}
-		version, err := r.Writer.CreateCandidate(ctx, run, name, candidate)
+		stored, err := r.Writer.CreateCandidate(ctx, run, name, candidate)
 		if err != nil {
 			return fmt.Errorf("creating candidate %s: %w", candidate.ID, err)
 		}
-		versions[name] = version // a new candidate is not in the cache; use the version the API server returned
+		versions[name] = stored.ResourceVersion // a new candidate is not in the cache; use the version the API server returned
+		if stored.Populated {
+			populated[name] = struct{}{}
+		}
 	}
 	unpopulated := make([]dgdcreconcile.DesiredCandidate, 0, len(actions.Creates)+len(actions.Incomplete))
 	unpopulated = append(unpopulated, actions.Creates...)
 	unpopulated = append(unpopulated, actions.Incomplete...)
 	for _, candidate := range unpopulated {
 		name := desired.Names[candidate.ID]
-		if _, done := r.written[name]; done {
+		if _, done := populated[name]; done {
 			continue
 		}
 		if err := r.Writer.PopulateStatus(ctx, name, versions[name], candidate); err != nil {
 			return fmt.Errorf("populating status of candidate %s: %w", candidate.ID, err)
 		}
-		r.written[name] = struct{}{}
 	}
 
 	if err := r.updateRunStatus(ctx, run, desired.Status); err != nil {
@@ -263,29 +257,19 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	return nil
 }
 
-// updateRunStatus writes the run status when it differs from what the cache shows and
-// from what this process already wrote. A snapshot without a usable timestamp keeps the
-// latest progress time known, because a server-side-apply payload that omits the field
-// would remove it.
+// updateRunStatus writes the run status when it differs from what the cache shows. A
+// snapshot without a usable timestamp keeps the progress time the cached run already has,
+// because a server-side-apply payload that omits the field would remove it. The write is
+// constrained to the cached run's resourceVersion, so a decision made from a stale cache
+// fails with a conflict instead of overwriting newer status.
 func (r *Reconciler) updateRunStatus(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired RunStatus) error {
 	observed := observedStatus(run)
 	if !desired.NeedsUpdate(observed) {
 		return nil
 	}
-	known := observed.LastProgress
-	if r.lastProgress.After(known) {
-		known = r.lastProgress
-	}
-	write := desired.WithPreservedProgress(known)
-	if r.applied != nil && !write.NeedsUpdate(*r.applied) {
-		return nil // already written; the cache has not caught up yet
-	}
+	write := desired.WithPreservedProgress(observed.LastProgress)
 	if err := r.Writer.UpdateRunStatus(ctx, run.ResourceVersion, write); err != nil {
 		return fmt.Errorf("updating run status: %w", err)
-	}
-	r.applied = &write
-	if write.LastProgress.After(r.lastProgress) {
-		r.lastProgress = write.LastProgress
 	}
 	return nil
 }
