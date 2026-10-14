@@ -9,18 +9,19 @@ mod mooncake_shared;
 use clap::{Parser, Subcommand};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
-use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
+use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
 use mooncake_open_loop::{
-    OpenLoopConfig, OpenLoopResult, parse_cpu_list, prepare_mooncake_corpus,
+    OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
 };
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
     merge_worker_traces, prepare_scaled_benchmark,
 };
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -31,9 +32,6 @@ const PRE_RUN_QUIESCENCE_MS: u64 = 0;
 /// Indexer backend selection and its backend-specific parameters.
 #[derive(Subcommand, Debug, Clone)]
 enum IndexerArgs {
-    /// Single-threaded radix tree indexer.
-    RadixTree {},
-
     /// Position-based nested map indexer with jump search.
     NestedMap {
         /// Number of positions to skip during jump search before scanning back.
@@ -51,31 +49,11 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
-
-    /// Branch-sharded CRTC: N independent CRTC shards routed by a bounded
-    /// prefix trie with structural anchors for depth-boundary suffixes.
-    /// find_matches touches at most one shard (no scatter-gather).
-    BranchShardedCrtc {
-        /// Number of independent CRTC shards.
-        #[clap(long, default_value = "2")]
-        num_shards: usize,
-
-        /// Number of OS event-worker threads per shard.
-        #[clap(long, default_value = "4")]
-        num_event_workers_per_shard: usize,
-
-        /// Maximum routing-trie depth before dispatching suffixes to one shard.
-        /// K=2 is the recommended default: depth=1 often produces too few
-        /// distinct branches, while depth=2 exposes more branch diversity.
-        #[clap(long, default_value = "2")]
-        prefix_depth: usize,
-    },
 }
 
 impl IndexerArgs {
     fn to_config(&self) -> MooncakeIndexerConfig {
         match self {
-            IndexerArgs::RadixTree {} => MooncakeIndexerConfig::radix_tree(),
             IndexerArgs::NestedMap {
                 jump_size,
                 num_event_workers,
@@ -83,15 +61,6 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
             }
-            IndexerArgs::BranchShardedCrtc {
-                num_shards,
-                num_event_workers_per_shard,
-                prefix_depth,
-            } => MooncakeIndexerConfig::branch_sharded_crtc(
-                *num_shards,
-                *num_event_workers_per_shard,
-                *prefix_depth,
-            ),
         }
     }
 }
@@ -137,15 +106,12 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// radix-tree, nested-map, concurrent-radix-tree-compressed,
-    /// branch-sharded-crtc.
+    /// nested-map, concurrent-radix-tree-compressed.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
-    /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map,
-    /// concurrent-radix-tree-compressed, branch-sharded-crtc).
-    /// Ignored by radix-tree.
+    /// Number of OS threads for event processing with `--compare` or when no
+    /// subcommand is given (the default concurrent-radix-tree-compressed run).
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
 
@@ -164,15 +130,19 @@ struct Args {
     #[clap(long, default_value = "1")]
     benchmark_runs: usize,
 
-    /// Indexer backend to benchmark (defaults to radix-tree if not specified).
+    /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
+    /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
     indexer: Option<IndexerArgs>,
 }
 
 impl Args {
-    /// Return the indexer config, falling back to RadixTree if none was specified.
     fn get_indexer(&self) -> IndexerArgs {
-        self.indexer.clone().unwrap_or(IndexerArgs::RadixTree {})
+        self.indexer
+            .clone()
+            .unwrap_or(IndexerArgs::ConcurrentRadixTreeCompressed {
+                num_event_workers: self.num_event_workers,
+            })
     }
 }
 
@@ -348,10 +318,17 @@ async fn run_backend<T: dynamo_kv_router::indexer::SyncIndexer>(
     trial: mooncake_open_loop::PreparedOpenLoopTrial,
     open_config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
+    let coordinator_cpus = open_config.backend_cpus.clone();
     if let Some(cpu) = open_config.query_issuer_cpu {
         pin_current_thread_to_cpus(&[cpu])?;
     }
-    run_open_loop(backend_name, indexer, trial, open_config).await
+    let result = run_open_loop(backend_name, indexer, trial, open_config).await;
+    // Restore the coordinator mask. Otherwise blocking-pool threads spawned while the
+    // next sweep or compare cell generates events inherit the single query-issuer CPU.
+    let restored = pin_current_thread_to_cpus(&coordinator_cpus);
+    let result = result?;
+    restored?;
+    Ok(result)
 }
 
 fn print_open_loop_result(result: &OpenLoopResult) {
@@ -395,6 +372,41 @@ fn write_open_loop_result(path: &str, result: &OpenLoopResult) -> anyhow::Result
     Ok(())
 }
 
+fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result<RunProvenance> {
+    let common = &args.common;
+    let file_sha256 = |path: &std::path::Path| -> anyhow::Result<String> {
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+        Ok(format!("{:x}", hasher.finalize()))
+    };
+    let trace_sha256 = common
+        .mooncake_trace_path
+        .as_deref()
+        .map(|path| file_sha256(std::path::Path::new(path)))
+        .transpose()?;
+    let binary = std::env::current_exe().ok();
+    let binary_sha256 = binary.as_deref().map(file_sha256).transpose()?;
+    Ok(RunProvenance {
+        argv: std::env::args().collect(),
+        binary: binary.map(|path| path.display().to_string()),
+        binary_sha256,
+        trace_path: common.mooncake_trace_path.clone(),
+        trace_sha256,
+        trace_block_size: common.trace_block_size,
+        num_gpu_blocks: common.num_gpu_blocks,
+        num_unique_inference_workers: common.num_unique_inference_workers,
+        inference_worker_duplication_factor: common.inference_worker_duplication_factor,
+        trace_length_factor: common.trace_length_factor,
+        trace_duplication_factor: common.trace_duplication_factor,
+        trace_simulation_duration_ms: common.trace_simulation_duration_ms,
+        seed: common.seed,
+        jump_size: matches!(config.kind, MooncakeIndexerKind::NestedMap)
+            .then_some(config.jump_size),
+        issuer_spin_us: args.issuer_spin_us,
+        issue_lag_diagnostic_threshold_us: args.issue_lag_diagnostic_threshold_us,
+    })
+}
+
 fn benchmark_config(args: &Args, benchmark_duration_ms: u64) -> MooncakeBenchmarkConfig {
     MooncakeBenchmarkConfig {
         benchmark_duration_ms,
@@ -411,14 +423,7 @@ async fn prepare_benchmark(
         return Ok(None);
     };
 
-    let traces = process_mooncake_trace(
-        path,
-        args.common.block_size,
-        args.common.trace_length_factor,
-        args.common.trace_duplication_factor,
-        args.common.num_unique_inference_workers,
-        args.common.seed,
-    )?;
+    let traces = args.common.load_mooncake_trace(path)?;
     let artifacts = generate_replay_artifacts(
         &traces,
         args.common.num_gpu_blocks,
@@ -437,12 +442,15 @@ async fn prepare_benchmark(
 async fn run_open_loop_repeated_mode(args: &Args, indexer_names: &[String]) -> anyhow::Result<()> {
     for name in indexer_names {
         let config = indexer_config(args, name)?;
+        // Record provenance before the run so it describes the inputs actually read.
+        let provenance = run_provenance(args, &config)?;
         let bench_config = benchmark_config(args, args.common.benchmark_duration_ms);
         let Some(prepared) = prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
         else {
             return Ok(());
         };
-        let result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+        let mut result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+        result.provenance = Some(provenance);
         print_open_loop_result(&result);
         let path = if indexer_names.len() == 1 {
             args.result_json_output.clone()
@@ -459,10 +467,11 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
         args.common.sweep_min_ms,
         args.common.sweep_max_ms,
         args.common.sweep_steps,
-    );
+    )?;
 
     for name in indexer_names {
         let config = indexer_config(args, name)?;
+        let provenance = run_provenance(args, &config)?;
         for &duration_ms in durations.iter().rev() {
             println!(
                 "\n=== Mooncake sweep: backend={} benchmark_duration_ms={} ===",
@@ -475,7 +484,9 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
             else {
                 return Ok(());
             };
-            let result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+            let mut result =
+                run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+            result.provenance = Some(provenance.clone());
             print_open_loop_result(&result);
             let path = open_loop_output_path(
                 &args.result_json_output,

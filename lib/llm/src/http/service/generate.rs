@@ -1446,6 +1446,7 @@ pub(crate) mod tests {
                         prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                             audio_tokens: None,
                             cached_tokens: Some(2),
+                            ..Default::default()
                         }),
                         completion_tokens_details: None,
                     }),
@@ -1500,6 +1501,7 @@ pub(crate) mod tests {
                                     dynamo_protocols::types::PromptTokensDetails {
                                         audio_tokens: None,
                                         cached_tokens: Some(prompt_tokens),
+                                        ..Default::default()
                                     },
                                 ),
                                 completion_tokens_details: None,

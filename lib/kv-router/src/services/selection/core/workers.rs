@@ -128,6 +128,11 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        if record.dp_start().checked_add(record.dp_size()).is_none() {
+            return Err(SelectionError::BadRequest(
+                "data parallel rank range overflows u32".to_string(),
+            ));
+        }
         // Reject before any per-rank work so an oversized range cannot allocate per rank.
         if record.dp_size() > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
             return Err(SelectionError::BadRequest(format!(
@@ -305,9 +310,9 @@ impl SelectionCore {
                     partition: key.clone(),
                     host: self.host.replication.request_leases.clone(),
                 }));
-                let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+                let replica_inbox = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
                     slots.start_replica_sync(subscriber, self.cancel_token.child_token());
-                    replica_tx
+                    ReplicaInbox::new(replica_tx)
                 });
                 if self.host.replication.request_leases.is_none() {
                     slots.start_periodic_force_expiry_across_all_workers(
@@ -358,7 +363,7 @@ impl SelectionCore {
                     indexer,
                     workers_tx,
                     scheduler,
-                    replica_tx,
+                    replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
                 }))

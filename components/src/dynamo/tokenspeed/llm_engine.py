@@ -26,6 +26,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
@@ -168,6 +169,7 @@ class TokenspeedLLMEngine(LLMEngine):
     ) -> AsyncGenerator[GenerateChunk, None]:
         if self.engine is None:
             raise RuntimeError("Engine not initialized")
+        normalize_request_token_ids(request)
 
         bootstrap = bootstrap_kwargs(
             request, self.disaggregation_mode, self._bootstrap_endpoint

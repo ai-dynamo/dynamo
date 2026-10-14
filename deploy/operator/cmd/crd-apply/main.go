@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -31,6 +32,7 @@ const (
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
+	lpxEnabled := flag.Bool("lpx-enabled", false, "Install the experimental LPXGraphDeployment CRD")
 	conversionWebhookServiceName := flag.String(
 		"conversion-webhook-service-name",
 		"",
@@ -84,6 +86,9 @@ func main() {
 			log.Error(err, "unable to unmarshal CRD", "file", filePath)
 			os.Exit(1)
 		}
+		if crd.Name == "lpxgraphdeployments.nvidia.com" && !*lpxEnabled {
+			continue
+		}
 
 		if *version != "" {
 			if crd.Annotations == nil {
@@ -100,7 +105,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		patchData, err := yaml.Marshal(crd)
+		// Compact JSON avoids expanding large CRD schemas into oversized YAML requests.
+		patchData, err := json.Marshal(crd)
 		if err != nil {
 			log.Error(err, "unable to marshal CRD for patch", "crd", crd.Name)
 			os.Exit(1)

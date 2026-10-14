@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Mapping, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, Mapping, Optional
 
 import numpy as np
 import sglang as sgl
@@ -29,6 +29,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
@@ -46,10 +47,17 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     IMAGE_URL_KEY,
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.thinking_budget import (
+    apply_thinking_budget,
+    thinking_budget_requested,
+)
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -171,6 +179,34 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
         if isinstance(extra_fields, list) and field in extra_fields:
             return True
     return False
+
+
+def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build the final-chunk cache-hit report read by the KV router.
+
+    SGLang reports one ``cached_tokens`` count per request, with any HiCache
+    host hits folded in, so there is no per-tier split.
+    """
+    prompt_tokens = meta_info.get("prompt_tokens")
+    if prompt_tokens is None:
+        return {}
+    return {
+        "prompt_tokens": prompt_tokens,
+        "reused_tokens": meta_info.get("cached_tokens") or 0,
+    }
+
+
+def _has_parallel_prefix_warmup(sampling_params: Any) -> bool:
+    """Whether SGLang caches the prompt with a zero-token request before sampling.
+
+    For n > 1 every sample's cached_tokens then includes that warm-up hit, so
+    none of them measures reuse from before the request.
+    """
+    if isinstance(sampling_params, list):
+        sampling_params = sampling_params[0] if sampling_params else {}
+    if not isinstance(sampling_params, Mapping):
+        return False
+    return (sampling_params.get("n") or 1) > 1
 
 
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -421,43 +457,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
-        """Probe whether engine.async_generate accepts ``mm_hashes``.
+        """Prepare caller hashes when engine.async_generate accepts them.
 
-        SGLang accepted the kwarg starting with the upstream interop PR; older
-        builds (and forks lacking the patch) raise TypeError if we pass it.
-        Probing the signature once at init keeps the request hot path free of
-        repeated inspection. Returns ``False`` when the kwarg is absent — the
-        request still completes, MM-aware routing just falls back to the
-        text-prefix overlap signal.
+        Older builds (and forks lacking the interop patch) raise TypeError if
+        we pass it. Supported releases accept it but may apply the hash after
+        constructing padded multimodal IDs; the compatibility helper repairs
+        that derived data once per tokenized request.
         """
-        probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
-        return "mm_hashes" in probe
-
-    @staticmethod
-    def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
-        """Pull the per-image hashes the Rust frontend forwards via extra_args.
-
-        Returns ``None`` when the field is absent or malformed; SGLang then
-        recomputes the hash internally via ``hash_feature()``.
-        """
-        extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
-            return None
-        mm_hashes = extra_args.get("mm_hashes")
-        if not mm_hashes:
-            return None
-        if not isinstance(mm_hashes, list):
-            return None
-        # Fail closed if a non-string slipped into the list — downstream
-        # SGLang treats mm_hashes as List[str] and a bad element would
-        # crash the worker mid-request. Routing falls back to text-prefix.
-        if not all(isinstance(h, str) for h in mm_hashes):
-            logging.warning(
-                "extra_args.mm_hashes contained non-str entries; "
-                "ignoring routing-side hashes and letting SGLang recompute"
-            )
-            return None
-        return mm_hashes
+        return supports_external_mm_hashes(engine)
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
@@ -529,9 +536,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Keep max_new_tokens even when None — SGLang treats None as "generate
         # until EOS/context-length" whereas omitting it triggers a default of 128.
         keep_if_none = {"max_new_tokens"}
-        return {
+        sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
+        return apply_thinking_budget(
+            request,
+            sampling_params,
+            self.config.server_args,
+            engine=getattr(self, "engine", None),
+        )
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -592,6 +605,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             cache_salt=request_cache_salt(request),
         )
         return native_generate_stream(self.engine, native_request)
+
+    @property
+    def _reports_kv_cache_hit(self) -> bool:
+        # Disaggregated decode copies the prefill worker's cached_tokens into its
+        # own meta_info, so only the prefill attempt reports cache reuse.
+        return self.serving_mode != DisaggregationMode.DECODE
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -658,12 +677,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 submitted_request_id=submitted_request_id,
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
+                report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                    native_payload.get("sampling_params")
+                ),
             ):
                 yield output
             return
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        thinking_budget = sampling_params.get("custom_params", {}).get(
+            "thinking_budget"
+        )
+        if thinking_budget is not None:
+            logging.debug("SGLang thinking budget configured: %s", thinking_budget)
         submitted_request_id = _ordered_cancellation_request_id(
             sglang_request_id,
             sampling_params,
@@ -684,6 +711,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             raise_if_unextracted_multimodal(request)
+            reject_unconsumed_media(
+                request, consumes_media=engine_consumes_media(self.engine)
+            )
 
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
@@ -716,7 +746,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    request,
+                    thinking_budget_requested=thinking_budget_requested(request),
+                ),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -738,6 +772,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -752,6 +789,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     yield out
         else:
             raise_if_unextracted_multimodal(request)
+            reject_unconsumed_media(
+                request, consumes_media=engine_consumes_media(self.engine)
+            )
 
             # Extract media URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
@@ -797,7 +837,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             mm_hashes_kwargs: Dict[str, Any] = {}
             if self._mm_hashes_supported:
-                forwarded = self._extract_mm_hashes(request)
+                forwarded = extract_mm_hashes(request)
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 
@@ -809,7 +849,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    request,
+                    thinking_budget_requested=thinking_budget_requested(request),
+                ),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
@@ -828,6 +872,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -848,6 +895,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         submitted_request_id: str | None = None,
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -902,6 +950,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "sglang_response": public_response,
                             },
                         }
+                if (
+                    report_kv_cache_hit
+                    and self._reports_kv_cache_hit
+                    and isinstance(meta_info, dict)
+                    and meta_info.get("finish_reason")
+                ):
+                    # Native Generate is routed too; the frontend forwards only
+                    # sglang_response, so this sibling key stays router-only.
+                    kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
+                    if kv_cache_hit:
+                        output = {
+                            **output,
+                            "engine_data": {
+                                **output["engine_data"],
+                                "kv_cache_hit": kv_cache_hit,
+                            },
+                        }
                 if not context.is_stopped():
                     yield output
 
@@ -913,6 +978,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -1018,6 +1084,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
+                    # Router-facing, so kept even when metadata is uploaded instead.
+                    kv_cache_hit = (
+                        _kv_cache_hit_engine_data(meta_info)
+                        if report_kv_cache_hit and self._reports_kv_cache_hit
+                        else {}
+                    )
+                    if kv_cache_hit:
+                        engine_data["kv_cache_hit"] = kv_cache_hit
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")
