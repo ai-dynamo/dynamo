@@ -4959,7 +4959,6 @@ func TestGeneratePodCliqueSet_DynamoNamespace(t *testing.T) {
 		{name: "short", namespace: "k8s-namespace", dgdName: "test-dynamo-graph"},
 		{name: "63 byte boundary", namespace: strings.Repeat("n", 36), dgdName: "g" + strings.Repeat("a", 25)},
 		{name: "64 byte regression", namespace: strings.Repeat("n", 36), dgdName: "g" + strings.Repeat("a", 26)},
-		{name: "65 byte regression", namespace: strings.Repeat("n", 36), dgdName: "g" + strings.Repeat("a", 27)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

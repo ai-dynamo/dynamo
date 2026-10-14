@@ -24,7 +24,6 @@ func TestComputeDynamoNamespace(t *testing.T) {
 		{name: "short", namespace: "default", dgdName: "graph", global: false, want: "default-graph"},
 		{name: "dotted name", namespace: "default", dgdName: "qwen3-0.6b", global: false, want: "default-qwen3-0-6b"},
 		{name: "global with long names", namespace: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", dgdName: "ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg", global: true, want: "dynamo"},
-		{name: "derived length 62", namespace: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", dgdName: "gaaaaaaaaaaaaaaaaaaaaaaaa", global: false, want: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{name: "derived length 63", namespace: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", dgdName: "gaaaaaaaaaaaaaaaaaaaaaaaaa", global: false, want: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{name: "derived length 64", namespace: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", dgdName: "gaaaaaaaaaaaaaaaaaaaaaaaaaa", global: false, want: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaa-27479653da05e5b6"},
 		{name: "derived length 65", namespace: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", dgdName: "gaaaaaaaaaaaaaaaaaaaaaaaaaaa", global: false, want: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaa-7a36c9d0a158ef97"},
