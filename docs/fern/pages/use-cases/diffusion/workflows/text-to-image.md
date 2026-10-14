@@ -84,7 +84,7 @@ with vLLM 0.31.0 and vLLM-Omni 0.31.0rc1.
 > [!IMPORTANT]
 > Use a Dynamo build containing the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390).
 > Dynamo 1.5.1 ignores edit references. See [Image API Compatibility](../../../reference/components/frontend-configuration.mdx#image-api-compatibility)
-> for version requirements and the remaining multipart-upload limitation.
+> for the JSON request contract and the remaining multipart-upload limitation.
 
 Launch the reference-capable model from the repository root:
 
