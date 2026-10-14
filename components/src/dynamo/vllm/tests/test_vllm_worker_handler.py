@@ -1092,7 +1092,9 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
     artifact = chunks[0]["engine_data"]["metadata_upload"]
     assert artifact["kind"] == "generation_artifact"
     assert artifact["mode"] == "inline_base64"
-    choice = decode_generation_artifact(base64.b64decode(artifact["data_base64"])).choices[0]
+    choice = decode_generation_artifact(
+        base64.b64decode(artifact["data_base64"])
+    ).choices[0]
     assert choice.sequence_token_ids.as_array().tolist() == [10, 11, 12]
     assert {type(component).__name__ for component in choice.components} == {
         "MoeRoutes",
@@ -1100,7 +1102,9 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
     }
 
     monkeypatch.setattr(
-        artifact_capture, "process_capture_budget", lambda: artifact_capture.CaptureBudget(1)
+        artifact_capture,
+        "process_capture_budget",
+        lambda: artifact_capture.CaptureBudget(1),
     )
     with pytest.raises(mod.WorkerOverloaded, match="capture capacity"):
         async for _ in handler.generate(request, context):
