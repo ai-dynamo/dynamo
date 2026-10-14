@@ -21,14 +21,11 @@ use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{
-    register_lora_allocation_metrics, register_model_ready_metric, register_worker_timing_metrics,
-};
+use super::metrics::{register_lora_allocation_metrics, register_model_ready_metric};
+use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{
-    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
-};
+use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -1234,16 +1231,17 @@ fn validate_generate_route_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Append route metadata, rejecting duplicate method/path pairs regardless of schema kind.
+/// Earlier entries remain appended if a later duplicate returns an error.
 fn append_route_docs(
     all_docs: &mut Vec<RouteDoc>,
-    seen_routes: &mut HashSet<RouteDoc>,
+    seen_routes: &mut HashSet<(axum::http::Method, String)>,
     route_docs: Vec<RouteDoc>,
 ) -> Result<()> {
     for route_doc in route_docs {
-        if let Some(existing) = seen_routes.get(&route_doc) {
-            anyhow::bail!("duplicate HTTP route registered: {route_doc} conflicts with {existing}");
+        if !seen_routes.insert((route_doc.method().clone(), route_doc.path().to_owned())) {
+            anyhow::bail!("duplicate HTTP route registered: {route_doc}");
         }
-        seen_routes.insert(route_doc.clone());
         all_docs.push(route_doc);
     }
     Ok(())
@@ -1345,17 +1343,7 @@ impl HttpServiceConfigBuilder {
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
 
-        // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
-        // These are updated by KvWorkerMonitor when receiving ActiveLoad events
-        if let Err(e) = register_worker_load_metrics(&registry) {
-            tracing::warn!("Failed to register worker load metrics: {}", e);
-        }
-
-        // Register worker timing metrics (last_ttft, last_itl per worker)
-        // These are updated by ResponseMetricCollector when observing TTFT/ITL
-        if let Err(e) = register_worker_timing_metrics(&registry) {
-            tracing::warn!("Failed to register worker timing metrics: {}", e);
-        }
+        register_worker_metrics(&registry, state.manager_clone())?;
 
         // Register router queue metrics (pending requests per worker_type)
         // These are updated by KvScheduler on enqueue/update/free
@@ -1463,8 +1451,14 @@ impl HttpServiceConfigBuilder {
         ));
 
         // OpenAPI documentation routes (system)
-        let (openapi_docs, openapi_route) =
-            super::openapi_docs::openapi_router(all_docs.clone(), None);
+        let (openapi_docs, openapi_route) = super::openapi_docs::openapi_router(
+            all_docs.clone(),
+            super::openapi_docs::OpenApiOptions {
+                reasoning_field: state.reasoning_field(),
+                streaming_tool_dispatch: state.streaming_tool_dispatch_enabled(),
+                streaming_reasoning_dispatch: state.streaming_reasoning_dispatch_enabled(),
+            },
+        );
         append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
 
@@ -1923,6 +1917,68 @@ mod tests {
             "batch endpoint availability is fixed when the HTTP service is built"
         );
         assert!(enabled.state.flags.get(&EndpointType::Batch));
+    }
+
+    /// Actual HTTP docs must use the service flags and response-key configuration.
+    #[tokio::test]
+    async fn openapi_http_uses_service_configuration() {
+        for enabled in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let service = HttpService::builder()
+                .port(port)
+                .enable_streaming_tool_dispatch(enabled)
+                .enable_streaming_reasoning_dispatch(enabled)
+                .reasoning_field(crate::reasoning_field::ReasoningField::Reasoning)
+                .build()
+                .unwrap();
+            let cancel = CancellationToken::new();
+            let server_cancel = cancel.clone();
+            let server = tokio::spawn(async move {
+                service
+                    .run_with_listener(server_cancel, listener)
+                    .await
+                    .unwrap()
+            });
+            let spec: serde_json::Value = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://127.0.0.1:{port}/openapi.json"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(spec["paths"]["/v1/chat/completions"]["post"]["responses"]["200"]["content"]["text/event-stream"]["itemSchema"]["anyOf"].as_array().unwrap().len(), if enabled { 3 } else { 1 });
+            let properties = &spec["components"]["schemas"]["dynamo_protocols.chat.ChatCompletionResponseMessage"]
+                ["properties"];
+            assert!(properties.get("reasoning").is_some());
+            assert!(properties.get("reasoning_content").is_none());
+            cancel.cancel();
+            server.await.unwrap();
+        }
+    }
+
+    /// Handler metadata must not allow two registrations of the same method/path.
+    #[test]
+    fn openapi_metadata_does_not_change_duplicate_route_detection() {
+        let mut docs = Vec::new();
+        let mut seen = HashSet::new();
+        let route = RouteDoc::new(axum::http::Method::POST, "/chat");
+        append_route_docs(&mut docs, &mut seen, vec![route.clone()]).unwrap();
+        assert!(
+            append_route_docs(
+                &mut docs,
+                &mut seen,
+                vec![route.with_openapi_kind(super::super::OpenApiRouteKind::ChatCompletions)]
+            )
+            .is_err()
+        );
+        assert_eq!(docs.len(), 1);
     }
 
     #[tokio::test]

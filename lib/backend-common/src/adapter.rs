@@ -337,7 +337,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let abort_engine = self.engine.clone();
         let abort_ctx = ctx.clone();
         tokio::spawn(async move {
-            // Wait for cancellation; drop_token arm = natural completion, no abort.
+            // Recheck cancellation when stream teardown wins the select.
             let cancelled = tokio::select! {
                 _ = abort_ctx.stopped() => {
                     tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (stopped)");
@@ -347,7 +347,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (killed)");
                     true
                 }
-                _ = monitor_token.cancelled() => false,
+                _ = monitor_token.cancelled() => abort_ctx.is_stopped() || abort_ctx.is_killed(),
             };
             if !cancelled {
                 return;
@@ -1030,6 +1030,40 @@ mod tests {
 
         release.notify_one();
         while stream.next().await.is_some() {}
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_followed_by_stream_drop_still_aborts() {
+        const REQUESTS: usize = 64;
+        let (engine, _release, abort_calls) = ParkedEngine::new();
+        let engine_lifetime = Arc::downgrade(&engine);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+
+        // Exercise the monitor's randomized select order with both signals ready.
+        for _ in 0..REQUESTS {
+            let input = Context::new(make_request(vec![1]));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
+            assert!(futures::poll!(stream.next()).is_pending());
+            tokio::task::yield_now().await;
+
+            ctrl.stop_generating();
+            drop(stream);
+        }
+        drop(adapter);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while engine_lifetime.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation monitors did not finish");
+        assert_eq!(
+            abort_calls.load(Ordering::SeqCst),
+            REQUESTS,
+            "every cancelled request must call engine.abort despite stream teardown"
+        );
     }
 
     /// Engine that fires the side-channel first-token notify on entry and
