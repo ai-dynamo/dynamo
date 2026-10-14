@@ -484,6 +484,7 @@ async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings()
                     &json!({
                         "model": MODEL, "max_tokens": 128, "stream": stream,
                         "tools": [tool("read_file")],
+                        "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
                         "messages": [{"role": "user", "content": "Read /a and /b"}]
                     }),
                 )
