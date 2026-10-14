@@ -535,7 +535,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
     // so /metrics traverses registered child registries and produces a single combined output.
     let registry = state.drt().get_metrics_registry().clone();
-    match render_scrape(&state.scrape_gate, registry).await {
+    match render_scrape(state.scrape_gate.clone(), registry).await {
         Ok(response) => (StatusCode::OK, response),
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {e}");
@@ -550,26 +550,31 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 /// Render `/metrics` for one scrape. Scrapes queue on `gate` without holding a
 /// blocking thread; a scrape that arrived while a render was in flight takes
 /// that render's text, and only an actual render goes to the blocking pool,
-/// where the engine exposition callbacks wait for the GIL.
+/// where the engine exposition callbacks wait for the GIL. The gate guard
+/// travels into the blocking render, so a cancelled request cannot release it
+/// early and let the next scrape queue inside the pool.
 async fn render_scrape(
-    gate: &tokio::sync::Mutex<()>,
+    gate: Arc<tokio::sync::Mutex<()>>,
     registry: crate::metrics::MetricsRegistry,
 ) -> anyhow::Result<String> {
     render_scrape_at(gate, registry, Instant::now()).await
 }
 
 async fn render_scrape_at(
-    gate: &tokio::sync::Mutex<()>,
+    gate: Arc<tokio::sync::Mutex<()>>,
     registry: crate::metrics::MetricsRegistry,
     requested_at: Instant,
 ) -> anyhow::Result<String> {
-    let _serialized = gate.lock().await;
+    let serialized = gate.lock_owned().await;
     if let Some(text) = registry.cached_prometheus_expfmt_since(requested_at) {
         return Ok(text);
     }
-    tokio::task::spawn_blocking(move || registry.prometheus_expfmt_combined_since(requested_at))
-        .await
-        .map_err(|e| anyhow::anyhow!("metrics render task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        let _held_until_rendered = serialized;
+        registry.prometheus_expfmt_combined_since(requested_at)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("metrics render task failed: {e}"))?
 }
 
 /// Metadata handler
@@ -997,7 +1002,7 @@ mod tests {
                     let gate = gate.clone();
                     let registry = registry.clone();
                     tokio::spawn(async move {
-                        render_scrape_at(&gate, registry, arrived)
+                        render_scrape_at(gate, registry, arrived)
                             .await
                             .expect("render")
                     })
@@ -1012,13 +1017,69 @@ mod tests {
                 "overlapping scrapes share one render"
             );
 
-            render_scrape(&gate, registry.clone())
+            render_scrape(gate.clone(), registry.clone())
                 .await
                 .expect("render");
             assert_eq!(
                 renders.load(Ordering::SeqCst),
                 2,
                 "a later scrape renders again"
+            );
+        });
+    }
+
+    /// Cancelling the request that owns the active render must not release the
+    /// gate: the next scrape keeps waiting on the runtime, not in the pool.
+    #[test]
+    fn cancelled_scrape_keeps_the_gate_until_its_render_finishes() {
+        use crate::metrics::MetricsRegistry;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let registry = MetricsRegistry::new();
+            let renders = Arc::new(AtomicUsize::new(0));
+            let rendering = Arc::new(AtomicBool::new(false));
+            let (counter, flag) = (renders.clone(), rendering.clone());
+            registry.add_expfmt_callback(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                flag.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+                Ok("engine_metric 1\n".to_string())
+            }));
+            let gate = Arc::new(tokio::sync::Mutex::new(()));
+
+            // The first scrape starts a render, then its request is cancelled.
+            let first = tokio::spawn(render_scrape(gate.clone(), registry.clone()));
+            while !rendering.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            first.abort();
+            let _ = first.await;
+
+            // The next scrape must wait on the gate and leave the pool's other
+            // thread free: an unrelated blocking job runs immediately.
+            let second = tokio::spawn(render_scrape(gate.clone(), registry.clone()));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let probe = Instant::now();
+            tokio::task::spawn_blocking(|| ()).await.expect("probe");
+            assert!(
+                probe.elapsed() < Duration::from_millis(200),
+                "a waiting scrape occupied a blocking thread: probe took {:?}",
+                probe.elapsed()
+            );
+
+            let text = second.await.expect("task").expect("render");
+            assert!(text.contains("engine_metric 1"));
+            assert_eq!(
+                renders.load(Ordering::SeqCst),
+                2,
+                "the second scrape arrived after the first render started, so it renders again"
             );
         });
     }
