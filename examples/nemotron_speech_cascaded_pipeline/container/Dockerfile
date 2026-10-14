@@ -1,4 +1,3 @@
-# check=skip=InvalidDefaultArgInFrom
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,17 +13,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Required so callers select an available, runtime-compatible published release.
-ARG BASE_IMAGE
+# Build from the repository root. The crate has its own lockfile and does not
+# add speech dependencies to the LLM sidecar images or Python wheel.
+ARG RUST_IMAGE=rust:1.96.1-bookworm
+ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20250619
+FROM ${RUST_IMAGE} AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang cmake libclang-dev protobuf-compiler libprotobuf-dev \
+        pkg-config python3 perl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+COPY lib/ lib/
+COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
+COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
+COPY examples/nemotron_speech_cascaded_pipeline/riva/ examples/nemotron_speech_cascaded_pipeline/riva/
+
+ARG TARGETARCH
+ARG CARGO_BUILD_JOBS=6
+RUN --mount=type=cache,id=riva-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=riva-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=riva-cargo-target-${TARGETARCH},target=/src/target,sharing=locked \
+    CARGO_TARGET_DIR=/src/target cargo build --release --locked \
+        --manifest-path examples/nemotron_speech_cascaded_pipeline/riva/Cargo.toml \
+    && install -D target/release/dynamo-riva-sidecar /out/dynamo-riva-sidecar \
+    && strip /out/dynamo-riva-sidecar
+
 FROM ${BASE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && { userdel -r ubuntu 2>/dev/null || true; } \
+    && useradd --create-home --uid 1000 --gid 0 dynamo
 
-ARG RUNTIME_USER=dynamo
-
-USER root
-COPY --chmod=644 requirements.txt /tmp/speech-nim/requirements.txt
-COPY --chmod=644 container/install.sh /tmp/speech-nim/container/install.sh
-RUN bash /tmp/speech-nim/container/install.sh
-
-COPY --chown=${RUNTIME_USER}:root nemotron_speech/ /opt/nemotron-speech-cascaded-pipeline/nemotron_speech/
-ENV PYTHONPATH=/opt/nemotron-speech-cascaded-pipeline
-USER ${RUNTIME_USER}
+COPY --from=builder /out/dynamo-riva-sidecar /usr/local/bin/dynamo-riva-sidecar
+COPY LICENSE /licenses/dynamo/LICENSE
+COPY examples/nemotron_speech_cascaded_pipeline/riva/proto/LICENSE /licenses/riva-protos/LICENSE
+USER 1000
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/dynamo-riva-sidecar"]
+CMD ["--help"]

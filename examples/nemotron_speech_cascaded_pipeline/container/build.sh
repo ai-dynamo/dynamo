@@ -15,26 +15,22 @@
 # limitations under the License.
 
 # Build the CPU-only Dynamo adapter image for Speech NIMs for the cascaded voice
-# pipeline example. The published Dynamo frontend image supplies the runtime;
-# this layer adds the Riva client and adapter code while preserving the base
-# image's protobuf and websockets versions.
+# pipeline example. The Rust worker and its Dynamo runtime are compiled from
+# this checkout; the final image requires neither Python nor a GPU runtime.
 #
-#   DYNAMO_FRONTEND_IMAGE     Published Dynamo frontend base image
 #   CUSTOM_SPEECH_ADAPTER_IMAGE Output adapter image tag
 
 set -euo pipefail
 
-: "${DYNAMO_FRONTEND_IMAGE:?Set DYNAMO_FRONTEND_IMAGE to a published Dynamo frontend image}"
 : "${CUSTOM_SPEECH_ADAPTER_IMAGE:?Set CUSTOM_SPEECH_ADAPTER_IMAGE to the output adapter image tag}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXAMPLE_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-echo "Building ${CUSTOM_SPEECH_ADAPTER_IMAGE} from ${DYNAMO_FRONTEND_IMAGE}"
+echo "Building ${CUSTOM_SPEECH_ADAPTER_IMAGE} from the local Rust sources"
 docker build \
-  --build-arg "BASE_IMAGE=${DYNAMO_FRONTEND_IMAGE}" \
   -t "${CUSTOM_SPEECH_ADAPTER_IMAGE}" \
   -f "${SCRIPT_DIR}/Dockerfile" \
-  "${EXAMPLE_DIR}"
+  "${REPO_ROOT}"
 
 echo "Built ${CUSTOM_SPEECH_ADAPTER_IMAGE}"

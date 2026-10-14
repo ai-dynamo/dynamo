@@ -1,21 +1,8 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
-# Nemotron Speech adapters for a cascaded voice agent
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Nemotron Speech adapters for a cascaded voice agent
+---
 
 This example exposes NVIDIA Speech NIM microservices serving Nemotron models
 through NVIDIA Dynamo's standard OpenAI-compatible APIs. It deploys independent
@@ -25,8 +12,11 @@ taking, tools, and barge-in.
 
 NVIDIA documents these containers as
 [NVIDIA Speech NIM microservices](https://docs.nvidia.com/nim/speech/latest/index.html),
-which serve Nemotron Speech models. The adapter intentionally uses `nvidia-riva-client`, which the current Speech
-NIM documentation specifies for gRPC access.
+which serve Nemotron Speech models. The example-local `dynamo-riva-sidecar` Rust
+crate uses `tonic` and `prost` to call the Riva gRPC API directly. Its ASR and TTS
+workers use generated clients from a pinned copy of the
+[Riva protobuf definitions](https://github.com/nvidia-riva/common). The Python
+Riva SDK is not required. The standalone smoke client remains Python.
 
 ```mermaid
 flowchart LR
@@ -110,13 +100,15 @@ utterances without a real-time wait.
 - A Hugging Face token with access to the Nemotron LLM.
 - A ReadWriteMany storage class for the shared model cache.
 
-The runtime must support realtime transcription, streaming `/v1/audio/speech`,
-and `register_model(skip_model_assets=True)` for external audio models.
+The frontend runtime must support realtime transcription and streaming
+`/v1/audio/speech`. The Rust speech workers register external models without
+loading tokenizer or model assets.
 Published Dynamo **1.5.0 is not compatible** with this example. Until a release
-includes these capabilities, use source-built runtime images with rebuilt Python
-bindings from a revision that provides that registration option. See the
+includes these capabilities, use source-built frontend and LLM images from a
+compatible revision. See the
 [frontend image build instructions](../../container/README.md#building-the-frontend-image).
-Building only the adapter image below does not rebuild the Dynamo runtime.
+Building the speech adapter image compiles its own Rust runtime from this
+checkout; it does not rebuild the frontend or LLM images.
 
 Run all commands from the Dynamo repository root. Set the deployment values
 once:
@@ -145,9 +137,11 @@ registry; the published Dynamo images are pulled directly from NVCR.
 
 ### 1. Build and push the adapter image
 
-The speech worker's main container is a small CPU-only adapter. It derives from
-the selected Dynamo frontend image, which provides the Dynamo runtime without
-vLLM, and adds the Riva client and this example's adapter code:
+The speech worker's main container is a CPU-only Rust adapter. A multi-stage
+build compiles the example crate and its Dynamo dependencies from this checkout,
+then copies the executable into an Ubuntu runtime image. The image contains no
+Python Riva SDK or inference engine. Use the repository root as the build
+context; the helper does this automatically:
 
 ```bash
 ./examples/nemotron_speech_cascaded_pipeline/container/build.sh
@@ -156,10 +150,10 @@ printf '%s' "${CUSTOM_IMAGE_REGISTRY_PASSWORD}" | docker login "${CUSTOM_IMAGE_R
 docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 ```
 
-The installer preserves the base image's `protobuf` and `websockets` versions
-using scoped `uv` overrides. These intentionally override Riva 2.26's declared
-constraints, so `uv pip check` still reports those metadata conflicts. Validation
-covers the adapter's gRPC paths, not the Riva client's WebSocket APIs.
+The crate owns its Cargo lockfile and vendors the Riva protos with their upstream
+revision and checksums in [the proto provenance record](riva/proto/README.md).
+No Python dependency overrides are needed. The build helper builds a local image;
+the separate `docker push` command publishes it.
 
 ### 2. Create the namespace and credentials
 
@@ -326,7 +320,7 @@ to produce `dynamo:frontend` and the
 to produce `dynamo:latest-vllm-runtime`. Using the registry variables above and a
 fresh semantic-version tag matching the source runtime (for example,
 `<runtime-version>-dev.<short-commit>`), push those images and rebuild the speech
-adapter from the matching frontend:
+adapter from the same checkout:
 
 ```bash
 export DYNAMO_RUNTIME_VERSION="<source-build-version>"
@@ -341,7 +335,7 @@ docker push "${DYNAMO_VLLM_IMAGE}"
 docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 ```
 
-The adapter build uses `DYNAMO_FRONTEND_IMAGE` as its base. Use published images
+The adapter build compiles the Rust runtime from source. Use published frontend and LLM images
 only after both capabilities are released. In `deploy/agg.yaml`, add
 `--realtime` and `--enable-prefix-caching` to the `main` container's `args` in
 the component named `worker`, leaving its other arguments unchanged. For private
@@ -391,8 +385,12 @@ detection (VAD).
 
 Each ASR worker admits up to 32 active turns across all clients, configurable
 with `--max-concurrent-turns`. Excess turns receive a transcription failure
-immediately rather than waiting for a consumer thread. The TTS adapter rejects
+immediately. Each realtime session runs one turn and can queue one more. The TTS adapter rejects
 unsupported cloning and generation controls instead of silently ignoring them.
+An ASR turn accepts at most 60 seconds of audio. Optional trailing silence is
+controlled by `--commit-padding-ms` (0 to 60,000). TTS streams chunks when the
+frontend advertises chunk support and otherwise returns one combined PCM buffer
+for compatibility with older frontends.
 
 ## External Orchestration
 
@@ -432,26 +430,64 @@ remain available for the next deployment:
 kubectl delete dgd nemotron-speech-cascaded --namespace "${NAMESPACE}"
 ```
 
-## Tests
+## Local Build and Module Boundaries
 
-Running the adapter workers or unit tests outside the container requires Python
-3.11 or newer.
-
-The example's unit tests cover connection configuration, endpoint resolution,
-and the external ASR-to-LLM handoff without installing the Riva client.
-Model-registration regressions are covered
-by `lib/bindings/python/tests/test_runtime_data_discovery.py` in the regular
-Dynamo binding suite. The Riva-dependent adapter, worker, and connection modules
-have no automated test coverage. Run the deployed smoke test manually for
-functional validation.
+Build the worker with the repository's Rust toolchain and native build prerequisites,
+including `protoc`, a C/C++ toolchain, CMake, and libclang:
 
 ```bash
+cargo build --release --locked \
+  --manifest-path examples/nemotron_speech_cascaded_pipeline/riva/Cargo.toml
+examples/nemotron_speech_cascaded_pipeline/riva/target/release/dynamo-riva-sidecar asr --help
+examples/nemotron_speech_cascaded_pipeline/riva/target/release/dynamo-riva-sidecar tts --help
+```
+
+`launch_workers.sh` uses this binary to launch ASR and TTS alongside the existing
+Python frontend and vLLM worker. Set `RIVA_SIDECAR_BIN` if the binary is installed
+elsewhere, including when using a custom `CARGO_TARGET_DIR`. Both speech modes
+accept `--nim-use-ssl`, `--nim-ssl-root-cert`, `--nim-api-key`, and
+`--nim-function-id` for TLS and authenticated NIM endpoints.
+
+The module layout separates the backend API from the serving contract:
+
+| Path under `riva/` | Responsibility |
+| --- | --- |
+| `proto/`, `build.rs` | Pinned Riva wire definitions and generated clients. |
+| `src/client.rs` | Riva connection readiness, TLS, and request metadata. |
+| `src/asr.rs`, `src/asr/`, `src/events.rs` | Realtime transcription sessions, turn lifecycle, and OpenAI events. |
+| `src/tts.rs` | Audio speech validation and streaming PCM responses through `RawEngine`. |
+| `src/worker.rs`, `src/config.rs` | Dynamo registration, shutdown, and CLI configuration. |
+
+Riva is the backend axis; realtime ASR and audio speech are the serving-contract
+axis. This example implements only those supported combinations. It does not
+add ASR/TTS methods to `LLMEngine` or depend on the Python vLLM realtime helpers.
+
+The crate is a separate Cargo workspace with path dependencies on the shared
+Dynamo crates. Speech development therefore does not change the root lockfile,
+the Python wheel, or the vLLM/SGLang image build inputs. To promote it to
+`lib/sidecar/riva`, keep the `dynamo-riva-sidecar` package and binary names, remove
+the nested workspace, adopt workspace dependencies, and update build/test paths
+and image packaging. The adapter modules and public speech endpoints can stay
+the same; promotion still needs shared-image and CI integration.
+
+## Tests
+
+The Rust suite runs against local mock Riva gRPC services on dynamically allocated
+ports. It covers streaming PCM, recognition configuration, TLS, authentication metadata,
+validation, half-close, cancellation, turn ordering, capacity, and deadlines without
+a GPU or NIM image. The Python tests cover the external ASR-to-LLM handoff and require
+Python 3.11 or newer.
+The registration test exercises both worker types through Dynamo's TCP request
+plane and checks their model cards and shutdown.
+
+```bash
+cargo test --locked \
+  --manifest-path examples/nemotron_speech_cascaded_pipeline/riva/Cargo.toml
 python3 -m pip install aiohttp pytest pytest-asyncio
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
 bash -n examples/nemotron_speech_cascaded_pipeline/launch_workers.sh
 bash -n examples/nemotron_speech_cascaded_pipeline/container/build.sh
-bash -n examples/nemotron_speech_cascaded_pipeline/container/install.sh
 pre-commit run check-yaml --files examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml
 ```
 

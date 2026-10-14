@@ -20,9 +20,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 source "$SCRIPT_DIR/../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../common/launch_utils.sh"
+
+RIVA_SIDECAR_BIN="${RIVA_SIDECAR_BIN:-${SCRIPT_DIR}/riva/target/release/dynamo-riva-sidecar}"
+if ! command -v "$RIVA_SIDECAR_BIN" >/dev/null 2>&1; then
+  echo "Build the speech worker with cargo build --release --locked --manifest-path ${SCRIPT_DIR}/riva/Cargo.toml, or set RIVA_SIDECAR_BIN" >&2
+  exit 1
+fi
 
 ASR_NIM_SERVER="${ASR_NIM_SERVER:-localhost:50152}"
 TTS_NIM_SERVER="${TTS_NIM_SERVER:-localhost:50151}"
@@ -43,10 +48,10 @@ print_launch_banner --no-curl \
   "LLM:          http://localhost:${HTTP_PORT}/v1/chat/completions" \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
-python -m nemotron_speech.asr.worker \
+"$RIVA_SIDECAR_BIN" asr \
   --nim-server "$ASR_NIM_SERVER" --model-name "$ASR_MODEL_NAME" &
 
-python -m nemotron_speech.tts.worker \
+"$RIVA_SIDECAR_BIN" tts \
   --nim-server "$TTS_NIM_SERVER" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 
