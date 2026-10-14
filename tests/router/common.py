@@ -577,7 +577,7 @@ def _test_frontend_kv_routing(
             while time.monotonic() < deadline:
                 try:
                     async with session.get(
-                        f"http://localhost:{frontend_port}/health",
+                        f"http://localhost:{frontend_port}/health?instances=true",
                         timeout=aiohttp.ClientTimeout(total=5),
                     ) as response:
                         if response.status == 200:

@@ -250,7 +250,7 @@ def wait_for_endpoint_instances(
     while time.monotonic() < deadline:
         try:
             response = requests.get(
-                f"http://localhost:{frontend_port}/health",
+                f"http://localhost:{frontend_port}/health?instances=true",
                 timeout=1,
             )
             response.raise_for_status()
@@ -298,7 +298,7 @@ def wait_for_endpoint_instance_reduction(
     while time.monotonic() < deadline:
         try:
             response = requests.get(
-                f"http://localhost:{frontend_port}/health",
+                f"http://localhost:{frontend_port}/health?instances=true",
                 timeout=1,
             )
             response.raise_for_status()
