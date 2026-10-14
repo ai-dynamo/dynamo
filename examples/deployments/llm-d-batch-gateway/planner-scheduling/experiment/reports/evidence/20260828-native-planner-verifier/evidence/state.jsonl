@@ -1,0 +1,5 @@
+{"observed_at":"2026-08-28T21:35:35.3NZ","adapter_spec":0,"ready_worker_pods":0,"worker_ready_replicas":0,"dgd_ready":"False","lease_csv":"\"llm-d.ai/v1alpha1\",\"dynamo-batch\",\"0\",\"1787952995218\",\"d-1787952935.2187095\""}
+{"observed_at":"2026-08-28T21:36:16.3NZ","adapter_spec":1,"ready_worker_pods":0,"worker_ready_replicas":0,"dgd_ready":"False","lease_csv":"\"llm-d.ai/v1alpha1\",\"dynamo-batch\",\"0\",\"1787953035637\",\"d-1787952975.6371195\""}
+{"observed_at":"2026-08-28T21:38:11.3NZ","adapter_spec":1,"ready_worker_pods":1,"worker_ready_replicas":1,"dgd_ready":"True","lease_csv":"\"llm-d.ai/v1alpha1\",\"dynamo-batch\",\"0\",\"1787953151837\",\"d-1787953091.837957\""}
+{"observed_at":"2026-08-28T21:38:17.3NZ","adapter_spec":1,"ready_worker_pods":1,"worker_ready_replicas":1,"dgd_ready":"True","lease_csv":"\"llm-d.ai/v1alpha1\",\"dynamo-batch\",\"5\",\"1787953156890\",\"d-1787953096.8903909\""}
+{"observed_at":"2026-08-28T21:38:42.3NZ","adapter_spec":1,"ready_worker_pods":1,"worker_ready_replicas":1,"dgd_ready":"True","lease_csv":"\"llm-d.ai/v1alpha1\",\"dynamo-batch\",\"0\",\"1787953182161\",\"d-1787953122.1612728\""}

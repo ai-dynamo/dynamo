@@ -1,0 +1,3 @@
+{"type":"ADDED","object":{"metadata":{"generation":6,"resourceVersion":"807643579"},"spec":{"replicas":0},"status":{"replicas":0}}}
+{"type":"MODIFIED","object":{"metadata":{"generation":7,"resourceVersion":"807657699"},"spec":{"replicas":1},"status":{"replicas":0}}}
+{"type":"MODIFIED","object":{"metadata":{"generation":7,"resourceVersion":"807657707"},"spec":{"replicas":1},"status":{"replicas":1}}}

@@ -1,0 +1,18 @@
+{
+  "fixed_request_configuration": {
+    "max_tokens": 128,
+    "method": "POST",
+    "model": "Qwen/Qwen3-0.6B",
+    "stream": false,
+    "temperature": 0.0,
+    "url": "/v1/chat/completions"
+  },
+  "normalized_input_sha256": "a75148f503f5518b00463a708ef79c67470857abb2c390a1bc8053de67f5dada",
+  "schema_version": "1.0",
+  "selection": {
+    "count": 100,
+    "order": "source file order",
+    "start_index": 0
+  },
+  "source_dataset_sha256": "fc56d28e5522056856c064181dfe841d3fe927ea2f4f605f24b9fbe81db06fd0"
+}
