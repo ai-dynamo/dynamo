@@ -37,6 +37,7 @@ BACKFILL_BASELINE = {
     "kimi-k2-5",
     "kimi-k2-6",
     "kimi-k3",
+    "minimax-m3",
     "motif-3",
     "nemotron-3-5-lightning",
     "nemotron-3-super",
