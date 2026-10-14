@@ -176,6 +176,53 @@ async def test_resolver_allows_explicit_private_store_network(policy):
     await resolver.close()
 
 
+@pytest.mark.asyncio
+async def test_real_http_transport_rejects_private_dns_answer_before_connect(
+    target, policy, monkeypatch
+):
+    resolve = AsyncMock(
+        return_value=[
+            {
+                "hostname": "objects.example",
+                "host": "127.0.0.1",
+                "port": 443,
+                "family": socket.AF_INET,
+                "proto": 0,
+                "flags": socket.AI_NUMERICHOST,
+            }
+        ]
+    )
+    connect = AsyncMock(side_effect=AssertionError("private address was dialed"))
+    monkeypatch.setattr(aiohttp.ThreadedResolver, "resolve", resolve)
+    monkeypatch.setattr(aiohttp.TCPConnector, "_wrap_create_connection", connect)
+
+    with pytest.raises(ArtifactStorageError) as error:
+        await put_artifact(b"abc", target, policy=policy)
+
+    assert error.value.code == "destination_denied"
+    resolve.assert_awaited_once()
+    connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_real_http_transport_rejects_private_ip_literal_before_connect(
+    target, monkeypatch
+):
+    connect = AsyncMock(side_effect=AssertionError("private address was dialed"))
+    monkeypatch.setattr(aiohttp.TCPConnector, "_wrap_create_connection", connect)
+    literal_target = replace(target, url="https://127.0.0.1/object")
+
+    with pytest.raises(ArtifactStorageError) as error:
+        await put_artifact(
+            b"abc",
+            literal_target,
+            policy=StoragePolicy(allowed_hosts=frozenset({"127.0.0.1"})),
+        )
+
+    assert error.value.code == "destination_denied"
+    connect.assert_not_awaited()
+
+
 @pytest.fixture
 def http_transport(monkeypatch):
     response = SimpleNamespace(status=200, headers={"x-amz-version-id": "version-1"})
