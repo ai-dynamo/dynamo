@@ -195,7 +195,11 @@ jobs:
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}${{ inputs.gpu_test_shards == 2 && matrix.platform == 'amd64' && format(' (shard {0}/2)', matrix.shard == 0 && '1' || '2') || '' }}
     runs-on: ${{ matrix.platform == 'amd64' && (matrix.shard == 1 && inputs.amd_runner_secondary_labels != '' && fromJson(inputs.amd_runner_secondary_labels) || inputs.amd_runner_labels != '' && fromJson(inputs.amd_runner_labels) || inputs.amd_runner) || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      # Match the effective AMD64 selector, including shard 1's primary-label
+      # fallback. ARM and callers without regional labels keep ECR_REGISTRY
+      # (west). shared-build-image publishes the same test tag to both regions.
+      # ECR_REGISTRY_EAST may override this repository's east registry.
+      image: ${{ matrix.platform == 'amd64' && contains(fromJson(matrix.shard == 1 && inputs.amd_runner_secondary_labels != '' && inputs.amd_runner_secondary_labels || inputs.amd_runner_labels || '[]'), 'aws-ci-prod-east') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and

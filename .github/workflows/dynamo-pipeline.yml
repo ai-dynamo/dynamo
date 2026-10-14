@@ -106,7 +106,8 @@ jobs:
     needs: image
     runs-on: ${{ fromJson(inputs.rust_gpu_runner_labels) }}
     container:
-      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      # Use the registry local to the selected GPU runner, as shared-test does.
+      image: ${{ contains(fromJson(inputs.rust_gpu_runner_labels), 'aws-ci-prod-east') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
