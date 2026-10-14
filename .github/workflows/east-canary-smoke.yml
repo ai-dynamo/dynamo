@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: East GPU label rollout smoke
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    name: East ${{ matrix.gpus }} GPU smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        gpus: [1, 2, 4]
+    runs-on:
+      group: dynamo-ci-prod-east
+      labels: ["${{ format('gpu-{0}', matrix.gpus) }}", amd64, v2, us-east-1]
+    timeout-minutes: 20
+    container:
+      image: 210086341041.dkr.ecr.us-east-1.amazonaws.com/ai-dynamo/dynamo@sha256:5ed1f2cd9d9bc26f7a3266bfbfec847ab69bc0803f95115556b6ca118bb18c66
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    steps:
+      - name: Verify GPU visibility and CUDA execution
+        shell: bash
+        env:
+          EXPECTED_GPUS: ${{ matrix.gpus }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          mkdir -p "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          hostname | tee smoke-hostname.txt
+          nvidia-smi -L | tee smoke-gpus.txt
+          python - <<'PY' | tee smoke-cuda.txt
+          import os, torch
+          expected = int(os.environ['EXPECTED_GPUS'])
+          actual = torch.cuda.device_count()
+          print(f'Expected GPUs: {expected}; visible GPUs: {actual}')
+          assert actual == expected, (actual, expected)
+          for i in range(actual):
+              x = torch.ones((32, 32), device=f'cuda:{i}')
+              assert (x @ x).sum().item() == 32768
+              torch.cuda.synchronize(i)
+              print(f'GPU {i}: {torch.cuda.get_device_name(i)} CUDA computation passed')
+          PY
+      - name: Upload smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: east-gpu-${{ matrix.gpus }}-smoke
+          path: smoke-*.txt
+          if-no-files-found: error
+      - name: Verify artifact download
+        uses: actions/download-artifact@v4
+        with:
+          name: east-gpu-${{ matrix.gpus }}-smoke
+          path: downloaded-smoke
+      - name: Verify artifact round trip
+        shell: bash
+        run: diff smoke-cuda.txt downloaded-smoke/smoke-cuda.txt
