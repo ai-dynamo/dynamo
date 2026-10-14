@@ -152,12 +152,6 @@ struct ResponseAddress<'a> {
     ticket: StreamOpenTicket,
 }
 
-#[derive(Serialize, Deserialize)]
-enum ResponseFrame {
-    Prologue(Bytes),
-    Data(Bytes),
-}
-
 struct Registration {
     controller: StreamController,
     done: CancellationToken,
@@ -482,7 +476,9 @@ impl VeloResponseService {
             !self.closing.load(Ordering::Acquire),
             "Velo response service is shut down"
         );
-        let anchor = self.velo.create_anchor::<ResponseFrame>();
+        // Item 0 is the JSON prologue and every later item is response data,
+        // both as raw bytes, so neither end runs them through msgpack.
+        let anchor = self.velo.create_anchor::<Bytes>();
         let ticket = self
             .velo
             .prebind_anchor(anchor.handle())
@@ -539,11 +535,11 @@ impl VeloResponseService {
                         tracing::debug!(context_id = %context.id(), "Stopping Velo response generation");
                         controller.request_stop(); stopped = true;
                     }
-                    first = anchor.next() => break first,
+                    first = anchor.next_bytes() => break first,
                 }
             };
             match first {
-                Some(Ok(StreamFrame::Item(ResponseFrame::Prologue(prologue)))) => {
+                Some(Ok(StreamFrame::Item(prologue))) => {
                     let prologue = match serde_json::from_slice::<ResponseStreamPrologue>(&prologue)
                     {
                         Ok(prologue) => prologue,
@@ -738,12 +734,10 @@ impl VeloResponseService {
             tracing::warn!(context_id = %context.id(), %error, "Failed to prepare Velo response peer");
         })?;
         let sender = if address.anchor.unpack().0 == self.velo.instance_id().worker_id() {
-            self.velo
-                .attach_anchor::<ResponseFrame>(address.anchor)
-                .await?
+            self.velo.attach_anchor::<Bytes>(address.anchor).await?
         } else {
             self.velo
-                .open_anchor_stream::<ResponseFrame>(address.anchor, address.ticket)
+                .open_anchor_stream::<Bytes>(address.anchor, address.ticket)
                 .await?
         };
         // Check compatibility only now that the stream is open, so the frontend
@@ -848,9 +842,7 @@ impl Drop for ResponseLease {
     }
 }
 
-fn first_kind(
-    frame: &Option<Result<StreamFrame<ResponseFrame>, velo::streaming::StreamError>>,
-) -> String {
+fn first_kind(frame: &Option<Result<StreamFrame<Bytes>, velo::streaming::StreamError>>) -> String {
     match frame {
         None => "closed".into(),
         Some(Err(error)) => error.to_string(),
@@ -859,7 +851,7 @@ fn first_kind(
 }
 
 pub(super) struct VeloResponseReceiver {
-    anchor: StreamAnchor<ResponseFrame>,
+    anchor: StreamAnchor<Bytes>,
     lease: ResponseLease,
     context_id: String,
     ended: bool,
@@ -871,8 +863,8 @@ impl Stream for VeloResponseReceiver {
         if this.ended {
             return Poll::Ready(None);
         }
-        match std::task::ready!(Pin::new(&mut this.anchor).poll_next(cx)) {
-            Some(Ok(StreamFrame::Item(ResponseFrame::Data(bytes)))) => Poll::Ready(Some(Ok(bytes))),
+        match std::task::ready!(this.anchor.poll_next_bytes(cx)) {
+            Some(Ok(StreamFrame::Item(bytes))) => Poll::Ready(Some(Ok(bytes))),
             Some(Ok(StreamFrame::Finalized)) => {
                 this.ended = true;
                 this.lease.service.complete(this.lease.id);
@@ -894,7 +886,7 @@ impl Stream for VeloResponseReceiver {
 }
 
 pub struct VeloResponseSender {
-    sender: Option<StreamSender<ResponseFrame>>,
+    sender: Option<StreamSender<Bytes>>,
     _peer: PeerLease,
     _service: Arc<VeloResponseService>,
     finished: CancellationToken,
@@ -907,7 +899,7 @@ impl VeloResponseSender {
         self.sender
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Velo response closed"))?
-            .send(ResponseFrame::Data(bytes))
+            .send_bytes(bytes)
             .await?;
         Ok(())
     }
@@ -917,9 +909,10 @@ impl VeloResponseSender {
         self.sender
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Velo response closed"))?
-            .send(ResponseFrame::Prologue(
-                serde_json::to_vec(&ResponseStreamPrologue { error, typed_error })?.into(),
-            ))
+            .send_bytes(serde_json::to_vec(&ResponseStreamPrologue {
+                error,
+                typed_error,
+            })?)
             .await?;
         self.prologue_sent = true;
         Ok(())
@@ -1654,7 +1647,7 @@ mod tests {
             .sender
             .as_ref()
             .unwrap()
-            .send(ResponseFrame::Prologue(Bytes::from_static(b"{invalid")))
+            .send_bytes(b"{invalid")
             .await
             .unwrap();
         match registered.wait().await.unwrap() {
