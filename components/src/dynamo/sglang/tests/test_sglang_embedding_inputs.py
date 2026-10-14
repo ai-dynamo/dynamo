@@ -156,3 +156,17 @@ async def test_batched_tokenized_input_gets_unique_request_ids():
     assert request.input_ids == token_ids
     assert request.rid == ["embedding-trace-0", "embedding-trace-1"]
     assert request.external_trace_header is None
+
+
+@pytest.mark.asyncio
+async def test_chat_style_messages_are_rejected():
+    handler = _handler()
+    request = {
+        "model": "embedding-model",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    with pytest.raises(ValueError, match="vLLM embedding workers only"):
+        async for _ in handler.generate(request, _Context()):
+            pass
+    assert handler.engine.async_encode_calls == []

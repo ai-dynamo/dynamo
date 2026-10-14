@@ -1668,4 +1668,24 @@ mod embedding_without_chat_template {
         })
         .await;
     }
+
+    #[tokio::test]
+    async fn frontend_tokenization_rejects_chat_input() {
+        let preprocessor = embedding_preprocessor_without_template();
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        let error = preprocessor
+            .preprocess_embedding_request(&request)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--embedding-frontend-tokenization"),
+            "{error}"
+        );
+    }
 }

@@ -98,6 +98,11 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             request: Embedding request dictionary.
             context: Context object for cancellation handling.
         """
+        if request.get("messages") is not None:
+            raise ValueError(
+                "chat-style embedding input (`messages`) is supported on vLLM "
+                "embedding workers only; send `input` to SGLang"
+            )
         embedding_input = request.get("input")
         if isinstance(embedding_input, str):
             input_type = "str"
