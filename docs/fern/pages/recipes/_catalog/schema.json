@@ -204,7 +204,7 @@
           },
           "badge": {
             "type": "string",
-            "enum": ["nvidia-validated", "nvidia-optimized", "nvidia-certified", "community"],
+            "enum": ["functional", "optimized", "nvidia-certified", "community"],
             "description": "Lifecycle badge for this target. validate.py requires it on every target (except recipes listed in badge_backfill.yaml) and checks the evidence each badge needs."
           },
           "certification": {

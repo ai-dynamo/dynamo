@@ -20,7 +20,7 @@ Checks, for BOTH catalogs:
      index (active OR deferred); benchmark promotion_candidate.deferred_recipe_id
      refers to a known recipe.
   8. Every recipe target has a badge with the evidence it claims:
-     nvidia-optimized needs a benchmark asset and published performance;
+     optimized needs a benchmark asset and published performance;
      nvidia-certified also needs a NIM Factory certification record; community
      needs a named maintainer and must cover every target of the recipe.
      Recipes listed in badge_backfill.yaml predate required badges and may
@@ -481,7 +481,7 @@ def check_recipe_specific_image_ownership(entries):
     ERRORS.extend(_image_attribution.recipe_image_ownership_errors(entries))
 
 
-BADGES = ("nvidia-validated", "nvidia-optimized", "nvidia-certified", "community")
+BADGES = ("functional", "optimized", "nvidia-certified", "community")
 CERTIFICATION_KEYS = ("source", "ref", "image", "date")
 BADGE_BACKFILL = os.path.join(RECIPES_CAT, "badge_backfill.yaml")
 
@@ -508,7 +508,7 @@ def recipe_badge_errors(obj, label, pending=False):
                 "%s badge must be one of %s, got %r" % (where, ", ".join(BADGES), badge)
             )
             continue
-        if badge in ("nvidia-optimized", "nvidia-certified"):
+        if badge in ("optimized", "nvidia-certified"):
             bench = t.get("benchmark")
             basset = bench.get("asset") if isinstance(bench, dict) else None
             perf = t.get("expected_performance")

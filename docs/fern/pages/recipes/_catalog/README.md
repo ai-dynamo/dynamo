@@ -115,12 +115,12 @@ is missing:
 
 | `badge` | Use it when | Evidence required on the target |
 | --- | --- | --- |
-| `nvidia-validated` | NVIDIA deployed the target end to end and the smoke test returned a completion | None |
-| `nvidia-optimized` | NVIDIA perf-tuned and benchmarked the target | `benchmark.asset` that exists, and `expected_performance.available: true` |
-| `nvidia-certified` | NIM Factory certified the target | Everything `nvidia-optimized` needs, plus a `certification` record (`source: nim-factory`, `ref`, `image`, `date`) |
+| `functional` | NVIDIA deployed the target end to end and the smoke test returned a completion | None |
+| `optimized` | NVIDIA perf-tuned and benchmarked the target | `benchmark.asset` that exists, and `expected_performance.available: true` |
+| `nvidia-certified` | NIM Factory certified the target | Everything `optimized` needs, plus a `certification` record (`source: nim-factory`, `ref`, `image`, `date`) |
 | `community` | The recipe is contributed and maintained outside NVIDIA | A named recipe `maintainer`; the badge must cover every target of the recipe |
 
-Contributors outside NVIDIA use `community`. The NVIDIA badges are set by NVIDIA.
+Contributors outside NVIDIA use `community`; NVIDIA sets the other three.
 
 `badge_backfill.yaml` lists the recipes that predate required badges; they may
 leave targets without one until they are backfilled. The list only shrinks:

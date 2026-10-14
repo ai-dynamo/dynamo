@@ -248,7 +248,7 @@ targets:                          # >= 1 item
     workload: { type: chat }
     deploy: { asset: recipes/llama-3-1-8b/vllm/agg/deploy.yaml }
     expected_performance: { available: false }   # add summary: when numbers exist
-    badge: nvidia-validated       # required; enum: nvidia-validated | nvidia-optimized |
+    badge: functional             # required; enum: functional | optimized |
                                   # nvidia-certified | community (outside contributors)
 ```
 

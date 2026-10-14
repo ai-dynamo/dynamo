@@ -79,12 +79,12 @@ def recipe(*targets: dict[str, object], maintainer: str | None = None) -> dict:
 @pytest.mark.parametrize(
     "obj",
     (
-        recipe(target("nvidia-validated", benchmark=None)),
-        recipe(target("nvidia-optimized")),
+        recipe(target("functional", benchmark=None)),
+        recipe(target("optimized")),
         recipe(target("nvidia-certified", certification=CERT)),
         recipe(target("community"), target("community", id="b"), maintainer="Jane Doe"),
     ),
-    ids=["validated", "optimized", "certified", "community"],
+    ids=["functional", "optimized", "certified", "community"],
 )
 def test_badge_with_its_evidence_passes(obj: dict) -> None:
     assert catalog_validate.recipe_badge_errors(obj, "recipe:model") == []
@@ -96,19 +96,15 @@ def test_badge_with_its_evidence_passes(obj: dict) -> None:
         (recipe(target()), "needs a badge"),
         (recipe(target("day-0")), "badge must be one of"),
         (
-            recipe(target("nvidia-optimized", benchmark=None)),
-            "nvidia-optimized needs a benchmark asset",
+            recipe(target("optimized", benchmark=None)),
+            "optimized needs a benchmark asset",
         ),
         (
-            recipe(
-                target("nvidia-optimized", benchmark={"asset": "recipes/missing.yaml"})
-            ),
-            "nvidia-optimized needs a benchmark asset",
+            recipe(target("optimized", benchmark={"asset": "recipes/missing.yaml"})),
+            "optimized needs a benchmark asset",
         ),
         (
-            recipe(
-                target("nvidia-optimized", expected_performance={"available": False})
-            ),
+            recipe(target("optimized", expected_performance={"available": False})),
             "needs expected_performance.available: true",
         ),
         (
@@ -124,14 +120,14 @@ def test_badge_with_its_evidence_passes(obj: dict) -> None:
             "nvidia-certified needs a benchmark asset",
         ),
         (
-            recipe(target("nvidia-optimized", certification=CERT)),
-            "has a certification record but badge is nvidia-optimized",
+            recipe(target("optimized", certification=CERT)),
+            "has a certification record but badge is optimized",
         ),
         (recipe(target("community")), "community badge needs a named maintainer"),
         (
             recipe(
                 target("community"),
-                target("nvidia-validated", id="b"),
+                target("functional", id="b"),
                 maintainer="Jane Doe",
             ),
             "community badge must apply to every target or none",
@@ -158,13 +154,11 @@ def test_badge_without_its_evidence_fails(obj: dict, expected_error: str) -> Non
 
 
 def test_pending_recipe_may_omit_badges_but_not_evidence() -> None:
-    obj = recipe(target(), target("nvidia-optimized", id="b", benchmark=None))
+    obj = recipe(target(), target("optimized", id="b", benchmark=None))
 
     errors = catalog_validate.recipe_badge_errors(obj, "recipe:model", pending=True)
 
-    assert errors == [
-        "[recipe:model] target b nvidia-optimized needs a benchmark asset"
-    ]
+    assert errors == ["[recipe:model] target b optimized needs a benchmark asset"]
 
 
 @pytest.mark.parametrize(
@@ -179,7 +173,7 @@ def test_badge_backfill_list_rejects_stale_ids(
     pending: list[str], expected_error: str
 ) -> None:
     entries = {
-        "done": recipe(target("nvidia-validated")),
+        "done": recipe(target("functional")),
         "open": recipe(target()),
     }
 
