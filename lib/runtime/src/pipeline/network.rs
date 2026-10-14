@@ -14,6 +14,7 @@ pub mod ingress;
 pub mod manager;
 pub mod quic_response;
 pub mod tcp;
+mod tombstones;
 pub mod velo_response;
 
 use crate::SystemHealth;
@@ -488,6 +489,36 @@ impl PendingConnections {
 #[async_trait::async_trait]
 pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
+}
+
+/// A response plane that registers each response stream by id and leaves any
+/// request stream to the TCP callback server. QUIC and Velo work this way.
+#[async_trait]
+pub(crate) trait RegisteredResponsePlane: Send + Sync {
+    /// QUIC ignores `defer_cancellation_until_prologue`.
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<RegisteredStream<StreamReceiver>>;
+
+    /// Link a registration to its worker. Returns `false` and cancels the
+    /// registration when discovery has just removed that worker.
+    async fn associate_instance(
+        &self,
+        registration_id: uuid::Uuid,
+        instance: &crate::discovery::EndpointInstanceId,
+    ) -> bool;
+
+    async fn cancel_response(&self, registration_id: uuid::Uuid);
+
+    /// Cancel every registration linked to `instance` and tombstone it.
+    async fn cancel_instance_streams(
+        &self,
+        instance: &crate::discovery::EndpointInstanceId,
+    ) -> usize;
+
+    async fn clear_instance_tombstone(&self, instance: &crate::discovery::EndpointInstanceId);
 }
 
 #[cfg(test)]
