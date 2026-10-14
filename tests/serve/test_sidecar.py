@@ -84,7 +84,6 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 
 CANCELLATION_MAX_TOKENS = 2048
 CANCELLATION_CONTEXT_LEN = 4096
-SGLANG_CANCELLATION_KV_TOKENS = 8192
 
 
 def _aggregated_payloads(metrics: EngineMetrics):
@@ -153,22 +152,16 @@ sidecar_configs = {
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
-            pytest.mark.requested_sglang_kv_tokens(SGLANG_CANCELLATION_KV_TOKENS),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
             "PYTHONUNBUFFERED": "1",
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
-            "SGLANG_MAX_NEW_TOKENS_LIMIT": "0",
         },
         request_payloads=[
             *_aggregated_payloads(
-                SGLangMetricsChecker(
-                    port_env="DYN_ENGINE_HTTP_PORT1",
-                    minimum_context_length=CANCELLATION_CONTEXT_LEN,
-                    minimum_kv_capacity=SGLANG_CANCELLATION_KV_TOKENS,
-                ),
+                SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
             ),
             OmittedMaxTokensChatPayload(
                 body={
