@@ -763,6 +763,67 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     publisher.cleanup()
 
 
+def _scheduler_entry(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank):
+    """Stands in for SGLang's ``run_scheduler_process`` signature."""
+
+
+@pytest.mark.asyncio
+async def test_every_pure_dp_scheduler_reaches_the_metrics_socket(
+    monkeypatch, tmp_path
+):
+    """SGLang gives each pure-DP scheduler a fresh ``metrics_ipc_name`` and keeps
+    only ``instance_id``; the scheduler wrapper must make every rank's metrics
+    reach the PULL socket the publisher binds from the parent ``port_args``."""
+    import uuid
+
+    import zmq
+
+    import dynamo.sglang._compat as sglang_compat
+    from dynamo.sglang.nixl_telemetry import _share_scheduler_metrics_ipc_name
+
+    monkeypatch.setattr(sglang_compat, "sglang_resolved_view", None)
+    instance_id = uuid.uuid4().hex[:12]
+    server_args = SimpleNamespace(
+        dp_size=2, enable_dp_attention=False, nnodes=1, node_rank=0, page_size=16
+    )
+    parent = SimpleNamespace(
+        metrics_ipc_name=f"ipc://{tmp_path}/parent", instance_id=instance_id
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(port_args=parent),
+        config=SimpleNamespace(server_args=server_args, dynamo_args=SimpleNamespace()),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+    ctx = zmq.Context()
+    pushes = []
+    try:
+        for dp_rank in (0, 1):
+            port_args = SimpleNamespace(
+                metrics_ipc_name=f"ipc://{tmp_path}/rank-{dp_rank}",
+                instance_id=instance_id,
+            )
+            _share_scheduler_metrics_ipc_name(
+                _scheduler_entry, (server_args, port_args, 0, 0, 0, dp_rank), {}
+            )
+            push = ctx.socket(zmq.PUSH)
+            push.setsockopt(zmq.LINGER, 0)
+            push.connect(port_args.metrics_ipc_name)
+            push.send_pyobj(SimpleNamespace(data_parallel_rank=dp_rank))
+            pushes.append(push)
+
+        received = [
+            await asyncio.wait_for(publisher._sock.recv_pyobj(), timeout=2)
+            for _ in range(2)
+        ]
+        assert sorted(m.data_parallel_rank for m in received) == [0, 1]
+    finally:
+        for push in pushes:
+            push.close()
+        ctx.term()
+        publisher.cleanup()
+
+
 # ---- per-worker metric gating (embedding vs chat) ----
 
 
