@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402 -- Optional dependency checks precede runtime imports.
 
 """Configured authority, capture, and verified completion against a real store."""
 
@@ -19,19 +20,10 @@ pytest.importorskip("boto3")
 pytest.importorskip("msgspec")
 pytest.importorskip("zstandard")
 
-from dynamo.artifacts.runtime import (
-    ArtifactRuntime,
-)
-from dynamo.artifacts.storage import (
-    ArtifactStorageError,
-)
-from dynamo.artifacts.tests import (
-    test_storage_minio as test_artifact_storage_minio,
-)
-from dynamo.artifacts.vllm.capture import (
-    CaptureBudget,
-    VllmArtifactSession,
-)
+from dynamo.artifacts.runtime import ArtifactRuntime
+from dynamo.artifacts.storage import ArtifactStorageError
+from dynamo.artifacts.tests import test_storage_minio as test_artifact_storage_minio
+from dynamo.artifacts.vllm.capture import CaptureBudget, VllmArtifactSession
 
 frozen_artifact = test_artifact_storage_minio.frozen_artifact
 store = test_artifact_storage_minio.store
