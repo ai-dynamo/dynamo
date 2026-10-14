@@ -212,8 +212,6 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
             "DYN_REQUEST_PLANE": "tcp",
-            "DYN_ENGINE_GPU_INDEX1": "0",
-            "DYN_ENGINE_GPU_INDEX2": "0",
             # The TensorRT-LLM release image runs as uid 0 and PRTE refuses
             # to run as root unless told twice; without these the engines'
             # worker spawn fails with `MPI_ERR_UNKNOWN` and neither binds its
@@ -241,8 +239,6 @@ sidecar_configs = {
             "PYTHONUNBUFFERED": "1",
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
-            "DYN_ENGINE_GPU_INDEX1": "0",
-            "DYN_ENGINE_GPU_INDEX2": "0",
         },
         # disagg.sh launches decode as worker 1 and prefill as worker 2.
         request_payloads=_disaggregated_payloads(
@@ -270,8 +266,6 @@ sidecar_configs = {
             "PYTHONUNBUFFERED": "1",
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
-            "DYN_ENGINE_GPU_INDEX1": "0",
-            "DYN_ENGINE_GPU_INDEX2": "0",
         },
         request_payloads=[disaggregated_chat_payload()],
     ),
@@ -285,6 +279,12 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+    backend, layout = config.name.split("_", 1)
+    if layout == "disaggregated":
+        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+        assert device != "-1", "One visible GPU is required"
+        for role in ("PREFILL", "DECODE"):
+            monkeypatch.setenv(f"{backend.upper()}_{role}_GPU", device)
     return config
 
 
@@ -482,9 +482,10 @@ def test_sidecar_kv_routing(
                 str(dep_ports[-1]),
             ]
     else:
+        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+        assert device != "-1", "One visible GPU is required"
         engine_env = {
-            "DYN_ENGINE_GPU_INDEX1": "0",
-            "DYN_ENGINE_GPU_INDEX2": "0",
+            f"{backend.upper()}_WORKER{worker}_GPU": device for worker in (1, 2)
         }
     run_serve_deployment(
         config,
