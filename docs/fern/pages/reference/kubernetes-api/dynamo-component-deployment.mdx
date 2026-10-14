@@ -127,6 +127,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   For `type: lpx`, omit this field and use `roles[].podTemplate`. Every LPX role requires its own template with an explicit `main` container image.
 
+  For runtime 1.6.0 and later, frontend containers receive a startup probe that allows five minutes for NATS and etcd connections and initialization. The same default applies to a designated frontend sidecar, using its own image version independently of the parent component's runtime version and `runtimeVersionOverride`. Older or unknown runtime versions do not receive this default.
+
+  Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` is a complete value that replaces the applicable default. It must include exactly one handler (`exec`, `httpGet`, `tcpSocket`, or `grpc`). In both `v1alpha1` and `v1beta1`, the DGD and DCD APIs reject probes that only change timing or define multiple handlers, including probes in role templates and sidecars. To change timing, include the handler and the desired timing settings. Omit a probe to retain the applicable operator default. See [Health Probes](../../kubernetes/operations/observability.mdx#check-and-customize-health-probes) for probe settings and timeout adjustments.
+
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
 
@@ -178,7 +182,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="globalDynamoNamespace" type="boolean" default="false">
-  Places the component in the global Dynamo namespace rather than the per-deployment namespace derived from the DGD name.
+  Places the component in the global Dynamo namespace (`dynamo`) rather than the per-deployment namespace. By default, the operator combines the Kubernetes namespace and DGD name with a hyphen and replaces dots in the DGD name with hyphens. If the result exceeds 63 characters, the operator shortens it and appends a 16-character hash derived from the original namespace/name pair. Values of 63 characters or fewer remain unchanged.
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">
