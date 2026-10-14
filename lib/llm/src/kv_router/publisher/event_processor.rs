@@ -106,15 +106,16 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                             );
                             let applied = emit(
                                 &local_indexer,
-                                worker_id,
-                                storage_tier,
-                                residency_domain,
-                                KvCacheEvent {
-                                    event_id: batching_state.next_publish_id,
-                                    data: KvCacheEventData::Cleared,
-                                    dp_rank: event.dp_rank,
-                                },
-                                None,
+                                RouterEvent::with_residency_domain(
+                                    worker_id,
+                                    KvCacheEvent {
+                                        event_id: batching_state.next_publish_id,
+                                        data: KvCacheEventData::Cleared,
+                                        dp_rank: event.dp_rank,
+                                    },
+                                    storage_tier,
+                                    residency_domain,
+                                ),
                                 &mut output,
                             )
                             .await;
