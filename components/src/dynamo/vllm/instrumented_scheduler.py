@@ -2297,7 +2297,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 start_paused=self._bench_active,
             )
         except Exception:
-            if self._bench_synchronizer is not None:
+            if self._bench_speculative_tokens:
+                # EngineCore has not created the native emitter yet. Restore
+                # its temporary factory hook and GC policy before propagating
+                # a later publisher bind failure; no publisher exists to resume.
+                self._bench_deactivate(resume_publisher=False)
+            elif self._bench_synchronizer is not None:
                 self._bench_synchronizer.close()
             raise
 

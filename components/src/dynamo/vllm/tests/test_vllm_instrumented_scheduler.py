@@ -2850,6 +2850,63 @@ def test_eagle_factory_observer_is_scoped_and_restored(monkeypatch):
     assert stub._bench_sd_restore_factory is None
 
 
+def test_eagle_publisher_failure_restores_factory_and_gc_policy(
+    monkeypatch, tmp_path, unused_tcp_port
+):
+    class NativeEmitter(_NativeEmitterStub):
+        @classmethod
+        def from_vllm_config(cls, config, scheduler):
+            return "ordinary-emitter"
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_NativeFPMEmitter", NativeEmitter
+    )
+    original_factory = NativeEmitter.__dict__["from_vllm_config"]
+    scheduler_instances = []
+
+    def parent_init(self, **kwargs):
+        self.max_num_running_reqs = 8
+        self.cache_config = SimpleNamespace(enable_prefix_caching=False)
+        scheduler_instances.append(self)
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "__init__", parent_init
+    )
+    start_gc = MagicMock(return_value=True)
+    stop_gc = MagicMock()
+    monkeypatch.setattr("dynamo.vllm.gc_policy.start_gc_policy", start_gc)
+    monkeypatch.setattr("dynamo.vllm.gc_policy.stop_gc_policy", stop_gc)
+    failure = RuntimeError("publisher bind failed")
+
+    def fail_publisher(*args, **kwargs):
+        # The observer is installed before the later ZMQ bind failure.
+        assert NativeEmitter.__dict__["from_vllm_config"] is not original_factory
+        raise failure
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_FpmPublisherThread", fail_publisher
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=1, pipeline_parallel_size=1),
+        speculative_config=SimpleNamespace(method="eagle3", num_speculative_tokens=3),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        observability_config=SimpleNamespace(forward_pass_metrics_port=unused_tcp_port),
+        model_config=SimpleNamespace(get_diff_sampling_param=lambda: {}),
+        additional_config={
+            "benchmark": {"mode": "decode", "output_path": str(tmp_path / "sd.json")}
+        },
+    )
+    with pytest.raises(RuntimeError, match="publisher bind failed") as raised:
+        InstrumentedScheduler(config, object(), object(), block_size=16)
+    assert raised.value is failure
+    start_gc.assert_called_once_with()
+    stop_gc.assert_called_once_with()
+    assert NativeEmitter.__dict__["from_vllm_config"] is original_factory
+    assert NativeEmitter.from_vllm_config(None, object()) == "ordinary-emitter"
+    assert scheduler_instances[0]._bench_sd_restore_factory is None
+    assert not scheduler_instances[0]._bench_active
+
+
 def test_eagle_native_join_waits_for_corrected_shape_and_preserves_publisher(
     eagle_benchmark,
 ):
