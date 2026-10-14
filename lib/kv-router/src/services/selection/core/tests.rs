@@ -847,6 +847,10 @@ async fn partition_rejects_resident_blocks_without_cache() {
         "{:?}",
         record.not_schedulable_reasons
     );
+    assert!(
+        core.indexer_registry.get_indexer(&default_key()).is_none(),
+        "a rejected partition opened an indexer"
+    );
 }
 
 type SharedCacheCalls = Arc<parking_lot::Mutex<Vec<(Vec<u32>, u32, Option<String>)>>>;

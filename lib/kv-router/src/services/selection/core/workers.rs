@@ -269,6 +269,26 @@ impl SelectionCore {
         });
         let entry = entry_cell
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
+                // Fail before starting tasks or opening the indexer: a failed init reruns on every
+                // later upsert to this partition.
+                let mut selector = (self.worker_selection_policy_factory)(
+                    &self.kv_router_config,
+                    self.worker_type,
+                    key.as_ref(),
+                );
+                // Checked per partition, since the factory may build a different policy for each.
+                let inputs = selector.declared_inputs();
+                if inputs.contains(WorkerInputs::RESIDENT_BLOCKS)
+                    && !inputs.contains(WorkerInputs::CACHE)
+                {
+                    return Err(SelectionError::BadRequest(format!(
+                        "RESIDENT_BLOCKS requires the worker-selection policy for {key} to declare WorkerInputs::CACHE"
+                    )));
+                }
+                let profile = self
+                    .kv_router_config
+                    .policy_profile(Some(&key.model_name))
+                    .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
                 let host_replica = self
                     .host
@@ -326,24 +346,6 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let mut selector = (self.worker_selection_policy_factory)(
-                    &self.kv_router_config,
-                    self.worker_type,
-                    key.as_ref(),
-                );
-                // Checked per partition, since the factory may build a different policy for each.
-                let inputs = selector.declared_inputs();
-                if inputs.contains(WorkerInputs::RESIDENT_BLOCKS)
-                    && !inputs.contains(WorkerInputs::CACHE)
-                {
-                    return Err(SelectionError::BadRequest(format!(
-                        "RESIDENT_BLOCKS requires the worker-selection policy for {key} to declare WorkerInputs::CACHE"
-                    )));
-                }
-                let profile = self
-                    .kv_router_config
-                    .policy_profile(Some(&key.model_name))
-                    .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
                 if let Some(counts) = poll_resident_block_counts(
                     &key,
                     inputs,
