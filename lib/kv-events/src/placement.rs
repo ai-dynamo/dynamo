@@ -49,6 +49,9 @@ pub struct PlacementEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Positive text-only provenance required for shared-cache learning.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_cache_eligible: bool,
 }
 
 impl PlacementEvent {
@@ -57,6 +60,7 @@ impl PlacementEvent {
             placement,
             event,
             session_id: None,
+            shared_cache_eligible: false,
         }
     }
 
@@ -67,6 +71,11 @@ impl PlacementEvent {
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
         Self::new(Placement::local_gpu(worker_id, event.dp_rank), event)
+    }
+
+    pub fn with_shared_cache_eligibility(mut self, eligible: bool) -> Self {
+        self.shared_cache_eligible = eligible;
+        self
     }
 
     pub fn into_router_event(self) -> Option<RouterEvent> {
@@ -80,6 +89,7 @@ impl PlacementEvent {
             self.placement.residency_domain,
         );
         event.session_id = self.session_id;
+        event.shared_cache_eligible = self.shared_cache_eligible;
         Some(event)
     }
 }

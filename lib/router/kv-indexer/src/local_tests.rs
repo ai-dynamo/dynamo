@@ -60,6 +60,7 @@ mod local_indexer_tests {
             worker_id: 0,
             state_source: None,
             session_id: None,
+            shared_cache_eligible: false,
             storage_tier: StorageTier::Device,
             residency_domain: WireResidencyDomain::default(),
             event: KvCacheEvent {
@@ -294,7 +295,8 @@ mod local_indexer_tests {
                 }),
                 dp_rank: 0,
             },
-        );
+        )
+        .with_shared_cache_eligibility(true);
 
         local_indexer
             .apply_event_with_buffer(test_event)
@@ -325,6 +327,14 @@ mod local_indexer_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].worker_id, worker_id);
         assert_eq!(last_event_id, 1);
+        assert!(events[0].shared_cache_eligible);
+        let WorkerKvQueryResponse::TreeDump { events, .. } =
+            local_indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("expected a tree dump");
+        };
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].shared_cache_eligible);
     }
 
     #[tokio::test]
