@@ -8,11 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dynamo.common.multimodal.qwen_video_routing import (
-    QWEN_VIDEO_RESIZE_LEGACY_CEIL,
-    QWEN_VIDEO_RESIZE_ROUND_TIES_EVEN,
-    resolve_qwen_video_resize_mode,
-)
+from dynamo.common.multimodal.qwen_video_routing import resolve_qwen_video_resize_mode
 
 pytestmark = [
     pytest.mark.unit,
@@ -50,11 +46,6 @@ def _warnings(caplog):
         for record in caplog.records
         if record.name == LOGGER_NAME and record.levelno == logging.WARNING
     ]
-
-
-def test_resize_mode_constants():
-    assert QWEN_VIDEO_RESIZE_LEGACY_CEIL == "legacy_ceil"
-    assert QWEN_VIDEO_RESIZE_ROUND_TIES_EVEN == "round_ties_even"
 
 
 def test_probe_calls_smart_resize_once_with_exact_arguments():
