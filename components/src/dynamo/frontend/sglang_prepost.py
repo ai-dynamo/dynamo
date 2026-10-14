@@ -22,12 +22,24 @@ from sglang.srt.entrypoints.openai.protocol import (
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
+from sglang.srt.function_call.kimik3_format import RESPONSE_CLOSE, RESPONSE_OPEN
 from sglang.srt.function_call.utils import get_json_schema_constraint
+from sglang.srt.parser.inkling_tokenizer import (
+    CONTENT_INVOKE_TOOL_JSON,
+    CONTENT_INVOKE_TOOL_TEXT,
+    CONTENT_MODEL_END_SAMPLING,
+    CONTENT_TEXT,
+)
 from sglang.srt.parser.jinja_template_utils import (
     detect_jinja_template_content_format,
     process_content_for_template_format,
 )
-from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
+from sglang.srt.parser.reasoning_parser import (
+    GptOssDetector,
+    InklingDetector,
+    KimiK3Detector,
+    ReasoningParser,
+)
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -1158,6 +1170,156 @@ def resolve_skip_special_tokens(requested: bool | None, *, has_parser: bool) -> 
     return True if requested is None else requested
 
 
+def _find_subsequence(haystack: list[int], needle: list[int], start: int = 0) -> int:
+    """Return the index just past the first occurrence of needle, or -1."""
+    width = len(needle)
+    for index in range(start, len(haystack) - width + 1):
+        if haystack[index : index + width] == needle:
+            return index + width
+    return -1
+
+
+class _ReasoningTokenCounter:
+    """Count original token IDs using deterministic segments and a shadow parser.
+
+    Reasoning delimiters count; normal-output transitions do not. A parser
+    failure or an unmapped mixed segment withdraws usage instead of guessing.
+    Segmentation requires model control markers to retain their encoded IDs.
+    """
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        reasoning_parser: ReasoningParser,
+        *,
+        start_marker_ids: list[int],
+        end_marker_ids: list[int],
+    ) -> None:
+        self._tokenizer = tokenizer
+        # Copied before the live parser consumes anything, so the shadow starts
+        # in the same state, forced reasoning included.
+        self._shadow = copy.deepcopy(reasoning_parser)
+        self._start_marker_ids = start_marker_ids
+        self._end_markers: dict[int, list[tuple[str, list[int]]]] = {}
+        self._max_marker_width = 1
+        detector = reasoning_parser.detector
+        boundaries = [
+            (getattr(detector, attribute, None), kind)
+            for attribute, kind in (
+                ("tool_start_token", "tool"),
+                ("_tool_start_token", "tool"),
+                ("_tool_end_token", "close"),
+                ("TEXT_START_TOKEN", "normal"),
+                ("ACTION_START_TOKEN", "normal"),
+            )
+        ]
+        if isinstance(detector, KimiK3Detector):
+            boundaries += [(RESPONSE_OPEN, "normal"), (RESPONSE_CLOSE, "close")]
+        if isinstance(detector, InklingDetector):
+            boundaries += [
+                (CONTENT_TEXT, "normal"),
+                (CONTENT_INVOKE_TOOL_JSON, "normal"),
+                (CONTENT_INVOKE_TOOL_TEXT, "normal"),
+                (CONTENT_MODEL_END_SAMPLING, "close"),
+            ]
+        encoded = [(end_marker_ids, "close")] + [
+            (list(tokenizer.encode(marker, add_special_tokens=False)), kind)
+            for marker, kind in boundaries
+            if isinstance(marker, str) and marker
+        ]
+        for ids, kind in encoded:
+            if ids:
+                self._end_markers.setdefault(ids[0], []).append((kind, ids))
+                self._max_marker_width = max(self._max_marker_width, len(ids))
+        self._pending_ids: list[int] = []
+        # Pending ids before this offset hold no closing marker.
+        self._scanned = 0
+        self.total: int | None = 0
+
+    def observe(self, token_ids: list[int], *, finished: bool) -> None:
+        """Add generated tokens, before any stop trim, and count what closed."""
+        if self.total is None:
+            return
+        self._pending_ids.extend(token_ids)
+        consumed = 0
+        index = self._scanned
+        while index < len(self._pending_ids):
+            for attribute, marker in self._end_markers.get(
+                self._pending_ids[index], ()
+            ):
+                split = index + len(marker)
+                if self._pending_ids[index:split] == marker:
+                    self._classify(
+                        self._pending_ids[consumed:split], attribute, len(marker)
+                    )
+                    consumed = split
+                    index = split
+                    break
+            else:
+                index += 1
+        self._scanned = (
+            max(consumed, len(self._pending_ids) - self._max_marker_width + 1)
+            - consumed
+        )
+        if consumed:
+            del self._pending_ids[:consumed]
+        if finished and self._pending_ids:
+            self._classify(self._pending_ids)
+            self._pending_ids = []
+            self._scanned = 0
+
+    def _classify(
+        self, segment: list[int], end_attribute: str = "", marker_width: int = 0
+    ) -> None:
+        if self.total is None:
+            return
+        text = self._tokenizer.decode(segment, skip_special_tokens=False)
+        try:
+            reasoning_text, normal_text = self._shadow.parse_stream_chunk(text)
+        except Exception:
+            # Isolation point: usage accounting must never fail a response.
+            logger.warning(
+                "reasoning parser failed while counting reasoning tokens; "
+                "omitting reasoning_tokens",
+                exc_info=True,
+            )
+            self.total = None
+            self._pending_ids = []
+            return
+        if not reasoning_text:
+            return
+        opening = (
+            _find_subsequence(segment, self._start_marker_ids)
+            if normal_text and self._start_marker_ids
+            else -1
+        )
+        start = opening - len(self._start_marker_ids) if opening >= 0 else 0
+        excluded = (
+            marker_width
+            if end_attribute == "normal" or (end_attribute == "tool" and normal_text)
+            else 0
+        )
+        if normal_text:
+            normal_ids = segment[:start] + (segment[-excluded:] if excluded else [])
+            if normal_text not in self._tokenizer.decode(
+                normal_ids, skip_special_tokens=False
+            ):
+                self.total = None
+                return
+        self.total += len(segment) - start - excluded
+
+
+def _reasoning_marker_ids(
+    tokenizer: Any, reasoning_parser: Any, attribute: str
+) -> list[int]:
+    detector = getattr(reasoning_parser, "detector", None)
+    marker = getattr(detector, attribute, None)
+    encode = getattr(tokenizer, "encode", None)
+    if not isinstance(marker, str) or not marker or not callable(encode):
+        return []
+    return list(encode(marker, add_special_tokens=False))
+
+
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -1266,6 +1428,30 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        self._reasoning_tokens = (
+            _ReasoningTokenCounter(
+                tokenizer,
+                reasoning_parser,
+                start_marker_ids=_reasoning_marker_ids(
+                    tokenizer, reasoning_parser, "think_start_token"
+                ),
+                end_marker_ids=_reasoning_marker_ids(
+                    tokenizer, reasoning_parser, "think_end_token"
+                ),
+            )
+            if reasoning_parser is not None
+            else None
+        )
+
+    @property
+    def reasoning_token_count(self) -> int | None:
+        """Generated tokens in reasoning blocks.
+
+        None without a reasoning parser, or when counting failed.
+        """
+        if self._reasoning_tokens is None:
+            return None
+        return self._reasoning_tokens.total
 
     def _strip_matched_stop_token_ids(
         self, token_ids: list[int], stop_reason: Any
@@ -1633,6 +1819,9 @@ class SglangStreamingPostProcessor:
         stop_terminated = engine_response.get(
             "stop_terminated", finish_reason == "stop"
         )
+        # Reasoning usage counts every generated token, including a stop
+        # token that is trimmed from the visible text.
+        generated_token_ids = token_ids
         if stop_terminated:
             raw_token_count = len(token_ids)
             token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
@@ -1685,6 +1874,10 @@ class SglangStreamingPostProcessor:
         if self.reasoning_parser and (delta_text or finish_reason):
             reasoning_text, normal_text = self._parse_reasoning_delta(
                 delta_text, finish_reason
+            )
+        if self._reasoning_tokens is not None:
+            self._reasoning_tokens.observe(
+                generated_token_ids, finished=finish_reason is not None
             )
 
         # -- Tool call parsing (accumulate deltas) --

@@ -68,6 +68,28 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
     return cached_tokens if isinstance(cached_tokens, int) else None
 
 
+def _with_reasoning_tokens(usage: dict[str, Any], count: int) -> dict[str, Any]:
+    """Return a copy of usage carrying the frontend's reasoning_tokens.
+
+    The frontend count replaces any backend count: it follows the same parser
+    split as `reasoning_content`, while SGLang's scheduler counts from the first
+    token to the first closing marker whether or not a reasoning block opened.
+    The count never exceeds `completion_tokens`, which the backend reports
+    separately and which consumers check it against.
+    """
+    completion_tokens = usage.get("completion_tokens")
+    if isinstance(completion_tokens, int) and count > completion_tokens:
+        logger.warning(
+            "reasoning token count %d exceeds completion_tokens %d; clamping",
+            count,
+            completion_tokens,
+        )
+        count = completion_tokens
+    details = dict(usage.get("completion_tokens_details") or {})
+    details["reasoning_tokens"] = count
+    return {**usage, "completion_tokens_details": details}
+
+
 def _normalize_eos_token_ids(value: Any) -> list[int]:
     if isinstance(value, int) and not isinstance(value, bool):
         return [value]
@@ -846,6 +868,10 @@ class SglangProcessor:
                         "completion_tokens": cumulative_output_tokens,
                         "total_tokens": input_tokens + cumulative_output_tokens,
                     }
+                if pending_usage and post.reasoning_token_count is not None:
+                    pending_usage = _with_reasoning_tokens(
+                        pending_usage, post.reasoning_token_count
+                    )
                 usage_for_metrics = pending_usage
 
                 if self.debug_perf:
