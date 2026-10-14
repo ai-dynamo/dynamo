@@ -1118,8 +1118,20 @@ mod tests {
         );
     }
 
+    /// Runs alone: it counts `_hello` events with a thread-scoped subscriber,
+    /// and other tests' handshakes race it through tracing's global callsite
+    /// interest cache.
     #[tokio::test]
     async fn concurrent_peer_preparation_shares_a_handshake_and_retries_failure() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::concurrent_peer_preparation_shares_a_handshake_and_retries_failure"
+            ),
+            &[],
+        ) {
+            return;
+        }
         use std::sync::atomic::AtomicUsize;
         use tracing_subscriber::prelude::*;
 
