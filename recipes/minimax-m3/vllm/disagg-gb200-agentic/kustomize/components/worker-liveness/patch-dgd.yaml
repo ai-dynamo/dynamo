@@ -22,6 +22,16 @@
 - op: test
   path: /spec/components/1/podTemplate/spec/containers/0/name
   value: main
+# Allow up to two hours for worker initialization before restarting.
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/startupProbe
+  value:
+    httpGet:
+      path: /live
+      port: system
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 720
 # Allow first-request FMHA compilation to finish before restarting.
 - op: add
   path: /spec/components/1/podTemplate/spec/containers/0/livenessProbe
@@ -52,6 +62,16 @@
 - op: test
   path: /spec/components/2/podTemplate/spec/containers/0/name
   value: main
+# Allow up to two hours for worker initialization before restarting.
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/startupProbe
+  value:
+    httpGet:
+      path: /live
+      port: system
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 720
 # Allow first-request FMHA compilation to finish before restarting.
 - op: add
   path: /spec/components/2/podTemplate/spec/containers/0/livenessProbe

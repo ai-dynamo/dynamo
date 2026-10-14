@@ -70,9 +70,11 @@ export DGD="minimax-m3-$PROFILE"
 
 Prepare and validate the cluster configuration as described in
 [Edit and render](#edit-and-render). Then include the selected profile's
-`worker-liveness` Component to extend worker liveness and readiness allowances
-for cold kernel compilation. The cluster validator accepts only cluster
-bindings, so compose this Component in a separate deployment directory:
+`worker-liveness` Component to configure worker startup, liveness, and readiness
+probes. The startup probe allows up to two hours for initialization, matching
+the operator default. The liveness and readiness probes extend allowances for
+cold kernel compilation. The cluster validator accepts only cluster bindings,
+so compose this Component in a separate deployment directory:
 
 ```bash
 export DEPLOY_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-deploy
