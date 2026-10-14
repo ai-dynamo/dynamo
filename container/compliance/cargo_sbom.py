@@ -160,9 +160,9 @@ def _licenses_field(pkg: dict) -> list[dict]:
 
     Emitting `expression` (rather than `license.id`) matches cargo-cyclonedx and
     round-trips compound expressions like "MIT OR Apache-2.0" unchanged through
-    generators/rust.py::_normalize_license. A crate carrying only `license_file`
-    yields an empty array, which that generator maps to UNKNOWN so
-    license_overrides.yaml can supply the answer.
+    generators/common.py::normalize_cyclonedx_licenses. A crate carrying only
+    `license_file` yields an empty array, which that function maps to UNKNOWN
+    so the Rust generator's license_overrides.yaml lookup can supply the answer.
     """
     raw = (pkg.get("license") or "").strip()
     if not raw:
