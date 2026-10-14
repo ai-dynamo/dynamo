@@ -159,7 +159,7 @@ func applyComponentCrashLoops(
 	result ReconcileResult,
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 ) ReconcileResult {
-	var crashLoops []string
+	crashLoops := make([]string, 0, len(dcds))
 	for _, dcd := range dcds {
 		if dcd.Status.ObservedGeneration < dcd.Generation {
 			continue

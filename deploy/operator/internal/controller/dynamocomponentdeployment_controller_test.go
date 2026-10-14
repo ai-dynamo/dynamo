@@ -2747,13 +2747,19 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 	}
 }
 
-// crashLoopTestDeployment describes the unready Deployment of DCD
-// test-component at revision.
+// The DCD whose Deployment the crash-loop cases reconcile.
+const (
+	crashLoopTestDCDName   = "test-component"
+	crashLoopTestNamespace = "default"
+)
+
+// crashLoopTestDeployment describes the unready Deployment of the crash-loop
+// cases' DCD at revision.
 func crashLoopTestDeployment(revision string) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "test-component",
-			Namespace:   "default",
+			Name:        crashLoopTestDCDName,
+			Namespace:   crashLoopTestNamespace,
 			UID:         "test-component-deployment",
 			Generation:  1,
 			Annotations: map[string]string{deploymentRevisionAnnotation: revision},
@@ -2774,17 +2780,17 @@ func crashLoopTestDeployment(revision string) *appsv1.Deployment {
 func crashLoopTestDeploymentReplicaSet(revision, podTemplateHash string) *appsv1.ReplicaSet {
 	return &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-component-" + podTemplateHash,
-			Namespace: "default",
+			Name:      crashLoopTestDCDName + "-" + podTemplateHash,
+			Namespace: crashLoopTestNamespace,
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoSelector:   "test-component",
+				commonconsts.KubeLabelDynamoSelector:   crashLoopTestDCDName,
 				appsv1.DefaultDeploymentUniqueLabelKey: podTemplateHash,
 			},
 			Annotations: map[string]string{deploymentRevisionAnnotation: revision},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "apps/v1",
 				Kind:       "Deployment",
-				Name:       "test-component",
+				Name:       crashLoopTestDCDName,
 				UID:        "test-component-deployment",
 				Controller: ptr.To(true),
 			}},
@@ -2792,16 +2798,16 @@ func crashLoopTestDeploymentReplicaSet(revision, podTemplateHash string) *appsv1
 	}
 }
 
-// crashLoopTestComponentPod describes a not-Ready Pod of DCD test-component
-// whose main container restarted three times after exiting with code 1.
+// crashLoopTestComponentPod describes a not-Ready Pod of the crash-loop cases'
+// DCD whose main container restarted three times after exiting with code 1.
 func crashLoopTestComponentPod(name, podTemplateHash string) *corev1.Pod {
 	pod := crashLoopTestPod(name, podTemplateHash, false, 3, 1)
-	pod.Namespace = "default"
-	pod.Labels[commonconsts.KubeLabelDynamoSelector] = "test-component"
+	pod.Namespace = crashLoopTestNamespace
+	pod.Labels[commonconsts.KubeLabelDynamoSelector] = crashLoopTestDCDName
 	pod.OwnerReferences = []metav1.OwnerReference{{
 		APIVersion: "apps/v1",
 		Kind:       "ReplicaSet",
-		Name:       "test-component-" + podTemplateHash,
+		Name:       crashLoopTestDCDName + "-" + podTemplateHash,
 		Controller: ptr.To(true),
 	}}
 	return &pod
