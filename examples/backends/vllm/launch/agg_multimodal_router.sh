@@ -65,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: $0 [--model NAME] [--num-workers N] [--single-gpu] [EXTRA_VLLM_ARGS...]
 
+Single-GPU mode (--single-gpu or SINGLE_GPU=true) requires CUDA_VISIBLE_DEVICES.
+All workers use its first entry; an unset or empty first entry is an error.
+Example: CUDA_VISIBLE_DEVICES=1 $0 --single-gpu
+
 Env vars:
   MODEL                       (default Qwen/Qwen3-VL-2B-Instruct)
   NUM_WORKERS                 (default 2)

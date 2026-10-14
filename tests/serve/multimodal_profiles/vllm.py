@@ -196,11 +196,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                marks=[pytest.mark.post_merge],
+                # TODO: revert to pytest.mark.post_merge and gpu_1 after PR validation.
+                marks=[pytest.mark.pre_merge],
+                gpu_marker="gpu_2",
                 timeout_s=400,
                 profiled_vram_gib=13.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
-                env={"SINGLE_GPU": "true"},
+                env={"SINGLE_GPU": "true", "CUDA_VISIBLE_DEVICES": "1"},
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
@@ -222,11 +224,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
                 health_check_workers=True,
-                marks=[pytest.mark.post_merge],
+                # TODO: revert to pytest.mark.post_merge and gpu_1 after PR validation.
+                marks=[pytest.mark.pre_merge],
+                gpu_marker="gpu_2",
                 timeout_s=400,
                 profiled_vram_gib=13.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
-                env={"SINGLE_GPU": "true"},
+                env={"SINGLE_GPU": "true", "CUDA_VISIBLE_DEVICES": "1"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             # Frontend-decode variant: same `agg_multimodal_router.sh` as
@@ -250,9 +254,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                # TODO: revert to pytest.mark.post_merge and gpu_1 after PR validation.
+                marks=[pytest.mark.pre_merge],
+                gpu_marker="gpu_2",
                 timeout_s=340,
                 single_gpu=True,
+                env={"CUDA_VISIBLE_DEVICES": "1"},
                 profiled_vram_gib=15.0,
                 requested_vllm_kv_cache_bytes=4_096_361_000,
                 tests=[
@@ -269,9 +276,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "epd": TopologyConfig(
                 health_check_workers=True,
                 health_check_worker_count=3,
-                marks=[pytest.mark.post_merge],
+                # TODO: revert to pytest.mark.post_merge and gpu_1 after PR validation.
+                marks=[pytest.mark.pre_merge],
+                gpu_marker="gpu_2",
                 timeout_s=300,
                 single_gpu=True,
+                env={"CUDA_VISIBLE_DEVICES": "1"},
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=536_870_912,
                 tests=[
@@ -330,9 +340,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             "p_d": TopologyConfig(
                 health_check_workers=True,
-                marks=[pytest.mark.post_merge],
+                # TODO: revert to pytest.mark.post_merge and gpu_1 after PR validation.
+                marks=[pytest.mark.pre_merge],
+                gpu_marker="gpu_2",
                 timeout_s=300,
                 single_gpu=True,
+                env={"CUDA_VISIBLE_DEVICES": "1"},
                 profiled_vram_gib=15.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],

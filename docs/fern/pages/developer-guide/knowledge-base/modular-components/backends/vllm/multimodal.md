@@ -321,6 +321,8 @@ model families use the expanded prompt token IDs produced during prefill.
 
 ### E/PD Serving (Encode + PD)
 
+For single-GPU mode, set `CUDA_VISIBLE_DEVICES` to the assigned GPU. The launcher uses the first entry and fails if it is missing or empty. For example, use `CUDA_VISIBLE_DEVICES=1` to keep the workers on GPU 1. Explicit `DYN_ENCODE_WORKER_GPU` and `DYN_PD_WORKER_GPU` values override this selection; if both are set, `CUDA_VISIBLE_DEVICES` is not required.
+
 Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
 
 > [!WARNING]
@@ -332,12 +334,14 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # Multi-GPU deployment
 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct
 
-# Single-GPU (functional testing with small models)
-bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
+# Single-GPU (functional testing with small models; select GPU 0 explicitly)
+CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 
 ```
 
 ### E/P/D Serving (Full Disaggregation)
+
+Single-GPU mode uses the first entry of `CUDA_VISIBLE_DEVICES`, which must be set and nonempty unless every worker has an explicit GPU override. `DYN_ENCODE_WORKER_GPU`, `DYN_PREFILL_WORKER_GPU`, and `DYN_DECODE_WORKER_GPU` each override the inherited selection for that worker.
 
 Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
 
@@ -350,8 +354,8 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # Multi-GPU deployment
 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct
 
-# Single-GPU (functional testing with small models)
-bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
+# Single-GPU (functional testing with small models; select GPU 0 explicitly)
+CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
 
 ## Audio Serving

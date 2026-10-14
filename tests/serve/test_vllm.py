@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import random
+import subprocess
 from dataclasses import dataclass, field
 
 import pytest
@@ -839,6 +840,25 @@ def vllm_config_test(request):
     return vllm_configs[request.param]
 
 
+# TODO: remove this probe after the promoted two-GPU PR validation, together
+# with the temporary markers and CUDA_VISIBLE_DEVICES in the Qwen3-VL profile.
+def _gpu_compute_processes() -> set[tuple[str, int]]:
+    """Read physical GPU UUIDs and process IDs without CUDA device remapping."""
+    result = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return {
+        (uuid.strip(), int(pid.strip()))
+        for line in result.stdout.splitlines()
+        if line.strip()
+        for uuid, pid in [line.split(",")]
+    }
+
+
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.parametrize("num_system_ports", [3], indirect=True)
@@ -858,7 +878,43 @@ def test_serve_deployment(
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+    post_validation = None
+    if config.env.get("CUDA_VISIBLE_DEVICES") == "1":
+        # The temporary gpu_2 profiles reserve both cards and run sequentially.
+        # Check placement after real inference while all workers are still alive.
+        gpu_one_uuid = subprocess.run(
+            ["nvidia-smi", "--id=1", "--query-gpu=uuid", "--format=csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        assert gpu_one_uuid, "The placement check requires physical GPU 1"
+        before = _gpu_compute_processes()
+
+        def check_gpu_placement() -> None:
+            new_processes = _gpu_compute_processes() - before
+            expected_workers = (
+                3 if config.script_name == "disagg_multimodal_epd.sh" else 2
+            )
+            logger.info(
+                "GPU placement for %s: GPU 1 UUID=%s, new compute processes=%s",
+                config.name,
+                gpu_one_uuid,
+                sorted(new_processes),
+            )
+            assert len(new_processes) >= expected_workers, new_processes
+            assert all(
+                uuid == gpu_one_uuid for uuid, _ in new_processes
+            ), f"Workers escaped GPU 1: {new_processes}"
+
+        post_validation = check_gpu_placement
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        post_validation=post_validation,
+    )
 
 
 # LoRA Test Directory
