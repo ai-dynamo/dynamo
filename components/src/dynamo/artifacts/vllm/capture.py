@@ -51,8 +51,13 @@ class _DeliveryRuntime(Protocol):
 
 
 def _validated_router_profile(profile):
-    if not isinstance(profile, (tuple, list)) or len(profile) > 4092:
-        raise ValueError("unsupported router profile")
+    if not isinstance(profile, (tuple, list)):
+        raise ValueError("router profile must be a list of router entries")
+    # The format allows 4096 tensors; reserve one sequence and up to three logprob tensors.
+    if len(profile) > 4092:
+        raise ValueError(
+            "router profile supports at most 4092 routers under the 4096-tensor format limit"
+        )
     result: list[tuple[int, int, int]] = []
     ids = set()
     for site in profile:
