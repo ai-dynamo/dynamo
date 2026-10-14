@@ -248,6 +248,12 @@ def test_router_profile_is_immutable_after_admission():
     capture.close()
 
 
+def test_router_profile_limit_names_the_tensor_budget():
+    profile = tuple((index, 8, 2) for index in range(4093))
+    with pytest.raises(ValueError, match="at most 4092 routers.*4096-tensor"):
+        generation_artifact._validated_router_profile(profile)
+
+
 def test_closed_capture_never_retains_new_observations():
     capture = session()
     capture.close()
