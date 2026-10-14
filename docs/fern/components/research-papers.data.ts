@@ -26,6 +26,7 @@ export const RESEARCH_TAGS = [
   "Memory & CXL",
   "Autoscaling",
   "Fault tolerance & startup",
+  "Guardrails",
   "Energy & power",
   "MoE & parallelism",
   "Configuration & simulation",
@@ -62,7 +63,7 @@ export const RESEARCH_PAPERS: ResearchPaper[] = [
     venue: "arXiv",
     date: "Oct 2, 2026",
     iso: "2026-10-02",
-    tags: ["Agentic"],
+    tags: ["Agentic", "Guardrails"],
   },
   {
     title: "EAServe: Encode-Aware Disaggregated Serving for Multimodal Large Language Models",
