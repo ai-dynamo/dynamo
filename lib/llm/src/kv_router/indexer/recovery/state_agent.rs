@@ -38,7 +38,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::EventSubscriber,
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::{
     sync::{Mutex, mpsc, oneshot, watch},
     time::Instant,
@@ -591,6 +591,62 @@ async fn run_state_agent_router(
             }
         }
         if reconcile {
+            // One reconciliation covers every discovery update already queued: the
+            // initial watch snapshot delivers each source and attachment as its own
+            // event, and reconciling per event re-queries every owner each time.
+            let mut watch_ended = false;
+            loop {
+                let mut drained = false;
+                match source_stream.next().now_or_never() {
+                    Some(Some(event)) => {
+                        drained = true;
+                        match update_advertisements(
+                            event,
+                            &endpoint,
+                            KV_STATE_SOURCE_TOPIC_V2,
+                            &mut sources,
+                        ) {
+                            Ok(true) => recovery_retry.reset(),
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "Ignoring invalid V2 KV state source")
+                            }
+                        }
+                    }
+                    Some(None) => watch_ended = true,
+                    None => {}
+                }
+                if let Some(stream) = attachment_stream.as_mut() {
+                    match stream.next().now_or_never() {
+                        Some(Some(event)) => {
+                            drained = true;
+                            match update_advertisements(
+                                event,
+                                &endpoint,
+                                KV_STATE_ATTACHMENT_TOPIC_V2,
+                                &mut attachments,
+                            ) {
+                                Ok(true) => recovery_retry.reset(),
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(%error, "Ignoring invalid V2 KV state attachment")
+                                }
+                            }
+                        }
+                        Some(None) => watch_ended = true,
+                        None => {}
+                    }
+                }
+                if watch_ended || !drained {
+                    break;
+                }
+            }
+            if watch_ended {
+                tracing::error!(%endpoint, "KV state discovery watch ended; keeping recognized ranks fail-closed");
+                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
+                cancel.cancelled().await;
+                break;
+            }
             if !sources.is_empty() && transport.is_none() {
                 match start_state_agent_consumers(&component, &endpoint, cancel.child_token()).await
                 {
