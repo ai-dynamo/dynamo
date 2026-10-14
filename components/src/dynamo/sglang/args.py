@@ -42,6 +42,7 @@ from dynamo.sglang._compat import (
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
+from dynamo.sglang.gateway import effective_gateway_workers
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -852,6 +853,11 @@ async def parse_args(args: list[str]) -> Config:
     else:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
+        # SGLang's PortArgs.init_new reads the raw tokenizer_worker_num; setting
+        # only the resolved value leaves the leader without a tokenizer IPC socket.
+        gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
+        if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
+            parsed_args.tokenizer_worker_num = gateway_count
         server_args = ServerArgs.from_cli_args(parsed_args)
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
