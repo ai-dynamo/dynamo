@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402 -- Optional native SDK checks precede relay imports.
 
 """Manual native TCP smoke test; not included in CI test discovery.
 
@@ -19,10 +20,7 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("msgspec")
 pytest.importorskip("zstandard")
 
-from dynamo.artifacts.relay import (
-    MooncakeByteRelay,
-    RelayError,
-)
+from dynamo.artifacts.relay import MooncakeByteRelay, RelayError
 from dynamo.artifacts.vllm.format import (
     GenerationArtifactChoice,
     GenerationArtifactView,
