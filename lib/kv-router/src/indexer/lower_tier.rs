@@ -22,6 +22,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
+use super::concurrent_radix_tree_compressed::mix_worker;
 use super::{
     EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
@@ -120,6 +121,17 @@ impl IndexedResidencyOwner {
             Self::Exact(key) => projection.project_key(key),
         }
     }
+
+    /// Identity XORed into a multi-owner edge's fingerprint, as in the CRTC's
+    /// `WorkerSet`. Exact owners are already BLAKE3 digests. A u64 keeps
+    /// `EdgeOwnersEntry` 8-byte aligned.
+    #[inline]
+    fn fingerprint(self) -> u64 {
+        match self {
+            Self::Worker(worker) => mix_worker(worker),
+            Self::Exact(key) => u128::from_le_bytes(key.digest()) as u64,
+        }
+    }
 }
 
 struct OwnerBlockState {
@@ -149,8 +161,13 @@ enum EdgeOwnersEntry {
         child_hash: ExternalSequenceBlockHash,
         workers: WorkerSet,
         exact_owners: FxHashSet<ResidencyOwnerKey>,
+        /// XOR of every owner's fingerprint; see [`Self::owner_set`].
+        owners_fp: u64,
     },
 }
+
+/// Set sizes and XOR fingerprint of a multi-owner edge's owners.
+type OwnerSetFingerprint = (usize, usize, u64);
 
 impl EdgeOwnersEntry {
     fn new(child_hash: ExternalSequenceBlockHash, owner: IndexedResidencyOwner) -> Self {
@@ -162,6 +179,21 @@ impl EdgeOwnersEntry {
             Self::Single { child_hash, .. }
             | Self::Pair { child_hash, .. }
             | Self::Multi { child_hash, .. } => *child_hash,
+        }
+    }
+
+    /// Equal values mean equal owner sets, up to a 2^-64 XOR coincidence.
+    /// Only multi-owner edges carry one; smaller edges intersect cheaply.
+    #[inline]
+    fn owner_set(&self) -> Option<OwnerSetFingerprint> {
+        match self {
+            Self::Multi {
+                workers,
+                exact_owners,
+                owners_fp,
+                ..
+            } => Some((workers.len(), exact_owners.len(), *owners_fp)),
+            Self::Single { .. } | Self::Pair { .. } => None,
         }
     }
 
@@ -199,7 +231,9 @@ impl EdgeOwnersEntry {
                 }
                 let mut workers = WorkerSet::default();
                 let mut exact_owners = FxHashSet::default();
+                let mut owners_fp = 0;
                 for owner in owners.iter().copied().chain(std::iter::once(owner)) {
+                    owners_fp ^= owner.fingerprint();
                     match owner {
                         IndexedResidencyOwner::Worker(worker) => {
                             workers.insert(worker);
@@ -213,6 +247,7 @@ impl EdgeOwnersEntry {
                     child_hash,
                     workers,
                     exact_owners,
+                    owners_fp,
                 };
                 true
             }
@@ -220,17 +255,17 @@ impl EdgeOwnersEntry {
                 child_hash: existing_hash,
                 workers,
                 exact_owners,
+                owners_fp,
             } => {
                 if *existing_hash != child_hash {
                     return false;
                 }
-                match owner {
-                    IndexedResidencyOwner::Worker(worker) => {
-                        workers.insert(worker);
-                    }
-                    IndexedResidencyOwner::Exact(owner) => {
-                        exact_owners.insert(owner);
-                    }
+                let inserted = match owner {
+                    IndexedResidencyOwner::Worker(worker) => workers.insert(worker),
+                    IndexedResidencyOwner::Exact(owner) => exact_owners.insert(owner),
+                };
+                if inserted {
+                    *owners_fp ^= owner.fingerprint();
                 }
                 true
             }
@@ -258,6 +293,7 @@ impl EdgeOwnersEntry {
                 child_hash,
                 workers,
                 exact_owners,
+                owners_fp,
             } => {
                 let removed = match owner {
                     IndexedResidencyOwner::Worker(worker) => workers.remove(&worker),
@@ -266,6 +302,7 @@ impl EdgeOwnersEntry {
                 if !removed {
                     return false;
                 }
+                *owners_fp ^= owner.fingerprint();
 
                 let remaining = workers.len() + exact_owners.len();
                 if remaining == 0 {
@@ -1228,6 +1265,8 @@ fn advance_state_to_breakpoint(
     // allocating new HashSets on every step.
     let mut worker_scratch = WorkerSet::default();
     let mut hint_source_scratch = HintSourceSet::default();
+    // Owner set of the last edge the active sets were intersected with.
+    let mut prev_owner_set: Option<OwnerSetFingerprint> = None;
 
     while cur_pos < next_breakpoint
         && (!active_workers.is_empty() || !active_hint_sources.is_empty())
@@ -1246,11 +1285,18 @@ fn advance_state_to_breakpoint(
             break;
         };
 
+        // The active sets are already subsets of the previous edge's owners, so
+        // an edge with the same owner set (common along a shared prefix) cannot
+        // drop anyone and both intersections are skipped.
+        let owner_set = edge.owner_set();
+        let owners_unchanged = owner_set.is_some() && owner_set == prev_owner_set;
+        prev_owner_set = owner_set;
+
         // Partition active workers into matched (own the edge) and unmatched.
         // For single-owner edges we can check membership in O(1) instead of
         // iterating all active workers. For multi-owner edges we iterate
         // whichever side is smaller.
-        if !active_workers.is_empty() {
+        if !active_workers.is_empty() && !owners_unchanged {
             match edge.value() {
                 EdgeOwnersEntry::Single { owner, .. } => {
                     if let Some(worker) = owner.project(projection)
@@ -1277,7 +1323,7 @@ fn advance_state_to_breakpoint(
             }
         }
 
-        if !active_hint_sources.is_empty() {
+        if !active_hint_sources.is_empty() && !owners_unchanged {
             hint_source_scratch.clear();
             edge.collect_matching_router_hint_sources(
                 &active_hint_sources,
@@ -2080,6 +2126,35 @@ mod tests {
             details.kv_transfer_extensions.unwrap().owner_prefix_blocks,
             FxHashMap::from_iter([(key(owner_a), 3), (key(owner_b), 1)])
         );
+    }
+
+    #[test]
+    fn equal_size_owner_set_change_stops_dropped_worker() {
+        let mut index = TestLowerTierIndex::new();
+        for worker_id in [1, 2, 3] {
+            index
+                .apply_event(store_event(worker_id, 0, 0, None, &[11, 12], &[101, 102]))
+                .unwrap();
+        }
+        // The third edge keeps the owner count but swaps worker 3 for worker 4.
+        for worker_id in [1, 2, 4] {
+            index
+                .apply_event(store_event(worker_id, 0, 1, Some(102), &[13], &[103]))
+                .unwrap();
+        }
+        let continuations: FxHashMap<_, _> = [1, 2, 3]
+            .map(|id| {
+                (
+                    WorkerWithDpRank::new(id, 0),
+                    LowerTierContinuation::from_root(0),
+                )
+            })
+            .into_iter()
+            .collect();
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        assert_eq!(hits[&WorkerWithDpRank::new(1, 0)], 3);
+        assert_eq!(hits[&WorkerWithDpRank::new(3, 0)], 2);
     }
 
     #[test]
