@@ -84,6 +84,7 @@ allow_paths:
   - "/usr/local/lib/libsw"
   - "/usr/local/lib/libpostproc"
   - "/usr/local/bin/ffmpeg"
+  - "/usr/local/bin/ffprobe"
   - "/usr/local/src/ffmpeg"   # retained source tree (kept for legal reasons)
 
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.

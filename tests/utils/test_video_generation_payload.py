@@ -18,6 +18,8 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -75,9 +77,23 @@ def test_video_must_meet_each_expectation(mp4_video, expectations, message):
 
 
 def test_corrupt_media_does_not_pass_as_a_completed_video(mp4_video):
-    with pytest.raises(OSError, match="Could not load meta information"):
+    with pytest.raises(AssertionError, match="Could not decode video"):
         _payload(expected_video_shape=(3, 24, 32)).response_handler(
             _response({"b64_json": base64.b64encode(mp4_video[:32]).decode()})
+        )
+
+
+def test_corrupt_frames_with_valid_container_metadata_are_rejected(mp4_video):
+    # Keep the MP4 stream metadata intact but destroy the encoded frames.
+    # FFprobe still returns success for this clip, so its exit code alone is
+    # insufficient to prove successful decoding.
+    corrupt = bytearray(mp4_video)
+    mdat = corrupt.index(b"mdat")
+    atom_size = int.from_bytes(corrupt[mdat - 4 : mdat], "big")
+    corrupt[mdat + 4 : mdat - 4 + atom_size] = bytes(atom_size - 8)
+    with pytest.raises(AssertionError, match="Could not decode video"):
+        _payload(expected_video_shape=(3, 24, 32)).response_handler(
+            _response({"b64_json": base64.b64encode(corrupt).decode()})
         )
 
 
@@ -110,13 +126,13 @@ def test_url_cannot_bypass_decode_checks():
     ],
 )
 def test_unconfigured_payload_does_not_require_a_decoder(monkeypatch, entry, expected):
-    monkeypatch.setattr(payloads, "imageio_ffmpeg", None)
+    monkeypatch.setattr(payloads.shutil, "which", lambda _: None)
     assert _payload().response_handler(_response(entry)) == expected
 
 
-def test_decode_checks_require_imageio_ffmpeg(monkeypatch, mp4_video):
-    monkeypatch.setattr(payloads, "imageio_ffmpeg", None)
-    with pytest.raises(RuntimeError, match="imageio-ffmpeg is required"):
+def test_decode_checks_require_ffprobe(monkeypatch, mp4_video):
+    monkeypatch.setattr(payloads.shutil, "which", lambda _: None)
+    with pytest.raises(RuntimeError, match="ffprobe is required"):
         _payload(expected_video_fps=24).response_handler(
             _response({"b64_json": base64.b64encode(mp4_video).decode()})
         )

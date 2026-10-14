@@ -362,7 +362,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
 # IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
-# required shared libraries and CLI available.
+# required shared libraries and CLI available. Copy the same build's ffprobe
+# for decoded-frame validation without adding encoders or muxers.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -370,6 +371,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -nL /tmp/usr/local/bin/ffprobe /usr/local/bin/ffprobe && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
