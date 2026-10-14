@@ -5,11 +5,13 @@
 
 import base64
 import sys
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from PIL import Image
 
 try:
     import torch
@@ -150,7 +152,7 @@ class TestDiffusionFormatterPrepareImages:
     @pytest.mark.asyncio
     async def test_invalid_format(self):
         f = _make_diffusion_formatter()
-        with pytest.raises(ValueError, match="Invalid response format"):
+        with pytest.raises(ValueError, match="Unsupported response_format"):
             await f._prepare_images([MagicMock()], "req-1", "invalid")
 
     @pytest.mark.asyncio
@@ -164,6 +166,143 @@ class TestDiffusionFormatterPrepareImages:
 
 
 class TestDiffusionFormatterImage:
+    @pytest.mark.asyncio
+    async def test_b64_outputs_report_decoded_encoding_and_size(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        images = [
+            Image.new("RGB", (37, 19), color=(230, 10, 20)),
+            Image.new("RGB", (37, 19), color=(10, 20, 230)),
+        ]
+
+        response = await f._encode_image(
+            images,
+            "req-formats",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            output_format="png",
+        )
+
+        assert response["output_format"] == "png"
+        assert response["size"] == "37x19"
+        assert "background" not in response
+        assert "quality" not in response
+        assert len(response["data"]) == len(images)
+        for item in response["data"]:
+            encoded = base64.b64decode(item["b64_json"])
+            with Image.open(BytesIO(encoded)) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == (37, 19)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("image_mode", ["RGBA", "P", "RGB", "L"])
+    async def test_jpeg_encodes_transparent_outputs(self, image_mode):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        if image_mode == "RGBA":
+            image = Image.new("RGBA", (12, 9), color=(20, 40, 60, 128))
+            expected_pixel = (137, 147, 157)
+        elif image_mode == "P":
+            image = Image.new("P", (12, 9), color=0)
+            image.putpalette([20, 40, 60] + [0, 0, 0] * 255)
+            image.info["transparency"] = 0
+            expected_pixel = (255, 255, 255)
+        elif image_mode == "RGB":
+            image = Image.new("RGB", (12, 9), color=(20, 40, 60))
+            image.info["transparency"] = (20, 40, 60)
+            expected_pixel = (255, 255, 255)
+        else:
+            image = Image.new("L", (12, 9), color=0)
+            image.info["transparency"] = 0
+            expected_pixel = (255, 255, 255)
+
+        response = await f._encode_image(
+            [image],
+            "req-alpha",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            output_format="jpeg",
+        )
+
+        encoded = base64.b64decode(response["data"][0]["b64_json"])
+        with Image.open(BytesIO(encoded)) as decoded:
+            assert decoded.format == "JPEG"
+            assert decoded.mode == "RGB"
+            assert decoded.size == (12, 9)
+            assert all(
+                abs(actual - expected) < 12
+                for actual, expected in zip(decoded.getpixel((0, 0)), expected_pixel)
+            )
+
+    @pytest.mark.asyncio
+    async def test_b64_outputs_omit_size_for_mixed_dimensions(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        response = await f._encode_image(
+            [Image.new("RGB", (37, 19)), Image.new("RGB", (41, 23))],
+            "req-mixed-size",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+        )
+
+        assert "size" not in response
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output_format", "file_extension", "pillow_format"),
+        [
+            ("png", "png", "PNG"),
+            ("jpeg", "jpg", "JPEG"),
+            ("webp", "webp", "WEBP"),
+        ],
+    )
+    async def test_url_outputs_upload_matching_media(
+        self, output_format, file_extension, pillow_format
+    ):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        image = Image.new("RGB", (21, 17), color=(70, 80, 90))
+        with patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="https://media.example/image",
+        ) as upload:
+            response = await f._encode_image(
+                [image],
+                "req-url",
+                request_type=RequestType.IMAGE_GENERATION,
+                response_format="url",
+                output_format=output_format,
+            )
+
+        assert response["data"][0]["url"] == "https://media.example/image"
+        assert response["output_format"] == output_format
+        assert response["size"] == "21x17"
+        storage_path = upload.await_args.args[1]
+        uploaded_bytes = upload.await_args.args[2]
+        assert storage_path.endswith(f".{file_extension}")
+        with Image.open(BytesIO(uploaded_bytes)) as decoded:
+            assert decoded.format == pillow_format
+            assert decoded.size == (21, 17)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("output_format", ["jpg"])
+    async def test_unsupported_image_output_format_is_rejected(self, output_format):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="Unsupported output_format"):
+            await f._encode_image(
+                [Image.new("RGB", (2, 2))],
+                "req-invalid",
+                request_type=RequestType.IMAGE_GENERATION,
+                response_format="b64_json",
+                output_format=output_format,
+            )
+
     @pytest.mark.asyncio
     async def test_chat_completion_format(self):
         from dynamo.common.utils.output_modalities import RequestType

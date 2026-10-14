@@ -40,6 +40,7 @@ from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.snapshot.lifecycle import is_snapshot_enabled
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
@@ -229,6 +230,21 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     raise ValueError(
         "--model-loader-extra-config must be a JSON object string or a dict"
     )
+
+
+def _force_snapshot_kv_cache_config(engine_args: dict) -> None:
+    """Use KV cache manager v1, the only one qualified for the KV cache sleep
+    that precedes snapshot capture.
+
+    Block reuse stays enabled: sleep discards KV cache contents but keeps the
+    reuse tree, and that tree is empty at capture because TRT-LLM never stores
+    warmup (dummy) requests for reuse and Dynamo sends no request before it.
+    """
+    kv_cache_config = engine_args["kv_cache_config"]
+    if isinstance(kv_cache_config, dict):
+        kv_cache_config["use_kv_cache_manager_v2"] = False
+    else:
+        kv_cache_config.use_kv_cache_manager_v2 = False
 
 
 def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
@@ -439,9 +455,9 @@ async def init_llm_worker(
     arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
-    if config.load_format == "gms":
+    # unmap/remap — and in snapshot mode, which sleeps the KV cache before
+    # capture. The default restore mode discards KV cache contents.
+    if config.load_format == "gms" or is_snapshot_enabled():
         from tensorrt_llm.llmapi.llm_args import SleepConfig
 
         arg_map["sleep_config"] = SleepConfig()
@@ -469,6 +485,9 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    if is_snapshot_enabled():
+        _force_snapshot_kv_cache_config(arg_map)
 
     streaming_kv_events_config = _resolve_streaming_kv_events_config(arg_map)
     if config.publish_kv_events:
