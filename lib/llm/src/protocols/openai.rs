@@ -406,6 +406,9 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// GLM request policy: preserve calls to names absent from the declarations.
+    #[serde(default)]
+    pub allow_undefined_tools: bool,
     /// Request mode retained so stream and batch use the same native-family eligibility.
     #[serde(default)]
     pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -485,6 +488,7 @@ impl Default for ParsingOptions {
 impl ParsingOptions {
     pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
         Self {
+            allow_undefined_tools: false,
             tool_call_parser,
             reasoning_parser,
             reasoning_disabled: false,

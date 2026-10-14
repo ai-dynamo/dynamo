@@ -29,6 +29,55 @@ fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) ->
     error.build()
 }
 
+/// Validate the GLM request policy independently of parser generation.
+///
+/// Parsers preserve unknown names and use declarations for argument coercion.
+/// The serving layer applies this policy to their output. Enabling it also
+/// prevents guided decoding from restricting the model to declared names.
+pub(crate) fn allow_undefined_tools(
+    request: &NvCreateChatCompletionRequest,
+    parser_name: Option<&str>,
+) -> Result<bool, DynamoError> {
+    let Some(value) = request
+        .chat_template_args
+        .as_ref()
+        .and_then(|args| args.get("allow_undefined_tools"))
+    else {
+        return Ok(false);
+    };
+    let enabled = value.as_bool().ok_or_else(|| {
+        invalid_argument(
+            "chat_template_args.allow_undefined_tools must be a boolean",
+            None,
+        )
+    })?;
+    if !enabled {
+        return Ok(false);
+    }
+    if !matches!(parser_name, Some("glm47" | "glm45")) {
+        return Err(invalid_argument(
+            "chat_template_args.allow_undefined_tools is supported only by the GLM parser",
+            None,
+        ));
+    }
+    if request.inner.tools.as_ref().is_none_or(Vec::is_empty) {
+        return Err(invalid_argument(
+            "chat_template_args.allow_undefined_tools requires a non-empty tools list",
+            None,
+        ));
+    }
+    if !matches!(
+        request.inner.tool_choice,
+        None | Some(ChatCompletionToolChoiceOption::Auto)
+    ) {
+        return Err(invalid_argument(
+            "chat_template_args.allow_undefined_tools requires tool_choice=auto",
+            None,
+        ));
+    }
+    Ok(true)
+}
+
 impl OpenAIPreprocessor {
     /// Whether this request permits model output to be interpreted as tool calls.
     ///
@@ -71,6 +120,7 @@ impl OpenAIPreprocessor {
         common_request: &mut PreprocessedRequest,
         prompt_injected_reasoning: bool,
     ) -> Result<GuidedToolConstraint, DynamoError> {
+        let allow_undefined = allow_undefined_tools(request, self.tool_call_parser.as_deref())?;
         let tool_choice = request
             .inner
             .tool_choice
@@ -109,6 +159,12 @@ impl OpenAIPreprocessor {
         {
             // OpenAI `response_format` applies to assistant content, not tool calls.
             gd.json = None;
+        }
+
+        // A declaration-bound tool grammar cannot generate undefined names.
+        // Keep explicit assistant-output constraints, but install no tool grammar.
+        if allow_undefined {
+            return Ok(GuidedToolConstraint::None);
         }
 
         if self.apply_tool_choice_structural_tag(
@@ -421,6 +477,83 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn allow_undefined_tools_validates_request_contract() {
+        for parser in ["glm47", "glm45"] {
+            for choice in [None, Some(json!("auto"))] {
+                let mut extra = json!({
+                    "tools": tools(),
+                    "chat_template_args": {"allow_undefined_tools": true}
+                });
+                if let Some(choice) = choice {
+                    extra["tool_choice"] = choice;
+                }
+                assert!(allow_undefined_tools(&request(extra), Some(parser)).unwrap());
+            }
+        }
+        for value in [json!(null), json!(1), json!("true")] {
+            let req = request(json!({"chat_template_args": {"allow_undefined_tools": value}}));
+            assert!(allow_undefined_tools(&req, Some("glm47")).is_err());
+        }
+        for choice in [
+            json!("none"),
+            json!("required"),
+            json!({"type": "function", "function": {"name": "get_weather"}}),
+        ] {
+            let req = request(json!({
+                "tools": tools(), "tool_choice": choice,
+                "chat_template_args": {"allow_undefined_tools": true}
+            }));
+            assert!(allow_undefined_tools(&req, Some("glm47")).is_err());
+        }
+        for declarations in [json!(null), json!([])] {
+            let req = request(json!({
+                "tools": declarations,
+                "chat_template_args": {"allow_undefined_tools": true}
+            }));
+            assert!(allow_undefined_tools(&req, Some("glm47")).is_err());
+        }
+        let req = request(
+            json!({"tools": tools(), "chat_template_args": {"allow_undefined_tools": true}}),
+        );
+        for parser in [None, Some("qwen3_coder")] {
+            assert!(allow_undefined_tools(&req, parser).is_err());
+        }
+        for extra in [
+            json!({}),
+            json!({"chat_template_args": {"allow_undefined_tools": false}}),
+        ] {
+            assert!(!allow_undefined_tools(&request(extra), None).unwrap());
+        }
+    }
+
+    #[test]
+    fn allow_undefined_tools_bypasses_declared_tool_grammar() {
+        let processor = preprocessor("glm47", StructuralTagMode::On);
+        for enabled in [false, true] {
+            let req = request(json!({
+                "tools": tools(), "tool_choice": "auto", "parallel_tool_calls": false,
+                "chat_template_args": {"allow_undefined_tools": enabled}
+            }));
+            let mut preprocessed = preprocessed_request();
+            let constraint = processor
+                .apply_tool_choice_guided_decoding(&req, &mut preprocessed, false)
+                .unwrap();
+            assert_eq!(
+                constraint,
+                if enabled {
+                    GuidedToolConstraint::None
+                } else {
+                    GuidedToolConstraint::StructuralTag
+                }
+            );
+            assert_eq!(
+                preprocessed.sampling_options.guided_decoding.is_some(),
+                !enabled
+            );
+        }
     }
 
     #[test]

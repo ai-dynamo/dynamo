@@ -116,7 +116,8 @@ async fn parse_complete_tool_output(
         super::tool_parser_v2::parse_complete(content, Some(tools), parser)
             .map(|(calls, normal)| (calls, Some(normal)))
     } else {
-        try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+        let declarations = matches!(parser, "glm47" | "glm45").then_some(tools);
+        try_tool_call_parse_aggregate_finalize(content, Some(parser), declarations).await
     };
 
     result.and_then(|(calls, normal)| {
@@ -826,6 +827,26 @@ impl DeltaAggregator {
         if parsing_options.suppress_tool_calls {
             for choice in aggregator.choices.values_mut() {
                 suppress_tool_call_output(choice);
+            }
+        }
+
+        if matches!(
+            parsing_options.tool_call_parser.as_deref(),
+            Some("glm47" | "glm45")
+        ) && !parsing_options.allow_undefined_tools
+        {
+            for choice in aggregator.choices.values_mut() {
+                if let Some(calls) = choice.tool_calls.as_mut() {
+                    calls.retain(|call| {
+                        parsing_options
+                            .tools
+                            .iter()
+                            .any(|tool| tool.name == call.function.name)
+                    });
+                    if calls.is_empty() {
+                        suppress_tool_call_output(choice);
+                    }
+                }
             }
         }
 
@@ -3612,10 +3633,18 @@ mod tests {
             None,
         );
         let stream = Box::pin(stream::iter(vec![delta]));
-        let result =
-            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
-                .await
-                .unwrap();
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("glm47".to_string()), None).with_tools(vec![
+                dynamo_parsers::tool_calling::ToolDefinition {
+                    name: "get_weather".into(),
+                    parameters: None,
+                    strict: None,
+                },
+            ]),
+        )
+        .await
+        .unwrap();
 
         let choice = &result.inner.choices[0];
         // First complete call is parsed into tool_calls and remains available.
@@ -3674,10 +3703,18 @@ mod tests {
             None,
         );
         let stream = Box::pin(stream::iter(vec![delta]));
-        let result =
-            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
-                .await
-                .unwrap();
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("glm47".to_string()), None).with_tools(vec![
+                dynamo_parsers::tool_calling::ToolDefinition {
+                    name: "get_weather".into(),
+                    parameters: None,
+                    strict: None,
+                },
+            ]),
+        )
+        .await
+        .unwrap();
 
         let choice = &result.inner.choices[0];
         assert_eq!(

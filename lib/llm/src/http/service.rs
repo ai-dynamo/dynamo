@@ -55,6 +55,11 @@ fn apply_request_tool_call_parsing_options(
     mut parsing_options: ParsingOptions,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
+    let allow_undefined = crate::preprocessor::tool_choice::allow_undefined_tools(
+        request,
+        parsing_options.tool_call_parser.as_deref(),
+    )?;
+    parsing_options.allow_undefined_tools = allow_undefined;
     let unified_family =
         crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
@@ -79,7 +84,11 @@ fn apply_request_tool_call_parsing_options(
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
     let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
     let converted_tools = crate::preprocessor::tool_choice::convert_tools(effective_tools.as_ref());
-    let structural_tag_config = parsing_options.structural_tag.as_ref();
+    let structural_tag_config = if allow_undefined {
+        None
+    } else {
+        parsing_options.structural_tag.as_ref()
+    };
     let has_structured_output = request
         .inner
         .response_format

@@ -820,6 +820,24 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
 
+### GLM undefined tool calls
+
+For chat completions with the `glm47` tool parser (including GLM 5.3), set this request option to preserve calls to functions absent from the request's tool declarations:
+
+```json
+{
+  "chat_template_args": {
+    "allow_undefined_tools": true
+  }
+}
+```
+
+The default is `false`: Dynamo drops undeclared calls after parsing. The option must be a boolean. Enabling it requires a nonempty top-level `tools` list and `tool_choice: "auto"` or an omitted tool choice. The `glm45` parser alias also accepts it. Other parsers reject `true`.
+
+Enabling the option bypasses the structural tool grammar, which restricts generation to declared names. Tool declarations remain available for argument type coercion. Explicit assistant-output constraints remain in effect. Streaming and non-streaming responses apply the same policy; streaming indices remain contiguous, and a turn with all calls dropped ends with `finish_reason: "stop"`.
+
+Applications must decide which returned calls they will execute. This option changes the response policy, not tool execution permissions.
+
 ### Anthropic (Experimental)
 
 | Method | Path | Description |

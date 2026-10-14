@@ -19,6 +19,7 @@ pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub(crate) mod tool_choice;
 pub mod tools;
+mod undefined_tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
@@ -5260,6 +5261,20 @@ impl OpenAIPreprocessor {
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
+        let allow_undefined =
+            tool_choice::allow_undefined_tools(request, self.tool_call_parser.as_deref())?;
+        let allowed_names = if matches!(self.tool_call_parser.as_deref(), Some("glm47" | "glm45"))
+            && !allow_undefined
+        {
+            Some(
+                tool_choice::effective_tool_definitions(&request.inner)?
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect(),
+            )
+        } else {
+            None
+        };
         let prompt_prefill = prompt_injected_reasoning;
         let prompt_injected_reasoning = prompt_prefill.for_route(&tool_processing_route);
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
@@ -5302,7 +5317,7 @@ impl OpenAIPreprocessor {
                     },
                 ));
             return Ok(Self::apply_unified_response_policies(
-                unified,
+                undefined_tools::apply_stream(unified, allowed_names),
                 Self::tool_call_parsing_enabled(request),
                 defer_reasoning_for_nonempty_content,
                 reasoning_disabled,
@@ -5340,7 +5355,7 @@ impl OpenAIPreprocessor {
                     },
                 ));
             return Ok(Self::apply_unified_response_policies(
-                unified,
+                undefined_tools::apply_stream(unified, allowed_names),
                 Self::tool_call_parsing_enabled(request),
                 defer_reasoning_for_nonempty_content,
                 reasoning_disabled,
@@ -5485,7 +5500,7 @@ impl OpenAIPreprocessor {
             };
 
         Ok(Self::apply_tool_call_response_policy(
-            transformed_stream,
+            undefined_tools::apply_stream(transformed_stream, allowed_names),
             tool_call_parsing_enabled,
         ))
     }
@@ -7702,6 +7717,9 @@ impl
         )?;
         let tool_processing_route =
             self.tool_processing_route(&request, &guided_tool_constraint)?;
+        let allow_undefined =
+            tool_choice::allow_undefined_tools(&request, self.tool_call_parser.as_deref())?;
+        let tool_definitions = tool_choice::effective_tool_definitions(&request.inner)?;
         let payload_parsing_options = payload_handle.as_ref().map(|_| {
             context
                 .get_optional::<ParsingOptions>(REQUEST_PARSING_OPTIONS_CONTEXT_KEY)
@@ -7713,10 +7731,12 @@ impl
                         self.tool_call_parser.clone(),
                         self.runtime_config.reasoning_parser.clone(),
                     );
+                    options.allow_undefined_tools = allow_undefined;
                     options.tool_choice = request.inner.tool_choice.clone();
                     options.guided_tool_constraint = guided_tool_constraint.clone();
                     options.parallel_tool_calls = request.inner.parallel_tool_calls;
                     options
+                        .with_tools(tool_definitions.clone())
                         .with_tool_call_parsing_enabled(Self::tool_call_parsing_enabled(&request))
                         .with_move_reasoning_to_content_when_empty(
                             Self::wants_reasoning_as_content_when_empty(
