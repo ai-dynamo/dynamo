@@ -247,6 +247,7 @@ async def test_generate_delegates_formatting_to_output_formatter():
     mock_formatter.format.return_value = {"data": [{"b64_json": "abc"}]}
 
     async def stage0_handler(request):
+        assert request["format_context"]["output_format"] == "jpeg"
         return {"shm_meta": {"some": "meta"}, "finished": True}
 
     router = _make_router(
