@@ -1,19 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
+use std::{num::NonZeroUsize, time::Duration};
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use dynamo_backend_common::RuntimeConfig;
@@ -35,18 +23,11 @@ pub enum Mode {
 
 #[derive(Clone, ClapArgs)]
 pub struct ConnectionConfig {
-    #[arg(long, default_value = "localhost:50051")]
-    pub nim_server: String,
+    /// Plaintext gRPC port of the Speech NIM in the same pod or on this host.
+    #[arg(long, default_value_t = 50051, value_parser = clap::value_parser!(u16).range(1..))]
+    pub nim_port: u16,
     #[arg(long, default_value = "600", value_parser = duration)]
     pub nim_startup_timeout_s: Duration,
-    #[arg(long)]
-    pub nim_use_ssl: bool,
-    #[arg(long, hide_env_values = true)]
-    pub nim_api_key: Option<String>,
-    #[arg(long)]
-    pub nim_function_id: Option<String>,
-    #[arg(long)]
-    pub nim_ssl_root_cert: Option<PathBuf>,
 }
 
 #[derive(Clone, ClapArgs)]
@@ -129,8 +110,10 @@ fn resolve_endpoint(
     }
     let mut namespace = namespace.unwrap_or("dynamo").to_owned();
     if let Some(suffix) = suffix.filter(|s| !s.is_empty()) {
-        namespace.push('-');
-        namespace.push_str(suffix);
+        let suffix = format!("-{suffix}");
+        if !namespace.ends_with(&suffix) {
+            namespace.push_str(&suffix);
+        }
     }
     Ok((namespace, component.into(), "generate".into()))
 }
@@ -145,6 +128,8 @@ mod tests {
             (None, None, "dynamo"),
             (Some("speech"), None, "speech"),
             (Some("speech"), Some("blue"), "speech-blue"),
+            (Some("speech-blue"), Some("blue"), "speech-blue"),
+            (Some("speech"), Some(""), "speech"),
         ] {
             assert_eq!(
                 resolve_endpoint(None, "asr", namespace, suffix).unwrap(),
@@ -165,7 +150,7 @@ mod tests {
         let Mode::Asr(config) = Args::parse_from(["sidecar", "asr"]).mode else {
             unreachable!()
         };
-        assert_eq!(config.worker.connection.nim_server, "localhost:50051");
+        assert_eq!(config.worker.connection.nim_port, 50051);
         assert_eq!(
             config.worker.connection.nim_startup_timeout_s,
             Duration::from_secs(600)
@@ -175,13 +160,8 @@ mod tests {
         let Mode::Tts(config) = Args::parse_from([
             "sidecar",
             "tts",
-            "--nim-use-ssl",
-            "--nim-api-key",
-            "test-key",
-            "--nim-function-id",
-            "test-function",
-            "--nim-ssl-root-cert",
-            "ca.pem",
+            "--nim-port",
+            "50052",
             "--nim-startup-timeout-s",
             "12.5",
         ])
@@ -189,19 +169,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert!(config.worker.connection.nim_use_ssl);
-        assert_eq!(
-            config.worker.connection.nim_api_key.as_deref(),
-            Some("test-key")
-        );
-        assert_eq!(
-            config.worker.connection.nim_function_id.as_deref(),
-            Some("test-function")
-        );
-        assert_eq!(
-            config.worker.connection.nim_ssl_root_cert,
-            Some(PathBuf::from("ca.pem"))
-        );
+        assert_eq!(config.worker.connection.nim_port, 50052);
         assert_eq!(
             config.worker.connection.nim_startup_timeout_s,
             Duration::from_millis(12500)
@@ -212,6 +180,8 @@ mod tests {
     #[test]
     fn rejects_invalid_limits_before_starting_runtime() {
         for (mode, option, value) in [
+            ("asr", "--nim-port", "0"),
+            ("tts", "--nim-port", "65536"),
             ("asr", "--timeout-s", "0"),
             ("asr", "--timeout-s", "NaN"),
             ("asr", "--nim-startup-timeout-s", "inf"),

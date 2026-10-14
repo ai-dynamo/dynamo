@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Bidirectional realtime transcription adapter, independent of LLM backends.
 
@@ -31,23 +19,24 @@ use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use tonic::transport::Channel;
 
-use crate::{client::SpeechNimConnection, config::AsrConfig};
+use crate::config::AsrConfig;
 
 #[derive(Clone)]
 pub struct AsrAdapter {
     config: Arc<AsrConfig>,
-    connection: SpeechNimConnection,
+    channel: Channel,
     slots: Arc<Semaphore>,
     shutdown: CancellationToken,
 }
 
 impl AsrAdapter {
-    pub fn new(config: AsrConfig, connection: SpeechNimConnection) -> Self {
+    pub fn new(config: AsrConfig, channel: Channel) -> Self {
         let slots = Arc::new(Semaphore::new(config.max_concurrent_turns.get()));
         Self {
             config: Arc::new(config),
-            connection,
+            channel,
             slots,
             shutdown: CancellationToken::new(),
         }

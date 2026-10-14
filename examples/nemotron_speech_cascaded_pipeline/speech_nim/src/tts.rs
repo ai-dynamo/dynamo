@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Single-request, streaming-response audio speech adapter.
 
@@ -23,24 +11,25 @@ use dynamo_backend_common::{DynamoError, EngineConfig, GenerateContext, RawEngin
 use dynamo_llm::protocols::openai::audios::{
     AudioData, AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest,
 };
-use dynamo_sidecar_common::{invalid_argument, status_to_dynamo};
+use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, invalid_argument, status_to_dynamo};
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
+use tonic::transport::Channel;
 
 use crate::proto::{
     AudioEncoding,
     tts::{SynthesizeSpeechRequest, riva_speech_synthesis_client::RivaSpeechSynthesisClient},
 };
-use crate::{client::SpeechNimConnection, config::TtsConfig, events};
+use crate::{config::TtsConfig, events};
 
 pub struct TtsEngine {
     config: TtsConfig,
-    connection: SpeechNimConnection,
+    channel: Channel,
 }
 
 impl TtsEngine {
-    pub fn new(config: TtsConfig, connection: SpeechNimConnection) -> Self {
-        Self { config, connection }
+    pub fn new(config: TtsConfig, channel: Channel) -> Self {
+        Self { config, channel }
     }
 
     fn validate(&self, request: &NvCreateAudioSpeechRequest) -> Result<(), DynamoError> {
@@ -117,10 +106,6 @@ impl RawEngine for TtsEngine {
         let request: NvCreateAudioSpeechRequest = serde_json::from_value(request)
             .map_err(|e| invalid_argument(format!("invalid audio speech request: {e}")))?;
         self.validate(&request)?;
-        let can_stream = request
-            .nvext
-            .as_ref()
-            .is_some_and(|n| n.frontend_accepts_audio_chunks == Some(true));
         let rpc_request = SynthesizeSpeechRequest {
             text: request.input,
             voice_name: request
@@ -135,11 +120,9 @@ impl RawEngine for TtsEngine {
             sample_rate_hz: self.config.sample_rate_hz,
             ..Default::default()
         };
-        let request = self
-            .connection
-            .request(futures::stream::once(async { rpc_request }));
-        let mut client = RivaSpeechSynthesisClient::new(self.connection.channel.clone())
-            .max_decoding_message_size(64 * 1024 * 1024);
+        let request = futures::stream::once(async { rpc_request });
+        let mut client = RivaSpeechSynthesisClient::new(self.channel.clone())
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
         let model = self.config.model_name.clone();
         Ok(async_stream::try_stream! {
             let mut responses = tokio::select! {
@@ -150,7 +133,6 @@ impl RawEngine for TtsEngine {
             }.map_err(synthesis_error)?.into_inner();
             let id = events::id("speech");
             let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-            let mut buffered = Vec::new();
             loop {
                 let response = tokio::select! {
                     biased;
@@ -158,25 +140,18 @@ impl RawEngine for TtsEngine {
                     _ = ctx.killed() => return,
                     result = responses.message() => result,
                 }.map_err(synthesis_error)?;
-                let is_last = response.is_none();
-                let audio = match response {
-                    Some(response) if can_stream => response.audio,
-                    Some(response) => { buffered.extend(response.audio); continue; },
-                    None if !can_stream => std::mem::take(&mut buffered),
-                    None => break,
+                let Some(response) = response else {
+                    break;
                 };
-                // Older frontends only decode the first worker response. Honor
-                // the existing compatibility flag by returning one PCM buffer.
                 let response = NvAudioSpeechResponse {
                     id: id.clone(), model: model.clone(), created,
                     data: vec![AudioData {
                         output_format: "pcm".into(), url: None,
-                        b64_json: Some(STANDARD.encode(audio)),
+                        b64_json: Some(STANDARD.encode(response.audio)),
                     }],
                     ..NvAudioSpeechResponse::empty()
                 };
                 yield serde_json::to_value(response).map_err(|e| DynamoError::msg(e.to_string()))?;
-                if is_last { break; }
             }
         }.boxed())
     }

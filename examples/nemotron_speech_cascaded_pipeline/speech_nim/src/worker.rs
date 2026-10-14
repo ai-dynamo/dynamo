@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Example-local registration and lifecycle glue. Shared LLM workers are unchanged.
 
@@ -28,10 +16,11 @@ use dynamo_runtime::{
     system_status_server::SystemProbePolicy,
 };
 use tokio_util::sync::CancellationToken;
+use tonic::transport::Channel;
 
 use crate::{
     asr::AsrAdapter,
-    client::SpeechNimConnection,
+    client,
     config::{Args, AsrConfig, Mode},
     tts::TtsEngine,
 };
@@ -49,8 +38,8 @@ pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> a
         )
         .await?;
         tracing::info!("Speech runtime connected; waiting for the NIM gRPC channel");
-        let connection = SpeechNimConnection::connect(&worker.connection).await?;
-        Ok::<_, anyhow::Error>((drt, connection))
+        let channel = client::connect(&worker.connection).await?;
+        Ok::<_, anyhow::Error>((drt, channel))
     };
     let runtime_shutdown = runtime.shutdown_started_token();
     let result = tokio::select! {
@@ -65,14 +54,14 @@ pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> a
         }
         anyhow::bail!("runtime shut down during speech initialization");
     }
-    let (drt, connection) = result?;
-    serve(args.mode, connection, drt, shutdown).await
+    let (drt, channel) = result?;
+    serve(args.mode, channel, drt, shutdown).await
 }
 
 /// Serve a connected backend using an existing runtime, including in CPU tests.
 pub async fn serve(
     mode: Mode,
-    connection: SpeechNimConnection,
+    channel: Channel,
     drt: DistributedRuntime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -91,18 +80,18 @@ pub async fn serve(
                 runtime: config.worker.runtime.clone(),
                 ..Default::default()
             };
-            Worker::new_raw(Arc::new(TtsEngine::new(config, connection)), worker_config)
+            Worker::new_raw(Arc::new(TtsEngine::new(config, channel)), worker_config)
                 .run_with_drt(drt, shutdown)
                 .await
                 .map_err(Into::into)
         }
-        Mode::Asr(config) => run_asr(config, connection, drt, shutdown).await,
+        Mode::Asr(config) => run_asr(config, channel, drt, shutdown).await,
     }
 }
 
 async fn run_asr(
     config: AsrConfig,
-    connection: SpeechNimConnection,
+    channel: Channel,
     drt: DistributedRuntime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -116,7 +105,7 @@ async fn run_asr(
         .model_name(Some(config.model_name.clone()))
         .build()
         .await?;
-    let adapter = Arc::new(AsrAdapter::new(config, connection));
+    let adapter = Arc::new(AsrAdapter::new(config, channel));
     let ingress = Ingress::for_engine(adapter.clone())?;
     let started = endpoint
         .endpoint_builder()
@@ -135,7 +124,9 @@ async fn run_asr(
         )
         .await
     {
-        started.shutdown().await?;
+        if let Err(shutdown_error) = started.shutdown().await {
+            tracing::warn!(error = %shutdown_error, endpoint = %endpoint.id(), "Failed to shut down ASR endpoint after registration failure");
+        }
         return Err(error);
     }
     tracing::info!(endpoint = %endpoint.id(), "Serving Speech NIM realtime transcription");

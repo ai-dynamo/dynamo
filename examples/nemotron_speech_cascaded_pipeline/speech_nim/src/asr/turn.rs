@@ -1,18 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
+use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -66,13 +55,10 @@ pub(super) async fn run(
             streaming_request: Some(request),
             ..Default::default()
         });
-    let mut client = RivaSpeechRecognitionClient::new(adapter.connection.channel.clone())
-        .max_decoding_message_size(64 * 1024 * 1024);
+    let mut client = RivaSpeechRecognitionClient::new(adapter.channel.clone())
+        .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
     let transcribe = async {
-        let mut responses = client
-            .streaming_recognize(adapter.connection.request(requests))
-            .await?
-            .into_inner();
+        let mut responses = client.streaming_recognize(requests).await?.into_inner();
         let mut segments = Vec::new();
         let mut emitted = String::new();
         while let Some(response) = responses.message().await? {

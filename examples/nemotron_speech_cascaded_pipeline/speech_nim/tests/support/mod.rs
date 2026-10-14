@@ -1,30 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::{future::Future, time::Duration};
 
 use clap::Parser;
 use dynamo_speech_nim_sidecar::{
-    client::SpeechNimConnection,
+    client,
     config::{Args, AsrConfig, Mode, TtsConfig},
     proto::{asr::*, tts::*},
 };
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tokio_util::task::AbortOnDropHandle;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status, Streaming, transport::Channel};
 
 pub async fn within<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(5), future)
@@ -107,7 +95,7 @@ impl riva_speech_synthesis_server::RivaSpeechSynthesis for SpeechNim {
 }
 
 pub struct Server {
-    pub address: String,
+    port: u16,
     pub asr: mpsc::UnboundedReceiver<AsrCall>,
     pub tts: mpsc::UnboundedReceiver<TtsCall>,
     _task: AbortOnDropHandle<()>,
@@ -115,15 +103,8 @@ pub struct Server {
 
 impl Server {
     pub async fn start() -> Self {
-        Self::start_with_tls(None).await
-    }
-
-    pub async fn start_with_tls(identity: Option<tonic::transport::Identity>) -> Self {
-        if identity.is_some() {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap().to_string();
+        let port = listener.local_addr().unwrap().port();
         let (asr_tx, asr) = mpsc::unbounded_channel();
         let (tts_tx, tts) = mpsc::unbounded_channel();
         let service = SpeechNim {
@@ -131,13 +112,7 @@ impl Server {
             tts: tts_tx,
         };
         let task = tokio::spawn(async move {
-            let mut builder = tonic::transport::Server::builder();
-            if let Some(identity) = identity {
-                builder = builder
-                    .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))
-                    .unwrap();
-            }
-            builder
+            tonic::transport::Server::builder()
                 .add_service(
                     riva_speech_recognition_server::RivaSpeechRecognitionServer::new(
                         service.clone(),
@@ -149,7 +124,7 @@ impl Server {
                 .unwrap();
         });
         Self {
-            address,
+            port,
             asr,
             tts,
             _task: AbortOnDropHandle::new(task),
@@ -160,8 +135,8 @@ impl Server {
         let Mode::Asr(config) = Args::parse_from([
             "sidecar",
             "asr",
-            "--nim-server",
-            &self.address,
+            "--nim-port",
+            &self.port.to_string(),
             "--nim-startup-timeout-s",
             "2",
             "--timeout-s",
@@ -178,8 +153,8 @@ impl Server {
         let Mode::Tts(config) = Args::parse_from([
             "sidecar",
             "tts",
-            "--nim-server",
-            &self.address,
+            "--nim-port",
+            &self.port.to_string(),
             "--nim-startup-timeout-s",
             "2",
         ])
@@ -190,12 +165,10 @@ impl Server {
         config
     }
 
-    pub async fn connection(&self) -> SpeechNimConnection {
-        within(SpeechNimConnection::connect(
-            &self.asr_config().worker.connection,
-        ))
-        .await
-        .unwrap()
+    pub async fn connection(&self) -> Channel {
+        within(client::connect(&self.asr_config().worker.connection))
+            .await
+            .unwrap()
     }
 }
 

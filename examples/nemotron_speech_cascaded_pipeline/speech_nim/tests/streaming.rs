@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 mod support;
 
@@ -359,37 +347,27 @@ async fn asr_validates_session_and_audio_without_breaking_connection() {
 }
 
 #[tokio::test]
-async fn tts_preserves_pcm_chunks_config_and_auth_metadata() {
+async fn tts_preserves_pcm_chunks_and_config() {
     let mut server = Server::start().await;
     let mut config = server.tts_config();
-    config.worker.connection.nim_api_key = Some("test-key".into());
-    config.worker.connection.nim_function_id = Some("test-function".into());
-    let connection =
-        dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config.worker.connection)
-            .await
-            .unwrap();
-    let engine = TtsEngine::new(config, connection);
+    config.sample_rate_hz = 16000;
+    let engine = TtsEngine::new(config, server.connection().await);
     let card = engine.start(0).await.unwrap();
     assert_eq!(card.model, "nvidia/magpie-tts-multilingual");
     assert!(card.llm.is_none());
-    let stream = engine
+    let mut stream = engine
         .generate(
             json!({"input": "Hello", "voice": "custom", "language": "de-DE", "speed": 1,
-        "response_format": "pcm", "data_source": "b64_json", "nvext": {"frontend_accepts_audio_chunks": true}}),
+        "response_format": "pcm", "data_source": "b64_json"}),
             GenerateContext::new(mock_context(), None),
         )
         .await
         .unwrap();
-    let output = tokio::spawn(stream.collect::<Vec<_>>());
+    let output = tokio::spawn(async move {
+        let first = stream.next().await.unwrap().unwrap();
+        (first, stream)
+    });
     let mut call = within(server.tts.recv()).await.unwrap();
-    assert_eq!(
-        call.request.metadata().get("authorization").unwrap(),
-        "Bearer test-key"
-    );
-    assert_eq!(
-        call.request.metadata().get("function-id").unwrap(),
-        "test-function"
-    );
     let request = within(call.request.get_mut().message())
         .await
         .unwrap()
@@ -397,7 +375,7 @@ async fn tts_preserves_pcm_chunks_config_and_auth_metadata() {
     assert_eq!(request.text, "Hello");
     assert_eq!(request.voice_name, "custom");
     assert_eq!(request.language_code, "de-DE");
-    assert_eq!(request.sample_rate_hz, 24000);
+    assert_eq!(request.sample_rate_hz, 16000);
     assert_eq!(request.encoding, AudioEncoding::LinearPcm as i32);
     assert!(
         within(call.request.get_mut().message())
@@ -405,23 +383,28 @@ async fn tts_preserves_pcm_chunks_config_and_auth_metadata() {
             .unwrap()
             .is_none()
     );
-    for audio in [vec![1, 0, 2, 0], vec![3, 0]] {
-        call.responses
-            .send(Ok(SynthesizeSpeechResponse {
-                audio,
-                ..Default::default()
-            }))
-            .await
-            .unwrap();
-    }
+    call.responses
+        .send(Ok(SynthesizeSpeechResponse {
+            audio: vec![1, 0, 2, 0],
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let (first, mut stream) = within(output).await.unwrap();
+    assert_eq!(first["object"], "audio.speech");
+    assert_eq!(first["data"][0]["b64_json"], "AQACAA==");
+    call.responses
+        .send(Ok(SynthesizeSpeechResponse {
+            audio: vec![3, 0],
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let second = within(stream.next()).await.unwrap().unwrap();
+    assert_eq!(first["id"], second["id"]);
+    assert_eq!(second["data"][0]["b64_json"], "AwA=");
     drop(call.responses);
-    let output = within(output).await.unwrap();
-    let output: Vec<_> = output.into_iter().map(Result::unwrap).collect();
-    assert_eq!(output.len(), 2);
-    assert_eq!(output[0]["id"], output[1]["id"]);
-    assert_eq!(output[0]["object"], "audio.speech");
-    assert_eq!(output[0]["data"][0]["b64_json"], "AQACAA==");
-    assert_eq!(output[1]["data"][0]["b64_json"], "AwA=");
+    assert!(within(stream.next()).await.is_none());
 }
 
 #[tokio::test]
@@ -454,37 +437,6 @@ async fn tts_rejects_unsupported_options_before_rpc() {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
     }
-}
-
-#[tokio::test]
-async fn tts_aggregates_pcm_for_frontends_without_chunk_support() {
-    let mut server = Server::start().await;
-    let engine = TtsEngine::new(server.tts_config(), server.connection().await);
-    let stream = engine
-        .generate(
-            json!({"input": "Hello"}),
-            GenerateContext::new(mock_context(), None),
-        )
-        .await
-        .unwrap();
-    let output = tokio::spawn(stream.collect::<Vec<_>>());
-    let call = within(server.tts.recv()).await.unwrap();
-    for audio in [vec![1, 0], vec![2, 0]] {
-        call.responses
-            .send(Ok(SynthesizeSpeechResponse {
-                audio,
-                ..Default::default()
-            }))
-            .await
-            .unwrap();
-    }
-    drop(call.responses);
-    let output = within(output).await.unwrap();
-    assert_eq!(output.len(), 1);
-    assert_eq!(
-        output[0].as_ref().unwrap()["data"][0]["b64_json"],
-        "AQACAA=="
-    );
 }
 
 #[tokio::test]
@@ -525,65 +477,6 @@ async fn tts_maps_invalid_argument_and_cancels_open_rpc_on_stop() {
         ErrorType::Backend(BackendError::InvalidArgument)
     );
     assert!(!error.to_string().contains("server-internal-details"));
-}
-
-#[tokio::test]
-async fn connection_verifies_tls_with_the_configured_root() {
-    let rcgen::CertifiedKey { cert, key_pair } =
-        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-    let mut pem = tempfile::NamedTempFile::new().unwrap();
-    std::io::Write::write_all(&mut pem, cert.pem().as_bytes()).unwrap();
-    let server = Server::start_with_tls(Some(tonic::transport::Identity::from_pem(
-        cert.pem(),
-        key_pair.serialize_pem(),
-    )))
-    .await;
-    let mut config = server.asr_config().worker.connection;
-    config.nim_use_ssl = true;
-    config.nim_ssl_root_cert = Some(pem.path().to_owned());
-    within(dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config))
-        .await
-        .unwrap();
-    config.nim_ssl_root_cert = None;
-    config.nim_startup_timeout_s = Duration::from_millis(100);
-    assert!(
-        within(dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config))
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn connection_rejects_invalid_addresses_and_redacts_bad_auth() {
-    let server = Server::start().await;
-    let mut config = server.asr_config().worker.connection;
-    config.nim_api_key = Some("secret\ninvalid".into());
-    let result = dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config).await;
-    let Err(error) = result else {
-        panic!("invalid auth accepted")
-    };
-    assert!(!format!("{error:#}").contains("secret"));
-    config.nim_api_key = None;
-    for address in [
-        "ftp://localhost",
-        "http://user:secret@localhost",
-        "http://localhost/path",
-        "http://localhost?token=secret",
-    ] {
-        config.nim_server = address.into();
-        assert!(
-            dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config)
-                .await
-                .is_err()
-        );
-    }
-    config.nim_server = format!("http://{}", server.address);
-    config.nim_use_ssl = true;
-    assert!(
-        dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config)
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]

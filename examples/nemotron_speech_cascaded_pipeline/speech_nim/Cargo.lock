@@ -2464,8 +2464,6 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
- "rcgen",
- "rustls",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2474,7 +2472,6 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
- "url",
  "uuid",
 ]
 
@@ -8110,10 +8107,8 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost 0.13.5",
- "rustls-native-certs",
  "socket2 0.5.10",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",

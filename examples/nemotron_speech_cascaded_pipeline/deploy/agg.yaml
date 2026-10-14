@@ -38,8 +38,8 @@ spec:
               image: ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}
               command: [dynamo-speech-nim-sidecar, asr]
               args:
-                - --nim-server
-                - localhost:50052
+                - --nim-port
+                - "50052"
                 - --nim-startup-timeout-s
                 - "3600"
                 - --commit-padding-ms
@@ -150,8 +150,8 @@ spec:
               image: ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}
               command: [dynamo-speech-nim-sidecar, tts]
               args:
-                - --nim-server
-                - localhost:50051
+                - --nim-port
+                - "50051"
                 - --nim-startup-timeout-s
                 - "3600"
                 - --model-name

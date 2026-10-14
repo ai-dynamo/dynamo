@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Launch Dynamo endpoints for a cascaded Nemotron speech pipeline.
-# ASR and TTS NIMs must already be reachable over their gRPC APIs.
+# ASR and TTS NIMs must already be running locally with their gRPC ports exposed.
 
 set -euo pipefail
 
@@ -29,8 +29,8 @@ if ! command -v "$SPEECH_NIM_SIDECAR_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-ASR_NIM_SERVER="${ASR_NIM_SERVER:-localhost:50152}"
-TTS_NIM_SERVER="${TTS_NIM_SERVER:-localhost:50151}"
+ASR_NIM_PORT="${ASR_NIM_PORT:-50152}"
+TTS_NIM_PORT="${TTS_NIM_PORT:-50151}"
 ASR_MODEL_NAME="${ASR_MODEL_NAME:-nemotron-asr-streaming}"
 TTS_MODEL_NAME="${TTS_MODEL_NAME:-nvidia/magpie-tts-multilingual}"
 LLM_MODEL_PATH="${LLM_MODEL_PATH:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8}"
@@ -49,10 +49,10 @@ print_launch_banner --no-curl \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
 "$SPEECH_NIM_SIDECAR_BIN" asr \
-  --nim-server "$ASR_NIM_SERVER" --model-name "$ASR_MODEL_NAME" &
+  --nim-port "$ASR_NIM_PORT" --model-name "$ASR_MODEL_NAME" &
 
 "$SPEECH_NIM_SIDECAR_BIN" tts \
-  --nim-server "$TTS_NIM_SERVER" --model-name "$TTS_MODEL_NAME" \
+  --nim-port "$TTS_NIM_PORT" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 
 # Word splitting is intentional for optional CLI argument strings.
