@@ -46,7 +46,6 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 <div data-variant="disagg">
 
 - Eight available B200 GPUs. Each TP2 worker occupies two GPUs on one node; configure the fabric for NIXL/UCX transfer between nodes.
-- An NGC API key with read access to the staged image at `nvcr.io/nvstaging/nim/motif-3`.
 
 </div>
 
@@ -59,20 +58,6 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="$HF_TOKEN" \
   -n "${NAMESPACE}"
 ```
-
-<div data-variant="disagg">
-
-Set `NGC_API_KEY` to your registry key, then configure image pulls before deploying:
-
-```bash
-kubectl create secret docker-registry ngc-pull-secret -n "${NAMESPACE}" \
-  --docker-server=nvcr.io --docker-username='$oauthtoken' \
-  --docker-password="${NGC_API_KEY}"
-kubectl patch serviceaccount default -n "${NAMESPACE}" --type=strategic \
-  -p '{"imagePullSecrets":[{"name":"ngc-pull-secret"}]}'
-```
-
-</div>
 
 ## Deploy
 
@@ -235,7 +220,8 @@ Thirty-five requests exceeded the 262,144-token context limit.
 ## Notes
 
 - Both targets use NVFP4 weights, FP8 KV cache, prefix caching, and a 262,144-token context limit.
-- The runtime images include Motif support. Populate the shared model cache before starting the workers, which run in offline mode.
+- Both targets use the public `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2` image; no NGC API key or image-pull secret is required. The Hugging Face secret is used only to download the model.
+- Populate the shared model cache before starting the workers, which run in offline mode.
 - The disaggregated recipe has been validated with TP2 on both prefill and decode workers.
 
 ## Source

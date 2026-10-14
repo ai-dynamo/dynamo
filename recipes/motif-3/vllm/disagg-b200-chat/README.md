@@ -10,7 +10,7 @@ three TP2 prefill workers and one TP2 decode worker, with NIXL KV transfer
 and real MTP2 verification by default.
 
 Follow the [Fern recipe documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/recipes/model-recipes/motif-3.mdx)
-for image access, model-cache setup, deployment, smoke tests, and benchmarking.
+for model-cache setup, deployment, smoke tests, and benchmarking.
 After completing the prerequisites, apply the generic manifest from the repository root:
 
 ```bash

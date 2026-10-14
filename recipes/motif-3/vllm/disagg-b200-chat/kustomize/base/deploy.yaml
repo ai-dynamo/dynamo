@@ -49,7 +49,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -105,7 +105,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -200,7 +200,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
           imagePullPolicy: IfNotPresent
           command:
           - python3

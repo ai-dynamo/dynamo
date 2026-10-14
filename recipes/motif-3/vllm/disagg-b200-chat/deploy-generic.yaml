@@ -83,7 +83,7 @@ spec:
             value: kv
           - name: DYN_ROUTER_USE_KV_EVENTS
             value: "true"
-          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
           imagePullPolicy: IfNotPresent
           name: main
           resources: {}
@@ -160,7 +160,7 @@ spec:
             value: none
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
-          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -253,7 +253,7 @@ spec:
             value: "1024"
           - name: NCCL_NET_PLUGIN
             value: none
-          image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
           imagePullPolicy: IfNotPresent
           name: main
           resources:

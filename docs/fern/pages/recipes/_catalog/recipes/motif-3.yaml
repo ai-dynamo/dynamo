@@ -18,7 +18,7 @@ targets:
     count: 2
   runtime:
     framework: vLLM
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
   topology: aggregated
   techniques:
   - tp2
@@ -44,7 +44,7 @@ targets:
     count: 8
   runtime:
     framework: vLLM
-    image: nvcr.io/nvstaging/nim/motif-3:dynamo-db6a3705-disagg-41e2d0b33@sha256:dca0373c70ddd7ec613f6b9cf5dad67411a61e239739608c600c8f6deca54501
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
   topology: disaggregated
   techniques:
   - tp2
@@ -70,4 +70,3 @@ maintainer: null
 gaps:
 - maintainer unknown
 - published performance is a synthetic-acceptance proxy; no real-MTP chat-trace result yet
-- disaggregated image requires private registry access
