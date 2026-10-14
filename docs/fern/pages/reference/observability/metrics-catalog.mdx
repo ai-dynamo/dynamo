@@ -310,18 +310,68 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
   Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
 </ParamField>
 
-The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
+The shared TCP request plane exposes the following `dynamo_work_handler_*` metrics. They are
+independent of backend admission; see [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
 
-<ParamField path="dynamo_rejection_request_total" type="counter">
-  Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
+<ParamField path="dynamo_work_handler_pool_active_tasks" type="gauge">
+  Current TCP request handlers holding worker-pool permits, from dispatch until downstream handling finishes.
 </ParamField>
 
-<ParamField path="dynamo_engine_request" type="gauge">
-  Current requests being handled by the engine.
+<ParamField path="dynamo_work_handler_pool_capacity" type="gauge">
+  Configured capacity of the TCP worker pool.
 </ParamField>
 
-<ParamField path="dynamo_request_queue" type="gauge">
-  Current requests queued in Dynamo, not yet in the engine.
+<ParamField path="dynamo_work_handler_queue_depth" type="gauge">
+  Current requests in the bounded TCP work queue awaiting dispatcher pickup.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_queue_capacity" type="gauge">
+  Configured capacity of the bounded TCP work queue.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_enqueue_rejected_total" type="counter">
+  Cumulative requests rejected before TCP worker dispatch because the bounded work queue was full or the dispatcher channel was closed.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_permit_wait_seconds" type="histogram">
+  Time a queued request spends waiting for a TCP worker-pool permit after dispatcher pickup.
+</ParamField>
+
+The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
+See [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend)
+for gate behavior.
+
+The `dp_rank` label contains the rank ID, such as `"4"`, or `"unspecified"` for unranked requests.
+Sum across all `dp_rank` values for worker totals.
+
+<ParamField path="dynamo_backend_admission_engine_request_count" type="gauge">
+  Requests admitted to the engine that have not finished. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_engine_request_waiting_count" type="gauge">
+  Admitted requests still awaiting their first generated token or completion. Label: `dp_rank`.
+  Replaces `dynamo_backend_admission_engine_wait_count`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_queue_count" type="gauge">
+  Requests waiting outside the engine in gate queues. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_receive_total" type="counter">
+  All requests received by the gate, counted once regardless of outcome. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_admit_total" type="counter">
+  Requests passed into the engine. Labels: `dp_rank` and `source`.
+  `source="direct"` means admitted without queueing; `source="queue"` means admitted after queueing.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_rejection_total" type="counter">
+  Requests the gate could neither admit nor queue. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_cancellation_total" type="counter">
+  Requests cancelled before engine admission. Label: `dp_rank`.
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.

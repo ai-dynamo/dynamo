@@ -462,7 +462,9 @@ impl Endpoint {
         Ok(())
     }
 
-    pub(crate) fn lifecycle_operation_role(
+    /// The cell holding this endpoint's topology role, shared by every clone of
+    /// it: empty until a role is recorded, then fixed.
+    pub fn lifecycle_operation_role(
         &self,
     ) -> Arc<OnceLock<crate::telemetry::LifecycleOperationRole>> {
         self.lifecycle_operation_role.clone()

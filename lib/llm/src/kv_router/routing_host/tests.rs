@@ -26,7 +26,9 @@ use dynamo_runtime::{
     error::{BackendError, ErrorType, match_error_chain},
     pipeline::{
         AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, PushRouter, RouterMode,
-        ServerStreamingEngine, StreamingDispatch, context::Controller,
+        ServerStreamingEngine, StreamingDispatch,
+        context::Controller,
+        network::{IngressRequestDecoder, RequestPlanePayloadCodec, SerdeIngressPayloadAdapter},
     },
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
@@ -35,6 +37,7 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use super::*;
 use crate::{
+    admission_gate::AdmissionRequest,
     http::service::metrics::Metrics,
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
@@ -4511,5 +4514,250 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     assert!(matches!(operation, Some(Hold::Initialize(_))));
     assert_eq!(affinity.query_target(&group, None).unwrap(), None);
 
+    runtime.shutdown();
+}
+
+/// The DP rank a worker ingress reads from `body` after the request
+/// plane carries it, under each payload codec: the rank its backend admission
+/// gate admits the request under.
+async fn worker_admission_rank(body: &PreprocessedRequest) -> Option<u32> {
+    let mut ranks = Vec::new();
+    for codec in [
+        RequestPlanePayloadCodec::Json,
+        RequestPlanePayloadCodec::Msgpack,
+    ] {
+        let decoded: PreprocessedRequest = SerdeIngressPayloadAdapter
+            .decode_request(codec, codec.encode(body).unwrap().into())
+            .await
+            .unwrap();
+        ranks.push(decoded.dp_rank());
+    }
+    assert_eq!(ranks[0], ranks[1], "both codecs deliver the same rank");
+    assert_eq!(ranks[0], body.dp_rank(), "the rank the body names");
+    ranks[0]
+}
+
+/// Records, for each dispatch, the DP rank the worker's admission gate reads
+/// from the body that dispatch sends, and the body's prefill rank, which a
+/// prefill engine prefers when it is set.
+#[derive(Default)]
+struct RankRecordingDispatch {
+    ranks: Mutex<Vec<(Option<u32>, Option<u32>)>>,
+}
+
+#[async_trait]
+impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for RankRecordingDispatch {
+    async fn generate(
+        &self,
+        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (addressed, context) = request.transfer(());
+        let (body, _, _) = addressed.into_parts();
+        let admission_rank = worker_admission_rank(&body).await;
+        let prefill_rank = body
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.prefill_dp_rank);
+        self.ranks
+            .lock()
+            .unwrap()
+            .push((admission_rank, prefill_rank));
+        let output = Annotated::from_data(LLMEngineOutput {
+            finish_reason: Some(FinishReason::Stop),
+            ..Default::default()
+        });
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            context.context(),
+        ))
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        _instance: Instance,
+        _address: String,
+        _input: ManyIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        unreachable!("the routing host dispatches unary requests")
+    }
+}
+
+async fn drain(host: &RoutingHost, request: PreprocessedRequest) {
+    let mut stream = host.generate(Context::new(request)).await.unwrap();
+    while stream.next().await.is_some() {}
+}
+
+/// Builtin routing writes the DP rank it assigned into each dispatch's body,
+/// which is where the worker's admission gate reads it, and no rank when it
+/// assigned none.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_dispatch_bodies_name_their_assigned_dp_rank() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-dp-rank-body".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(RankRecordingDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+
+    for dp_rank in [Some(3), None] {
+        let mut pinned = request();
+        pinned.routing_mut().backend_instance_id = Some(worker_id);
+        pinned.routing_mut().dp_rank = dp_rank;
+        drain(&host, pinned).await;
+    }
+    drain(&host, request()).await;
+
+    assert_eq!(
+        dispatch.ranks.lock().unwrap().as_slice(),
+        &[(Some(3), None), (None, None), (None, None)]
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+/// KV routing writes the selected worker's DP rank into the dispatch's body,
+/// so the worker's admission gate reads exactly that rank.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_bodies_name_the_selected_dp_rank() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("kv-dp-rank-body".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let two_ranks = ModelRuntimeConfig {
+        data_parallel_start_rank: 4,
+        data_parallel_size: 2,
+        ..Default::default()
+    };
+    let (_workers_tx, workers) = watch::channel(HashMap::from([(worker_id, two_ranks)]));
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        ..Default::default()
+    };
+    let chooser = KvRouter::new(
+        endpoint,
+        client.clone(),
+        workers,
+        None,
+        16,
+        crate::kv_router::SelectionPolicySource::Registry,
+        Some(config),
+        None,
+        "decode",
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let dispatch = Arc::new(RankRecordingDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::KV,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::new(inner, Arc::new(chooser), None).unwrap();
+
+    for _ in 0..4 {
+        drain(&host, request()).await;
+    }
+
+    let ranks = dispatch.ranks.lock().unwrap().clone();
+    assert_eq!(ranks.len(), 4);
+    for (admission_rank, prefill_rank) in ranks {
+        assert!(
+            matches!(admission_rank, Some(4 | 5)),
+            "a served rank: {admission_rank:?}"
+        );
+        assert_eq!(prefill_rank, None);
+    }
+    drop(host);
+    runtime.shutdown();
+}
+
+/// Each dispatch's body names the rank its own routing selected: a prefill
+/// dispatch names the prefill rank it targets in `dp_rank`, where the worker's
+/// admission gate reads it, matching the `prefill_dp_rank` a prefill engine
+/// prefers, rather than the decode rank the request arrived with; the decode
+/// dispatch of the same request names its own.
+#[tokio::test]
+#[serial_test::serial]
+async fn prefill_and_decode_dispatch_bodies_name_their_own_dp_rank() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("prefill-dp-rank-body".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(RankRecordingDispatch::default());
+    // Direct routing assigns the rank inside the preparation that runs after
+    // transport resolution.
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::Direct,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+
+    let mut original = request();
+    original.routing_mut().backend_instance_id = Some(worker_id);
+    original.routing_mut().prefill_worker_id = Some(worker_id);
+    original.routing_mut().dp_rank = Some(5);
+    original.routing_mut().prefill_dp_rank = Some(3);
+
+    let ((), mut prefill) = host
+        .select_and_dispatch_prefill(Context::new(original.clone()), |_, _| Ok(()))
+        .await
+        .unwrap();
+    while prefill.next().await.is_some() {}
+    drain(&host, original).await;
+
+    assert_eq!(
+        dispatch.ranks.lock().unwrap().as_slice(),
+        &[(Some(3), Some(3)), (Some(5), Some(3))]
+    );
+    drop(host);
     runtime.shutdown();
 }

@@ -10,6 +10,8 @@ need to add more tests to cover different code paths of DynamoVllmConfig.
 
 import argparse
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -843,3 +845,32 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+
+_MOCK_MODEL = (
+    Path(__file__).resolve().parents[5]
+    / "lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+)
+_CANONICAL_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
+_LEGACY_LIMIT_ENV = "DYN_ENGINE_REQUEST_LIMIT"
+
+
+@pytest.mark.parametrize(
+    "flag, expected",
+    [(["--engine-request-limit", "7"], "7"), ([], "5")],
+)
+def test_startup_exports_an_explicit_engine_request_limit_before_the_runtime(
+    monkeypatch, flag, expected
+):
+    """The real startup parse validates the configuration, which exports an
+    explicit flag under the name the backend admission gate reads first, ahead
+    of any environment value, and leaves the environment alone without one.
+    Parsing only: no engine starts."""
+    monkeypatch.setenv(_CANONICAL_LIMIT_ENV, "5")
+    monkeypatch.setenv(_LEGACY_LIMIT_ENV, "3")
+
+    config = parse_args(["--model", str(_MOCK_MODEL), *flag])
+
+    assert config.engine_request_limit == (int(expected) if flag else None)
+    assert os.environ[_CANONICAL_LIMIT_ENV] == expected
+    assert os.environ[_LEGACY_LIMIT_ENV] == "3"
