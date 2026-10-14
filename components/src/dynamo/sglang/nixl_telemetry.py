@@ -185,7 +185,6 @@ def scheduler_metrics_ipc_name(server_args: Any, port_args: Any) -> str:
 
 
 def _share_scheduler_metrics_ipc_name(target: Any, args: tuple, kwargs: dict) -> None:
-    """Point this scheduler's KV metrics PUSH socket at the publisher's address."""
     bound = inspect.signature(target).bind(*args, **kwargs)
     from dynamo.sglang._compat import resolved_server_args
 
