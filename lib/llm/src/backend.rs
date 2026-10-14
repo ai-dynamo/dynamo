@@ -1872,6 +1872,106 @@ mod tests {
         assert_eq!(content[1].bytes, Some(b"<|user|>".to_vec()));
     }
 
+    /// With a tokenizer that honors `skip_special_tokens` (default true), special tokens
+    /// are dropped from the generated text but kept in logprob metadata: a mid-output
+    /// special token and a hidden stop token are both reported by their own string.
+    #[tokio::test]
+    async fn test_special_tokens_omitted_from_text_but_kept_in_logprobs() {
+        let special = |id: u32, content: &str| {
+            serde_json::json!({"id": id, "content": content, "special": true,
+                "single_word": false, "lstrip": false, "rstrip": false, "normalized": false})
+        };
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [special(1, "<eos>"), special(2, "<|mid|>")],
+            "normalizer": null, "pre_tokenizer": null, "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [
+                {"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {"type": "BPE", "vocab": {"<0x61>": 0, "<eos>": 1, "<|mid|>": 2},
+                "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![1]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: vec![0, 2, 0, 1],
+                    log_probs: Some(vec![-0.1; 4]),
+                    index: Some(0),
+                    ..Default::default()
+                }]),
+            });
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<BackendOutput> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|output| output.data)
+            .collect();
+        let text: String = outputs
+            .iter()
+            .filter_map(|output| output.text.as_deref())
+            .collect();
+        assert_eq!(text, "aa");
+        let tokens: Vec<Option<String>> = outputs
+            .iter()
+            .flat_map(|output| output.tokens.clone())
+            .collect();
+        assert_eq!(
+            tokens,
+            ["a", "<|mid|>", "a", "<eos>"].map(|t| Some(t.to_string()))
+        );
+
+        let options = DeltaGeneratorOptions::new(None, None, true, None);
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let content: Vec<_> = outputs
+            .into_iter()
+            .filter_map(|output| {
+                generator
+                    .choice_from_postprocessor(output)
+                    .expect("OpenAI response conversion succeeds")
+                    .inner
+                    .choices
+                    .first()
+                    .and_then(|choice| choice.logprobs.as_ref())
+                    .and_then(|logprobs| logprobs.content.clone())
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            content
+                .iter()
+                .map(|entry| entry.token.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "<|mid|>", "a", "<eos>"]
+        );
+        assert_eq!(content[1].bytes, Some(b"<|mid|>".to_vec()));
+        assert_eq!(content[3].bytes, Some(b"<eos>".to_vec()));
+    }
+
     /// The engine's string for the sampled token wins over single-ID decode; an empty
     /// engine string does not.
     #[tokio::test]
