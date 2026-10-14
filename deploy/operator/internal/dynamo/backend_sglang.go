@@ -8,7 +8,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -16,15 +15,7 @@ import (
 const (
 	SglangPort = "29500"
 
-	maxTCPPort       = 65535
-	booleanTrueValue = "true"
-
-	sglangEmbeddingWorkerFlag           = "--embedding-worker"
-	sglangNoEmbeddingWorkerFlag         = "--no-embedding-worker"
-	healthCheckPayloadFlag              = "--health-check-payload"
-	sglangEmbeddingWorkerEnv            = "DYN_SGL_EMBEDDING_WORKER"
-	healthCheckPayloadEnv               = "DYN_HEALTH_CHECK_PAYLOAD"
-	sglang15EmbeddingHealthCheckPayload = `{"model":"health-check","input":"Test"}`
+	maxTCPPort = 65535
 )
 
 type SGLangBackend struct {
@@ -47,17 +38,6 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// is exactly the case that co-locates every rank in one container.
 	if err := reserveNixlExporterPorts(container, containerGPUCount); err != nil {
 		return err
-	}
-
-	// Supply the embedding request shape that Dynamo 1.5.0 cannot derive for its active canary.
-	if version, err := runtimeversion.Resolve(container.Image, component.RuntimeVersionOverride); err == nil &&
-		version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) &&
-		!sglangHealthCheckPayloadConfigured(container) &&
-		sglangEmbeddingWorkerEnabled(container) {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  healthCheckPayloadEnv,
-			Value: sglang15EmbeddingHealthCheckPayload,
-		})
 	}
 
 	if component.CompilationCache != nil {
@@ -101,44 +81,6 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	return nil
 }
 
-func sglangEmbeddingWorkerEnabled(container *corev1.Container) bool {
-	enabled := false
-	if env := findEnvVar(container.Env, sglangEmbeddingWorkerEnv); env != nil {
-		if env.ValueFrom == nil {
-			switch strings.ToLower(strings.TrimSpace(env.Value)) {
-			case booleanTrueValue, "1", "yes", "on":
-				enabled = true
-			}
-		}
-	}
-
-	for _, arg := range getExpandedCommandLine(container) {
-		switch arg {
-		case sglangEmbeddingWorkerFlag:
-			enabled = true
-		case sglangNoEmbeddingWorkerFlag:
-			enabled = false
-		}
-	}
-
-	return enabled
-}
-
-func sglangHealthCheckPayloadConfigured(container *corev1.Container) bool {
-	if findEnvVar(container.Env, healthCheckPayloadEnv) != nil {
-		return true
-	}
-
-	// Argparse accepts the payload in both separated and --flag=value forms.
-	for _, arg := range getExpandedCommandLine(container) {
-		if arg == healthCheckPayloadFlag || strings.HasPrefix(arg, healthCheckPayloadFlag+"=") {
-			return true
-		}
-	}
-
-	return false
-}
-
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.
 // Skips containers without a nixl port, with NIXL_TELEMETRY_ENABLE set off, or
 // with an exporter other than Prometheus selected. Literal enable values other
@@ -169,7 +111,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if prometheusOn {
 		switch strings.ToLower(enabled.Value) {
 		case "y":
-		case "1", "yes", "on", booleanTrueValue, "enable":
+		case "1", "yes", "on", "true", "enable":
 			return nil
 		case "n", "0", "no", "off", "false", "disable":
 			return nil

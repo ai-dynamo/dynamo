@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -629,118 +628,6 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 					t.Errorf("Expected StartupProbe to be preserved, but it was removed")
 				}
 			}
-		})
-	}
-}
-
-func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
-	const image15 = "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0"
-	const customPayload = `{"model":"custom","input":"probe"}`
-	sourced := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}
-	configMapEnvFrom := []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}}
-	secretEnvFrom := []corev1.EnvFromSource{{Prefix: "DYN_", SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}}
-	payload := func(value string) []corev1.EnvVar {
-		return []corev1.EnvVar{{Name: healthCheckPayloadEnv, Value: value}}
-	}
-
-	tests := []struct {
-		name        string
-		image       string
-		args        []string
-		env         []corev1.EnvVar
-		envFrom     []corev1.EnvFromSource
-		wantPayload []corev1.EnvVar
-	}{
-		{
-			name:        "Dynamo 1.5 embedding flag gets compatible payload",
-			image:       image15,
-			args:        []string{sglangEmbeddingWorkerFlag},
-			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
-		},
-		{
-			name:        "literal embedding environment gets compatible payload",
-			image:       image15,
-			env:         []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: "true"}},
-			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
-		},
-		{
-			name:  "last negative CLI flag disables embedding mode",
-			image: image15,
-			args:  []string{sglangEmbeddingWorkerFlag, sglangNoEmbeddingWorkerFlag},
-			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: "true"}},
-		},
-		{
-			name:  "chat worker is unchanged",
-			image: image15,
-		},
-		{
-			name:  "newer embedding worker is unchanged",
-			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0",
-			args:  []string{sglangEmbeddingWorkerFlag},
-		},
-		{
-			name:        "literal user payload is preserved",
-			image:       image15,
-			args:        []string{sglangEmbeddingWorkerFlag},
-			env:         payload(customPayload),
-			envFrom:     configMapEnvFrom,
-			wantPayload: payload(customPayload),
-		},
-		{
-			name:        "valueFrom user payload is preserved",
-			image:       image15,
-			args:        []string{sglangEmbeddingWorkerFlag},
-			env:         []corev1.EnvVar{{Name: healthCheckPayloadEnv, ValueFrom: sourced}},
-			envFrom:     secretEnvFrom,
-			wantPayload: []corev1.EnvVar{{Name: healthCheckPayloadEnv, ValueFrom: sourced}},
-		},
-		{
-			name:    "CLI user payload is preserved",
-			image:   image15,
-			args:    []string{sglangEmbeddingWorkerFlag, healthCheckPayloadFlag + "=" + customPayload},
-			envFrom: configMapEnvFrom,
-		},
-		{
-			name:  "indirect embedding mode skips the shim",
-			image: image15,
-			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, ValueFrom: sourced}},
-		},
-		{
-			name:        "ConfigMap envFrom does not suppress default",
-			image:       image15,
-			args:        []string{sglangEmbeddingWorkerFlag},
-			envFrom:     configMapEnvFrom,
-			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
-		},
-		{
-			name:        "prefixed Secret envFrom does not suppress default",
-			image:       image15,
-			args:        []string{sglangEmbeddingWorkerFlag},
-			envFrom:     secretEnvFrom,
-			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
-		},
-	}
-
-	backend := &SGLangBackend{}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Render the SGLang container with the configured environment sources")
-			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env, EnvFrom: tt.envFrom}
-			err := backend.UpdateContainer(
-				container, 1, RoleMain, &v1beta1.DynamoComponentDeploymentSharedSpec{},
-				"test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
-			)
-			require.NoError(t, err)
-
-			t.Log("Check the complete payload override and preserve envFrom references")
-			var got []corev1.EnvVar
-			for _, env := range container.Env {
-				if env.Name == healthCheckPayloadEnv {
-					got = append(got, env)
-				}
-			}
-			require.Equal(t, tt.wantPayload, got)
-			require.Equal(t, tt.envFrom, container.EnvFrom)
 		})
 	}
 }

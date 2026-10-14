@@ -46,27 +46,6 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
-### v1.7.0
-
-#### Worker runtime compatibility
-
-##### SGLang 1.5.0 embedding health checks
-
-**Change:** The Operator injects an embedding-compatible health-check payload for workers resolved
-as Dynamo 1.5.0 when `--embedding-worker` or a truthy literal `DYN_SGL_EMBEDDING_WORKER` enables
-embedding mode, unless a payload is explicitly declared in `env` or on the CLI. The injected
-`env` value overrides `DYN_HEALTH_CHECK_PAYLOAD` supplied through ConfigMap or Secret `envFrom`.
-
-**Affected:** Dynamo 1.5.0 SGLang embedding workers with a custom payload supplied only through
-`envFrom`. Reconciliation by the upgraded Operator can replace the chosen probe input or options
-even when the deployment manifest is unchanged.
-
-**Action:** Before upgrading to Operator 1.7.0, preserve custom payloads by declaring
-`DYN_HEALTH_CHECK_PAYLOAD` explicitly in the worker container's `env`, using `value` or `valueFrom`,
-or by passing `--health-check-payload`. If embedding mode itself is configured only through
-`valueFrom` or `envFrom`, the shim cannot detect it; configure a compatible payload explicitly.
-See the [compatibility migration example](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/general/compatibility.mdx#sglang-150-embedding-workers).
-
 ### v1.6.0
 
 #### Runtime Compatibility

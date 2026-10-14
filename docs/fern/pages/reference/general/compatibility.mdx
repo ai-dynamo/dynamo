@@ -31,27 +31,26 @@ This guarantee covers the frontend-to-worker discovery metadata and wire protoco
 
 ### SGLang 1.5.0 Embedding Workers
 
-Starting with Operator 1.7.0, the Operator supplies an embedding-shaped health-check payload for Dynamo 1.5.0 SGLang embedding workers when `--embedding-worker` or a truthy literal `DYN_SGL_EMBEDDING_WORKER` value enables embedding mode. If embedding mode is set only through Kubernetes `valueFrom` or `envFrom`, set `DYN_HEALTH_CHECK_PAYLOAD` explicitly before upgrading. Use a JSON payload with the worker's model name and a text input, for example `{"model":"your-model","input":"Test"}`.
+Dynamo 1.5.0 SGLang embedding workers register a generation-shaped payload for active health checks by default. The embedding handler requires `model` and `input`, so the default canary fails and can prevent the worker from becoming ready in a mixed-version deployment.
 
-The Operator ignores `envFrom` when deciding whether to inject this default and does not read referenced ConfigMaps or Secrets during rendering. An injected payload in `env` takes precedence over the same variable supplied by `envFrom`, replacing the custom probe input or options even if the deployment manifest is unchanged. Before upgrading, preserve a custom payload by declaring `DYN_HEALTH_CHECK_PAYLOAD` explicitly in `env`, using either a literal value or `valueFrom`, or by passing `--health-check-payload`.
+When running these workers with active health checks enabled, set `DYN_HEALTH_CHECK_PAYLOAD` to an embedding request in the DGD worker configuration. Use the worker's served model name and a text input. This explicit configuration is required for this version's mixed-version compatibility path; the Operator does not supply it automatically.
 
-The following worker container fragment preserves the payload from the `DYN_HEALTH_CHECK_PAYLOAD` key in an existing ConfigMap. For a Secret, use `secretKeyRef` instead of `configMapKeyRef`:
+The following DGD fragment shows the setting for an embedding worker. Merge the `env` entry into the worker's existing `main` container and replace `your-model` with its served model name:
 
 ```yaml
-containers:
-  - name: main
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
-    args: ["--embedding-worker"]
-    envFrom:
-      - configMapRef:
-          name: health-check-settings
-    env:
-      - name: DYN_HEALTH_CHECK_PAYLOAD
-        valueFrom:
-          configMapKeyRef:
-            name: health-check-settings
-            key: DYN_HEALTH_CHECK_PAYLOAD
+spec:
+  components:
+    - name: decode
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: DYN_HEALTH_CHECK_PAYLOAD
+                  value: '{"model":"your-model","input":"Test"}'
 ```
+
+The payload can also be supplied through `valueFrom`, `envFrom`, or `--health-check-payload`. Keep an existing custom payload if it already contains a compatible embedding request. This requirement is specific to Dynamo 1.5.0 SGLang embedding workers; it does not apply to chat workers.
 
 ### Rolling Update Behavior
 
