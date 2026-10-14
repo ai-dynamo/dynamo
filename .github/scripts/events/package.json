@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "description": "Pinned deps for .github/scripts/generate-events.js and update-events.js",
   "type": "commonjs",
+  "scripts": {
+    "test": "NODE_PATH=node_modules node --test generate-events.test.js"
+  },
   "dependencies": {
-    "node-ical": "0.20.0"
+    "node-ical": "0.20.0",
+    "rrule": "2.8.1"
   },
   "overrides": {
     "axios": ">=1.18.1 <2.0.0"

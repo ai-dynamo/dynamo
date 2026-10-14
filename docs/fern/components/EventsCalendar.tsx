@@ -16,6 +16,7 @@ import {
 } from "./events.generated";
 import {
   MONTH_INDEX,
+  agendaEvents,
   resolveCalendarMonth,
   resolveToday,
 } from "./calendar-today";
@@ -109,6 +110,8 @@ export function EventsCalendar() {
   const selectedDay =
     today && today.year === year && today.month === month ? today.day : null;
   const days = buildMonthDays(year, month);
+  const agenda = agendaEvents(UPCOMING_EVENTS).slice(0, 4);
+  const recent = agendaEvents(PAST_EVENTS).slice(0, 5);
 
   // Days in the displayed month that have something scheduled, so the grid
   // still carries event information now that the highlight marks today.
@@ -195,8 +198,8 @@ export function EventsCalendar() {
           </div>
 
           <div className="dynamo-calendar__events">
-            {UPCOMING_EVENTS.length > 0 ? (
-              UPCOMING_EVENTS.slice(0, 4).map((event) => (
+            {agenda.length > 0 ? (
+              agenda.map((event) => (
                 <UpcomingEvent
                   key={`${event.start}-${event.title}`}
                   event={event}
@@ -215,11 +218,11 @@ export function EventsCalendar() {
             )}
           </div>
 
-          {PAST_EVENTS.length > 0 && (
+          {recent.length > 0 && (
             <details className="dynamo-calendar__past">
               <summary>Recent events</summary>
               <div>
-                {PAST_EVENTS.slice(0, 5).map((event) => (
+                {recent.map((event) => (
                   <a
                     key={`${event.start}-${event.title}`}
                     href={event.addUrl}

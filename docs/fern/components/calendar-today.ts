@@ -3,14 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Shared "today" and displayed-month resolution for the two calendar grids:
- * EventsCalendar (Home) and CommunityLanding's FullCalendar (Community).
+ * EventsCalendar (Home) and CommunityLanding's FullCalendar (Community), plus
+ * the agenda-list filter their event lists share.
  *
  * It lives here rather than in either component because both previously
  * derived the displayed month from `UPCOMING_EVENTS[0] ?? PAST_EVENTS[0]` --
  * the same defect, copy-pasted -- and pinning both to one helper is what stops
  * the next edit from fixing only one of them.
  */
-import { GENERATED_ON, PAST_EVENTS, UPCOMING_EVENTS } from "./events.generated";
+import {
+  GENERATED_ON,
+  PAST_EVENTS,
+  UPCOMING_EVENTS,
+  type DynamoEvent,
+} from "./events.generated";
 
 export interface CalendarDate {
   year: number;
@@ -146,4 +152,24 @@ export function resolveCalendarMonth(): CalendarMonth {
 
   const now = new Date();
   return { year: now.getUTCFullYear(), month: now.getUTCMonth() };
+}
+
+/**
+ * `events` for an agenda list, with each recurring series listed once.
+ *
+ * The generator expands a recurring series into one event per occurrence so
+ * the grids mark every week, but a short list fed the same arrays fills up
+ * with the weekly meeting and pushes one-off events out of view. This keeps
+ * each series' first occurrence in list order -- the next one in
+ * UPCOMING_EVENTS, the latest in PAST_EVENTS -- matched by title, which is how
+ * a reader tells two series apart.
+ */
+export function agendaEvents(events: DynamoEvent[]): DynamoEvent[] {
+  const listed = new Set<string>();
+  return events.filter((event) => {
+    if (!event.recurring) return true;
+    if (listed.has(event.title)) return false;
+    listed.add(event.title);
+    return true;
+  });
 }
