@@ -59,6 +59,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
+	syncedDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{}
 	logger := log.FromContext(ctx)
 
 	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
@@ -110,6 +111,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
 		resources = append(resources, syncedDCD)
+		syncedDCDs = append(syncedDCDs, syncedDCD)
 	}
 
 	if rollingUpdateCtx.InProgress() {
@@ -119,7 +121,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	result := checkResourcesReadiness(resources)
+	result := applyComponentCrashLoops(checkResourcesReadiness(resources), syncedDCDs)
 	if rollingUpdateCtx.InProgress() {
 		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
 		if err != nil {
