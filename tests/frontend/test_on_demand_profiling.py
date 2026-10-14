@@ -1584,7 +1584,7 @@ def test_bundle_fails_only_the_target_with_a_malformed_trace(tmp_path):
     assert summary["artifact_verification"]["bad"]["status"] == "verified"
 
 
-def test_bundle_reads_nsight_worker_exports(tmp_path):
+def nsight_session(tmp_path):
     base, clock = 1_700_000_000_000_000_000, 5_000_000_000
     # Nsight event timestamps are relative to the session start (utcEpochNs).
 
@@ -1732,6 +1732,11 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     otel.write_text(
         json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
     )
+    return session, otel, base
+
+
+def test_bundle_reads_nsight_worker_exports(tmp_path):
+    session, otel, base = nsight_session(tmp_path)
     bundle.build(session, [otel], tmp_path / "out", per_request=True)
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
     path = tmp_path / "out" / index["requests"][0]["timeline"]
@@ -1774,6 +1779,58 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     assert "out/profiles/decode-0/worker.nsys-rep" in names
     assert digest == hashlib.sha256(archived.read_bytes()).hexdigest()
     assert (tmp_path / "out.tar.gz.sha256").read_text() == f"{digest}  out.tar.gz\n"
+
+
+def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path):
+    session, otel, base = nsight_session(tmp_path)
+    importer = tmp_path / "ImportNvtxt"
+    importer.write_text(
+        f"#!{sys.executable}\n"
+        "import shutil, sys\n"
+        "args = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n"
+        "shutil.copy(args['-i'], args['-o'])\n"
+        "lines = open(args['-n']).read().splitlines()\n"
+        "count = sum(l.startswith(('RangeStartEnd,', 'Marker,')) for l in lines)\n"
+        "print(f'{count} events imported')\n"
+    )
+    importer.chmod(0o755)
+    summary = bundle.build(
+        session, [otel], tmp_path / "out", import_nvtxt=str(importer)
+    )
+    # Nsight default: native reports with request spans, no Perfetto conversion.
+    assert summary["timeline"] is None
+    assert not (tmp_path / "out/timeline.json.gz").exists()
+    reports = summary["nsight_reports"]
+    assert {t: r["status"] for t, r in reports.items()} == {
+        "frontend": "merged",
+        "decode-0": "merged",
+    }
+    text = (tmp_path / "out/reports/decode-0.nvtxt").read_text()
+    assert "TimeBase = Manual" in text
+    assert 'NameOsThread, 900001, 2, "req t · decode-0"' in text
+    # Spans at base+2..3 ms land 2..3 ms after the session start, which is
+    # 5 s on this report's clock.
+    assert (
+        'RangeStartEnd, 5002000000, 5003000000, 2, "worker.operation.decode · decode-0"'
+        in text
+    )
+    assert 'RangeStartEnd, 5001000000, 5004000000, 1, "decode-0 recording"' in text
+    assert (
+        reports["decode-0"]["events_imported"]
+        == reports["decode-0"]["ranges"] + reports["decode-0"]["marks"]
+    )
+    assert (tmp_path / "out/reports/decode-0.nsys-rep").read_bytes() == b"report"
+    archived, _ = bundle.archive(tmp_path / "out", summary)
+    with tarfile.open(archived) as tar:
+        names = set(tar.getnames())
+    assert {"out/reports/decode-0.nsys-rep", "out/reports/frontend.nvtxt"} <= names
+    # Without ImportNvtxt the NVTXT is still written and Perfetto is the fallback.
+    summary = bundle.build(
+        session, [otel], tmp_path / "plain", import_nvtxt=str(tmp_path / "missing")
+    )
+    if summary["nsight_reports"]["decode-0"]["status"] == "nvtxt_only":
+        assert summary["timeline"]["events"]
+        assert (tmp_path / "plain/reports/decode-0.nvtxt").exists()
 
 
 @pytest.mark.asyncio
