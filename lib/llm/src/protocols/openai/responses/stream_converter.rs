@@ -1074,9 +1074,13 @@ impl ResponseStreamConverter {
     }
 
     /// Append remaining output completion events and `response.completed` at stream end.
-    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        if self.terminal_failure_emitted || self.append_single_tool_call_fallback(events) {
-            return;
+    /// Returns `true` after appending a terminal failure, as [`Self::append_chunk_events`] does.
+    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) -> bool {
+        if self.terminal_failure_emitted {
+            return false;
+        }
+        if self.append_single_tool_call_fallback(events) {
+            return true;
         }
 
         let output_status = self.output_status();
@@ -1106,6 +1110,7 @@ impl ResponseStreamConverter {
             })
         };
         events.push(self.make_sse_event(&terminal));
+        false
     }
 
     /// Emit error events when the stream ends due to a backend error.
@@ -2811,6 +2816,39 @@ mod tests {
             ]
         );
         assert_eq!(single_function_call(&conv).call_id, "call_b");
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_disallowed_fallback_fails_at_stream_end() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            tool_choice: Some(
+                serde_json::from_value(serde_json::json!({
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }))
+                .unwrap(),
+            ),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let _ = conv.process_chunk(&tool_call_chunk(0, None, Some("read_file"), Some("{}")));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call_b"),
+            Some("delete_file"),
+            Some("{}"),
+        ));
+        let mut events = Vec::new();
+        assert!(conv.append_end_events(&mut events));
+        assert_eq!(
+            event_types(&events).last().map(String::as_str),
+            Some("response.failed")
+        );
+        assert!(!event_types(&events).contains(&"response.completed".to_string()));
     }
 
     #[test]

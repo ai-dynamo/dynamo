@@ -4556,8 +4556,22 @@ async fn responses(
                     producer_error_signal.mark_terminal_event_emitted();
                 }
                 yield terminal_event.map_err(axum::Error::new);
+            } else if converter.append_end_events(&mut events) {
+                // The single-call EOF fallback selected a call outside allowed_tools.
+                producer_error_signal.set(ErrorType::Internal);
+                producer_ctx.kill();
+
+                let terminal_event = events
+                    .pop()
+                    .expect("terminal failure is missing response.failed");
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+                if terminal_event.is_ok() {
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
+                yield terminal_event.map_err(axum::Error::new);
             } else {
-                converter.append_end_events(&mut events);
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
