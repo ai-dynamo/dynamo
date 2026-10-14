@@ -185,6 +185,9 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && 'http://minio:9000' || '' }}
+        DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && 'minioadmin' || '' }}
+        DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && 'minioadmin' || '' }}
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
