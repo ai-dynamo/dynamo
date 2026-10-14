@@ -50,8 +50,9 @@ engine. If SGLang exposes `Engine.attach_tokenizer_worker`, children use it inst
 facade.
 
 Configuration (`effective_gateway_workers`, `validate_gateway_mode`, applied in `main.py`
-before snapshot preparation and runtime creation): `--gateway-workers N` sets
-`tokenizer_worker_num` to N; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
+before snapshot preparation and runtime creation): `--gateway-workers N` sets the raw
+`tokenizer_worker_num` to N in `args.py` before `ServerArgs.from_cli_args`, because SGLang's
+`PortArgs.init_new` reads the raw field; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
 above 1 that differs from `--gateway-workers` is an error. Gateway mode is rejected for the direct-engine workers
 (embedding, rerank, multimodal, diffusion), with `--enable-lora` (dynamic LoRA state would
 live in one child), with `--enable-forward-pass-metrics` (the schedulers stamp FPM with the
@@ -211,8 +212,11 @@ SGLang multinode LLM workers have two different DP-rank views:
 - **Model registration / router scheduling** is global. In the legacy
   `python -m dynamo.sglang` path, only the leader process (`node_rank == 0`)
   serves the Dynamo endpoint and registers the model card. That single routable
-  worker must advertise `[0, dp_size)` via `ModelRuntimeConfig`; otherwise the
-  router cannot schedule remote DP ranks.
+  worker must advertise every DP rank, `[0, num_dp_ranks)`, via
+  `ModelRuntimeConfig`; otherwise the router cannot schedule remote DP ranks.
+  Count ranks with `sglang_dp_layout(server_args)` (`capacity.py`), not
+  `server_args.dp_size`: since sgl-project/sglang#41818, attention DP lives in
+  `attn_dp_size` and `dp_size` counts replicas only.
 - **KV events, FPM, and component metrics** are local. Each node subscribes only
   to its own rank slice from `local_dp_rank_bounds(server_args)`, and non-leader
   nodes publish those events using the leader worker id so the router-visible KV
