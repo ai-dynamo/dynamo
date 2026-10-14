@@ -30,6 +30,8 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+hmac = "0.12"
+sha2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }

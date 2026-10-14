@@ -48,6 +48,7 @@ mod engine;
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
+    affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     reject: Arc<AtomicBool>,
@@ -63,6 +64,7 @@ struct FakeTrtllm {
     unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
     kv_routing: Arc<AtomicBool>,
+    subagent_affinity: Arc<AtomicBool>,
     disable_events: Arc<AtomicBool>,
     disable_load: Arc<AtomicBool>,
     dp_size: Arc<AtomicU32>,
@@ -105,6 +107,19 @@ impl pb::inference_server::Inference for FakeTrtllm {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
+        if let Some(parent) = request.metadata().get("x-trtllm-subagent-affinity-id") {
+            let auth = request
+                .metadata()
+                .get("x-trtllm-subagent-affinity-auth")
+                .expect("signed parent affinity")
+                .to_str()
+                .expect("ASCII signature")
+                .to_string();
+            self.affinity_headers
+                .lock()
+                .await
+                .push((parent.to_str().expect("valid parent ID").to_string(), auth));
+        }
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
@@ -299,24 +314,32 @@ impl pb::control_server::Control for FakeTrtllm {
         if !self.kv_routing.load(Ordering::SeqCst) {
             return Err(Status::unimplemented("GetServerInfo is not used"));
         }
+        let mut fields = [
+            (
+                "trtllm_supports_dp_rank_targeting".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            ),
+            (
+                "kv_event_heartbeat_interval_ms".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::NumberValue(5000.0)),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        if self.subagent_affinity.load(Ordering::SeqCst) {
+            fields.insert(
+                "trtllm_supports_subagent_affinity".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            );
+        }
         Ok(Response::new(pb::ServerInfo {
-            extra: Some(prost_types::Struct {
-                fields: [
-                    (
-                        "trtllm_supports_dp_rank_targeting".to_string(),
-                        prost_types::Value {
-                            kind: Some(prost_types::value::Kind::BoolValue(true)),
-                        },
-                    ),
-                    (
-                        "kv_event_heartbeat_interval_ms".to_string(),
-                        prost_types::Value {
-                            kind: Some(prost_types::value::Kind::NumberValue(5000.0)),
-                        },
-                    ),
-                ]
-                .into(),
-            }),
+            extra: Some(prost_types::Struct { fields }),
             parallelism: Some(pb::ParallelismInfo {
                 data_parallel_size: Some(self.dp_size.load(Ordering::SeqCst).max(1)),
                 ..Default::default()

@@ -3,9 +3,13 @@
 
 //! Thin client for TensorRT-LLM's OpenEngine gRPC services (`openengine.v1`).
 
+use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tokio::time::{Instant, sleep_until, timeout_at};
 
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
@@ -83,19 +87,83 @@ impl TrtllmClient {
         &self,
         request: pb::GenerateRequest,
         target_dp_rank: Option<u32>,
+        parent_affinity: Option<(&str, &str)>,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
-        let mut request = tonic::Request::new(request);
+        let mut rpc = tonic::Request::new(request);
         if let Some(rank) = target_dp_rank {
-            request.metadata_mut().insert(
+            rpc.metadata_mut().insert(
                 TARGET_DP_RANK_METADATA_KEY,
                 tonic::metadata::MetadataValue::from(rank),
             );
         }
+        if let Some((parent_id, key)) = parent_affinity {
+            let conversation_id = rpc
+                .get_ref()
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.fields.get("conversation_id"))
+                .and_then(|value| value.kind.as_ref())
+                .and_then(|kind| match kind {
+                    prost_types::value::Kind::StringValue(id) => Some(id.as_str()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    invalid_argument("subagent affinity requires a child conversation ID")
+                })?;
+            let payload = BTreeMap::from([
+                ("purpose", "x-trtllm-subagent-affinity-id"),
+                ("model", rpc.get_ref().model.as_str()),
+                ("request_id", rpc.get_ref().request_id.as_str()),
+                ("conversation_id", conversation_id),
+                ("subagent_affinity_id", parent_id),
+                ("request_type", "context_only"),
+            ]);
+            let encoded = serde_json::to_vec(&payload)
+                .map_err(|error| invalid_argument(format!("invalid affinity payload: {error}")))?;
+            let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+                .map_err(|error| invalid_argument(format!("invalid affinity key: {error}")))?;
+            mac.update(&encoded);
+            let digest = mac.finalize().into_bytes();
+            let mut signature = String::with_capacity(71);
+            signature.push_str("sha256=");
+            for byte in digest {
+                write!(&mut signature, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+            rpc.metadata_mut().insert(
+                "x-trtllm-subagent-affinity-id",
+                parent_id
+                    .parse()
+                    .map_err(|_| invalid_argument("invalid parent affinity ID"))?,
+            );
+            rpc.metadata_mut().insert(
+                "x-trtllm-subagent-affinity-auth",
+                signature
+                    .parse()
+                    .map_err(|_| invalid_argument("invalid affinity signature"))?,
+            );
+        }
         self.inference()
-            .generate(request)
+            .generate(rpc)
             .await
             .map(tonic::Response::into_inner)
             .map_err(|status| status_to_dynamo("Generate", status))
+    }
+
+    pub(crate) async fn supports_subagent_affinity(&self) -> Result<bool, DynamoError> {
+        let info = tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.control().get_server_info(pb::GetServerInfoRequest {}),
+        )
+        .await
+        .map_err(|_| connection_timeout("GetServerInfo timed out"))?
+        .map_err(|status| status_to_dynamo("GetServerInfo", status))?
+        .into_inner();
+        Ok(info
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.fields.get("trtllm_supports_subagent_affinity"))
+            .and_then(|value| value.kind.as_ref())
+            .is_some_and(|kind| matches!(kind, prost_types::value::Kind::BoolValue(true))))
     }
 
     /// Reads the server's advertised limits, keeping positive values.
