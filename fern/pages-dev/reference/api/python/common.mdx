@@ -418,7 +418,7 @@ those transitions. The conformance kit asserts that a second
 <h4 id="api-dynamo-common-backend-engine-baseengine-register-prometheus">register_prometheus</h4>
 
 ```python
-register_prometheus(metrics: 'EngineMetrics') -> None
+register_prometheus(metrics: _backend.EngineMetrics) -> None
 ```
 
 Bridge a vendor-prefixed Prometheus registry into the runtime's ``/metrics`` output via `metrics.add_expfmt_callback`. Default no-op. See `dynamo.common.backend.metrics` for helpers. Do not retain ``metrics`` past return.
