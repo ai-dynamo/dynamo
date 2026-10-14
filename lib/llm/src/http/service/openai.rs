@@ -430,7 +430,7 @@ fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
 
     if request_was_timed_out(error) {
         ErrorType::ResponseTimeout
-    } else if find_queue_rejection_in_chain(error).is_some() || request_was_rejected(error) {
+    } else if request_was_rejected(error) {
         ErrorType::Overload
     } else if request_was_unavailable(error) {
         ErrorType::Unavailable

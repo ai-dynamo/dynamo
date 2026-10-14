@@ -144,7 +144,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total overload responses. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. A router admission refusal is HTTP 429. Worker and engine overload uses the configured status, HTTP 529 by default. Labeled by `model` and `endpoint` (the API route).
+  Total overload responses. Incremented for worker-scoped `WorkerOverloaded` errors, pool-scoped `ResourceExhausted` errors, and router policy-queue rejections. A router admission refusal is HTTP 429. Worker and engine overload uses the configured status, HTTP 529 by default. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges

@@ -674,11 +674,9 @@ async fn anthropic_messages(
             );
         }
         if super::metrics::router_admission_rejected(e.as_ref()) {
-            if super::metrics::request_was_rejected(e.as_ref()) {
-                state
-                    .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
-            }
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
             inflight_guard.mark_error(super::metrics::ErrorType::Overload);
             return anthropic_error(
                 ErrorClass::CapacityExhausted,
