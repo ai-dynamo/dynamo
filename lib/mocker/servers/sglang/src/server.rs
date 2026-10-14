@@ -347,6 +347,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                         signal.completed,
                     ),
                     finished: signal.completed,
+                    text: None,
                 };
                 if signal.completed {
                     return;
