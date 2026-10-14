@@ -393,7 +393,8 @@ pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Validates logit bias map
+/// Validates logit bias map: each key must be a token id (the string form of a
+/// `u32`) and each value a number within the allowed bias range.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -403,6 +404,10 @@ pub fn validate_logit_bias(
     };
 
     for (token, bias_value) in logit_bias {
+        token.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!("Logit bias key must be a non-negative 32-bit integer token id")
+        })?;
+
         let bias = bias_value.as_f64().ok_or_else(|| {
             anyhow::anyhow!(
                 "Logit bias value for token '{}' must be a number, got {:?}",
@@ -1091,6 +1096,42 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Echoing client-controlled keys can duplicate a whole request body while
+    /// building HTTP errors, so oversized keys must also yield a fixed diagnostic.
+    #[test]
+    fn test_validate_logit_bias_keys() {
+        let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
+        let oversized_key = "x".repeat(16 * 1024);
+
+        for key in ["not-a-token", "-1", "", "1.5", "4294967296", &oversized_key] {
+            let msg = validate_logit_bias(&bias(key)).unwrap_err().to_string();
+            assert_eq!(
+                msg,
+                "Logit bias key must be a non-negative 32-bit integer token id"
+            );
+        }
+
+        for key in ["0", "50256", "4294967295"] {
+            assert!(validate_logit_bias(&bias(key)).is_ok(), "key: {key}");
+        }
+    }
+
+    /// A valid token ID must still reach the numeric and range checks for its
+    /// bias value, rather than letting key validation mask a missing value check.
+    #[test]
+    fn test_validate_logit_bias_values_with_valid_key() {
+        for (value, expected_error) in [
+            (json!("not-a-number"), "must be a number"),
+            (json!(-101.0), "must be between -100 and 100"),
+            (json!(101.0), "must be between -100 and 100"),
+        ] {
+            let bias = Some(HashMap::from([("50256".to_string(), value)]));
+            let msg = validate_logit_bias(&bias).unwrap_err().to_string();
+            assert!(msg.contains("'50256'"), "unexpected error: {msg}");
+            assert!(msg.contains(expected_error), "unexpected error: {msg}");
+        }
+    }
 
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
