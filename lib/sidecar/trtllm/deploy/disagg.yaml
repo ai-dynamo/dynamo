@@ -100,13 +100,14 @@ spec:
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
           # The stock engine image has grpc but no openengine Python bindings.
-          # HealthResponse.state is protobuf field 1; 08 02 means READY.
+          # HealthResponse.state is protobuf field 1 (varint); READY is 2.
+          # Int32Value decodes that field and skips any other fields.
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
             periodSeconds: 5
             timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
             failureThreshold: 360   # Up to 30 min for model load and warmup.
@@ -115,16 +116,17 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
           livenessProbe:
+            # A responsive RPC keeps the process live during transient DEGRADED states.
             exec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+              - import grpc; grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 6
@@ -241,7 +243,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
             periodSeconds: 5
             timeoutSeconds: 10
             failureThreshold: 360
@@ -250,7 +252,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
@@ -259,7 +261,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+              - import grpc; grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 6
