@@ -54,6 +54,14 @@ mTLS. These HTTP options do not configure either internal transport.
 For certificate rotation behavior and the HTTP TLS configuration overview,
 see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 
+<ParamField path="--http-endpoint-drain-delay-secs" type="integer" default="10">
+  Time between failing readiness and rejecting new inference requests during signal-initiated
+  shutdown. This allows upstream endpoint removal to propagate while the Frontend and its runtime
+  remain available. Must be zero or greater.
+
+  Environment variable: `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS`
+</ParamField>
+
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
 <ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
