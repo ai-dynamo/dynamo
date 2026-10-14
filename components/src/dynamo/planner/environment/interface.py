@@ -62,6 +62,10 @@ class PlannerEnvironment(Protocol):
     async def refresh(self) -> DeploymentState:
         pass
 
+    async def refresh_replica_state(self) -> DeploymentState:
+        """Refresh only capacity state after potentially slow observation I/O."""
+        pass
+
     def deployment_state(self) -> DeploymentState:
         pass
 
