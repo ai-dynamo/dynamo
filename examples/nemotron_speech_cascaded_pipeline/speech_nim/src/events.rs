@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! OpenAI realtime event projection. No Riva transport types cross this module.
+//! OpenAI realtime event projection. No Speech NIM transport types cross this module.
 
 use serde_json::{Value, json};
 

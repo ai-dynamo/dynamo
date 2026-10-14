@@ -14,12 +14,12 @@
 # limitations under the License.
 
 [package]
-name = "dynamo-riva-sidecar"
+name = "dynamo-speech-nim-sidecar"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "Example-local Dynamo ASR and TTS workers for the Riva gRPC API"
+description = "Example-local Dynamo ASR and TTS workers for the Speech NIM gRPC API"
 
 # Keep example dependencies and builds independent of the main workspace.
 # Promotion to lib/sidecar can retain this package and executable name.

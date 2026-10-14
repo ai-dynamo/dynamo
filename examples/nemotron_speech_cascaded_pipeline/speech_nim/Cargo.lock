@@ -2339,35 +2339,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-riva-sidecar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "base64 0.22.1",
- "clap",
- "dynamo-backend-common",
- "dynamo-llm",
- "dynamo-runtime",
- "dynamo-sidecar-common",
- "futures",
- "prost 0.13.5",
- "rcgen",
- "rustls",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "dynamo-rl"
 version = "1.6.0"
 dependencies = [
@@ -2476,6 +2447,35 @@ dependencies = [
  "tonic 0.13.1",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-speech-nim-sidecar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "futures",
+ "prost 0.13.5",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

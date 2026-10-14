@@ -25,9 +25,11 @@ The deployment creates four pods and uses three GPUs:
 | Language model (LLM) | Generates text responses using vLLM. | NVIDIA Nemotron 3 Nano 30B A3B FP8 | 1 |
 | Speech synthesis (TTS) | Converts text into audio. | Magpie TTS Multilingual 1.8.0 | 1 |
 
-Each speech pod contains a Speech NIM and a lightweight Dynamo adapter that
-connects it to the frontend. The three model pods share a persistent model cache
-so they can reuse downloaded model files after a restart.
+Each speech pod contains a
+[NVIDIA Speech NIM](https://docs.nvidia.com/nim/speech/latest/index.html) and a
+Dynamo Speech NIM sidecar that connects it to the frontend. The three model pods
+share a persistent model cache so they can reuse downloaded model files after a
+restart.
 
 ```mermaid
 flowchart LR
@@ -41,7 +43,7 @@ flowchart LR
         end
 
         subgraph ASRPod["Kubernetes Pod: asr"]
-            ASRWorker["Container: main<br/>Custom Dynamo ASR adapter<br/>CPU only"]
+            ASRSidecar["Container: main<br/>Dynamo Speech NIM sidecar<br/>CPU only"]
             ASR["Container: asr-nim<br/>Nemotron ASR NIM<br/>1 GPU"]
         end
 
@@ -50,27 +52,27 @@ flowchart LR
         end
 
         subgraph TTSPod["Kubernetes Pod: tts"]
-            TTSWorker["Container: main<br/>Custom Dynamo TTS adapter<br/>CPU only"]
+            TTSSidecar["Container: main<br/>Dynamo Speech NIM sidecar<br/>CPU only"]
             TTS["Container: tts-nim<br/>Magpie TTS NIM<br/>1 GPU"]
         end
     end
 
     Client -->|"/v1/realtime (WebSocket)"| Frontend
-    Frontend --> ASRWorker
-    ASRWorker <-->|"Speech NIM streaming gRPC"| ASR
+    Frontend --> ASRSidecar
+    ASRSidecar <-->|"Speech NIM streaming gRPC"| ASR
 
     Client -->|"/v1/chat/completions (HTTP)"| Frontend
     Frontend --> LLMWorker
 
     Client -->|"/v1/audio/speech (HTTP)"| Frontend
-    Frontend --> TTSWorker
-    TTSWorker <-->|"Speech NIM online gRPC"| TTS
+    Frontend --> TTSSidecar
+    TTSSidecar <-->|"Speech NIM online gRPC"| TTS
 
     classDef client fill:#eef6ff,stroke:#2563eb,color:#111827
     classDef dynamo fill:#fff7e6,stroke:#b45309,color:#111827
     classDef nim fill:#edf9f0,stroke:#15803d,color:#111827
     class Client client
-    class Frontend,ASRWorker,LLMWorker,TTSWorker dynamo
+    class Frontend,ASRSidecar,LLMWorker,TTSSidecar dynamo
     class ASR,TTS nim
 
     style DGD fill:#f8fafc,stroke:#1d4ed8,stroke-width:4px
@@ -98,27 +100,21 @@ each inner box is a container. Your application runs outside the deployment.
 - A ReadWriteMany storage class with capacity for a 200 GiB model cache.
 - Python 3.11 or newer in a virtual environment for the validation client.
 
-> [!IMPORTANT]
-> Use frontend and vLLM images from a Dynamo revision that supports realtime
-> transcription and streaming speech output. Published Dynamo 1.5.0 images are
-> not compatible. Build and publish both images from this checkout using the
-> [frontend build instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md#building-the-frontend-image)
-> and [vLLM runtime build instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md#1-runtime-target-runs-as-non-root-dynamo-user).
-
 ### 1. Configure the deployment
 
 Run the following commands from the Dynamo repository root. Replace the
-placeholders with your image references, registry credentials, and storage
-class:
+placeholders with your Dynamo release tag, registry credentials, and storage
+class. The frontend and vLLM images use NVIDIA's official Dynamo repositories.
+Choose a release with realtime transcription and streaming speech support:
 
 ```bash
 export NAMESPACE=voice-agent
-export DYNAMO_RUNTIME_VERSION="<matching-dynamo-version>"
-export DYNAMO_FRONTEND_IMAGE="<frontend-image>:${DYNAMO_RUNTIME_VERSION}"
-export DYNAMO_VLLM_IMAGE="<vllm-image>:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_RUNTIME_VERSION="<dynamo-version>"
+export DYNAMO_FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_VLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
 export CUSTOM_IMAGE_REGISTRY="<registry-host>"
 export CUSTOM_IMAGE_REPOSITORY="<project>"
-export CUSTOM_SPEECH_ADAPTER_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-nemotron-speech-adapter:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_SPEECH_NIM_SIDECAR_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-speech-nim-sidecar:${DYNAMO_RUNTIME_VERSION}"
 export CUSTOM_IMAGE_REGISTRY_USER="<username>"
 export CUSTOM_IMAGE_REGISTRY_PASSWORD="<password>"
 export NGC_API_KEY="<ngc-api-key>"
@@ -126,19 +122,15 @@ export HF_TOKEN="<hugging-face-token>"
 export RWX_STORAGE_CLASS="<rwx-storage-class>"
 ```
 
-Use the same Dynamo version for all three image tags. For source builds, use a
-semantic-version tag matching the checkout, such as `1.6.0-dev.<short-commit>`,
-so the operator can recognize the image version.
+### 2. Build and push the Dynamo Speech NIM sidecar image
 
-### 2. Build and push the speech adapter image
-
-Both speech pods use the same adapter image:
+Both speech pods use the same Dynamo Speech NIM sidecar image:
 
 ```bash
 ./examples/nemotron_speech_cascaded_pipeline/container/build.sh
 printf '%s' "${CUSTOM_IMAGE_REGISTRY_PASSWORD}" | docker login "${CUSTOM_IMAGE_REGISTRY}" \
   --username "${CUSTOM_IMAGE_REGISTRY_USER}" --password-stdin
-docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
+docker push "${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}"
 ```
 
 ### 3. Prepare the namespace, credentials, and storage
@@ -149,7 +141,7 @@ Create the namespace and the credentials referenced by the deployment:
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml \
   | kubectl apply -f -
 
-kubectl create secret docker-registry custom-adapter-image-pull-secret \
+kubectl create secret docker-registry speech-nim-sidecar-image-pull-secret \
   --namespace "${NAMESPACE}" \
   --docker-server "${CUSTOM_IMAGE_REGISTRY}" \
   --docker-username "${CUSTOM_IMAGE_REGISTRY_USER}" \
@@ -174,12 +166,11 @@ kubectl create secret generic hf-token-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-If your frontend and vLLM images use the same private registry, add
-`custom-adapter-image-pull-secret` to `podTemplate.spec.imagePullSecrets` for the
-`Frontend` and `worker` components in
+If you override the frontend or vLLM image with a private image, add its registry
+credentials to `podTemplate.spec.imagePullSecrets` for the corresponding
+`Frontend` or `worker` component in
 [the deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml).
-For another private registry, create and reference its pull secret instead.
-The speech pods already reference the adapter and NGC pull secrets.
+The speech pods already reference the sidecar and NGC pull secrets.
 
 Create the shared model cache. ReadWriteMany allows the model pods to run on
 different nodes:
@@ -205,7 +196,7 @@ EOF_CACHE
 Apply the deployment with your image references:
 
 ```bash
-envsubst '${DYNAMO_FRONTEND_IMAGE} ${DYNAMO_VLLM_IMAGE} ${CUSTOM_SPEECH_ADAPTER_IMAGE}' \
+envsubst '${DYNAMO_FRONTEND_IMAGE} ${DYNAMO_VLLM_IMAGE} ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}' \
   < examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml \
   | kubectl apply --namespace "${NAMESPACE}" -f -
 ```

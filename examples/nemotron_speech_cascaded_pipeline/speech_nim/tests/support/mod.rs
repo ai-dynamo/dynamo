@@ -16,8 +16,8 @@
 use std::{future::Future, time::Duration};
 
 use clap::Parser;
-use dynamo_riva_sidecar::{
-    client::RivaConnection,
+use dynamo_speech_nim_sidecar::{
+    client::SpeechNimConnection,
     config::{Args, AsrConfig, Mode, TtsConfig},
     proto::{asr::*, tts::*},
 };
@@ -41,13 +41,13 @@ type AsrCall = Call<StreamingRecognizeRequest, StreamingRecognizeResponse>;
 type TtsCall = Call<SynthesizeSpeechRequest, SynthesizeSpeechResponse>;
 
 #[derive(Clone)]
-struct Riva {
+struct SpeechNim {
     asr: mpsc::UnboundedSender<AsrCall>,
     tts: mpsc::UnboundedSender<TtsCall>,
 }
 
 #[tonic::async_trait]
-impl riva_speech_recognition_server::RivaSpeechRecognition for Riva {
+impl riva_speech_recognition_server::RivaSpeechRecognition for SpeechNim {
     type StreamingRecognizeStream = ReceiverStream<Result<StreamingRecognizeResponse, Status>>;
 
     async fn streaming_recognize(
@@ -77,7 +77,7 @@ impl riva_speech_recognition_server::RivaSpeechRecognition for Riva {
 }
 
 #[tonic::async_trait]
-impl riva_speech_synthesis_server::RivaSpeechSynthesis for Riva {
+impl riva_speech_synthesis_server::RivaSpeechSynthesis for SpeechNim {
     type SynthesizeOnlineStream = ReceiverStream<Result<SynthesizeSpeechResponse, Status>>;
 
     async fn synthesize_online(
@@ -126,7 +126,7 @@ impl Server {
         let address = listener.local_addr().unwrap().to_string();
         let (asr_tx, asr) = mpsc::unbounded_channel();
         let (tts_tx, tts) = mpsc::unbounded_channel();
-        let service = Riva {
+        let service = SpeechNim {
             asr: asr_tx,
             tts: tts_tx,
         };
@@ -190,8 +190,8 @@ impl Server {
         config
     }
 
-    pub async fn connection(&self) -> RivaConnection {
-        within(RivaConnection::connect(
+    pub async fn connection(&self) -> SpeechNimConnection {
+        within(SpeechNimConnection::connect(
             &self.asr_config().worker.connection,
         ))
         .await

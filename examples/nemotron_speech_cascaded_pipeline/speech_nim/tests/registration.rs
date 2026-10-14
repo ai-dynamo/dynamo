@@ -23,7 +23,6 @@ use dynamo_llm::{
     model_type::{ModelInput, ModelType},
     worker_type::WorkerType,
 };
-use dynamo_riva_sidecar::{config::Mode, proto::tts::SynthesizeSpeechResponse, worker};
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     discovery::{DiscoveryInstance, DiscoveryQuery},
@@ -35,6 +34,7 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_speech_nim_sidecar::{config::Mode, proto::tts::SynthesizeSpeechResponse, worker};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use support::{Server, transcript, within};
@@ -47,13 +47,13 @@ async fn speech_workers_register_without_assets_and_serve_over_dynamo_tcp() {
     let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
         .unwrap();
-    let namespace = drt.namespace("riva-example-test").unwrap();
+    let namespace = drt.namespace("speech-nim-example-test").unwrap();
     let asr_endpoint = namespace.component("asr").unwrap().endpoint("generate");
     let tts_endpoint = namespace.component("tts").unwrap().endpoint("generate");
     let mut asr = server.asr_config();
-    asr.worker.endpoint = Some("riva-example-test.asr.generate".into());
+    asr.worker.endpoint = Some("speech-nim-example-test.asr.generate".into());
     let mut tts = server.tts_config();
-    tts.worker.endpoint = Some("riva-example-test.tts.generate".into());
+    tts.worker.endpoint = Some("speech-nim-example-test.tts.generate".into());
     let stop_asr = CancellationToken::new();
     let stop_tts = CancellationToken::new();
     let asr_task = AbortOnDropHandle::new(tokio::spawn(worker::serve(
@@ -187,7 +187,7 @@ async fn speech_workers_register_without_assets_and_serve_over_dynamo_tcp() {
     assert!(
         drt.discovery()
             .list(DiscoveryQuery::ComponentModels {
-                namespace: "riva-example-test".into(),
+                namespace: "speech-nim-example-test".into(),
                 component: "asr".into(),
             })
             .await

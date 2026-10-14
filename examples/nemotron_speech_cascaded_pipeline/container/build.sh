@@ -14,23 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build the CPU-only Dynamo adapter image for Speech NIMs for the cascaded voice
+# Build the CPU-only Dynamo Speech NIM sidecar image for the cascaded voice
 # pipeline example. The Rust worker and its Dynamo runtime are compiled from
 # this checkout; the final image requires neither Python nor a GPU runtime.
 #
-#   CUSTOM_SPEECH_ADAPTER_IMAGE Output adapter image tag
+#   DYNAMO_SPEECH_NIM_SIDECAR_IMAGE Output sidecar image tag
 
 set -euo pipefail
 
-: "${CUSTOM_SPEECH_ADAPTER_IMAGE:?Set CUSTOM_SPEECH_ADAPTER_IMAGE to the output adapter image tag}"
+: "${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE:?Set DYNAMO_SPEECH_NIM_SIDECAR_IMAGE to the output sidecar image tag}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-echo "Building ${CUSTOM_SPEECH_ADAPTER_IMAGE} from the local Rust sources"
+echo "Building ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE} from the local Rust sources"
 docker build \
-  -t "${CUSTOM_SPEECH_ADAPTER_IMAGE}" \
+  -t "${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}" \
   -f "${SCRIPT_DIR}/Dockerfile" \
   "${REPO_ROOT}"
 
-echo "Built ${CUSTOM_SPEECH_ADAPTER_IMAGE}"
+echo "Built ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}"

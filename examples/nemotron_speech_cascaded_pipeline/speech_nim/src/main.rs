@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use clap::Parser;
-use dynamo_riva_sidecar::{config::Args, worker};
+use dynamo_speech_nim_sidecar::{config::Args, worker};
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();

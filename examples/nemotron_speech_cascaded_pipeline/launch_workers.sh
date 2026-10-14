@@ -23,9 +23,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../common/launch_utils.sh"
 
-RIVA_SIDECAR_BIN="${RIVA_SIDECAR_BIN:-${SCRIPT_DIR}/riva/target/release/dynamo-riva-sidecar}"
-if ! command -v "$RIVA_SIDECAR_BIN" >/dev/null 2>&1; then
-  echo "Build the speech worker with cargo build --release --locked --manifest-path ${SCRIPT_DIR}/riva/Cargo.toml, or set RIVA_SIDECAR_BIN" >&2
+SPEECH_NIM_SIDECAR_BIN="${SPEECH_NIM_SIDECAR_BIN:-${SCRIPT_DIR}/speech_nim/target/release/dynamo-speech-nim-sidecar}"
+if ! command -v "$SPEECH_NIM_SIDECAR_BIN" >/dev/null 2>&1; then
+  echo "Build the speech worker with cargo build --release --locked --manifest-path ${SCRIPT_DIR}/speech_nim/Cargo.toml, or set SPEECH_NIM_SIDECAR_BIN" >&2
   exit 1
 fi
 
@@ -48,10 +48,10 @@ print_launch_banner --no-curl \
   "LLM:          http://localhost:${HTTP_PORT}/v1/chat/completions" \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
-"$RIVA_SIDECAR_BIN" asr \
+"$SPEECH_NIM_SIDECAR_BIN" asr \
   --nim-server "$ASR_NIM_SERVER" --model-name "$ASR_MODEL_NAME" &
 
-"$RIVA_SIDECAR_BIN" tts \
+"$SPEECH_NIM_SIDECAR_BIN" tts \
   --nim-server "$TTS_NIM_SERVER" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 

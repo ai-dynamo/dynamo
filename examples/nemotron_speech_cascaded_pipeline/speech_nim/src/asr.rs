@@ -32,18 +32,18 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::{client::RivaConnection, config::AsrConfig};
+use crate::{client::SpeechNimConnection, config::AsrConfig};
 
 #[derive(Clone)]
 pub struct AsrAdapter {
     config: Arc<AsrConfig>,
-    connection: RivaConnection,
+    connection: SpeechNimConnection,
     slots: Arc<Semaphore>,
     shutdown: CancellationToken,
 }
 
 impl AsrAdapter {
-    pub fn new(config: AsrConfig, connection: RivaConnection) -> Self {
+    pub fn new(config: AsrConfig, connection: SpeechNimConnection) -> Self {
         let slots = Arc::new(Semaphore::new(config.max_concurrent_turns.get()));
         Self {
             config: Arc::new(config),

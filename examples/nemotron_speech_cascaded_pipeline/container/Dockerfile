@@ -29,17 +29,17 @@ WORKDIR /src
 COPY Cargo.toml rust-toolchain.toml ./
 COPY .cargo/ .cargo/
 COPY lib/ lib/
-COPY examples/nemotron_speech_cascaded_pipeline/riva/ examples/nemotron_speech_cascaded_pipeline/riva/
+COPY examples/nemotron_speech_cascaded_pipeline/speech_nim/ examples/nemotron_speech_cascaded_pipeline/speech_nim/
 
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=6
-RUN --mount=type=cache,id=riva-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=riva-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=riva-cargo-target-${TARGETARCH},target=/src/target,sharing=locked \
+RUN --mount=type=cache,id=speech-nim-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=speech-nim-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=speech-nim-cargo-target-${TARGETARCH},target=/src/target,sharing=locked \
     CARGO_TARGET_DIR=/src/target cargo build --release --locked \
-        --manifest-path examples/nemotron_speech_cascaded_pipeline/riva/Cargo.toml \
-    && install -D target/release/dynamo-riva-sidecar /out/dynamo-riva-sidecar \
-    && strip /out/dynamo-riva-sidecar
+        --manifest-path examples/nemotron_speech_cascaded_pipeline/speech_nim/Cargo.toml \
+    && install -D target/release/dynamo-speech-nim-sidecar /out/dynamo-speech-nim-sidecar \
+    && strip /out/dynamo-speech-nim-sidecar
 
 FROM ${BASE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
@@ -47,10 +47,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && { userdel -r ubuntu 2>/dev/null || true; } \
     && useradd --create-home --uid 1000 --gid 0 dynamo
 
-COPY --from=builder /out/dynamo-riva-sidecar /usr/local/bin/dynamo-riva-sidecar
+COPY --from=builder /out/dynamo-speech-nim-sidecar /usr/local/bin/dynamo-speech-nim-sidecar
 COPY LICENSE /licenses/dynamo/LICENSE
-COPY examples/nemotron_speech_cascaded_pipeline/riva/proto/LICENSE /licenses/riva-protos/LICENSE
+COPY examples/nemotron_speech_cascaded_pipeline/speech_nim/proto/LICENSE /licenses/riva-protos/LICENSE
 USER 1000
 EXPOSE 9090
-ENTRYPOINT ["/usr/local/bin/dynamo-riva-sidecar"]
+ENTRYPOINT ["/usr/local/bin/dynamo-speech-nim-sidecar"]
 CMD ["--help"]

@@ -21,7 +21,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dynamo_backend_common::{
     BackendError, ErrorType, GenerateContext, RawEngine, testing::mock_context,
 };
-use dynamo_riva_sidecar::{
+use dynamo_runtime::engine::AsyncEngineContext;
+use dynamo_speech_nim_sidecar::{
     asr::AsrAdapter,
     proto::{
         AudioEncoding, asr::streaming_recognize_request::StreamingRequest,
@@ -29,7 +30,6 @@ use dynamo_riva_sidecar::{
     },
     tts::TtsEngine,
 };
-use dynamo_runtime::engine::AsyncEngineContext;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -365,7 +365,7 @@ async fn tts_preserves_pcm_chunks_config_and_auth_metadata() {
     config.worker.connection.nim_api_key = Some("test-key".into());
     config.worker.connection.nim_function_id = Some("test-function".into());
     let connection =
-        dynamo_riva_sidecar::client::RivaConnection::connect(&config.worker.connection)
+        dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config.worker.connection)
             .await
             .unwrap();
     let engine = TtsEngine::new(config, connection);
@@ -541,19 +541,15 @@ async fn connection_verifies_tls_with_the_configured_root() {
     let mut config = server.asr_config().worker.connection;
     config.nim_use_ssl = true;
     config.nim_ssl_root_cert = Some(pem.path().to_owned());
-    within(dynamo_riva_sidecar::client::RivaConnection::connect(
-        &config,
-    ))
-    .await
-    .unwrap();
+    within(dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config))
+        .await
+        .unwrap();
     config.nim_ssl_root_cert = None;
     config.nim_startup_timeout_s = Duration::from_millis(100);
     assert!(
-        within(dynamo_riva_sidecar::client::RivaConnection::connect(
-            &config
-        ))
-        .await
-        .is_err()
+        within(dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config))
+            .await
+            .is_err()
     );
 }
 
@@ -562,7 +558,7 @@ async fn connection_rejects_invalid_addresses_and_redacts_bad_auth() {
     let server = Server::start().await;
     let mut config = server.asr_config().worker.connection;
     config.nim_api_key = Some("secret\ninvalid".into());
-    let result = dynamo_riva_sidecar::client::RivaConnection::connect(&config).await;
+    let result = dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config).await;
     let Err(error) = result else {
         panic!("invalid auth accepted")
     };
@@ -576,7 +572,7 @@ async fn connection_rejects_invalid_addresses_and_redacts_bad_auth() {
     ] {
         config.nim_server = address.into();
         assert!(
-            dynamo_riva_sidecar::client::RivaConnection::connect(&config)
+            dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config)
                 .await
                 .is_err()
         );
@@ -584,7 +580,7 @@ async fn connection_rejects_invalid_addresses_and_redacts_bad_auth() {
     config.nim_server = format!("http://{}", server.address);
     config.nim_use_ssl = true;
     assert!(
-        dynamo_riva_sidecar::client::RivaConnection::connect(&config)
+        dynamo_speech_nim_sidecar::client::SpeechNimConnection::connect(&config)
             .await
             .is_err()
     );

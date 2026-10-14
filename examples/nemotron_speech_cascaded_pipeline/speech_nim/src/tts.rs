@@ -31,15 +31,15 @@ use crate::proto::{
     AudioEncoding,
     tts::{SynthesizeSpeechRequest, riva_speech_synthesis_client::RivaSpeechSynthesisClient},
 };
-use crate::{client::RivaConnection, config::TtsConfig, events};
+use crate::{client::SpeechNimConnection, config::TtsConfig, events};
 
 pub struct TtsEngine {
     config: TtsConfig,
-    connection: RivaConnection,
+    connection: SpeechNimConnection,
 }
 
 impl TtsEngine {
-    pub fn new(config: TtsConfig, connection: RivaConnection) -> Self {
+    pub fn new(config: TtsConfig, connection: SpeechNimConnection) -> Self {
         Self { config, connection }
     }
 

@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     asr::AsrAdapter,
-    client::RivaConnection,
+    client::SpeechNimConnection,
     config::{Args, AsrConfig, Mode},
     tts::TtsEngine,
 };
@@ -49,7 +49,7 @@ pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> a
         )
         .await?;
         tracing::info!("Speech runtime connected; waiting for the NIM gRPC channel");
-        let connection = RivaConnection::connect(&worker.connection).await?;
+        let connection = SpeechNimConnection::connect(&worker.connection).await?;
         Ok::<_, anyhow::Error>((drt, connection))
     };
     let runtime_shutdown = runtime.shutdown_started_token();
@@ -72,7 +72,7 @@ pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> a
 /// Serve a connected backend using an existing runtime, including in CPU tests.
 pub async fn serve(
     mode: Mode,
-    connection: RivaConnection,
+    connection: SpeechNimConnection,
     drt: DistributedRuntime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -102,7 +102,7 @@ pub async fn serve(
 
 async fn run_asr(
     config: AsrConfig,
-    connection: RivaConnection,
+    connection: SpeechNimConnection,
     drt: DistributedRuntime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {

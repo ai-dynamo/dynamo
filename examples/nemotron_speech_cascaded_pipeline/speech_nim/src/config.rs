@@ -19,7 +19,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use dynamo_backend_common::RuntimeConfig;
 
 #[derive(Parser)]
-#[command(about = "Dynamo speech worker for a Riva-compatible NIM")]
+#[command(about = "Dynamo Speech NIM sidecar for ASR and TTS")]
 pub struct Args {
     #[command(subcommand)]
     pub mode: Mode,

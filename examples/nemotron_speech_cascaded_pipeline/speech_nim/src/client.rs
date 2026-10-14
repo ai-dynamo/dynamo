@@ -27,12 +27,12 @@ use crate::config::ConnectionConfig;
 
 /// Backend-only transport; contains no Dynamo or OpenAI request mapping.
 #[derive(Clone)]
-pub struct RivaConnection {
+pub struct SpeechNimConnection {
     pub channel: Channel,
     metadata: MetadataMap,
 }
 
-impl RivaConnection {
+impl SpeechNimConnection {
     pub async fn connect(config: &ConnectionConfig) -> anyhow::Result<Self> {
         // Dynamo's dependency graph enables both rustls providers. Tonic 0.13
         // needs an explicit process default; preserve one chosen by an embedder.

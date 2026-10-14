@@ -1,12 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Riva Protocol Sources
+title: Speech NIM Protocol Sources
 ---
 
 Unmodified sources from [nvidia-riva/common](https://github.com/nvidia-riva/common/tree/268890b7286031a6d4950e34f7ce13ed0d4ce621) at commit `268890b7286031a6d4950e34f7ce13ed0d4ce621`. The upstream license is included in `LICENSE`.
 
-`build.rs` generates the Rust messages and services into Cargo's output directory. Builds do not download protobuf definitions. Both streaming RPCs use bidirectional streams, matching the `nvidia-riva-client==2.26.0` contract previously used by this example.
+`build.rs` generates the Rust messages and services into Cargo's output directory. Builds do not download protobuf definitions. Both streaming RPCs use bidirectional streams.
 
 | Source | SHA-256 |
 | --- | --- |
@@ -16,4 +16,4 @@ Unmodified sources from [nvidia-riva/common](https://github.com/nvidia-riva/comm
 | `riva/proto/riva_common.proto` | `07d668e74d7c2c4e01fa5fee5323b9f6aff2f57f86f4f00d51656b9cb2a3a377` |
 | `LICENSE` | `9c0bb53336319c13d061a2246eea4f3f216bad31cdeb1fc9ff0fd8d8308dd543` |
 
-To update the contract, replace the upstream sources and license together, update this provenance, and rerun the adapter tests against the targeted Speech NIM images.
+To update the contract, replace the upstream sources and license together, update this provenance, and rerun the Dynamo Speech NIM sidecar tests against the targeted Speech NIM images.
