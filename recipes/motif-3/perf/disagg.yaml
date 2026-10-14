@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Run warmup separately, then clear both worker roles before this profiling run.
+# Use run_disagg.py for a 32-request warm-cache burst before this profiling run.
+# Preserve worker and router caches between warmup and measurement.
 # Set variables.concurrency for each run; preserve all 1,805 trace rows.
 schemaVersion: '2.0'
 randomSeed: 42

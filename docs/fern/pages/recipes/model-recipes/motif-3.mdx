@@ -169,16 +169,27 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 python3 recipes/motif-3/perf/prepare_disagg_client.py
 ```
 
-The [disaggregated AIPerf configuration](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/disagg.yaml) uses concurrency 64 and all 1,805 trace rows. Keep the tokenizer environment variables above when profiling. Run warmup separately, then clear the prefill, decode, and router caches before each independent run:
+The [disaggregated AIPerf configuration](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/disagg.yaml) uses concurrency 64 and all 1,805 trace rows. Before each independent run, clear the worker and router state from a terminal with cluster access:
+
+```bash
+kubectl delete pods -n "${NAMESPACE}" \
+  -l nvidia.com/dynamo-graph-deployment-name=motif3-disagg-b200
+kubectl get pods -n "${NAMESPACE}" \
+  -l nvidia.com/dynamo-graph-deployment-name=motif3-disagg-b200 \
+  --watch
+```
+
+Wait for all five replacement pods (one frontend, three prefill workers, and one decode worker) to show Ready, then stop the watch with Ctrl+C.
+
+Keep the tokenizer environment variables above in the benchmark client. Run the [benchmark runner](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/run_disagg.py), which sends a separate 32-request warm-cache burst at concurrency 32, then starts the complete measured trace at concurrency 64. Preserve the worker and router caches between warmup and measurement:
 
 ```bash
 export INFERENCE_URL=http://motif3-disagg-b200-frontend:8000/v1/chat/completions
-export AIPERF_ARTIFACT_DIR=/tmp/motif3-3p1d-c64
-aiperf config validate recipes/motif-3/perf/disagg.yaml
-aiperf profile --config recipes/motif-3/perf/disagg.yaml
+export AIPERF_ARTIFACT_DIR="/tmp/motif3-3p1d-c64-$(date -u +%Y%m%dT%H%M%SZ)"
+python3 recipes/motif-3/perf/run_disagg.py
 ```
 
-Divide system output throughput by all eight GPUs. Report context-limit rejections separately from unexpected errors.
+Warmup and measurement write separate artifact directories under `AIPERF_ARTIFACT_DIR`; warmup requests are excluded from the measured results. Divide system output throughput by all eight GPUs. Report context-limit rejections separately from unexpected errors.
 
 </div>
 
@@ -208,6 +219,8 @@ Thirty-five requests exceeded the 262,144-token context limit.
 |---|---:|---:|---:|---:|---:|
 | Disaggregated 3P1D, KV-aware | 8 | 64 | 319.26 | 51.49 | 4305.08 |
 
+This supplied historical result predates the 32-request warm-cache procedure above. That procedure has not been GPU-benchmarked with the current public image.
+
 </div>
 
 ## Compare All Targets
@@ -219,7 +232,7 @@ Thirty-five requests exceeded the 262,144-token context limit.
 
 ## Notes
 
-- Both targets use NVFP4 weights, FP8 KV cache, prefix caching, and a 262,144-token context limit.
+- Both targets use NVFP4 weights, FP8 KV cache, prefix caching, and a 262,144-token context limit. Frontends explicitly set `--kv-cache-block-size 128`, matching `--block-size=128` on every worker.
 - Both targets use the public `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2` image; no NGC API key or image-pull secret is required. The Hugging Face secret is used only to download the model.
 - Populate the shared model cache before starting the workers, which run in offline mode.
 - The disaggregated recipe has been validated with TP2 on both prefill and decode workers.

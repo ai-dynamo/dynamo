@@ -56,6 +56,8 @@ spec:
           - dynamo.frontend
           - --dyn-chat-processor
           - vllm
+          - --kv-cache-block-size
+          - "128"
           - --model-name
           - Motif-Technologies/Motif-3-NVFP4
           - --trust-remote-code

@@ -64,7 +64,7 @@ targets:
     asset: recipes/motif-3/perf/disagg.yaml
   expected_performance:
     available: false
-    summary: 'Synthetic MTP2 AL 2.13: 319.26 output tokens/sec/GPU, 51.49 P50 tokens/sec/user, and 4305.08 ms P50 TTFT at concurrency 64 on eight B200 GPUs (3P1D, TP2 per worker, KV-aware routing). The deployment defaults to real MTP verification; these results require the synthetic configuration.'
+    summary: 'Historical supplied synthetic MTP2 AL 2.13: 319.26 output tokens/sec/GPU, 51.49 P50 tokens/sec/user, and 4305.08 ms P50 TTFT at concurrency 64 on eight B200 GPUs (3P1D, TP2 per worker, KV-aware routing). The deployment defaults to real MTP verification; these results require the synthetic configuration and predate the current 32-request warm-cache procedure. That procedure has not been GPU-benchmarked with the current public image.'
 related_benchmarks: []
 maintainer: null
 gaps:
