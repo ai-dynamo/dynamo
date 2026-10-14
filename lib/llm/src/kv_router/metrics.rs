@@ -5,7 +5,8 @@
 //!
 //! This module centralizes all router-side Prometheus metric definitions:
 //!
-//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks and prefill tokens gauges.
+//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks, prefill tokens, and
+//!   active requests by request phase.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
 //!   Populated by `KvWorkerMonitor` in the frontend when receiving ActiveLoad events.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
@@ -64,8 +65,13 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+
+mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
+use dynamo_kv_router::sequences::LocalWorkerLoad;
+use worker_registered::RouterWorkerRegistered;
+pub(crate) use worker_registered::{RegistrationAvailabilityProvider, RouterWorkerRegistration};
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -506,7 +512,7 @@ impl dynamo_kv_router::services::selection::ReplicaIngressObserver
 
 /// Component-scoped router gauges for worker discovery.
 pub(crate) struct RouterWorkerStatusMetrics {
-    pub registered: IntGaugeVec,
+    registered: RouterWorkerRegistered,
     pub kv_event_source_mismatch_workers: IntGaugeVec,
 }
 
@@ -522,12 +528,13 @@ impl RouterWorkerStatusMetrics {
         ROUTER_WORKER_STATUS_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
-                let registered = metrics
-                    .create_intgaugevec(
+                let registered = dynamo_runtime::metrics::create_metric(
+                        component,
                         router::WORKER_REGISTERED,
                         "Whether the router currently has this worker/dp_rank registered (1 = registered)",
-                        &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
                         &[],
+                        None,
+                        None,
                     )
                     .expect("failed to create router_worker_registered gauge");
                 let kv_event_source_mismatch_workers = metrics
@@ -553,41 +560,15 @@ impl RouterWorkerStatusMetrics {
             .clone()
     }
 
-    /// Gauges on no registry, for observer tests that only read them back.
-    #[cfg(test)]
-    pub(crate) fn unregistered() -> Self {
-        Self {
-            registered: IntGaugeVec::new(
-                Opts::new(router::WORKER_REGISTERED, "registered"),
-                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .expect("valid gauge"),
-            kv_event_source_mismatch_workers: IntGaugeVec::new(
-                Opts::new(router::KV_EVENT_SOURCE_MISMATCH_WORKERS, "mismatch"),
-                &[
-                    labels::MODEL,
-                    labels::WORKER_TYPE,
-                    TARGET_NAMESPACE_LABEL,
-                    TARGET_COMPONENT_LABEL,
-                    TARGET_ENDPOINT_LABEL,
-                ],
-            )
-            .expect("valid gauge"),
-        }
-    }
-
-    pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
-        let worker_id = worker_id.to_string();
-        let dp_rank = dp_rank.to_string();
-        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
-        self.registered.with_label_values(labels).set(1);
-    }
-
-    pub fn remove_worker(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
-        let worker_id = worker_id.to_string();
-        let dp_rank = dp_rank.to_string();
-        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
-        let _ = self.registered.remove_label_values(labels);
+    pub fn watch_workers(
+        &self,
+        workers: crate::discovery::RuntimeConfigWatch,
+        worker_type: &'static str,
+        cancellation: tokio_util::sync::CancellationToken,
+        available_workers: Option<RegistrationAvailabilityProvider>,
+    ) -> Arc<RouterWorkerRegistration> {
+        self.registered
+            .watch(workers, worker_type, cancellation, available_workers)
     }
 
     pub fn set_kv_event_source_mismatch_workers(
@@ -620,66 +601,96 @@ impl RouterWorkerStatusMetrics {
 pub struct WorkerLoadMetrics {
     pub active_decode_blocks: IntGaugeVec,
     pub active_prefill_tokens: IntGaugeVec,
+    /// Booked requests split by `request_phase`: `prefill` until the request is
+    /// marked prefill-complete, `decode` after.
+    pub active_requests: IntGaugeVec,
 }
 
+const REQUEST_PHASE_PREFILL: &str = "prefill";
+const REQUEST_PHASE_DECODE: &str = "decode";
+
 impl WorkerLoadMetrics {
-    pub fn observe(
-        &self,
-        worker_id: u64,
-        dp_rank: u32,
-        worker_type: &str,
-        active_blocks: usize,
-        active_tokens: usize,
-    ) {
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = dp_rank.to_string();
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+    fn new() -> Self {
+        let worker_labels = &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE];
+        let gauge = |suffix: &str, help: &str, label_names: &[&str]| {
+            IntGaugeVec::new(
+                Opts::new(format!("{}_{}", name_prefix::FRONTEND, suffix), help),
+                label_names,
+            )
+            .unwrap_or_else(|error| panic!("Failed to create {suffix} gauge: {error}"))
+        };
+        Self {
+            active_decode_blocks: gauge(
+                frontend_service::WORKER_ACTIVE_DECODE_BLOCKS,
+                "Active KV cache decode blocks per worker",
+                worker_labels,
+            ),
+            active_prefill_tokens: gauge(
+                frontend_service::WORKER_ACTIVE_PREFILL_TOKENS,
+                "Active prefill tokens queued per worker",
+                worker_labels,
+            ),
+            active_requests: gauge(
+                frontend_service::WORKER_ACTIVE_REQUESTS,
+                "Active requests booked per worker, by request phase",
+                &[
+                    labels::WORKER_ID,
+                    labels::DP_RANK,
+                    labels::WORKER_TYPE,
+                    labels::REQUEST_PHASE,
+                ],
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    fn register(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.active_decode_blocks.clone()))?;
+        registry.register(Box::new(self.active_prefill_tokens.clone()))?;
+        registry.register(Box::new(self.active_requests.clone()))?;
+        Ok(())
+    }
+
+    pub fn observe(&self, worker_id: u64, dp_rank: u32, worker_type: &str, load: LocalWorkerLoad) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = [worker_id.as_str(), dp_rank.as_str(), worker_type];
         self.active_decode_blocks
-            .with_label_values(labels)
-            .set(active_blocks as i64);
+            .with_label_values(&labels)
+            .set(load.active_blocks as i64);
         self.active_prefill_tokens
-            .with_label_values(labels)
-            .set(active_tokens as i64);
+            .with_label_values(&labels)
+            .set(load.active_tokens as i64);
+        let decode_requests = load.active_requests.saturating_sub(load.prefill_requests);
+        for (phase, count) in [
+            (REQUEST_PHASE_PREFILL, load.prefill_requests),
+            (REQUEST_PHASE_DECODE, decode_requests),
+        ] {
+            self.active_requests
+                .with_label_values(&[worker_id.as_str(), dp_rank.as_str(), worker_type, phase])
+                .set(count as i64);
+        }
+    }
+
+    /// Remove every load series for one worker/dp_rank.
+    pub fn remove(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = [worker_id.as_str(), dp_rank.as_str(), worker_type];
+        let _ = self.active_decode_blocks.remove_label_values(&labels);
+        let _ = self.active_prefill_tokens.remove_label_values(&labels);
+        for phase in [REQUEST_PHASE_PREFILL, REQUEST_PHASE_DECODE] {
+            let _ = self.active_requests.remove_label_values(&[
+                worker_id.as_str(),
+                dp_rank.as_str(),
+                worker_type,
+                phase,
+            ]);
+        }
     }
 }
 
-pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| WorkerLoadMetrics {
-    active_decode_blocks: IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
-            ),
-            "Active KV cache decode blocks per worker",
-        ),
-        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-    )
-    .expect("Failed to create worker_active_decode_blocks gauge"),
-    active_prefill_tokens: IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
-            ),
-            "Active prefill tokens queued per worker",
-        ),
-        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-    )
-    .expect("Failed to create worker_active_prefill_tokens gauge"),
-});
-
-/// Register the worker load gauges with the given Prometheus registry.
-/// Called during frontend HTTP service setup (`service_v2.rs`), served on port 8000.
-pub fn register_worker_load_metrics(
-    registry: &prometheus::Registry,
-) -> Result<(), prometheus::Error> {
-    let m = &*WORKER_LOAD_METRICS;
-    registry.register(Box::new(m.active_decode_blocks.clone()))?;
-    registry.register(Box::new(m.active_prefill_tokens.clone()))?;
-    Ok(())
-}
+pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(WorkerLoadMetrics::new);
 
 // ---------------------------------------------------------------------------
 // Router queue and admission metrics
@@ -1501,6 +1512,7 @@ impl RemoteIndexerMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::metrics::PrometheusMetric;
     use prometheus::{Encoder, TextEncoder};
 
     #[test]
@@ -1590,40 +1602,20 @@ mod tests {
     #[test]
     fn test_worker_load_metrics_pef() {
         let registry = prometheus::Registry::new();
-        let metrics = WorkerLoadMetrics {
-            active_decode_blocks: IntGaugeVec::new(
-                Opts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::FRONTEND,
-                        frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
-                    ),
-                    "Active KV cache decode blocks per worker",
-                ),
-                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .unwrap(),
-            active_prefill_tokens: IntGaugeVec::new(
-                Opts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::FRONTEND,
-                        frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
-                    ),
-                    "Active prefill tokens queued per worker",
-                ),
-                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .unwrap(),
-        };
-        registry
-            .register(Box::new(metrics.active_decode_blocks.clone()))
-            .unwrap();
-        registry
-            .register(Box::new(metrics.active_prefill_tokens.clone()))
-            .unwrap();
+        let metrics = WorkerLoadMetrics::new();
+        metrics.register(&registry).unwrap();
 
-        metrics.observe(123, 0, "decode", 42, 100);
+        metrics.observe(
+            123,
+            0,
+            "decode",
+            LocalWorkerLoad {
+                active_blocks: 42,
+                active_tokens: 100,
+                active_requests: 5,
+                prefill_requests: 2,
+            },
+        );
 
         let output = gather_pef(&registry);
         let expected = "\
@@ -1633,18 +1625,25 @@ dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",work
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
 dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+# HELP dynamo_frontend_worker_active_requests Active requests booked per worker, by request phase
+# TYPE dynamo_frontend_worker_active_requests gauge
+dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"decode\",worker_id=\"123\",worker_type=\"decode\"} 3
+dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",worker_id=\"123\",worker_type=\"decode\"} 2
 ";
         assert_eq!(
             output, expected,
             "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
         );
+
+        metrics.remove(123, 0, "decode");
+        assert_eq!(gather_pef(&registry), "");
     }
 
     #[test]
     fn test_router_worker_status_metrics_pef() {
         let registry = prometheus::Registry::new();
         let metrics = RouterWorkerStatusMetrics {
-            registered: IntGaugeVec::new(
+            registered: RouterWorkerRegistered::with_opts(
                 Opts::new(
                     format!(
                         "{}_{}",
@@ -1653,7 +1652,6 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     ),
                     "Whether the router currently has this worker/dp_rank registered (1 = registered)",
                 ),
-                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
             kv_event_source_mismatch_workers: IntGaugeVec::new(
@@ -1682,7 +1680,17 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             .register(Box::new(metrics.kv_event_source_mismatch_workers.clone()))
             .unwrap();
 
-        metrics.set_registered(123, 0, "decode");
+        let (workers_tx, workers_rx) =
+            tokio::sync::watch::channel(std::collections::HashMap::from([(
+                123,
+                crate::local_model::runtime_config::ModelRuntimeConfig::default(),
+            )]));
+        let _registration = metrics.watch_workers(
+            workers_rx,
+            "decode",
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        );
         metrics.set_kv_event_source_mismatch_workers(
             "model-a", "decode", "ns-a", "decode", "generate", 2,
         );
@@ -1710,7 +1718,7 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             "\nActual PEF:\n{output}"
         );
 
-        metrics.remove_worker(123, 0, "decode");
+        workers_tx.send(std::collections::HashMap::new()).unwrap();
         let output = gather_pef(&registry);
         assert!(
             !output.contains("router_worker_id=\"123\""),

@@ -60,6 +60,16 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  {
+    file: 'lib/llm/tests/fixtures/openapi/requests.json',
+    expect: { rust: true },
+    desc: 'native request schema fixtures trigger Rust checks'
+  },
+  {
+    file: 'lib/llm/tests/fixtures/openapi/responses.json',
+    expect: { rust: true },
+    desc: 'native response schema fixtures trigger Rust checks'
+  },
   // dev/local-dev templates build only the dev images -- they must NOT pull in
   // `core` (all runtime builds + the GPU test matrix), and must not be silently
   // uncovered the way they were when they sat in `ignore`.
@@ -133,6 +143,11 @@ const testCases = [
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
+  },
+  {
+    file: 'components/src/dynamo/aisimulate/output/dgd/adapter.py',
+    expect: { core: false, planner: true },
+    desc: 'AISimulate Dynamo adapter triggers planner validation'
   },
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
