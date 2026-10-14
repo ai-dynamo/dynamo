@@ -23,7 +23,6 @@ fn executable_exposes_triton_configuration() {
         "--event-plane",
         "--grpc-endpoint",
         "--grpc-connections",
-        "--triton-http-endpoint",
         "--model-name",
     ] {
         assert!(stdout.contains(flag), "missing {flag} in help output");

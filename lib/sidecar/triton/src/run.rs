@@ -12,9 +12,7 @@ use dynamo_backend_common::{DisaggregationMode, ModelInput, Worker, WorkerConfig
 use dynamo_llm::protocols::tensor::TensorModelConfig;
 use dynamo_runtime::Runtime;
 use dynamo_runtime::system_status_server::SystemProbePolicy;
-use dynamo_sidecar_common::HttpEndpoint;
 use prost::Message;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -22,13 +20,6 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::TritonClient;
 use crate::engine::TritonModelEngine;
-
-#[derive(Debug, Deserialize)]
-struct RepositoryModel {
-    name: String,
-    #[serde(default)]
-    state: String,
-}
 
 type RunFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 
@@ -47,7 +38,7 @@ async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyho
     .await?;
     let transport = args.grpc.config();
     let client = TritonClient::connect(&args.grpc_endpoint, transport).await?;
-    let models = discover_models(&args, transport.startup_deadline).await?;
+    let models = discover_models(&args, &client).await?;
     ensure!(!models.is_empty(), "Triton has no ready models to register");
 
     let mut workers = JoinSet::new();
@@ -112,7 +103,7 @@ async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyho
     result
 }
 
-async fn discover_models(args: &Args, timeout: std::time::Duration) -> anyhow::Result<Vec<String>> {
+async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<Vec<String>> {
     if !args.model_names.is_empty() {
         return Ok(args
             .model_names
@@ -125,33 +116,10 @@ async fn discover_models(args: &Args, timeout: std::time::Duration) -> anyhow::R
             .collect());
     }
 
-    let endpoint = match &args.triton_http_endpoint {
-        Some(endpoint) => endpoint.clone(),
-        None => HttpEndpoint::from_grpc(&args.grpc_endpoint, 8000)?,
-    };
-    let url = endpoint.with_path("/v2/repository/index");
-    let response = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(timeout)
-        .build()?
-        .post(url.clone())
-        .json(&serde_json::json!({}))
-        .send()
+    client
+        .ready_models()
         .await
-        .with_context(|| format!("query Triton repository index at {url}"))?
-        .error_for_status()
-        .with_context(|| format!("Triton repository index at {url} returned an error"))?;
-    let entries: Vec<RepositoryModel> = response
-        .json()
-        .await
-        .context("decode Triton repository index")?;
-    Ok(entries
-        .into_iter()
-        .filter(|entry| entry.state.eq_ignore_ascii_case("READY"))
-        .map(|entry| entry.name)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
+        .context("query Triton repository index over gRPC")
 }
 
 fn endpoint_slug(model: &str) -> String {

@@ -83,7 +83,8 @@ pub mod inference {
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
 use inference::{
     ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest, ModelInferResponse,
-    ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
+    ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse, RepositoryIndexRequest,
+    RepositoryIndexResponse,
 };
 
 use prost::Message;
@@ -778,6 +779,15 @@ impl GrpcInferenceService for KserveService {
             "Model '{}' not found",
             request_model_name
         )))
+    }
+
+    async fn repository_index(
+        &self,
+        _request: Request<RepositoryIndexRequest>,
+    ) -> Result<Response<RepositoryIndexResponse>, Status> {
+        Err(Status::unimplemented(
+            "RepositoryIndex is a Triton extension and is not served by Dynamo",
+        ))
     }
 
     async fn model_config(
