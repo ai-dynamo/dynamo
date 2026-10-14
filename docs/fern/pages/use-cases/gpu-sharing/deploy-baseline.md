@@ -47,34 +47,13 @@ export GPU_NODE=<node-name>
 kubectl get node "$GPU_NODE" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 8
 ```
 
-## Step 1: Install the Dynamo Platform
+## Step 1: Complete the Common Setup
 
-```bash
-cd examples/gpu-sharing
-common/install-dynamo-platform.sh
-```
+Install the Dynamo platform and download the model as described in
+[Common Setup](common-setup.md). Skip this step if you already did it for
+another experiment on this cluster.
 
-The script installs the `dynamo-platform` Helm chart, version 1.4.2, into the `dynamo-system` namespace and waits for its pods to be Ready. It sets `global.etcd.install=true` and `global.nats.install=true`, which is deliberate. Platform 1.4.x installs without etcd and NATS by default and configures Kubernetes-based discovery, and with that default the `vllm-runtime:1.3.0` frontend never lists the model: `/v1/models` is empty and chat requests return 404. The generated DGDs set `DYN_DISCOVERY_BACKEND=etcd`, which needs the etcd and NATS the script installs.
-
-Override `PLATFORM_NAMESPACE` or `PLATFORM_VERSION` to change the namespace or chart version.
-
-## Step 2: Download the Model to the GPU Node
-
-```bash
-NODE_NAME="$GPU_NODE" common/download-model.sh
-```
-
-The script runs a Kubernetes Job on `$GPU_NODE` that downloads `Qwen/Qwen3-4B` at the pinned revision `1cfa9a7208912126459214e8b04321603b3df60c` into a `hostPath` cache on that node, and prints the snapshot path. An init container running as root creates the directory and opens its permissions, because the download container, like the workers, runs as a non-root user. The workers then run fully offline from that cache.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `NODE_NAME` | unset | Node to place the cache on. Set it to `$GPU_NODE` |
-| `HF_CACHE_DIR` | `/opt/hf-cache` | `hostPath` cache directory on the node |
-| `NAMESPACE` | `default` | Namespace for the download Job |
-| `HF_TOKEN` | empty | Hugging Face token, if your network requires one |
-| `RUNTIME_IMAGE` | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` | Image that runs the download |
-
-## Step 3: Deploy the Eight DGDs
+## Step 2: Deploy the Eight DGDs
 
 [`baseline/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/gen-dgds.sh) renders the eight DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
 
@@ -87,7 +66,7 @@ kubectl get dgd -n default      # wait until all eight DGDs are Ready
 |---|---|---|
 | `NODE_NAME` | unset | Node to pin the frontends and workers to. Set it to `$GPU_NODE` |
 | `NAMESPACE` | `default` | Namespace for the DGDs |
-| `HF_CACHE_DIR` | `/opt/hf-cache` | Model cache the pods mount read-only. Use the value from Step 2 |
+| `HF_CACHE_DIR` | `/opt/hf-cache` | Model cache the pods mount read-only. Use the value from [Common Setup](common-setup.md#download-the-model-to-the-gpu-node) |
 | `NUM_MODELS` | `8` | Number of DGDs (`qwen3-4b-01` and up) |
 
 The generator also takes an optional model snapshot path as its first argument. The checked-in [`baseline/dgds-8x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/dgds-8x.yaml) is the same output without a node pin, for reference.
@@ -116,7 +95,7 @@ Expect eight lines, each with a count of `1`. Then confirm that all eight fronte
 kubectl get svc -n default | grep frontend      # 8 services, qwen3-4b-NN-frontend
 ```
 
-## Step 4: Run the Concurrency Sweep
+## Step 3: Run the Concurrency Sweep
 
 The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
 
@@ -187,7 +166,7 @@ The `tok/s per GPU` column is the baseline column in [Interpreting GPU Sharing R
 | `nvidia.com/gpu` | `"1"` request and limit | One exclusive GPU per worker. This is the only experiment that uses it: KAI rejects pods that carry both a `gpu-fraction` annotation and an `nvidia.com/gpu` resource |
 | `--gpu-memory-utilization` | `0.85` | The pod sees the full 40,960 MiB, so vLLM claims about 33.6 GiB (0.85 of 39.5 GiB). Fractional experiments size to about 16 to 17 GB per worker instead |
 | `--max-model-len` / `--max-num-seqs` | `4096` / `32` | Same as the other experiments. A cap of 32 sequences keeps the high-concurrency points measuring GPU contention rather than vLLM queueing |
-| `DYN_DISCOVERY_BACKEND` | `etcd` on both components | Required with operator 1.4.2 and `vllm-runtime:1.3.0` (see Step 1) |
+| `DYN_DISCOVERY_BACKEND` | `etcd` on both components | Required with operator 1.4.2 and `vllm-runtime:1.3.0` (see [Common Setup](common-setup.md#install-the-dynamo-platform)) |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | empty, on the worker | The operator otherwise appends a random suffix to the worker namespace. Pinning it empty makes the worker and frontend namespaces match exactly |
 | `runtimeClassName` | `nvidia` | Gives the worker the driver libraries |
 
@@ -205,5 +184,5 @@ The model cache stays in `/opt/hf-cache` on `$GPU_NODE`; keep it if you plan to 
 ## Next Steps
 
 - [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) packs two models per GPU with memory caps and time-sliced compute.
-- [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md), then [deploy the KAI + GPU Fractions experiment](deploy-kai-gpu-fractions.md), which adds a hard 50% compute share per model.
+- [Build the KAI + GPU Fractions Stack](build-gpu-fractioning-forks.md), then [deploy the KAI + GPU Fractions experiment](deploy-kai-gpu-fractions.md), which adds a hard 50% compute share per model.
 - [Interpreting GPU Sharing Results](gpu-sharing-results.mdx) explains how to compare your sweep with the other two.

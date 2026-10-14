@@ -80,9 +80,31 @@ Dynamo also recognizes the current stable identity headers emitted by the follow
 Session identity is passive metadata. Sending a session ID does not enable sticky sessions or change request placement. Tracing records the identity when `DYN_REQUEST_TRACE=1` is enabled, and a session-aware routing policy can consume it only when that policy is configured separately.
 </Warning>
 
+## Sticky Placement
+
+To keep a session's requests on one worker, enable session affinity on the
+frontend. Without it, session IDs label requests but do not affect placement.
+
+```bash
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-session-affinity-ttl-secs 300
+```
+
+The first successfully dispatched request binds the session ID to its worker
+for the TTL. `--router-session-affinity-mode hard` (the default) pins later
+requests to that worker; `soft` passes it to the router as a preferred target
+that load can override. See
+[Session Affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity)
+for both modes and how subagents with a parent session share a binding.
+
+On SGLang, session control (`nvext.session_control`) also keeps a subagent's KV
+cache isolated from other sessions. See
+[Agents on SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#session-control-for-subagent-kv-isolation-experimental).
+
 ## Related
 
 - [Agent Harnesses](agent-harnesses.mdx) — connect supported coding-agent CLIs to Dynamo
 - [Agent Tracing](agent-tracing.md) — join LLM and tool spans on `session_id`
-- [Agent Simulation](agent-simulation.mdx) — replay captured agent traces
+- [Agent Trace Replay](agent-simulation.mdx) — replay captured agent traces
 - [ThunderAgent Program Scheduler](thunderagent-program-scheduler.md) — program-level scheduling keyed by `session_id`

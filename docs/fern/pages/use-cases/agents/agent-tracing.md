@@ -76,7 +76,7 @@ For every request-trace environment variable and default, see [Request Trace Ref
 
 When request tracing is enabled and the worker uses `--dyn-tool-call-parser`, Dynamo records the final finish reason and each parsed tool call's name and ID in `request_end.finish_reason_metadata`. Tool-call arguments are intentionally omitted.
 
-The Perfetto converter infers a tool span from the end of a tool-call response to the next request in the same trajectory. You can calculate the same interval from the trace:
+The Perfetto converter infers a tool span from the end of a tool-call response to the next request in the same session. You can calculate the same interval from the trace:
 
 ```text title="Approximate tool and agent wait time"
 tool_wait(turn N) ~= next.request_received_ms - this.event_time_unix_ms
@@ -99,20 +99,17 @@ The endpoint is a ZMQ PULL bind address. The harness publishes `agent-tool-event
 <details>
 <summary>Tool-event wire format and example</summary>
 
-The wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`. Use a monotonic sequence and a background PUSH publisher with a bounded queue. Include `started_at_unix_ms`, `ended_at_unix_ms`, and `duration_ms` on terminal `tool_end` and `tool_error` events so timing survives a dropped `tool_start`.
+The wire format is `[topic, seq_be_u64, msgpack(tool_event)]`. `tool_event` has top-level `schema`, `event_type`, `event_time_unix_ms`, `session_id`, an optional `parent_session_id`, and `tool`. Dynamo adds the `harness` event source and builds the record's agent context from the session fields. Use a monotonic sequence and a background PUSH publisher with a bounded queue. Include `started_at_unix_ms`, `ended_at_unix_ms`, and `duration_ms` on terminal `tool_end` and `tool_error` events so timing survives a dropped `tool_start`.
 
-Use the same agent context as the surrounding LLM requests. Make each `tool_call_id` unique within its trajectory.
+Use the same `session_id` as the surrounding LLM requests. Make each `tool_call_id` unique within its session.
 
 ```json title="Explicit tool_end event"
 {
   "schema": "dynamo.request.trace.v1",
   "event_type": "tool_end",
   "event_time_unix_ms": 1777312801500,
-  "event_source": "harness",
-  "agent_context": {
-    "session_id": "research-run-42",
-    "trajectory_id": "research-run-42:researcher"
-  },
+  "session_id": "research-run-42:researcher",
+  "parent_session_id": "research-run-42:planner",
   "tool": {
     "tool_call_id": "call-abc",
     "tool_class": "web_search",
@@ -142,9 +139,8 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
   "event_time_unix_ms": 1777312801000,
   "event_source": "dynamo",
   "agent_context": {
-    "session_id": "research-run-42",
-    "trajectory_id": "research-run-42:researcher",
-    "parent_trajectory_id": "research-run-42:planner"
+    "session_id": "research-run-42:researcher",
+    "parent_session_id": "research-run-42:planner"
   },
   "request": {
     "request_id": "dynamo-request-id",

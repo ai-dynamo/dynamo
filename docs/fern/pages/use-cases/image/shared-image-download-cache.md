@@ -1,63 +1,16 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Multimodal Model Serving
-subtitle: Deploy multimodal models with image, video, and audio support in Dynamo
+title: Shared Image Download Cache
+subtitle: Reuse downloaded image bytes across workers with Redis Cluster or Dragonfly
 ---
-
-Dynamo supports multimodal inference across multiple LLM backends, enabling models to process images, video, and audio alongside text.
-
-## Which Feature to Use
-
-Dynamo provides support for improving latency and throughput for multimodal workloads, with image and video inputs, through the following features. Use them together or separately, depending on your workload characteristics:
-
-| Workload | Feature | Benefit |
-|----------|---------|---------|
-| Workload where significant time is spent preprocessing. | [Parallel media decoding](parallel-media-decoding.md) | Move image fetching and decompression off the worker's critical path. |
-| Workload includes repeated multimodal content across requests. | [Embedding cache](embedding-cache.md) | Skip re-encoding repeated multimodal content. |
-| Workload includes repeated multimodal content across requests, and multiple backend workers serve multimodal requests. | [Multimodal KV routing](multimodal-kv-routing.md) | Maximize KV cache hit rates for multimodal content. |
-| Workload where media encoding is a bottleneck. | [Encoder disaggregation](encoder-disaggregation.md) | Scale encoders independently of LLM workers. |
-
-
-> [!IMPORTANT]
-> These features currently support image and video inputs only. Support for audio modalities will be added in upcoming releases.
-
-## Multimodal Performance Optimization Features
-
-<CardGroup cols={2}>
-  <Card title="Parallel Media Decoding" icon="regular image" href="parallel-media-decoding.md">
-    Decode image inputs concurrently in the Rust frontend and transfer pixels through NIXL
-  </Card>
-  <Card title="Embedding Cache" icon="regular database" href="embedding-cache.md">
-    Cache vision encoder embeddings to skip re-encoding repeated multimodal content
-  </Card>
-  <Card title="Multimodal KV Routing" icon="regular arrows-split-up-and-left" href="multimodal-kv-routing.md">
-    Include multimodal identity in cache-aware, load-balanced worker selection
-  </Card>
-  <Card title="Encoder Disaggregation" icon="regular microchip" href="encoder-disaggregation.md">
-    Separate vision encoding into a dedicated worker for independent scaling
-  </Card>
-</CardGroup>
-
-## Example Workflows
-
-Reference implementations for deploying multimodal models for each backend:
-
-- [Voice Pipelines](voice.md): streaming speech endpoints and cascaded voice agents
-- [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md)
-- [TensorRT-LLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md)
-- [vLLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md)
-
-To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](custom-vision-encoders.md).
-
-## Shared Image Download Cache
 
 The optional shared cache stores encoded bytes from HTTP and HTTPS image URLs
 before image decoding. Workers can reuse those bytes across processes while
 keeping their local decoded-image caches independent. Data URLs,
 frontend-decoded NIXL inputs, video, and audio do not use this cache.
 
-### Backend Support
+## Backend Support
 
 | Backend | Mode | Shared encoded-image cache |
 | --- | --- | --- |
@@ -117,7 +70,7 @@ Warnings are emitted initially and at most once per minute; individual
 operation failures remain available at debug level. Dynamo does not currently
 use a bounded asynchronous write queue.
 
-### Cache Service Deployment
+## Cache Service Deployment
 
 Dynamo uses the Redis Cluster protocol for both backends. The client uses
 `DYN_MM_SHARED_IMAGE_CACHE_URL` only to discover the cluster: it reads the slot
@@ -156,7 +109,7 @@ discover each other. A cluster orchestrator must push the slot map with
 map is kept in memory. Point the URL at a Service that selects every node, as
 for Redis Cluster.
 
-### Session Scoping
+## Session Scoping
 
 Enable `DYN_MM_IMAGE_CACHE_SESSION_SCOPED=1` when the same URL can resolve to
 different content for different sessions. Dynamo derives the

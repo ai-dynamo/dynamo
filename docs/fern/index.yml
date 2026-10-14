@@ -425,6 +425,22 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
                   - page: Tokenizer
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md
+                  - section: Tool Calling & Reasoning
+                    collapsed: true
+                    slug: tool-calling
+                    contents:
+                      - page: Overview
+                        path: pages/use-cases/tool-calling-and-reasoning/overview.mdx
+                      - page: Chat Processors
+                        path: pages/use-cases/tool-calling-and-reasoning/chat-processors.mdx
+                      - page: Tool Call Parsing
+                        path: pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
+                      - page: Reasoning Parsing
+                        path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
+                      - page: Structural Tag
+                        path: pages/use-cases/tool-calling-and-reasoning/structural-tag.md
+                      - page: Troubleshooting Tool Calls
+                        path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
               - section: Router
                 collapsed: true
                 contents:
@@ -545,6 +561,9 @@ navigation:
                       - page: Multimodal
                         slug: sglang-multimodal
                         path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md
+                      - page: Diffusion Language Models
+                        slug: sglang-diffusion-language-models
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/sglang/diffusion-language-models.md
                   - section: TensorRT-LLM
                     collapsed: true
                     contents:
@@ -668,7 +687,12 @@ navigation:
 
   - tab: use-cases
     layout:
-      # ==================== Features ====================
+      - page: Overview
+        slug: use-cases
+        icon: compass
+        path: pages/use-cases/overview.md
+
+      # ==================== Reinforcement Learning ====================
       - section: Reinforcement Learning
         collapsed: true
         icon: brain
@@ -676,12 +700,6 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/reinforcement-learning/overview.md
-          - page: KV-Aware Load Balancing
-            path: pages/use-cases/reinforcement-learning/routing.md
-          - page: Rollout Weight Updates
-            path: pages/use-cases/reinforcement-learning/weight-updates.md
-          - page: RL Profiling and Simulation
-            path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
           - page: verl Integration
             path: pages/use-cases/reinforcement-learning/verl.md
           - page: NeMo RL Integration
@@ -690,8 +708,16 @@ navigation:
             path: pages/use-cases/reinforcement-learning/slime.md
           - page: External Trainer Integration
             path: pages/use-cases/reinforcement-learning/implementation-guide.md
+          - page: KV-Aware Load Balancing
+            path: pages/use-cases/reinforcement-learning/routing.md
+          - page: Rollout Weight Updates
+            path: pages/use-cases/reinforcement-learning/weight-updates.md
+          - page: RL Profiling and Simulation
+            path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
           - page: RL Integration Reference
             path: pages/use-cases/reinforcement-learning/integration-reference.md
+
+      # ==================== Agents ====================
       - section: Agents
         collapsed: true
         icon: users
@@ -699,102 +725,116 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/agents/overview.md
+          - page: Agent Harnesses
+            path: pages/use-cases/agents/agent-harnesses.mdx
           - page: Session IDs
             path: pages/use-cases/agents/session-ids.mdx
           - page: Agent Hints
             path: pages/use-cases/agents/agent-hints.md
-          - page: Priority Scheduling
-            path: pages/use-cases/agents/priority-scheduling.md
-          - page: Agent Harnesses
-            path: pages/use-cases/agents/agent-harnesses.mdx
           - page: Agent Tracing
             path: pages/use-cases/agents/agent-tracing.md
-          - page: Agent Simulation
+          - page: Agent Trace Replay
+            slug: agent-simulation
             path: pages/use-cases/agents/agent-simulation.mdx
           - page: ThunderAgent Program Scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
-      - section: Multimodal Serving
+          - page: Priority Scheduling
+            path: pages/use-cases/agents/priority-scheduling.md
+
+      # ==================== Image ====================
+      - section: Image
         collapsed: true
-        icon: photo-film
-        slug: multimodal
+        icon: image
+        slug: image
+        contents:
+          - page: Image Understanding
+            path: pages/use-cases/image/image-understanding.md
+          - page: Image Generation
+            path: pages/use-cases/image/image-generation.md
+          - page: Custom Vision Encoders
+            path: pages/use-cases/image/custom-vision-encoders.md
+          - page: Shared Image Download Cache
+            path: pages/use-cases/image/shared-image-download-cache.md
+
+      # ==================== Video ====================
+      - section: Video
+        collapsed: true
+        icon: film
+        slug: video
+        contents:
+          - page: Video Understanding
+            path: pages/use-cases/video/video-understanding.md
+          - page: Text-to-Video
+            path: pages/use-cases/video/text-to-video.md
+          - page: Image-to-Video
+            path: pages/use-cases/video/image-to-video.md
+          - page: FastVideo
+            slug: fastvideo
+            path: pages/use-cases/video/fastvideo.md
+          - page: MiniMax-H3
+            slug: minimax-h3
+            path: pages/use-cases/video/minimax-h3.md
+          - page: Exact Video KV Routing
+            path: pages/use-cases/video/exact-video-kv-routing.md
+          - page: Video Decoding and GPU Requirements
+            slug: video-decoding
+            path: pages/use-cases/video/video-decoding.md
+
+      # ==================== Speech & Audio ====================
+      - section: Speech & Audio
+        collapsed: true
+        icon: microphone
+        slug: speech
+        contents:
+          - page: Voice Pipelines
+            path: pages/use-cases/speech/voice-pipelines.md
+          - page: Speech Recognition (ASR)
+            slug: speech-recognition
+            path: pages/use-cases/speech/speech-recognition.md
+          - page: Text-to-Speech
+            path: pages/use-cases/speech/text-to-speech.md
+          - page: Audio Understanding
+            path: pages/use-cases/speech/audio-understanding.md
+          - page: Speech-to-Speech
+            path: pages/use-cases/speech/speech-to-speech.md
+
+      # ==================== Multimodal Performance ====================
+      - section: Multimodal Performance
+        collapsed: true
+        icon: gauge-high
+        slug: multimodal-performance
         contents:
           - page: Overview
-            path: pages/use-cases/multimodal-serving/overview.md
-          - page: Voice Pipelines
-            path: pages/use-cases/multimodal-serving/voice.md
-          - page: Parallel Media Decoding
-            path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
-          - page: Custom Vision Encoders
-            slug: custom-vision-encoders
-            path: pages/use-cases/multimodal-serving/custom-vision-encoders.md
+            path: pages/use-cases/multimodal-performance/overview.md
+          - page: Frontend Media Decoding
+            path: pages/use-cases/multimodal-performance/frontend-media-decoding.md
           - page: Embedding Cache
-            path: pages/use-cases/multimodal-serving/embedding-cache.md
+            path: pages/use-cases/multimodal-performance/embedding-cache.md
           - page: Multimodal KV Routing
             slug: multimodal-kv-routing
-            path: pages/use-cases/multimodal-serving/multimodal-kv-routing.md
+            path: pages/use-cases/multimodal-performance/multimodal-kv-routing.md
           - page: Encoder Disaggregation
-            path: pages/use-cases/multimodal-serving/encoder-disaggregation.md
-          - page: Video Decode GPU Requirements
-            slug: video-decode-gpu-requirements
-            path: pages/use-cases/multimodal-serving/video-decode-gpu-requirements.md
-          - page: Additional Media Decoders
-            slug: additional-media-decoders
-            path: pages/use-cases/multimodal-serving/additional-media-decoders.md
-      - section: Diffusion
-        collapsed: true
-        icon: wand-magic-sparkles
-        slug: diffusion
-        contents:
-          - page: Overview
-            path: pages/use-cases/diffusion/overview.md
-          - section: Workflows
-            collapsed: true
-            skip-slug: true
-            contents:
-              - page: Text-to-Image
-                slug: text-to-image
-                path: pages/use-cases/diffusion/workflows/text-to-image.md
-              - page: Text-to-Video
-                slug: text-to-video
-                path: pages/use-cases/diffusion/workflows/text-to-video.md
-              - page: Image-to-Video
-                slug: image-to-video
-                path: pages/use-cases/diffusion/workflows/image-to-video.md
-              - page: Text-to-Audio
-                slug: text-to-audio
-                path: pages/use-cases/diffusion/workflows/text-to-audio.md
-              - page: Text-to-Text (LLM Diffusion)
-                slug: text-to-text
-                path: pages/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
-      - section: Tool Calling & Reasoning
-        collapsed: true
-        icon: screwdriver-wrench
-        slug: parsing
-        contents:
-          - page: Overview
-            path: pages/use-cases/tool-calling-and-reasoning/overview.mdx
-          - page: Chat Processors
-            path: pages/use-cases/tool-calling-and-reasoning/chat-processors.mdx
-          - page: Tool Call Parsing
-            path: pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
-          - page: Structural Tag
-            path: pages/use-cases/tool-calling-and-reasoning/structural-tag.md
-          - page: Reasoning Parsing
-            path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
-          - page: Troubleshooting Tool Calls
-            path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
+            path: pages/use-cases/multimodal-performance/encoder-disaggregation.md
+
+      # ==================== Many-Model Serving ====================
       - section: Many-Model Serving
         collapsed: true
         icon: layer-group
         slug: many-model-serving
         contents:
-          - page: Interpreting GPU Sharing Results
+          - page: Overview
+            path: pages/use-cases/gpu-sharing/overview.md
+          - page: GPU Sharing Benchmark Results
+            slug: interpreting-gpu-sharing-results
             path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
+          - page: Common Setup
+            path: pages/use-cases/gpu-sharing/common-setup.md
           - page: Deploy the Baseline Experiment
             path: pages/use-cases/gpu-sharing/deploy-baseline.md
           - page: Deploy the KAI + HAMi Experiment
             path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
-          - page: Build the KAI-Scheduler and GPU Fractioning Forks
+          - page: Build the KAI + GPU Fractions Stack
+            slug: build-the-kai-scheduler-and-gpu-fractioning-forks
             path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
           - page: Deploy the KAI + GPU Fractions Experiment
             path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md

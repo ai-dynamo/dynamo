@@ -1,0 +1,20 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+subtitle: Reusable setup steps for experimental TensorRT-LLM image and video generation
+---
+
+TensorRT-LLM provides **experimental** image and video generation through `tensorrt_llm._torch.visual_gen`. It is not recommended for production.
+
+**Prerequisites**
+
+- TensorRT-LLM installed with the `visual_gen` module.
+- A Dynamo runtime with the image and video model types.
+- A GPU with enough memory for the selected model.
+
+Text-to-image needs nothing else. Text-to-video also needs `imageio` and ffmpeg. Dynamo's runtime images already include an ffmpeg build that encodes VP9. Outside the container, install the Python wrapper without its bundled binary and point it at your ffmpeg:
+
+```bash
+pip install --no-binary imageio-ffmpeg "imageio[ffmpeg]"
+export IMAGEIO_FFMPEG_EXE=/path/to/your/ffmpeg
+```

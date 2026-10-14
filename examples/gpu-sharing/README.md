@@ -73,7 +73,7 @@ Install the scheduler stack for the experiment first:
   [kai-scheduler/KAI-Scheduler#2368](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) and
   [kai-scheduler/gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147),
   as described in
-  [Build the KAI-Scheduler and GPU Fractioning Forks](../../docs/fern/pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md).
+  [Build the KAI + GPU Fractions Stack](../../docs/fern/pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md).
   This requires driver r615 or later for per-namespace MPS limits. Then verify the caps
   with `kai-gpu-fractions/smoke-test-half-gpu.yaml`.
 
@@ -162,5 +162,5 @@ Also confirm the per-worker caps:
 - [Interpreting GPU Sharing Results](../../docs/fern/pages/use-cases/gpu-sharing/gpu-sharing-results.mdx)
 - [Deploy the Baseline Experiment](../../docs/fern/pages/use-cases/gpu-sharing/deploy-baseline.md)
 - [Deploy the KAI + HAMi Experiment](../../docs/fern/pages/use-cases/gpu-sharing/deploy-kai-hami.md)
-- [Build the KAI-Scheduler and GPU Fractioning Forks](../../docs/fern/pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md)
+- [Build the KAI + GPU Fractions Stack](../../docs/fern/pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md)
 - [Deploy the KAI + GPU Fractions Experiment](../../docs/fern/pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md)
