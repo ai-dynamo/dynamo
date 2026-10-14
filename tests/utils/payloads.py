@@ -255,6 +255,15 @@ class DisaggregatedChatPayload(ChatPayload):
             )
 
 
+class OmittedMaxTokensChatPayload(ChatPayload):
+    """Require more output than SGLang's 128-token default when `max_tokens` is omitted."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        usage = response.json()["usage"]
+        assert usage["completion_tokens"] > 128, usage
+
+
 class RouterNvextChatPayload(ChatPayload):
     """Chat payload that validates structured router metadata in nvext."""
 

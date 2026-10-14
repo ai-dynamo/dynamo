@@ -90,7 +90,10 @@ two legs' token accounting matches a real engine's.
 
 ## `--context-length` interacts with capacity
 
-The sidecar turns an omitted `max_tokens` into `context_length - prompt_len`.
+Explicit `max_tokens` values can be as large as 1,000,000, subject to the context
+limit. Model metadata keeps `max_output_tokens` at 32,768 so the sidecar's default
+budget stays unchanged. The sidecar turns an omitted `max_tokens` into
+`min(context_length - prompt_len, 32768)`.
 The scheduler caps that budget to the total KV-pool capacity minus the prompt
 length, then reserves through completion under `guaranteed_no_evict` without
 preemption. A prompt that leaves no room for output is rejected. Set an explicit

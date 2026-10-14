@@ -22,7 +22,7 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-10-07";
+export const GENERATED_ON = "2026-10-13";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {
@@ -41,6 +41,19 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
 ];
 
 export const PAST_EVENTS: DynamoEvent[] = [
+  {
+    "title": "Dynamo Engineering Sync",
+    "start": "2026-10-13T16:00:00.000Z",
+    "month": "Oct",
+    "day": "13",
+    "year": "2026",
+    "dateLabel": "Tue, Oct 13, 2026",
+    "timeLabel": "9:00 AM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
   {
     "title": "Dynamo community meeting",
     "start": "2026-09-23T17:30:00.000Z",
@@ -105,18 +118,5 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "location": "Online",
     "locationUrl": "https://meet.google.com/heb-demu-qok",
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260729T173000Z%2F20260729T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
-  },
-  {
-    "title": "AI Infra Builders Meetup with dstack, Crusoe, and SGLang",
-    "start": "2026-07-24T00:30:00.000Z",
-    "month": "Jul",
-    "day": "23",
-    "year": "2026",
-    "dateLabel": "Thu, Jul 23, 2026",
-    "timeLabel": "5:30 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/rxsn0u0h",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=AI+Infra+Builders+Meetup+with+dstack%2C+Crusoe%2C+and+SGLang&dates=20260724T003000Z%2F20260724T043000Z&location=https%3A%2F%2Fluma.com%2Frxsn0u0h"
   }
 ];

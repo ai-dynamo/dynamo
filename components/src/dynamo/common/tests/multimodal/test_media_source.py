@@ -112,11 +112,23 @@ async def test_malformed_data_uri_rejected(url, match):
 
 
 @pytest.mark.parametrize("size", [3, 4, 5], ids=["no-padding", "two-pad", "one-pad"])
-def test_decode_data_uri_size_bound_is_exact(size):
-    url = "data:video/mp4;base64," + base64.b64encode(b"x" * size).decode()
+@pytest.mark.parametrize("escaped", [False, True])
+def test_decode_data_uri_size_bound_is_exact(size, escaped):
+    encoded = base64.b64encode(b"x" * size).decode()
+    if escaped:
+        encoded = "".join(f"%{ord(char):02X}" for char in encoded)
+    url = "data:video/mp4;base64," + encoded
     assert decode_data_uri(url, max_bytes=size) == b"x" * size
     with pytest.raises(UrlValidationError, match="maximum allowed size"):
         decode_data_uri(url, max_bytes=size - 1)
+
+
+def test_extra_padding_does_not_lower_decoded_size():
+    # Extra padding is accepted only on some Python versions; the size
+    # guard must reject this payload before strict decoding either way.
+    url = "data:image/png;base64," + base64.b64encode(b"abc").decode() + "=="
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=2)
 
 
 def test_decode_data_uri_size_bound_rejects_before_unquote(monkeypatch):
