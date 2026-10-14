@@ -27,6 +27,9 @@ pub struct MockerRuntimeOptions {
     pub response_replay_trace_path: Option<PathBuf>,
     pub zmq_kv_events_port: Option<u16>,
     pub zmq_replay_port: Option<u16>,
+    /// Publish raw ZMQ events for an external KV state agent only: no
+    /// in-process relay, and host-pinned events are tagged KVCR-owned.
+    pub kv_state_agent: bool,
     pub router_queue_policy: Option<RouterQueuePolicy>,
 }
 
@@ -40,6 +43,7 @@ impl Default for MockerRuntimeOptions {
             response_replay_trace_path: None,
             zmq_kv_events_port: None,
             zmq_replay_port: None,
+            kv_state_agent: false,
             router_queue_policy: None,
         }
     }

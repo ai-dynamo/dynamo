@@ -15,6 +15,13 @@ from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_conf
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 
+# Fixed indexer domain and pool for mocker CacheOwners, in the canonical
+# `domain/pool/owner` format (see examples/backends/vllm/deploy/kvcr/agg.yaml).
+_KV_STATE_AGENT_INDEXER_DOMAIN = (
+    "01010101010101010101010101010101:02020202020202020202020202020202"
+)
+_KV_STATE_AGENT_POOL = "0303030303030303"
+
 
 def normalize_mocker_config(config: Mapping[str, Any] | str | None = None) -> dict:
     from dynamo._core import _normalize_mocker_config
@@ -195,6 +202,7 @@ def apply_worker_engine_args_overrides(
     bootstrap_port: int | None = None,
     zmq_kv_events_port: int | None = None,
     zmq_replay_port: int | None = None,
+    kv_state_agent: bool | None = None,
     ais_mtp_seed: int | None = None,
 ) -> dict:
     config = copy.deepcopy(dict(engine_args))
@@ -202,6 +210,7 @@ def apply_worker_engine_args_overrides(
         ("bootstrap_port", bootstrap_port),
         ("zmq_kv_events_port", zmq_kv_events_port),
         ("zmq_replay_port", zmq_replay_port),
+        ("kv_state_agent", kv_state_agent),
     ):
         if value is not None:
             config.setdefault("dynamo", {})[key] = value
@@ -237,3 +246,46 @@ def build_runtime_config(
         rc.set_disaggregated_endpoint(bootstrap_host=host, bootstrap_port=port)
     apply_topology_config(rc)
     return rank["block_size"], rc
+
+
+def build_kv_state_agent_descriptors(
+    engine_args: Mapping[str, Any],
+    *,
+    worker_id: int,
+    kv_state_endpoint: str,
+    zmq_kv_events_port: int,
+    router_hint_worker_type: str | None = None,
+) -> list[dict]:
+    """KV state-agent attachment descriptors for one mocker worker, one per DP rank.
+
+    The worker ID makes each CacheOwner unique across mocker processes. With
+    ``router_hint_worker_type``, each owner advertises a placeholder source
+    control endpoint: the router builds hints for it, and the mocker ignores them.
+    """
+    descriptors = []
+    for rank in range(engine_args["dp_size"]):
+        descriptors.append(
+            {
+                "cache_owner_id": (
+                    f"{_KV_STATE_AGENT_INDEXER_DOMAIN}/{_KV_STATE_AGENT_POOL}/"
+                    f"{worker_id:016x}{rank:016x}"
+                ),
+                "global_dp_rank": rank,
+                "kv_state_endpoint": kv_state_endpoint,
+                "indexer_domain_id": _KV_STATE_AGENT_INDEXER_DOMAIN,
+                "kv_block_size": engine_args["engine"]["block_size"],
+                "raw_zmq_endpoint": f"tcp://127.0.0.1:{zmq_kv_events_port + rank}",
+                "raw_topic": "",
+                "router_hint_source": (
+                    {
+                        "source_control_endpoint": (
+                            f"tcp://mocker-{worker_id:x}-{rank}.invalid:1"
+                        ),
+                        "worker_type": router_hint_worker_type,
+                    }
+                    if router_hint_worker_type is not None
+                    else None
+                ),
+            }
+        )
+    return descriptors

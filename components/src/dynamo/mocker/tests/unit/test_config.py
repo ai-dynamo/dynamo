@@ -423,3 +423,62 @@ async def test_native_host_offload_resolves_model_geometry_before_validation(
     assert engine["kv_cache_bytes_per_token"] == 2048
     assert engine["kv_transfer_bytes_per_token"] == 2048
     assert engine["native_host_offload"]["num_host_blocks"] == 16
+
+
+@pytest.mark.parametrize(
+    "flags, error",
+    [
+        (["--num-host-blocks", "8"], "requires --zmq-kv-events-ports"),
+        (["--zmq-kv-events-ports", "5557"], "requires --num-host-blocks"),
+    ],
+)
+def test_kv_state_agent_requires_zmq_ports_and_host_blocks(flags, error):
+    with pytest.raises(ValueError, match=error):
+        parse_args(["--kv-state-agent", *flags])
+
+
+def test_kv_state_agent_router_hints_require_kv_state_agent():
+    with pytest.raises(ValueError, match="requires --kv-state-agent"):
+        parse_args(["--kv-state-agent-router-hints"])
+
+
+def test_kv_state_agent_descriptors_cover_each_dp_rank():
+    args = parse_args(
+        [
+            "--kv-state-agent",
+            "--kv-state-agent-router-hints",
+            "--zmq-kv-events-ports",
+            "5557",
+            "--num-host-blocks",
+            "8",
+            "--kv-bytes-per-token",
+            "1024",
+            "--data-parallel-size",
+            "2",
+        ]
+    )
+    config = CONFIG.apply_worker_engine_args_overrides(
+        CONFIG.build_mocker_engine_args(args),
+        zmq_kv_events_port=5557,
+        kv_state_agent=True,
+    )
+    assert config["dynamo"]["kv_state_agent"] is True
+
+    descriptors = CONFIG.build_kv_state_agent_descriptors(
+        config,
+        worker_id=0xABC,
+        kv_state_endpoint=args.endpoint,
+        zmq_kv_events_port=5557,
+        router_hint_worker_type="aggregated",
+    )
+    assert [d["global_dp_rank"] for d in descriptors] == [0, 1]
+    assert [d["raw_zmq_endpoint"] for d in descriptors] == [
+        "tcp://127.0.0.1:5557",
+        "tcp://127.0.0.1:5558",
+    ]
+    assert len({d["cache_owner_id"] for d in descriptors}) == 2
+    for descriptor in descriptors:
+        assert descriptor["cache_owner_id"].startswith(
+            descriptor["indexer_domain_id"] + "/"
+        )
+        assert descriptor["router_hint_source"]["worker_type"] == "aggregated"

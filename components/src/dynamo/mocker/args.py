@@ -561,6 +561,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
     )
     parser.add_argument(
+        "--kv-state-agent",
+        action="store_true",
+        default=False,
+        help="Publish KV events through an external KV state agent "
+        "(python -m dynamo.kv_state_agent) instead of an in-process relay. Host-pinned "
+        "events are tagged KVCR-owned, so the router indexes them under a CacheOwner per "
+        "worker DP rank. Requires --zmq-kv-events-ports and --num-host-blocks.",
+    )
+    parser.add_argument(
+        "--kv-state-agent-router-hints",
+        action="store_true",
+        default=False,
+        help="With --kv-state-agent, advertise router-hint capability and a placeholder "
+        "source control endpoint per CacheOwner so the router runs its hinted lower-tier "
+        "lookup. The mocker ignores the hints it receives.",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -732,6 +749,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
+
+    if args.kv_state_agent:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--kv-state-agent requires --zmq-kv-events-ports")
+        # An --extra-engine-args file carries its own native_host_offload.
+        if args.num_host_blocks is None and args.extra_engine_args is None:
+            raise ValueError("--kv-state-agent requires --num-host-blocks")
+    elif args.kv_state_agent_router_hints:
+        raise ValueError("--kv-state-agent-router-hints requires --kv-state-agent")
 
     # Set endpoint default based on worker type if not explicitly provided
     if args.endpoint is None:

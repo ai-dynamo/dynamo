@@ -6,6 +6,7 @@
 import argparse
 import asyncio
 import functools
+import json
 import logging
 import os
 import signal
@@ -16,13 +17,25 @@ import uvloop
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.constants import (
+    KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
+)
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
+from dynamo.llm import (
+    EngineType,
+    EntrypointArgs,
+    KvStateAttachmentOwner,
+    fetch_model,
+    make_engine,
+    run_input,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import parse_args, resolve_planner_profile_data
 from .config import (
     apply_worker_engine_args_overrides,
+    build_kv_state_agent_descriptors,
     build_runtime_config,
     load_mocker_engine_args,
 )
@@ -121,6 +134,47 @@ async def worker():
             del profile_data_result  # Triggers tmpdir cleanup via __del__
 
 
+async def start_kv_state_agent_owner(
+    args: argparse.Namespace,
+    runtime,
+    engine_args: dict,
+    runtime_config,
+) -> KvStateAttachmentOwner:
+    """Attach one worker's raw ZMQ streams to the namespace's KV state agent."""
+    runtime_config.kv_event_source_mode = "state_agent_v2"
+    hint_worker_type = None
+    if args.kv_state_agent_router_hints:
+        hint_worker_type = (
+            "prefill"
+            if args.is_prefill_worker
+            else "decode"
+            if args.is_decode_worker
+            else "aggregated"
+        )
+        # Source endpoints ride in the descriptors, as for vLLM state-agent workers.
+        runtime_config.set_engine_specific(
+            KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, json.dumps(hint_worker_type)
+        )
+        runtime_config.set_engine_specific(
+            KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+        )
+    endpoint = runtime.endpoint(args.endpoint)
+    worker_id = endpoint.connection_id()
+    owner = KvStateAttachmentOwner(
+        endpoint,
+        worker_id,
+        build_kv_state_agent_descriptors(
+            engine_args,
+            worker_id=worker_id,
+            kv_state_endpoint=args.endpoint,
+            zmq_kv_events_port=engine_args["dynamo"]["zmq_kv_events_port"],
+            router_hint_worker_type=hint_worker_type,
+        ),
+    )
+    await owner.start()
+    return owner
+
+
 def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
     """Compute the stagger delay based on worker count to give the frontend time to process registrations.
     Returns the delay in seconds between worker launches.
@@ -154,6 +208,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     """
     futures = []
     runtimes = []
+    # Discovery leases own the attachment intents; holding the owners keeps
+    # their handles alive until the runtimes shut down.
+    attachment_owners = []
     shutdown_requested = False
 
     def on_worker_done(worker_num: int, future: asyncio.Future) -> None:
@@ -231,6 +288,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     if args.zmq_replay_ports_list
                     else None
                 ),
+                kv_state_agent=args.kv_state_agent or None,
                 ais_mtp_seed=(
                     (base_engine_args["engine"]["aic_mtp_seed"] + worker_id) % (1 << 64)
                     if base_engine_args["engine"]["aic_nextn"] is not None
@@ -243,6 +301,12 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
         if args.sglang_generate:
             runtime_config.set_engine_specific("sglang_generate", "true")
+        if args.kv_state_agent:
+            attachment_owners.append(
+                await start_kv_state_agent_owner(
+                    args, runtime, worker_engine_args, runtime_config
+                )
+            )
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
