@@ -5,6 +5,7 @@
 
 import json
 import os
+import socket
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -273,7 +274,11 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
-    monkeypatch.setattr(processes, "get_engine_zmq_addresses", lambda *_: addresses)
+    monkeypatch.setattr(
+        processes,
+        "_bind_engine_endpoints",
+        lambda *_: processes._EngineEndpoints(addresses),
+    )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", create_child)
@@ -336,3 +341,95 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["process_index"] == 1
     assert attach.call_args.kwargs["input_address"] == "in1"
     assert attach.call_args.kwargs["output_address"] == "out1"
+
+
+def test_parent_hands_each_child_its_own_bound_listeners(monkeypatch):
+    process_count = 3
+    addresses = SimpleNamespace(
+        inputs=[f"in{i}" for i in range(process_count)],
+        outputs=[f"out{i}" for i in range(process_count)],
+    )
+    listeners = [(socket.socket(), socket.socket()) for _ in range(process_count)]
+    child_fds = [tuple(s.fileno() for s in pair) for pair in listeners]
+    rpc_directory = Mock()
+    rpc_directory.name = "/tmp/dynamo-vllm-rpc-test"
+    popen_calls = []
+
+    def create_child(*_args, **kwargs):
+        popen_calls.append(kwargs)
+        child = Mock(pid=300 + len(popen_calls))
+        child.poll.return_value = 0
+        return child
+
+    @contextmanager
+    def launch_context(vllm_config, executor_class, log_stats, addresses):
+        yield _core_engine_launch_object(Mock(), addresses)
+
+    attach = Mock(return_value=(Mock(), _vllm_config()))
+    monkeypatch.delenv(processes._ROLE_ENV, raising=False)
+    monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
+    monkeypatch.setattr(
+        processes,
+        "_bind_engine_endpoints",
+        lambda *_: processes._EngineEndpoints(addresses, listeners),
+    )
+    monkeypatch.setattr(processes, "launch_core_engines", launch_context)
+    monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
+    monkeypatch.setattr(processes.subprocess, "Popen", create_child)
+    monkeypatch.setattr(processes, "_attach_client", attach)
+    monkeypatch.setattr(
+        processes.EmbeddingWorkerProcessGroup, "start_monitor", lambda _self: None
+    )
+
+    try:
+        _client, _config, group = processes.create_shared_embedding_engine_client(
+            vllm_config=_vllm_config(),
+            process_count=process_count,
+            usage_context=UsageContext.OPENAI_API_SERVER,
+            stat_loggers=[],
+            enable_log_requests=False,
+            disable_log_stats=False,
+        )
+
+        for index, call in enumerate(popen_calls, start=1):
+            assert call["pass_fds"] == child_fds[index]
+            assert call["env"][processes._LISTENER_FDS_ENV] == ",".join(
+                str(fd) for fd in child_fds[index]
+            )
+        # The parent drops the children's copies but keeps and adopts its own.
+        assert all(s.fileno() == -1 for pair in listeners[1:] for s in pair)
+        assert attach.call_args.kwargs["listeners"] is listeners[0]
+        assert all(s.fileno() != -1 for s in listeners[0])
+        group.cleanup()
+    finally:
+        for pair in listeners:
+            for listener in pair:
+                listener.close()
+
+
+def test_child_adopts_inherited_listener_fds(monkeypatch):
+    input_listener, output_listener = socket.socket(), socket.socket()
+    monkeypatch.setenv(
+        processes._LISTENER_FDS_ENV,
+        f"{input_listener.fileno()},{output_listener.fileno()}",
+    )
+    adopted = processes._decode_child_listeners()
+    try:
+        assert [s.fileno() for s in adopted] == [
+            input_listener.fileno(),
+            output_listener.fileno(),
+        ]
+    finally:
+        for listener in adopted:
+            listener.detach()
+        input_listener.close()
+        output_listener.close()
+
+
+def test_child_without_listener_fds_binds_its_addresses(monkeypatch):
+    monkeypatch.delenv(processes._LISTENER_FDS_ENV, raising=False)
+    assert processes._decode_child_listeners() is None
+    env = processes._child_environment(
+        process_count=2, process_index=1, addresses_json="{}", parent_pid=1
+    )
+    assert processes._LISTENER_FDS_ENV not in env

@@ -17,20 +17,33 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
+from vllm.v1.engine.utils import launch_core_engines
 from vllm.v1.executor import Executor
+
+try:
+    # vLLM after vllm-project/vllm#54113: the launcher binds raw listeners and
+    # each client adopts its own, so no port is released between choosing it
+    # and binding it.
+    from vllm.v1.engine.utils import bind_engine_zmq_listeners
+except ImportError:  # vLLM 0.28 and earlier: clients bind the addresses.
+    bind_engine_zmq_listeners = None
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
+else:
+    get_engine_zmq_addresses = None
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +51,7 @@ _ROLE_ENV = "DYN_VLLM_EMBEDDING_PROCESS_ROLE"
 _INDEX_ENV = "DYN_VLLM_EMBEDDING_PROCESS_INDEX"
 _PARENT_PID_ENV = "DYN_VLLM_EMBEDDING_PARENT_PID"
 _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
+_LISTENER_FDS_ENV = "DYN_VLLM_EMBEDDING_LISTENER_FDS"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
 # The two shapes _unpack_core_engine_launch accepts were read from these vLLM
@@ -112,22 +126,27 @@ def _attach_client(
     stat_loggers: list[Any],
     enable_log_requests: bool,
     disable_log_stats: bool,
+    listeners: tuple[socket.socket, socket.socket] | None = None,
 ) -> tuple[AsyncLLM, VllmConfig]:
     client_vllm_config = _client_config(
         vllm_config,
         process_count=process_count,
         process_index=process_index,
     )
+    client_addresses: dict[str, Any] = {
+        "input_address": input_address,
+        "output_address": output_address,
+    }
+    if listeners is not None:
+        client_addresses["input_listener"] = listeners[0]
+        client_addresses["output_listener"] = listeners[1]
     client = AsyncLLM.from_vllm_config(
         vllm_config=client_vllm_config,
         usage_context=usage_context,
         stat_loggers=stat_loggers,
         enable_log_requests=enable_log_requests,
         disable_log_stats=disable_log_stats,
-        client_addresses={
-            "input_address": input_address,
-            "output_address": output_address,
-        },
+        client_addresses=client_addresses,
         client_count=process_count,
         client_index=process_index,
     )
@@ -182,18 +201,78 @@ def _decode_child_addresses(process_count: int) -> tuple[int, list[str], list[st
     return process_index, inputs, outputs
 
 
+def _decode_child_listeners() -> tuple[socket.socket, socket.socket] | None:
+    raw = os.environ.get(_LISTENER_FDS_ENV)
+    if raw is None:
+        return None
+    try:
+        input_fd, output_fd = (int(fd) for fd in raw.split(","))
+        return socket.socket(fileno=input_fd), socket.socket(fileno=output_fd)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("invalid embedding child EngineCore listener fds") from exc
+
+
+@dataclass
+class _EngineEndpoints:
+    """Client endpoints for one EngineCore, with any listeners not yet handed off.
+
+    With listener-aware vLLM, ``listeners[i]`` is client ``i``'s bound input
+    and output socket pair; otherwise ``listeners`` is empty and each client
+    binds its address itself.
+    """
+
+    addresses: Any
+    listeners: list[tuple[socket.socket, socket.socket]] = field(default_factory=list)
+
+    def for_client(self, index: int) -> tuple[socket.socket, socket.socket] | None:
+        return self.listeners[index] if self.listeners else None
+
+    def close_child_listeners(self) -> None:
+        """Drop the parent's copies once every child has inherited its pair."""
+        for pair in self.listeners[1:]:
+            for listener in pair:
+                listener.close()
+
+    def close(self) -> None:
+        for pair in self.listeners:
+            for listener in pair:
+                listener.close()
+
+
+def _bind_engine_endpoints(
+    vllm_config: VllmConfig, process_count: int
+) -> _EngineEndpoints:
+    if bind_engine_zmq_listeners is None:
+        return _EngineEndpoints(get_engine_zmq_addresses(vllm_config, process_count))
+    zmq_listeners = bind_engine_zmq_listeners(vllm_config, process_count)
+    return _EngineEndpoints(
+        zmq_listeners.addresses,
+        [
+            (input_listener.socket, output_listener.socket)
+            for input_listener, output_listener in zip(
+                zmq_listeners.inputs, zmq_listeners.outputs, strict=True
+            )
+        ],
+    )
+
+
 def _child_environment(
     *,
     process_count: int,
     process_index: int,
     addresses_json: str,
     parent_pid: int,
+    listeners: tuple[socket.socket, socket.socket] | None = None,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env[_ROLE_ENV] = _CHILD_ROLE
     env[_INDEX_ENV] = str(process_index)
     env[_PARENT_PID_ENV] = str(parent_pid)
     env[_ENGINE_ADDRESSES_ENV] = addresses_json
+    env.pop(_LISTENER_FDS_ENV, None)
+    if listeners is not None:
+        # subprocess.Popen(pass_fds=...) keeps these fd numbers in the child.
+        env[_LISTENER_FDS_ENV] = ",".join(str(s.fileno()) for s in listeners)
     env["PYTHONUNBUFFERED"] = "1"
 
     # Each Dynamo runtime process needs its own system-status listener, but the
@@ -440,6 +519,7 @@ def create_shared_embedding_engine_client(
             stat_loggers=stat_loggers,
             enable_log_requests=enable_log_requests,
             disable_log_stats=disable_log_stats,
+            listeners=_decode_child_listeners(),
         )
         logger.info(
             "Attached Dynamo embedding child %d/%d to shared EngineCore",
@@ -458,12 +538,13 @@ def create_shared_embedding_engine_client(
 
     engine_manager = None
     process_group = None
+    endpoints: _EngineEndpoints | None = None
     children: list[tuple[int, subprocess.Popen]] = []
     try:
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        addresses = get_engine_zmq_addresses(vllm_config, process_count)
+        endpoints = _bind_engine_endpoints(vllm_config, process_count)
 
         parent_logger_config = _client_config(
             vllm_config,
@@ -480,7 +561,7 @@ def create_shared_embedding_engine_client(
                 vllm_config,
                 executor_class,
                 not disable_log_stats,
-                addresses,
+                endpoints.addresses,
             ) as core_engine_launch:
                 (
                     engine_manager,
@@ -503,6 +584,7 @@ def create_shared_embedding_engine_client(
                 )
                 command = [sys.executable, "-m", "dynamo.vllm", *sys.argv[1:]]
                 for process_index in range(1, process_count):
+                    child_listeners = endpoints.for_client(process_index)
                     child = subprocess.Popen(
                         command,
                         env=_child_environment(
@@ -510,9 +592,16 @@ def create_shared_embedding_engine_client(
                             process_index=process_index,
                             addresses_json=addresses_json,
                             parent_pid=os.getpid(),
+                            listeners=child_listeners,
+                        ),
+                        pass_fds=(
+                            tuple(s.fileno() for s in child_listeners)
+                            if child_listeners is not None
+                            else ()
                         ),
                     )
                     children.append((process_index, child))
+                endpoints.close_child_listeners()
 
                 process_group = EmbeddingWorkerProcessGroup(
                     children=children,
@@ -532,6 +621,7 @@ def create_shared_embedding_engine_client(
                     stat_loggers=parent_stat_loggers,
                     enable_log_requests=enable_log_requests,
                     disable_log_stats=disable_log_stats,
+                    listeners=endpoints.for_client(0),
                 )
 
             parent_client, parent_config = parent_client_future.result()
@@ -542,6 +632,8 @@ def create_shared_embedding_engine_client(
         )
         return parent_client, parent_config, process_group
     except BaseException:
+        if endpoints is not None:
+            endpoints.close()
         if process_group is not None:
             process_group.cleanup()
         else:
