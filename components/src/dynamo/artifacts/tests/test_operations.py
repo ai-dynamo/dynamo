@@ -6,6 +6,7 @@ import gc
 import hashlib
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -50,8 +51,7 @@ async def test_delivery_without_python311_timeout_api(tmp_path, monkeypatch, tim
     result = store.get(pending["operation_id"], "owner")
     assert result["state"] == ("failed" if times_out else "ready")
     if times_out:
-        assert result["error_code"] == "delivery_failed"
-    assert store.grant(pending["operation_id"]) is None
+        assert result["error_code"] == "commit_unknown"
     assert service.source_bytes == 0
     assert service._pending_count == 0
 
@@ -74,6 +74,80 @@ async def test_pending_operation_count_is_bounded(tmp_path):
     await service.submit(b"z", "owner", [], {})
     await service.drain()
     assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_wait_does_not_consume_transfer_timeout(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def transfer(data, target):
+        if data == b"first":
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+                raise
+        return {"actual_bytes": len(data), "object_id": data.hex()}
+
+    async def verify(data, target, receipt):
+        return {**receipt, "sha256": hashlib.sha256(data).hexdigest()}
+
+    service = ArtifactService(
+        store, transfer, verify, concurrency=1, timeout_seconds=0.1
+    )
+    first = await service.submit(b"first", "owner", [], {})
+    await entered.wait()
+    second = await service.submit(b"second", "owner", [], {})
+    await asyncio.sleep(0.15)
+    release.set()
+    await service.drain()
+    assert store.get(second["operation_id"], "owner")["state"] == "ready"
+    assert store.get(first["operation_id"], "owner")["state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_timeout_gets_fresh_readback_budget(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    attempts = []
+
+    async def transfer(data, target):
+        attempts.append(data)
+        await asyncio.sleep(0.2)
+
+    async def verify(data, target, receipt):
+        await asyncio.sleep(0.03)
+        return {
+            "actual_bytes": len(data),
+            "object_id": "committed-object",
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+
+    service = ArtifactService(store, transfer, verify, timeout_seconds=0.05)
+    pending = await service.submit(b"opaque", "owner", [], {})
+    await service.drain()
+    assert len(attempts) == 1
+    assert store.get(pending["operation_id"], "owner")["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_ambiguous_write_records_commit_unknown(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+
+    async def transfer(data, target):
+        raise ArtifactStorageError("commit_unknown", "ack lost", outcome="ambiguous")
+
+    async def verify(data, target, receipt):
+        await asyncio.Event().wait()
+
+    service = ArtifactService(store, transfer, verify, timeout_seconds=0.01)
+    pending = await service.submit(b"opaque", "owner", [], {})
+    await service.drain()
+    result = store.get(pending["operation_id"], "owner")
+    assert result["state"] == "failed"
+    assert result["error_code"] == "commit_unknown"
 
 
 @pytest.fixture
@@ -99,7 +173,7 @@ def blocking_writer():
         release.set()
 
 
-def test_state_is_durable_and_grants_are_encrypted(tmp_path):
+def test_state_is_durable_without_persisting_grants(tmp_path):
     path = tmp_path / "operations.db"
     key = Fernet.generate_key()
     store = ArtifactOperationStore(path, key)
@@ -107,15 +181,42 @@ def test_state_is_durable_and_grants_are_encrypted(tmp_path):
     assert pending["state"] == "pending"
     assert "SENTINEL_SECRET" not in repr(pending)
     assert b"SENTINEL_SECRET" not in path.read_bytes()
-    assert store.grant(pending["operation_id"]) == {"url": "SENTINEL_SECRET"}
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
+        assert "grant" not in columns
     with pytest.raises(KeyError):
         store.get(pending["operation_id"], "other-owner")
     store.finish(pending["operation_id"], "failed", error_code="source_lost")
-    assert store.grant(pending["operation_id"]) is None
     reopened = ArtifactOperationStore(path, key)
     assert reopened.get(pending["operation_id"], "owner")["state"] == "failed"
     with pytest.raises(ValueError):
         reopened.finish(pending["operation_id"], "ready", actual_bytes=1)
+
+
+def test_legacy_grants_are_removed_on_migration(tmp_path):
+    path = tmp_path / "operations.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE operations (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+            "result TEXT NOT NULL, grant BLOB, created REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO operations VALUES (?, ?, ?, ?, ?)",
+            (
+                "legacy",
+                "owner",
+                '{"state":"pending","revision":1}',
+                b"SENTINEL_SECRET",
+                time.time(),
+            ),
+        )
+    store = ArtifactOperationStore(path, Fernet.generate_key())
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
+        assert "grant" not in columns
+    assert b"SENTINEL_SECRET" not in path.read_bytes()
+    assert store.recover() == 1
+    assert store.get("legacy", "owner")["error_code"] == "source_lost"
 
 
 @pytest.mark.asyncio
@@ -169,6 +270,42 @@ def test_recovery_fails_lost_ephemeral_sources(tmp_path):
     assert store.get(pending["operation_id"], "owner")["error_code"] == "source_lost"
 
 
+def test_recovery_queries_indexed_pending_state(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    pending = store.create("owner", [], {})
+    terminal = store.create("owner", [], {})
+    store.finish(terminal["operation_id"], "failed", error_code="source_lost")
+    with store._connect() as conn:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(operations)")}
+        assert "operations_state_idx" in indexes
+    assert store.recover() == 1
+    assert store.get(pending["operation_id"], "owner")["state"] == "failed"
+
+
+def test_terminal_receipts_expire_without_deleting_pending_rows(tmp_path, monkeypatch):
+    clock = [time.time()]
+    monkeypatch.setattr("dynamo.artifacts.operations.time.time", lambda: clock[0])
+    store = ArtifactOperationStore(
+        tmp_path / "ops.db", Fernet.generate_key(), terminal_ttl_seconds=10
+    )
+    expired = store.create("owner", [], {})
+    pending = store.create("owner", [], {})
+    store.finish(expired["operation_id"], "failed", error_code="source_lost")
+    clock[0] += 11
+    with pytest.raises(KeyError):
+        store.get(expired["operation_id"], "owner")
+    store.create("owner", [], {})
+    with store._connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM operations WHERE id=?",
+                (expired["operation_id"],),
+            ).fetchone()[0]
+            == 0
+        )
+    assert store.get(pending["operation_id"], "owner")["state"] == "pending"
+
+
 @pytest.mark.asyncio
 async def test_queue_budget_releases_after_failure(tmp_path):
     release = asyncio.Event()
@@ -198,7 +335,6 @@ async def test_ambiguous_commit_is_verified_without_a_second_put(tmp_path):
         raise ArtifactStorageError("commit_unknown", "ack lost", outcome="ambiguous")
 
     async def verify(data, target, receipt):
-        assert store.grant(pending["operation_id"]) is not None
         return {
             "actual_bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
@@ -211,7 +347,6 @@ async def test_ambiguous_commit_is_verified_without_a_second_put(tmp_path):
     await service.drain()
     assert store.get(pending["operation_id"], "owner")["state"] == "ready"
     assert len(attempts) == 1
-    assert store.grant(pending["operation_id"]) is None
 
 
 @pytest.mark.asyncio
@@ -269,7 +404,6 @@ async def test_repeated_create_cancellation_keeps_source_until_failed_commit(
         await submission
     assert service.source_bytes == 0
     assert store.get(created[0], "owner")["state"] == "failed"
-    assert store.grant(created[0]) is None
 
 
 @pytest.mark.asyncio
@@ -340,7 +474,6 @@ async def test_repeated_delivery_cancellation_settles_failed_writer(
     with pytest.raises(asyncio.CancelledError):
         await delivery
     assert store.get(pending["operation_id"], "owner")["state"] == "failed"
-    assert store.grant(pending["operation_id"]) is None
     assert service.source_bytes == 0
 
 
@@ -377,7 +510,6 @@ async def test_repeated_cancellation_drains_transfer_cleanup_before_release(tmp_
         release_cleanup.set()
         await draining
     assert store.get(pending["operation_id"], "owner")["state"] == "failed"
-    assert store.grant(pending["operation_id"]) is None
     assert service.source_bytes == 0
 
 
@@ -497,5 +629,4 @@ async def test_cancel_before_delivery_starts_settles_failed_without_budget_leak(
     release.set()
     await draining
     assert store.get(pending["operation_id"], "owner")["state"] == "failed"
-    assert store.grant(pending["operation_id"]) is None
     assert service.source_bytes == 0
