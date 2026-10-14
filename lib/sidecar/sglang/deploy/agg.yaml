@@ -78,7 +78,9 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
+              # HealthCheckResponse has one bool field: healthy=true encodes as
+              # 0x08 0x01. Fail when the RPC succeeds but reports unhealthy.
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 6
