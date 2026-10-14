@@ -193,11 +193,10 @@ tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
 
 > [!NOTE]
-> Native Rust sidecars retain their existing conservative `off`/`auto`
-> settings, including the native Kimi forced-tool exception described above,
-> and are not included in this default change. The default-on policy
-> applies when regular vLLM, SGLang, or TensorRT-LLM workers publish the
-> deployment runtime configuration consumed by frontend preprocessing.
+> The native Rust vLLM, SGLang, and TensorRT-LLM sidecars publish the same
+> default-on policy. They accept `--dyn-structural-tag` and
+> `DYN_STRUCTURAL_TAG` with the values above, but not the legacy flags or
+> their environment variables.
 
 ## Activation Scope
 
