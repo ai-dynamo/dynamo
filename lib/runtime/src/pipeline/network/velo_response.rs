@@ -42,8 +42,10 @@ use crate::{
 
 pub const TRANSPORT_NAME: &str = "velo_response";
 const VERSION: u32 = 3;
-static PROCESS_SERVICE: tokio::sync::Mutex<Weak<SharedService>> =
-    tokio::sync::Mutex::const_new(Weak::new());
+/// Process-wide services, keyed by [`service_key`].
+static PROCESS_SERVICES: LazyLock<
+    tokio::sync::Mutex<HashMap<Option<tokio::runtime::Id>, Weak<SharedService>>>,
+> = LazyLock::new(Default::default);
 static PROCESS_METRICS: LazyLock<(crate::MetricsRegistry, Arc<velo::VeloMetrics>)> =
     LazyLock::new(|| {
         let registry = crate::MetricsRegistry::new();
@@ -177,6 +179,17 @@ impl Registrations {
     }
 }
 
+/// A service built on an owned runtime keeps that runtime alive, so all such
+/// callers share it. A service built on an External runtime holds only a
+/// `Handle`, and its I/O stops when that runtime ends, so only callers on the
+/// same Tokio runtime share it.
+fn service_key(runtime: &crate::runtime::RuntimeType) -> Option<tokio::runtime::Id> {
+    match runtime {
+        crate::runtime::RuntimeType::Shared(_) => None,
+        crate::runtime::RuntimeType::External(handle) => Some(handle.id()),
+    }
+}
+
 /// One owner per Dynamo Runtime, shared by all of that runtime's clones.
 pub(crate) struct RuntimeService {
     runtime: crate::runtime::RuntimeType,
@@ -213,8 +226,9 @@ impl RuntimeService {
         }
         // Acquisition and final-owner shutdown use the same lock. A new
         // runtime cannot acquire a service while that service is closing.
-        let mut shared = PROCESS_SERVICE.lock().await;
-        let lease = match shared.upgrade() {
+        let key = service_key(&self.runtime);
+        let mut shared = PROCESS_SERVICES.lock().await;
+        let lease = match shared.get(&key).and_then(Weak::upgrade) {
             Some(lease) => lease,
             None => {
                 let runtime = self.runtime.clone();
@@ -231,7 +245,8 @@ impl RuntimeService {
                         })
                         .await??,
                 );
-                *shared = Arc::downgrade(&lease);
+                shared.retain(|_, service| service.strong_count() > 0);
+                shared.insert(key, Arc::downgrade(&lease));
                 lease
             }
         };
@@ -246,9 +261,9 @@ impl RuntimeService {
         let Some(lease) = owner.take() else {
             return;
         };
-        let mut shared = PROCESS_SERVICE.lock().await;
+        let mut shared = PROCESS_SERVICES.lock().await;
         if let Some(lease) = Arc::into_inner(lease) {
-            *shared = Weak::new();
+            shared.remove(&service_key(&lease.runtime));
             lease.service.shutdown().await;
         }
     }
@@ -258,7 +273,8 @@ impl RuntimeService {
 struct SharedService {
     service: Arc<VeloResponseService>,
     // Retain an owned Tokio runtime without retaining the Dynamo Runtime and
-    // its owner slot. External runtimes remain the caller's responsibility.
+    // its owner slot. An External runtime is the caller's responsibility, so
+    // its service is shared only on that runtime (see `service_key`).
     runtime: crate::runtime::RuntimeType,
 }
 
@@ -859,17 +875,7 @@ mod tests {
                     &service,
                     &second.velo_response_service().service().await.unwrap()
                 ));
-                let entry = service
-                    .velo
-                    .peer_info()
-                    .worker_address()
-                    .get_entry("tcp")
-                    .unwrap()
-                    .unwrap();
-                let address = velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap()
-                    [0]
-                .socket_addr()
-                .unwrap();
+                let address = tcp_address(&service);
 
                 first.shutdown();
                 tokio::time::timeout(Duration::from_secs(10), first.primary_token().cancelled())
@@ -922,6 +928,68 @@ mod tests {
             },
         )
         .await;
+    }
+
+    fn tcp_address(service: &VeloResponseService) -> SocketAddr {
+        let entry = service
+            .velo
+            .peer_info()
+            .worker_address()
+            .get_entry("tcp")
+            .unwrap()
+            .unwrap();
+        velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap()[0]
+            .socket_addr()
+            .unwrap()
+    }
+
+    /// A service built on an External runtime holds only a `Handle`, so its
+    /// listeners die with that Tokio runtime. A Runtime on another Tokio
+    /// runtime must get its own service rather than share that one.
+    #[test]
+    fn external_runtimes_get_their_own_service() {
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+            ],
+            || {
+                let tokio_runtime = || {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                };
+                let first_tokio = tokio_runtime();
+                let second_tokio = tokio_runtime();
+                let service_on = |tokio: &tokio::runtime::Runtime| {
+                    tokio.block_on(async {
+                        let runtime = crate::Runtime::from_current().unwrap();
+                        let service = runtime.velo_response_service().service().await.unwrap();
+                        (runtime, service)
+                    })
+                };
+                let (first_owner, first) = service_on(&first_tokio);
+                let (second_owner, second) = service_on(&second_tokio);
+                assert!(!Arc::ptr_eq(&first, &second));
+
+                drop((first_owner, first));
+                drop(first_tokio);
+                second_tokio.block_on(async {
+                    tokio::net::TcpStream::connect(tcp_address(&second))
+                        .await
+                        .unwrap();
+                    second_owner.shutdown();
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        second_owner.primary_token().cancelled(),
+                    )
+                    .await
+                    .unwrap();
+                });
+            },
+        );
     }
 
     #[tokio::test]
