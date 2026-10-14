@@ -8853,7 +8853,8 @@ spec:
                           component. With apiVersion `grove.io/v1alpha1`, target is
                           `PodCliqueTemplateSpec` for a single-node component or
                           `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
-                          only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+                          `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD
+                          OpenAPI omits this field.
                         properties:
                           apiVersion:
                             description: |-
@@ -8875,6 +8876,7 @@ spec:
                               `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
                               PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
                               deprecated component field preserves its value and leaves the update strategy unchanged.
+                              Component contexts also accept rollingUpdate.maxUnavailable.
                             type: object
                             x-kubernetes-preserve-unknown-fields: true
                         required:
@@ -17058,6 +17060,7 @@ spec:
                                     `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
                                     PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
                                     deprecated component field preserves its value and leaves the update strategy unchanged.
+                                    Component contexts also accept rollingUpdate.maxUnavailable.
                                   type: object
                                   x-kubernetes-preserve-unknown-fields: true
                               required:
@@ -17443,6 +17446,7 @@ spec:
                         `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
                         PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
                         deprecated component field preserves its value and leaves the update strategy unchanged.
+                        Component contexts also accept rollingUpdate.maxUnavailable.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   required:
