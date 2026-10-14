@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use dynamo_backend_common::DynamoError;
@@ -86,6 +87,27 @@ impl TritonClient {
             .await
             .map(|response| response.into_inner().ready)
             .map_err(|status| status_to_dynamo("ModelReady", status))
+    }
+
+    /// Names of the models Triton reports as READY, sorted and de-duplicated.
+    pub(crate) async fn ready_models(&self) -> Result<Vec<String>, DynamoError> {
+        let response = self
+            .grpc()
+            .repository_index(inference::RepositoryIndexRequest {
+                repository_name: String::new(),
+                ready: true,
+            })
+            .await
+            .map_err(|status| status_to_dynamo("RepositoryIndex", status))?
+            .into_inner();
+        Ok(response
+            .models
+            .into_iter()
+            .filter(|entry| entry.state.eq_ignore_ascii_case("READY"))
+            .map(|entry| entry.name)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
     }
 
     pub(crate) async fn model_config(

@@ -64,6 +64,14 @@ service GRPCInferenceService
   //@@     Get model configuration.
   //@@
   rpc ModelConfig(ModelConfigRequest) returns (ModelConfigResponse) {}
+
+  //@@  .. cpp:var:: rpc RepositoryIndex(RepositoryIndexRequest) returns
+  //@@       (RepositoryIndexResponse)
+  //@@
+  //@@     Get the index of model repository contents. This is a Triton
+  //@@     extension to the KServe v2 protocol.
+  //@@
+  rpc RepositoryIndex(RepositoryIndexRequest) returns (RepositoryIndexResponse) {}
 }
 
 //@@
@@ -725,4 +733,70 @@ message ModelRepositoryParameter
     //@@
     bytes bytes_param = 4;
   }
+}
+
+//@@
+//@@.. cpp:var:: message RepositoryIndexRequest
+//@@
+//@@   Request message for RepositoryIndex.
+//@@
+message RepositoryIndexRequest
+{
+  //@@  .. cpp:var:: string repository_name
+  //@@
+  //@@     The name of the repository. If empty the index is returned
+  //@@     for all repositories.
+  //@@
+  string repository_name = 1;
+
+  //@@  .. cpp:var:: bool ready
+  //@@
+  //@@     If true return only models currently ready for inferencing.
+  //@@
+  bool ready = 2;
+}
+
+//@@
+//@@.. cpp:var:: message RepositoryIndexResponse
+//@@
+//@@   Response message for RepositoryIndex.
+//@@
+message RepositoryIndexResponse
+{
+  //@@
+  //@@  .. cpp:var:: message ModelIndex
+  //@@
+  //@@     Index entry for a model.
+  //@@
+  message ModelIndex {
+    //@@    .. cpp:var:: string name
+    //@@
+    //@@       The name of the model.
+    //@@
+    string name = 1;
+
+    //@@    .. cpp:var:: string version
+    //@@
+    //@@       The version of the model.
+    //@@
+    string version = 2;
+
+    //@@    .. cpp:var:: string state
+    //@@
+    //@@       The state of the model.
+    //@@
+    string state = 3;
+
+    //@@    .. cpp:var:: string reason
+    //@@
+    //@@       The reason, if any, that the model is in the given state.
+    //@@
+    string reason = 4;
+  }
+
+  //@@  .. cpp:var:: ModelIndex models (repeated)
+  //@@
+  //@@     An index entry for each model.
+  //@@
+  repeated ModelIndex models = 1;
 }

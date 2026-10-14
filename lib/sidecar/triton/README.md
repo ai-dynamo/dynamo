@@ -12,17 +12,16 @@ SPDX-License-Identifier: Apache-2.0
 `dynamo-triton-sidecar` connects Dynamo to a separately managed NVIDIA Triton Inference Server over its KServe v2 gRPC API.
 It registers one Dynamo tensor endpoint for every ready Triton model and forwards unary model-infer requests without loading Triton or GPU libraries into the sidecar process.
 
-Start Triton with its HTTP and gRPC services enabled, then run:
+Start Triton with its gRPC service enabled, then run:
 
 ```bash
 dynamo-triton-sidecar \
   --grpc-endpoint localhost:8001 \
-  --triton-http-endpoint http://localhost:8000 \
   --discovery-backend file
 ```
 
-The HTTP endpoint is used only to discover ready models. Use one or more
-`--model-name <name>` options to skip repository auto-discovery.
+Ready models are discovered through Triton's gRPC `RepositoryIndex` API. Use one
+or more `--model-name <name>` options to skip repository auto-discovery.
 
 ## Support matrix
 

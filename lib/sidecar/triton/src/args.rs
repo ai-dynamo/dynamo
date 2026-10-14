@@ -2,14 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_backend_common::RuntimeConfig;
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportArgs, HttpEndpoint};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportArgs};
 
 fn parse_grpc_endpoint(raw: &str) -> Result<GrpcEndpoint, String> {
     GrpcEndpoint::parse(raw, "--grpc-endpoint").map_err(|error| error.to_string())
-}
-
-fn parse_http_endpoint(raw: &str) -> Result<HttpEndpoint, String> {
-    HttpEndpoint::parse(raw, "--triton-http-endpoint").map_err(|error| error.to_string())
 }
 
 #[derive(clap::Parser, Clone, Debug)]
@@ -40,22 +36,10 @@ pub(crate) struct Args {
     #[command(flatten)]
     pub grpc: GrpcTransportArgs,
 
-    /// Triton HTTP base URL used for repository auto-discovery.
-    ///
-    /// When omitted, the sidecar uses the gRPC host with Triton's conventional
-    /// HTTP port 8000. This endpoint is not used when every model is supplied
-    /// explicitly with `--model-name`.
-    #[arg(
-        long,
-        env = "DYN_TRITON_HTTP_ENDPOINT",
-        value_parser = parse_http_endpoint
-    )]
-    pub triton_http_endpoint: Option<HttpEndpoint>,
-
     /// Triton model to expose. Repeat to expose multiple models.
     ///
     /// With no explicit model names, the sidecar registers every READY model
-    /// returned by Triton's repository-index API.
+    /// returned by Triton's gRPC RepositoryIndex API.
     #[arg(
         long = "model-name",
         env = "DYN_TRITON_MODEL_NAMES",
