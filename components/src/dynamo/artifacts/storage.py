@@ -255,7 +255,9 @@ class StoragePolicy:
         if isinstance(address, ipaddress.IPv6Address):
             if address.ipv4_mapped:
                 address = address.ipv4_mapped
-            elif any(address in prefix for prefix in _EMBEDDED_IPV4_PREFIXES):
+            elif not address.is_loopback and any(
+                address in prefix for prefix in _EMBEDDED_IPV4_PREFIXES
+            ):
                 address = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
         forbidden = (
             address.is_link_local or address.is_multicast or address.is_unspecified
