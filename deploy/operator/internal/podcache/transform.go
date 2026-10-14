@@ -168,10 +168,10 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// Model endpoint classification requires Ready; Snapshot-aware GMS
 		// replacement requires the public restore outcome.
 		Conditions: projectConditions(in.Conditions),
-		// DGDR diagnostics inspect container failures.
-		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
-		// GMS Pod replacement also requires init-sidecar restart counts.
-		InitContainerStatuses: projectInitContainerStatuses(in.InitContainerStatuses),
+		// DGDR diagnostics inspect container failures; GMS Pod replacement and
+		// DCD crash-loop detection inspect restarts.
+		ContainerStatuses:     projectContainerStatuses(in.ContainerStatuses),
+		InitContainerStatuses: projectContainerStatuses(in.InitContainerStatuses),
 	}
 }
 
@@ -201,21 +201,23 @@ func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerSta
 	out := make([]corev1.ContainerStatus, len(in))
 	for i := range in {
 		out[i] = corev1.ContainerStatus{
-			Name:  in[i].Name,
-			State: projectContainerState(in[i].State),
+			Name:                 in[i].Name,
+			State:                projectContainerState(in[i].State),
+			LastTerminationState: projectLastTerminationState(in[i].LastTerminationState),
+			RestartCount:         in[i].RestartCount,
 		}
 	}
 	return out
 }
 
-func projectInitContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
-	out := projectContainerStatuses(in)
-	for i := range out {
-		if in[i].Name == gms.ServerContainerName {
-			out[i].RestartCount = in[i].RestartCount
-		}
+func projectLastTerminationState(in corev1.ContainerState) corev1.ContainerState {
+	if in.Terminated == nil {
+		return corev1.ContainerState{}
 	}
-	return out
+	return corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: in.Terminated.ExitCode,
+		Reason:   in.Terminated.Reason,
+	}}
 }
 
 func projectContainerState(in corev1.ContainerState) corev1.ContainerState {

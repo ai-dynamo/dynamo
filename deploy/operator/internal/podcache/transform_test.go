@@ -121,9 +121,13 @@ func TestProjectConsumerContract(t *testing.T) {
 					}},
 				},
 				{
-					Name: "worker",
+					Name:         "worker",
+					RestartCount: 2,
 					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 						ExitCode: 17, Signal: 9, Reason: "Error", Message: "worker failed", ContainerID: "discard-me",
+					}},
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1, Reason: "Error", Message: "discard-me", ContainerID: "discard-me",
 					}},
 				},
 			},
@@ -178,14 +182,21 @@ func TestProjectConsumerContract(t *testing.T) {
 		assert.Equal(t, corev1.PodRunning, got.Status.Phase)
 		require.Len(t, got.Status.ContainerStatuses, 2)
 		assert.Equal(t, "ImagePullBackOff", got.Status.ContainerStatuses[0].State.Waiting.Reason)
-		assert.Zero(t, got.Status.ContainerStatuses[0].RestartCount)
 		assert.Equal(t, int32(17), got.Status.ContainerStatuses[1].State.Terminated.ExitCode)
 		assert.Equal(t, "worker failed", got.Status.ContainerStatuses[1].State.Terminated.Message)
 		require.Len(t, got.Status.InitContainerStatuses, 2)
 		assert.Equal(t, "ErrImagePull", got.Status.InitContainerStatuses[0].State.Waiting.Reason)
-		assert.Zero(t, got.Status.InitContainerStatuses[0].RestartCount)
 		assert.Equal(t, "GMS failed", got.Status.InitContainerStatuses[1].State.Terminated.Message)
 		assert.Equal(t, int32(5), got.Status.InitContainerStatuses[1].RestartCount)
+	})
+	t.Run("crash-loop detection retains restart counts and last exit", func(t *testing.T) {
+		assert.Equal(t, int32(7), got.Status.ContainerStatuses[0].RestartCount)
+		assert.Equal(t, int32(2), got.Status.ContainerStatuses[1].RestartCount)
+		assert.Equal(t, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 1, Reason: "Error",
+		}}, got.Status.ContainerStatuses[1].LastTerminationState)
+		assert.Nil(t, got.Status.ContainerStatuses[0].LastTerminationState.Terminated)
+		assert.Equal(t, int32(3), got.Status.InitContainerStatuses[0].RestartCount)
 	})
 	t.Run("GMS replacement retains only native init-sidecar identity", func(t *testing.T) {
 		assert.Equal(t, []corev1.Container{{

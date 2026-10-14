@@ -87,6 +87,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -399,6 +400,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 			status:               metav1.ConditionTrue,
 			reason:               "DeploymentReady",
 			message:              "Deployment is ready",
+			serviceReplicaStatus: serviceReplicaStatus,
+			gpuShape:             gpuShapeStatus,
+		}, nil
+	}
+	crashLoop, crashLooping, err := r.findDeploymentCrashLoop(ctx, deployment)
+	if err != nil {
+		return ComponentReconcileResult{}, err
+	}
+	if crashLooping {
+		return ComponentReconcileResult{
+			modified:             deploymentModified,
+			status:               metav1.ConditionFalse,
+			reason:               dcdReasonContainerCrashLooping,
+			message:              crashLoop.String(),
 			serviceReplicaStatus: serviceReplicaStatus,
 			gpuShape:             gpuShapeStatus,
 		}, nil
@@ -1053,6 +1068,11 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapDeploymentPodToDCDRequests),
+			builder.WithPredicates(dcdPodCrashLoopPredicate()),
+		).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
