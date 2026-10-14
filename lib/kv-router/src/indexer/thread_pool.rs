@@ -493,7 +493,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Arc::clone(&self.backend)
     }
 
-    /// Stops and joins the maintenance thread, if it is still running.
     fn stop_maintenance(&self) {
         let maintenance = self
             .maintenance

@@ -769,7 +769,6 @@ impl Node {
         self.children.for_each_child(visit);
     }
 
-    /// Whether `child` is attached to this node under `key`.
     pub(super) fn has_child(&self, key: LocalBlockHash, child: &SharedNode) -> bool {
         self.children
             .get(&key)
