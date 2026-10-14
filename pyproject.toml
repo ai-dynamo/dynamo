@@ -51,6 +51,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 artifact-delivery = [
     "opendal==0.47.10",
+    "cryptography>=46.0,<51.0",
 ]
 
 trtllm =[
