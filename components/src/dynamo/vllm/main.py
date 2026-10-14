@@ -114,6 +114,14 @@ async def close_configured_artifact_runtime() -> None:
     await close()
 
 
+async def initialize_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import (
+        initialize_configured_artifact_runtime as initialize,
+    )
+
+    await initialize()
+
+
 async def _close_worker_resources(
     state_agent_lifecycle: StateAgentLifecycle,
 ) -> None:
@@ -242,6 +250,9 @@ async def worker(argv: list[str] | None = None) -> None:
     if config.headless:
         run_dynamo_headless(config)
         return
+
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        await initialize_configured_artifact_runtime()
 
     shutdown_event = asyncio.Event()
     state_agent_lifecycle = StateAgentLifecycle()

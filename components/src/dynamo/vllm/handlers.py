@@ -6,6 +6,7 @@ import base64
 import functools
 import importlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -86,7 +87,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -144,6 +145,18 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
+
+
+def _configured_artifact_router_profile() -> tuple[tuple[int, int, int], ...]:
+    configured = os.environ.get("DYNAMO_ARTIFACT_ROUTER_PROFILE")
+    if configured is None:
+        return ()
+    from dynamo.artifacts.vllm.capture import _validated_router_profile
+
+    try:
+        return _validated_router_profile(json.loads(configured))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid DYNAMO_ARTIFACT_ROUTER_PROFILE") from exc
 
 
 def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
@@ -1284,6 +1297,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._served_model_name = config.served_model_name or config.model
         self._served_model_aliases = tuple(config.served_model_aliases or ())
         self.engine_args = config.engine_args
+        self.artifact_router_profile = _configured_artifact_router_profile()
         self._lora_state = LoRAState()
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
@@ -4092,7 +4106,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         artifact_settings = _backend_metadata_upload_settings(request)
         if artifact_settings is not None and "kind" in artifact_settings:
-            from dynamo.artifacts.vllm.capture import VllmArtifactSession
+            from dynamo.artifacts.vllm.capture import (
+                CaptureCapacityError,
+                VllmArtifactSession,
+            )
 
             if (
                 mode != DisaggregationMode.AGGREGATED
@@ -4101,10 +4118,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument(
                     "artifact capture currently requires aggregated token-mode generation"
                 )
-            profile_json = os.environ.get("DYNAMO_ARTIFACT_ROUTER_PROFILE", "[]")
-            import json
-
-            profile = tuple(tuple(site) for site in json.loads(profile_json))
             contents = artifact_settings.get("contents", [])
             if any(name in contents for name in ("selected_logprobs", "topk_logprobs")):
                 if sampling_params.logprobs == -1 or getattr(
@@ -4120,12 +4133,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             if prompt_ids is None or has_mm_data or has_external_encoder_result:
                 raise InvalidArgument("artifact capture requires an exact token prompt")
-            try:
-                artifact_runtime = None
-                if artifact_settings.get("mode") != "inline_base64":
-                    from dynamo.artifacts.runtime import configured_artifact_runtime
+            artifact_runtime = None
+            if artifact_settings.get("mode") != "inline_base64":
+                from dynamo.artifacts.runtime import configured_artifact_runtime
 
-                    artifact_runtime = configured_artifact_runtime()
+                artifact_runtime = configured_artifact_runtime()
+                if artifact_runtime is None:
+                    raise RuntimeError("artifact delivery authority is not configured")
+            try:
                 artifact_session = VllmArtifactSession.from_request(
                     request,
                     prompt_token_count=len(prompt_ids),
@@ -4134,7 +4149,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     route_capture_enabled=bool(
                         getattr(self.engine_args, "enable_return_routed_experts", False)
                     ),
-                    router_profile=profile,
+                    router_profile=self.artifact_router_profile,
                     token_start=(
                         getattr(sampling_params, "routed_experts_prompt_start", 0)
                         if getattr(sampling_params, "routed_experts_prompt_start", None)
@@ -4144,6 +4159,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logprob_width=max(1, sampling_params.logprobs or 0),
                     runtime=artifact_runtime,
                 )
+            except CaptureCapacityError as exc:
+                raise WorkerOverloaded(str(exc)) from None
             except ValueError as exc:
                 raise InvalidArgument(str(exc)) from None
 
