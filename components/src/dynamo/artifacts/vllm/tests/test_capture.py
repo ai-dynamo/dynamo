@@ -18,6 +18,7 @@ from dynamo.artifacts.vllm import (  # noqa: E402 -- optional dependency guards
 )
 from dynamo.artifacts.vllm.capture import (  # noqa: E402 -- optional dependency guards
     CaptureBudget,
+    CaptureCapacityError,
     VllmArtifactSession,
 )
 from dynamo.artifacts.vllm.format import (  # noqa: E402 -- optional dependency guards
@@ -83,12 +84,54 @@ def test_invalid_selection_is_rejected_before_inference(contents):
 def test_budget_is_aggregate_and_admitted_before_capture():
     budget = CaptureBudget(100_000)
     first = session(budget=budget)
-    with pytest.raises(ValueError, match="capacity"):
+    with pytest.raises(CaptureCapacityError, match="capacity"):
         session(budget=CaptureBudget(1))
     assert budget.used > 0
     first.close()
     first.close()
     assert budget.used == 0
+
+
+def test_default_budget_admits_representative_concurrent_route_requests(monkeypatch):
+    monkeypatch.delenv("DYNAMO_ARTIFACT_CAPTURE_BYTES", raising=False)
+    generation_artifact.process_capture_budget.cache_clear()
+    budget = generation_artifact.process_capture_budget()
+    runtime = SimpleNamespace(validate=Mock())
+    sessions = []
+    try:
+        for _ in range(20):
+            sessions.append(
+                VllmArtifactSession.from_request(
+                    request(("moe_routes",), "object_store", {"kind": "managed_store"}),
+                    prompt_token_count=2048,
+                    max_tokens=8192,
+                    route_capture_enabled=True,
+                    router_profile=tuple((i, 256, 8) for i in range(48)),
+                    budget=budget,
+                    runtime=runtime,
+                )
+            )
+        assert budget.used <= budget.max_bytes
+    finally:
+        for capture in sessions:
+            capture.close()
+        generation_artifact.process_capture_budget.cache_clear()
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_rejection_is_not_reported_as_invalid_capture():
+    runtime = SimpleNamespace(
+        validate=Mock(), submit=AsyncMock(side_effect=RuntimeError("delivery full"))
+    )
+    capture = session(
+        request((), "object_store", {"kind": "managed_store"}), runtime=runtime
+    )
+    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    result = await capture.finalize()
+    assert result["state"] == "failed"
+    assert result["error_code"] == "delivery_rejected"
+    assert capture.reserved_bytes == 0
 
 
 @pytest.mark.asyncio
