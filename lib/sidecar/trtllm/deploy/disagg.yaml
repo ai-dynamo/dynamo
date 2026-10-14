@@ -24,11 +24,12 @@
 # peer engine dials.
 #
 # PREREQUISITES / CAVEATS:
-#   - The prefill -> decode flow was validated with both engines co-located on
-#     one node, NIXL over TCP/CUDA-IPC without rdma/ib, which is what this
-#     manifest asks for. On a real RDMA fabric, add `rdma/ib: "1"` to each
-#     engine's resource limits and requests. Configure memory-lock limits and
-#     any additional capabilities only as required by that deployment.
+#   - The prefill -> decode flow was validated with both engines on one node,
+#     using NIXL over TCP/CUDA-IPC without rdma/ib. This manifest does not
+#     enforce placement. Set placement rules for same-node serving, or validate
+#     the interconnect before running across nodes. On an RDMA fabric, add
+#     `rdma/ib: "1"` to each engine's resource limits and requests. Configure
+#     memory-lock limits and other capabilities as that deployment requires.
 #   - The frontend, operator, and Dynamo runtime images must use compatible
 #     versions; the pinned nightlies below were validated together.
 
