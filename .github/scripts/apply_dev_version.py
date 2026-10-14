@@ -9,7 +9,7 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
   - [package].version / [workspace.package].version in every Cargo.toml
     (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev20260423')
   - The `ai-dynamo-runtime==1.1.0` pin in the root pyproject
-  - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
+  - The `version = "1.1.0"` pins on dynamo-* path deps in root Cargo.toml
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
 
@@ -33,12 +33,10 @@ from pathlib import Path
 PYPROJECT_TARGETS = [
     "pyproject.toml",
     "lib/bindings/python/pyproject.toml",
-    "lib/bindings/kvbm/pyproject.toml",
     "lib/gpu_memory_service/pyproject.toml",
 ]
 
 # Sub-crate Cargo files with an EXPLICIT [package].version (not workspace-inherited).
-# kvbm-config uses `version.workspace = true`, so it's intentionally omitted.
 # lib/runtime/examples/Cargo.toml is also omitted: it's a nested workspace (own
 # [workspace.package]) used only for local example binaries, not shipped in any
 # wheel, and nothing outside that workspace pins its version.
@@ -46,12 +44,6 @@ PYPROJECT_TARGETS = [
 SUBCRATE_CARGO_TARGETS = [
     "lib/bindings/python/Cargo.toml",
     "lib/bindings/python/codegen/Cargo.toml",
-    "lib/bindings/kvbm/Cargo.toml",
-    "lib/kvbm-common/Cargo.toml",
-    "lib/kvbm-engine/Cargo.toml",
-    "lib/kvbm-kernels/Cargo.toml",
-    "lib/kvbm-logical/Cargo.toml",
-    "lib/kvbm-physical/Cargo.toml",
 ]
 
 # Direct path deps on workspace crates, e.g. backend-common's

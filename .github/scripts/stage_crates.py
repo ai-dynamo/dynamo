@@ -44,7 +44,7 @@ EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/", "/deploy/")
 # Workspace members never published from the on-demand flow: internal
 # service/tool crates that no published crate depends on (leaves — excluding
 # them is closure-safe) and that registry consumers never pull.
-EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
+EXCLUDE_NAMES: frozenset[str] = frozenset()
 # Artifactory < 7.148 rejects the `Content-Type: application/octet-stream` header
 # cargo >= 1.96 sends on publish with a 415 (rust-lang/cargo#17086),
 # so the upload runs on the last pre-header toolchain. Remove once the
