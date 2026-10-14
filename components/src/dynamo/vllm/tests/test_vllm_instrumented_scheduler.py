@@ -9868,10 +9868,11 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.SUBSCRIBE, b"")
     publisher = instrumented_scheduler_module._FpmPublisherThread(
-        "tcp://127.0.0.1:*", worker_id="", dp_rank=0
+        "tcp://127.0.0.1:*", worker_id="", dp_rank=0, start_paused=True
     )
-    sub.connect(publisher._pub.getsockopt_string(zmq.LAST_ENDPOINT))
     try:
+        sub.connect(publisher._pub.getsockopt_string(zmq.LAST_ENDPOINT))
+        publisher.resume()
         scheduler = object.__new__(InstrumentedScheduler)
         scheduler._fpm_worker_id = ""
         scheduler._fpm_dp_rank = 0
