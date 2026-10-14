@@ -359,7 +359,11 @@ See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-t
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_RECORDS" type="string" default="request_end,tool">
-  Comma-separated record types: `request_end`, `request_payload`, and `tool`.
+  Comma-separated record types: `request_end`, `request_payload`, `tool`, and `router_selection`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K" type="integer" default="16">
+  Lowest-cost candidates kept per `router_selection` row. `0` keeps every scored candidate; the selected worker is always kept.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">

@@ -500,6 +500,95 @@ mod tests {
     }
 
     #[test]
+    fn selection_trace_is_captured_only_when_requested() {
+        struct DecodeLoadScorer;
+
+        impl WorkerScorer for DecodeLoadScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    *cost = candidate.load().unwrap().decode_cost_blocks();
+                }
+                Ok(())
+            }
+        }
+
+        /// Picks the costliest candidate so the selected row falls outside the top-k.
+        struct HighestCostPicker;
+
+        impl WorkerPicker for HighestCostPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.cost().total_cmp(&b.1.cost()))
+                    .map(|(row, _)| row)
+                    .unwrap())
+            }
+        }
+
+        let workers: HashMap<_, _> = (0..8u64)
+            .map(|id| (id, TaintedWorkerConfig::default()))
+            .collect();
+        let mut request = base_request(16);
+        request.worker_loads = worker_loads_with_active_decode(FxHashMap::from_iter(
+            (0..8u64).map(|id| (WorkerWithDpRank::from_worker_id(id), id as usize)),
+        ));
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(DecodeLoadScorer)],
+            Box::new(HighestCostPicker),
+        );
+
+        let untraced = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(untraced.worker.worker_id, 7);
+        assert!(untraced.selection_trace.is_none());
+
+        request.selection_trace = Some(crate::protocols::SelectionTraceSpec { top_k: 3 });
+        let traced = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        let trace = traced.selection_trace.expect("trace requested");
+        assert_eq!(trace.candidate_count, 8);
+        assert!(!trace.pinned);
+        let mut rows = trace.rows.clone();
+        rows.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        let ids: Vec<u64> = rows.iter().map(|row| row.worker.worker_id).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1, 2, 7],
+            "three cheapest plus the selected worker"
+        );
+        assert_eq!(rows[3].cost, 7.0);
+    }
+
+    #[test]
     fn custom_picker_receives_requested_cache_inputs() {
         struct HighestOverlapPicker;
 

@@ -1707,6 +1707,7 @@ impl<
                     target_cached_prefix_blocks,
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
+                    selection_trace: selected.selection.selection_trace,
                 },
             })
         })
@@ -1753,6 +1754,7 @@ impl<
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            selection_trace: selected.selection.selection_trace,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2200,6 +2202,7 @@ mod tests {
                 selected_raw_cached_tokens: None,
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
+                selection_trace: None,
             })
         }
     }
@@ -2650,6 +2653,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            selection_trace: None,
             resp_tx: Some(tx),
         };
         (req, rx)

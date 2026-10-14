@@ -1099,6 +1099,41 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+
+    /// Per-candidate costs captured for this selection, present only when the
+    /// request asked for them (`SchedulingRequest::selection_trace`).
+    pub selection_trace: Option<SelectionTrace>,
+}
+
+/// Request to capture per-candidate costs for one worker selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionTraceSpec {
+    /// Number of lowest-cost candidates to retain. `0` retains every candidate.
+    /// The selected worker is always retained.
+    pub top_k: usize,
+}
+
+/// One candidate's final cost in a traced selection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionTraceRow {
+    pub worker: WorkerWithDpRank,
+    /// Total cost after every scorer ran, in the policy's cost units
+    /// (scheduler-tracked KV blocks for the builtin policy). Lower is better.
+    pub cost: f64,
+}
+
+/// Per-candidate costs captured for one worker selection.
+///
+/// Rows are unordered. When `rows.len() < candidate_count`, the selection was
+/// truncated to the `top_k` lowest-cost candidates plus the selected worker,
+/// which is always present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionTrace {
+    /// Eligible candidates the policy scored, before truncation.
+    pub candidate_count: usize,
+    /// Whether the host pinned the selection to one worker and rank.
+    pub pinned: bool,
+    pub rows: Vec<SelectionTraceRow>,
 }
 
 /// Active load metrics for a worker, used for overload detection.

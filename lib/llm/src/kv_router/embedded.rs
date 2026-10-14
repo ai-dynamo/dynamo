@@ -280,6 +280,7 @@ impl EmbeddedSelection {
                     sender: args.scheduler_load,
                     worker_type: args.metric_worker_type,
                 })),
+                selection_trace: crate::request_trace::router_selection_spec(),
             },
             replication: HostReplication {
                 channels: replica_sync,

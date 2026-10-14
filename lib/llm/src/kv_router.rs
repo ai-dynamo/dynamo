@@ -1411,7 +1411,7 @@ impl KvRouter {
             Err(error) => return Err(error.into()),
         };
         let Selected {
-            response,
+            mut response,
             advisory_load,
             isl_tokens,
             kv_hint,
@@ -1518,6 +1518,12 @@ impl KvRouter {
             !is_admitted_routing,
             "advisory load is set exactly for without-admission selection"
         );
+        // Publish the selection trace here, on the routing task and before any
+        // fallible bookkeeping, so every caller of this method (routing hosts,
+        // prefill reservations, the Python binding) emits exactly one row.
+        if let (Some(request_id), Some(trace)) = (context_id, response.selection_trace.take()) {
+            crate::request_trace::emit_router_selection(request_id, self.worker_type(), trace);
+        }
         Ok(AdmittedFindBestMatchOutcome {
             outcome: FindBestMatchOutcome::Routed {
                 worker: response.best_worker,

@@ -4,6 +4,7 @@
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dynamo_custom_policy_builtin::default_policy;
+use dynamo_kv_router::protocols::SelectionTraceSpec;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -102,6 +103,52 @@ fn bench(c: &mut Criterion) {
         }
         group.finish();
     }
+
+    // Selection-trace capture (`DYN_REQUEST_TRACE_RECORDS=router_selection`): the disabled arm
+    // is the production default and must match `plugin` above; `top16` is the default capture.
+    let mut group = c.benchmark_group("default_selection/trace");
+    group
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_millis(500))
+        .sample_size(30)
+        .nresamples(1_000);
+    for count in [64, 1024, 4096] {
+        for (arm, spec) in [
+            ("off", None),
+            ("top16", Some(SelectionTraceSpec { top_k: 16 })),
+            ("all", Some(SelectionTraceSpec { top_k: 0 })),
+        ] {
+            let (workers, mut request) = support::fixture(count, 2048);
+            request.selection_trace = spec;
+            let plugin = default_policy(
+                KvRouterConfig {
+                    router_temperature: 0.0,
+                    ..Default::default()
+                },
+                "prefill",
+            );
+            let allocs = allocations(|| {
+                black_box(
+                    plugin
+                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .unwrap(),
+                );
+            });
+            eprintln!(
+                "allocations per 100 warm selections: trace={arm} workers={count} plugin={allocs}"
+            );
+            group.bench_function(BenchmarkId::new(arm, count), |b| {
+                b.iter(|| {
+                    black_box(
+                        plugin
+                            .select_worker(support::selection_input(&workers, &request, 16))
+                            .unwrap(),
+                    )
+                })
+            });
+        }
+    }
+    group.finish();
 }
 
 struct LoadScorer(f64);
