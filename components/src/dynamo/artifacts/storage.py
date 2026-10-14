@@ -38,6 +38,10 @@ _INVALID_URL_CHAR = re.compile(r"""[^A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]""")
 _RFC3339 = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
+_EMBEDDED_IPV4_PREFIXES = (
+    ipaddress.IPv6Network("64:ff9b::/96"),
+    ipaddress.IPv6Network("::/96"),
+)
 _DENIED_HEADERS = frozenset(
     {
         "authorization",
@@ -104,8 +108,13 @@ def _byte_limit(value: int) -> None:
 def _expiry(value: str) -> datetime:
     if not isinstance(value, str) or len(value) > 64 or not _RFC3339.fullmatch(value):
         raise _invalid("expires_at must be an RFC 3339 timestamp")
+    normalized = value.replace("Z", "+00:00")
+    if "." in normalized:
+        prefix, suffix = normalized.split(".", 1)
+        fraction = suffix.split("+", 1)[0].split("-", 1)[0]
+        normalized = prefix + "." + fraction[:6].ljust(6, "0") + suffix[len(fraction) :]
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         raise _invalid("expires_at must be an RFC 3339 timestamp") from None
     if parsed.tzinfo is None:
@@ -243,8 +252,11 @@ class StoragePolicy:
             address = ipaddress.ip_address(value)
         except ValueError:
             raise _invalid("destination address is invalid") from None
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-            address = address.ipv4_mapped
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.ipv4_mapped:
+                address = address.ipv4_mapped
+            elif any(address in prefix for prefix in _EMBEDDED_IPV4_PREFIXES):
+                address = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
         forbidden = (
             address.is_link_local or address.is_multicast or address.is_unspecified
         )
