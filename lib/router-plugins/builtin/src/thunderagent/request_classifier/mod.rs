@@ -17,6 +17,7 @@ use dynamo_kv_router::plugins::request_classifier::{
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
     RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -283,7 +284,11 @@ impl ThunderAgentClassifier {
 
 #[async_trait]
 impl RequestClassifier for ThunderAgentClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         let Some(session) = request.session_context() else {
             return Box::pin(async move { Ok(request) });
         };
