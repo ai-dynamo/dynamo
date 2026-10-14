@@ -562,7 +562,10 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
             "/query",
             post(query).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
         )
-        .route("/query_by_hash", post(query_by_hash))
+        .route(
+            "/query_by_hash",
+            post(query_by_hash).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/dump", get(dump_events))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))

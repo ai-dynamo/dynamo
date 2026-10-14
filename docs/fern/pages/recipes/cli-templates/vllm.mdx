@@ -46,6 +46,32 @@ The default model is `Qwen/Qwen3-0.6B`.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg.sh)
 </Accordion>
+<Accordion title="Qwen3-ASR Realtime Transcription">
+
+**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM 0.30.0's native
+Qwen3-ASR support. The launch script requires an explicit `--hf-overrides` argument:
+
+```bash
+./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
+    --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}' \
+    --max-model-len 4096 --max-num-seqs 2
+```
+
+In another terminal, send a speech file longer than five seconds to check incremental delivery:
+
+```bash
+python launch/realtime_audio_client.py \
+    --session-type transcription \
+    --model Qwen/Qwen3-ASR-0.6B \
+    --input-audio speech.wav \
+    --require-incremental
+```
+
+The client sends audio while receiving transcription events. A successful check prints
+`delta before commit: True`. vLLM processes five-second segments and flushes remaining audio on commit.
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+</Accordion>
 <Accordion title="Text Embeddings">
 
 Starts a vLLM pooling worker and exposes the OpenAI-compatible embeddings endpoint. Use it for
@@ -370,25 +396,6 @@ The default model is `Qwen/Qwen3-0.6B`.
 ```
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_tracing.sh)
-</Accordion>
-<Accordion title="Data-Parallel Attention and Expert Parallelism">
-
-Starts multiple data-parallel workers for a Mixture-of-Experts model and lets Dynamo route among the
-data-parallel ranks. The default Qwen configuration uses four GPUs.
-
-The default model is `Qwen/Qwen3-30B-A3B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/dep.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dep.sh)
 </Accordion>
 <Accordion title="Multi-Node DeepSeek-R1 Expert Parallelism">
 
@@ -948,6 +955,7 @@ The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`.
 | --- | --- | --- |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 | `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `MODEL` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Model identifier or path. |
 
 **Command-line flags:** `--model` sets the model identifier or path.
 
@@ -956,6 +964,30 @@ The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`.
 ```bash
 ./launch/agg_omni_audio.sh
 ```
+
+The same script serves Nemotron Audex, which runs a two-stage pipeline: stage 0 is the thinker that
+emits speech codec tokens, and stage 1 decodes those tokens to a 16 kHz mono waveform.
+
+```bash
+./launch/agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-2B
+```
+
+Audex serves a single built-in voice, so the request contract differs from Qwen3-TTS: the handler
+accepts `voice` only when it is omitted or set to `default`, rejects `ref_audio` and `ref_text`,
+and accepts an optional `nvext.cfg_scale` for classifier-free guidance. The printed curl example adapts to the selected model. See
+[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for the request format.
+
+<Note>
+Both Audex checkpoints report the same model type, so the 30B-A3B needs an explicit stage
+configuration. Otherwise auto-detection selects the 2B-tuned file. vLLM-Omni ships the
+configuration, so resolve it from the installed package and pass it through to the worker:
+
+```bash
+AUDEX_30B_CFG=$(python3 -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
+./launch/agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-30B-A3B \
+    --stage-configs-path "$AUDEX_30B_CFG"
+```
+</Note>
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
 </Accordion>

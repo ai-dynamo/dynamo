@@ -1,8 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from router.common import add_expected_osl
-from router.real_data_priority_benchmark import tag_requests_with_priority
+import pytest
+
+# Collection precedes marker filtering, including in the lean Planner image
+# which does not install the router benchmark's graph-synthesis dependency.
+pytest.importorskip("networkx", reason="router benchmark synthesis needs networkx")
+
+from benchmarks.router.common import (  # noqa: E402 -- optional dependency check
+    add_expected_osl,
+    tag_requests_with_priority,
+)
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.parallel,
+]
 
 
 def test_expected_osl_uses_mooncake_output_length_and_preserves_hints():

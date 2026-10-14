@@ -4,9 +4,10 @@
 """Unit tests for MultimodalEmbeddingCacheManager."""
 
 import pytest
-import torch
 
-from dynamo.common.memory.multimodal_embedding_cache_manager import (
+torch = pytest.importorskip("torch")
+
+from dynamo.common.memory.multimodal_embedding_cache_manager import (  # noqa: E402
     CachedEmbedding,
     CacheMutation,
     CacheReservation,

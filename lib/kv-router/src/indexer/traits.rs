@@ -266,7 +266,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
-    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// ConcurrentRadixTreeCompressed). Returns `None` for backends that keep per-thread
     /// state and must dump via the worker channel.
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         None

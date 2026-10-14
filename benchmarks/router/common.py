@@ -5,11 +5,10 @@
 
 """Common utilities shared across router benchmark scripts."""
 
+import copy
 import json
 import logging
 import os
-
-from prefix_data_generator.synthesizer import Synthesizer
 
 # Default values
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -236,6 +235,16 @@ def add_expected_osl(request):
     set_trace_agent_hint(request, "osl", osl)
 
 
+def tag_requests_with_priority(requests, priority):
+    """Return request copies with extra.nvext.agent_hints.priority merged in."""
+    tagged_requests = []
+    for request in requests:
+        tagged_request = copy.deepcopy(request)
+        set_trace_agent_hint(tagged_request, "priority", priority)
+        tagged_requests.append(tagged_request)
+    return tagged_requests
+
+
 def prepare_trace_dataset(args, output_dir, logger):
     """Prepare a trace dataset, optionally synthesizing or modifying it.
 
@@ -314,6 +323,10 @@ def prepare_trace_dataset(args, output_dir, logger):
         f"  Max OSL: {args.max_osl if args.max_osl else 'no clipping'} (clipping)"
     )
     logger.info(f"  Random seed: {args.seed}")
+
+    # Synthetic generation has optional dependencies absent from slim CPU test images.
+    # Keep the request helpers and trace-file path usable without those dependencies.
+    from prefix_data_generator.synthesizer import Synthesizer
 
     synthesizer = Synthesizer(
         args.input_dataset,

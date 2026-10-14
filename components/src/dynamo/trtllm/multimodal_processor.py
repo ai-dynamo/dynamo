@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import httpx
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -29,7 +28,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -39,13 +38,24 @@ from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
 )
-from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.media_source import describe_media_source
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
+from dynamo.common.multimodal.media_source import decode_data_uri, describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
+# Shortest whole-request budget for one embedding download, in seconds.
+_EMBEDDING_FETCH_MIN_TIMEOUT_S = 300.0
+# Above the floor, the budget is the size cap divided by this rate (bytes/s).
+_EMBEDDING_FETCH_MIN_RATE = 64 * 1024
+# A server that sends nothing for this long fails the download, in seconds.
+_EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -100,6 +110,41 @@ def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, A
     return mm_kwargs
 
 
+def _is_safetensors_url(url: str) -> bool:
+    """True when the URL path (not query) ends with ``.safetensors``."""
+    return urlparse(url).path.lower().endswith(".safetensors")
+
+
+def _urls_from_multi_modal_items(
+    items: Any,
+) -> Tuple[List[str], List[str]]:
+    """Split ``multi_modal_data`` image items into image URLs and embedding paths."""
+    image_urls: List[str] = []
+    embedding_paths: List[str] = []
+    if not isinstance(items, list):
+        return image_urls, embedding_paths
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("Url"), str):
+            url = item["Url"]
+        elif isinstance(item, str):
+            url = item
+        else:
+            continue
+        if not url:
+            continue
+        if _is_safetensors_url(url):
+            embedding_paths.append(url)
+        else:
+            image_urls.append(url)
+    return image_urls, embedding_paths
+
+
+def request_messages(request: Dict[str, Any]) -> List[Dict]:
+    extra_args = request.get("extra_args") or {}
+    messages = extra_args.get("messages") or request.get("messages") or []
+    return messages if isinstance(messages, list) else []
+
+
 class MultimodalRequestProcessor:
     """Simple processor for OpenAI format multimodal requests."""
 
@@ -128,7 +173,8 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding,
+            max_bytes=self.max_file_size_bytes,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
@@ -192,7 +238,7 @@ class MultimodalRequestProcessor:
             return next(iter(data.values()))
         return data
 
-    def load_tensor_from_path_or_url(
+    async def load_tensor_from_path_or_url(
         self, path: str
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
         """Load tensors from a local .safetensors path or URL.
@@ -214,35 +260,32 @@ class MultimodalRequestProcessor:
         if self.is_url(path):
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
+            # One budget for the whole download: at least 300 s, and 800 s at
+            # the default 50 MiB cap. A server that sends nothing for 300 s
+            # fails sooner.
+            timeout = max(
+                _EMBEDDING_FETCH_MIN_TIMEOUT_S,
+                self.max_file_size_bytes / _EMBEDDING_FETCH_MIN_RATE,
+            )
             try:
-                with httpx.Client(timeout=300.0) as client:
-                    with client.stream("GET", path) as resp:
-                        resp.raise_for_status()
-                        content_length = resp.headers.get("content-length")
-                        if (
-                            content_length
-                            and int(content_length) > self.max_file_size_bytes
-                        ):
-                            raise RuntimeError(
-                                f"File size exceeds limit: "
-                                f"{int(content_length) // (1024*1024)}MB > "
-                                f"{self.max_file_size_mb}MB"
-                            )
-                        chunks = []
-                        downloaded = 0
-                        for chunk in resp.iter_bytes():
-                            downloaded += len(chunk)
-                            if downloaded > self.max_file_size_bytes:
-                                raise RuntimeError(
-                                    f"File size exceeds limit: "
-                                    f"{downloaded // (1024*1024)}MB > "
-                                    f"{self.max_file_size_mb}MB"
-                                )
-                            chunks.append(chunk)
-                        content = b"".join(chunks)
-                    data = safetensors_load(content)
-                    return self._unwrap_safetensors(data)
+                # The shared client checks self._url_policy on the URL and on
+                # each redirect hop, filters blocked addresses again when it
+                # connects, and stops reading past the size cap.
+                content = await fetch_bytes(
+                    path,
+                    timeout,
+                    policy=self._url_policy,
+                    max_bytes=self.max_file_size_bytes,
+                    read_timeout=_EMBEDDING_FETCH_READ_TIMEOUT_S,
+                )
+                data = safetensors_load(content)
+                return self._unwrap_safetensors(data)
             except RuntimeError:
+                raise
+            except (UrlValidationError, HttpStatusError, HttpConfigurationError):
+                # Keep the type, so that the callers can tell a rejected URL
+                # (a client error) from a proxy configuration fault (a server
+                # error).
                 raise
             except Exception as e:
                 logging.error(f"Failed to download or load tensor from URL: {e}")
@@ -303,12 +346,34 @@ class MultimodalRequestProcessor:
                         if not url:
                             continue
                         self.modality = "image"
-                        if url.endswith(".safetensors"):
+                        if _is_safetensors_url(url):
                             embedding_paths.append(url)
                         else:
                             image_urls.append(url)
 
         return "".join(text_parts), image_urls, embedding_paths
+
+    def extract_prompt_and_media_from_request(
+        self, request: Dict[str, Any]
+    ) -> Tuple[str, List[str], List[str]]:
+        """Extract text and media URLs, preferring ``multi_modal_data``.
+
+        The frontend strips inline ``data:`` payloads from
+        ``extra_args.messages`` so the request plane carries a single copy of
+        the media in ``multi_modal_data``. Chat-template structure still lives
+        in ``extra_args.messages``.
+        """
+        text, image_urls, embedding_paths = self.extract_prompt_and_media(
+            request_messages(request)
+        )
+        mm_data = request.get("multi_modal_data")
+        if isinstance(mm_data, dict):
+            mm_urls, mm_emb = _urls_from_multi_modal_items(mm_data.get("image_url"))
+            if mm_urls:
+                image_urls = mm_urls
+            if mm_emb:
+                embedding_paths = mm_emb
+        return text, image_urls, embedding_paths
 
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
@@ -422,7 +487,7 @@ class MultimodalRequestProcessor:
                         )
                         continue
 
-                    if url.endswith(".safetensors"):
+                    if _is_safetensors_url(url):
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch
@@ -435,7 +500,8 @@ class MultimodalRequestProcessor:
                 if image_urls:
                     try:
                         pil_images = await self.image_loader.load_image_batch(
-                            image_urls
+                            image_urls,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                         if pil_images:
                             processed_mm_data["image"] = pil_images
@@ -454,7 +520,7 @@ class MultimodalRequestProcessor:
                 if embedding_paths:
                     try:
                         raw_loaded = [
-                            self.load_tensor_from_path_or_url(path)
+                            await self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
                         loaded_embeddings = []
@@ -473,6 +539,15 @@ class MultimodalRequestProcessor:
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
                             )
+                    except (
+                        UrlValidationError,
+                        HttpStatusError,
+                        HttpConfigurationError,
+                    ):
+                        # Keep the type: a rejected URL is a client error (4xx)
+                        # and a proxy configuration fault is a server error
+                        # (5xx). A None return makes both a generic 500.
+                        raise
                     except Exception as e:
                         logging.error(f"Failed to load embeddings: {e}")
                         return None
@@ -505,10 +580,19 @@ class MultimodalRequestProcessor:
                     )
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
-                    if urlparse(normalized_url).scheme in ("http", "https"):
-                        content = await fetch_bytes(
-                            normalized_url, 30.0, policy=self._url_policy
-                        )
+                    scheme = urlparse(normalized_url).scheme
+                    if scheme in ("http", "https", "data"):
+                        if scheme == "data":
+                            content = decode_data_uri(
+                                normalized_url, max_bytes=self.max_file_size_bytes
+                            )
+                        else:
+                            content = await fetch_bytes(
+                                normalized_url,
+                                30.0,
+                                policy=self._url_policy,
+                                max_bytes=self.max_file_size_bytes,
+                            )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
@@ -619,7 +703,7 @@ class MultimodalRequestProcessor:
                     processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
 
         # Get token_ids from request (already tokenized by Rust frontend)
-        token_ids = request.get("token_ids")
+        token_ids = token_ids_to_list(request.get("token_ids"))
         if not token_ids:
             logging.warning("No token_ids in request")
             return None

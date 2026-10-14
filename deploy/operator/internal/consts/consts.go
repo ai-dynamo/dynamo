@@ -27,6 +27,10 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	// DynamoMaxNixlPorts bounds the per-pod NIXL exporter ports: rank i uses
+	// DynamoNixlPort+i. Keep in sync with MAX_COLOCATED_NIXL_EXPORTERS (nixl_telemetry.py).
+	DynamoMaxNixlPorts = 8
+
 	DynamoFPMBasePort = 20380
 
 	MpiRunSshPort = 2222
@@ -40,16 +44,18 @@ const (
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
-	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+	KubeAnnotationEnableGrove            = "nvidia.com/enable-grove"
+	KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
 
 	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
-	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
-	WorkloadProviderComponent      = "component"
-	WorkloadProviderGrove          = "grove"
+	KubeAnnotationWorkloadProvider   = "nvidia.com/workload-provider"
+	WorkloadProviderComponent        = "component"
+	WorkloadProviderGrove            = "grove"
+	WorkloadProviderDisaggregatedSet = "disaggregatedset"
 
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.
-	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
+	// Accepted values are defined by dynamo.ParseGroveUpdateStrategy.
 	KubeAnnotationGroveUpdateStrategy = "nvidia.com/grove-update-strategy"
 
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
@@ -121,17 +127,23 @@ const (
 	// Snapshot compatibility metadata is written by Dynamo capture producers
 	// and validated before a PodSnapshot may restore a Dynamo worker.
 	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"
-	SnapshotWorkerHashAnnotation           = "nvidia.com/dynamo-snapshot-worker-hash"
+	SnapshotCompatibilityHashAnnotation    = "nvidia.com/dynamo-snapshot-compatibility-hash"
 	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
-	SnapshotCompatibilityVersion           = "v1"
+	SnapshotCompatibilityVersion           = "v2"
 	SnapshotGMSModeDisabled                = "disabled"
+
+	// CUDASharedMemorySupportAnnotation mirrors Snapshot's
+	// podcontract.CuInterposeAnnotation. SnapshotJob delivers and preloads the
+	// cuInterpose shim when it is "enabled".
+	CUDASharedMemorySupportAnnotation = "nvidia.com/cuda-shared-memory-support"
 
 	// Native restore candidate metadata pins the PodSnapshot observation used
 	// by workload reconciliation so admission can detect intervening changes.
-	SnapshotCandidateUIDAnnotation     = "nvidia.com/dynamo-restore-snapshot-uid"
-	SnapshotCandidateContentAnnotation = "nvidia.com/dynamo-restore-snapshot-content"
-	SnapshotCandidateGMSModeAnnotation = "nvidia.com/dynamo-restore-snapshot-gms-mode"
-	SnapshotCandidateVersionAnnotation = "nvidia.com/dynamo-restore-snapshot-version"
+	SnapshotCandidateUIDAnnotation               = "nvidia.com/dynamo-restore-snapshot-uid"
+	SnapshotCandidateContentAnnotation           = "nvidia.com/dynamo-restore-snapshot-content"
+	SnapshotCandidateGMSModeAnnotation           = "nvidia.com/dynamo-restore-snapshot-gms-mode"
+	SnapshotCandidateVersionAnnotation           = "nvidia.com/dynamo-restore-snapshot-version"
+	SnapshotCandidateCompatibilityHashAnnotation = "nvidia.com/dynamo-restore-snapshot-compatibility-hash"
 	// RestoreCandidateTargetContainersAnnotation carries Dynamo's rendered
 	// restore destinations from workload reconciliation to Pod admission.
 	RestoreCandidateTargetContainersAnnotation = "nvidia.com/dynamo-restore-target-containers"
@@ -174,9 +186,16 @@ const (
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
 	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
+	DynamoNamespacePrefixStrictEnvVar = "DYN_NAMESPACE_PREFIX_STRICT"
 	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
+
+	// Multinode topology aliases are operator-owned and independent of the deployment provider.
+	DynamoRankEnvVar                   = "DYNAMO_RANK"
+	DynamoLeaderAddressEnvVar          = "DYNAMO_LEADER_ADDRESS"
+	DynamoRankEnvVarReference          = "$(" + DynamoRankEnvVar + ")"
+	DynamoLeaderAddressEnvVarReference = "$(" + DynamoLeaderAddressEnvVar + ")"
 
 	GlobalDynamoNamespace = "dynamo"
 
@@ -256,6 +275,7 @@ const (
 
 	DiscoveryBackendKubernetes   = "kubernetes" // label value for KubeLabelDynamoDiscoveryBackend
 	MainContainerName            = "main"
+	RuntimeContainerName         = "runtime"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
 	RestartAnnotation = "nvidia.com/restartAt"

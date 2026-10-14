@@ -29,14 +29,15 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::{
-    KvRouterConfig, WorkerCacheInput, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
+use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionPolicyFactory,
+};
+use dynamo_kv_router::plugins::{
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
+    WorkerSelectionPolicyRegistryError,
 };
 
 /// Policy type selected by `worker_selection.instances[].type`.
@@ -96,7 +97,7 @@ fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> 
 
 fn select_row(
     parameters: &Parameters,
-    cache: &[WorkerCacheInput],
+    cache: WorkerCacheInputs<'_>,
     load: &[WorkerLoadInput],
     request_blocks: u64,
 ) -> Option<usize> {
@@ -177,9 +178,9 @@ fn provider(
 }
 
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register(POLICY_TYPE, Arc::new(provider))
+    registry.register_worker_selection(POLICY_TYPE, Arc::new(provider))
 }
 
 #[cfg(test)]

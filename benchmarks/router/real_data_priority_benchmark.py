@@ -21,8 +21,8 @@ from common import (
     get_aiperf_cmd_for_trace,
     prepare_trace_dataset,
     resolve_tokenizer,
-    set_trace_agent_hint,
     setup_logger,
+    tag_requests_with_priority,
 )
 
 logger = setup_logger(__name__)
@@ -71,16 +71,6 @@ def offset_hash_ids(tier_requests):
             r["hash_ids"] = [h + offset for h in r["hash_ids"]]
             shifted[tier].append(r)
     return shifted
-
-
-def tag_requests_with_priority(requests, priority):
-    """Return request copies with extra.nvext.agent_hints.priority merged in."""
-    tagged_requests = []
-    for request in requests:
-        tagged_request = copy.deepcopy(request)
-        set_trace_agent_hint(tagged_request, "priority", priority)
-        tagged_requests.append(tagged_request)
-    return tagged_requests
 
 
 def write_trace_file(requests, path):

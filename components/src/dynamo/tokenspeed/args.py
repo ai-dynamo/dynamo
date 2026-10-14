@@ -17,7 +17,12 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.tokenspeed.disagg import (
+    resolve_disaggregation_mode,
+    validate_disagg_compatibility,
+)
 
 DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_ENDPOINT_NAME = "generate"
@@ -25,6 +30,7 @@ DEFAULT_ENDPOINT_NAME = "generate"
 
 class Config(DynamoRuntimeConfig):
     component: str
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
     use_kv_events: bool = False
 
     model: str
@@ -33,7 +39,8 @@ class Config(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
-        self.use_kv_events = False
+        self.disaggregation_mode = resolve_disaggregation_mode(self.server_args)
+        validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
 
 
 @register_encoder(Config)
@@ -95,9 +102,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     else:
         config.custom_jinja_template = None
 
+    component = (
+        "prefill"
+        if config.disaggregation_mode == DisaggregationMode.PREFILL
+        else DEFAULT_ENDPOINT_COMPONENT
+    )
     endpoint = (
         config.endpoint
-        or f"dyn://{config.namespace}.{DEFAULT_ENDPOINT_COMPONENT}.{DEFAULT_ENDPOINT_NAME}"
+        or f"dyn://{config.namespace}.{component}.{DEFAULT_ENDPOINT_NAME}"
     )
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         endpoint

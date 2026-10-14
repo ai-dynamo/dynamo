@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k25-disagg-kv-eagle
+spec:
+  backendFramework: trtllm
+  priorityClassName: ci-nightly-high-priority
+  pvcs:
+  - name: shared-model-cache
+    create: false
+  services:
+    Frontend:
+      extraPodMetadata: &podMetadata
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /opt/models
+      extraPodSpec:
+        priorityClassName: ci-nightly-high-priority
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector: &arm64NodeSelector
+          kubernetes.io/arch: arm64
+        tolerations: &gpuTolerations
+        - key: dedicated
+          operator: Equal
+          value: user-workload
+          effect: NoExecute
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        affinity:
+          nodeAffinity: &gb200NodeAffinity
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: cloud.google.com/gke-nodepool
+                  operator: In
+                  # The TRT-LLM nightly image is validated on o7v's driver stack.
+                  values: [customer-gpu-o7v]
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: Exists
+    prefill:
+      replicas: 1
+      resources:
+        requests:
+          gpu: "4"
+      sharedMemory:
+        size: 179Gi
+      extraPodMetadata: *podMetadata
+      extraPodSpec:
+        priorityClassName: ci-nightly-high-priority
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector: *arm64NodeSelector
+        tolerations: *gpuTolerations
+        affinity:
+          nodeAffinity: *gb200NodeAffinity
+          podAffinity: &workerPodAffinity
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: nvidia.com/gpu.clique
+              matchLabelKeys: [nvidia.com/dynamo-graph-deployment-name]
+              labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [prefill, decode]
+    decode:
+      replicas: 1
+      resources:
+        requests:
+          gpu: "4"
+      sharedMemory:
+        size: 179Gi
+      extraPodMetadata: *podMetadata
+      extraPodSpec:
+        priorityClassName: ci-nightly-high-priority
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector: *arm64NodeSelector
+        tolerations: *gpuTolerations
+        affinity:
+          nodeAffinity: *gb200NodeAffinity
+          podAffinity: *workerPodAffinity

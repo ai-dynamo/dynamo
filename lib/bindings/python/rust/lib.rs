@@ -21,6 +21,7 @@ use rs::pipeline::network::Ingress;
 use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
+use std::thread::sleep;
 use std::{
     fmt::Display,
     sync::{Arc, Weak},
@@ -39,9 +40,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(any(feature = "custom-policy", feature = "select-service"))]
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -116,9 +117,6 @@ type PythonBidirectionalIngress = Ingress<
 
 static INIT: OnceCell<()> = OnceCell::new();
 
-#[cfg(feature = "custom-policy")]
-static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
-
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
 
@@ -173,6 +171,119 @@ fn create_request_context(
     }
 }
 
+/// The runtime the PyO3 bridge settled on, recorded so the exit hook can name it.
+///
+/// There is no way to ask PyO3 for it at exit: `get_runtime()` builds a runtime rather than
+/// report that there is none, and an exiting process has no business starting worker threads.
+static BRIDGE_RUNTIME: std::sync::OnceLock<&'static tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
+
+/// Offer `primary` to the PyO3 bridge and report the runtime the bridge is using.
+///
+/// Recording that runtime is what lets [`wait_for_bridge_tasks_at_exit`] reach the bridge when
+/// something got to `future_into_py` first and PyO3 built a runtime of its own. Reading it
+/// straight after the offer is what makes the read safe: by then the bridge holds either
+/// `primary` or the runtime it already had, so nothing is constructed here either.
+pub(crate) fn adopt_bridge_runtime(
+    primary: &'static tokio::runtime::Runtime,
+) -> &'static tokio::runtime::Runtime {
+    // `Err(())` only means that the bridge runtime was already selected. It may already be
+    // borrowing `primary`, so identity has to be checked independently by the caller.
+    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+    bridge_runtime()
+}
+
+/// Record the selected PyO3 runtime whenever bindings access it directly.
+///
+/// The bridge selects its runtime once, so the recorded value never goes stale.
+pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
+    BRIDGE_RUNTIME.get_or_init(pyo3_async_runtimes::tokio::get_runtime)
+}
+
+/// Convert a future and record its runtime for the bounded interpreter-exit drain.
+pub(crate) fn future_into_py<F, T>(py: Python<'_>, fut: F) -> PyResult<Bound<'_, PyAny>>
+where
+    F: std::future::Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'py> IntoPyObject<'py>,
+{
+    let future = pyo3_async_runtimes::tokio::future_into_py(py, fut)?;
+    // Successful conversion initialized the bridge without requiring a Dynamo runtime.
+    bridge_runtime();
+    Ok(future)
+}
+
+/// Preserve explicit task locals while recording the converted future's runtime.
+fn future_into_py_with_locals<F, T>(
+    py: Python<'_>,
+    locals: pyo3_async_runtimes::TaskLocals,
+    fut: F,
+) -> PyResult<Bound<'_, PyAny>>
+where
+    F: std::future::Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'py> IntoPyObject<'py>,
+{
+    let future = pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, fut)?;
+    bridge_runtime();
+    Ok(future)
+}
+
+/// Longest the exit hook will wait for the runtimes it drains to go quiet.
+///
+/// A process whose service tasks never finish pays this in full on every exit: a frontend's
+/// alive-task count never reaches zero. That cost bounds how large this may be.
+const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
+///
+/// A Tokio worker resolving a `future_into_py` future is still inside `Python::with_gil` when
+/// the awaiting coroutine resumes, so the main thread can start finalizing while that worker
+/// still has Python objects to drop, and the process dies by `SIGSEGV`. The bounded wait only
+/// narrows that window: at the timeout, finalization continues regardless.
+///
+/// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime PyO3
+/// built for itself when something reached `future_into_py` before [`adopt_bridge_runtime`]
+/// could offer the process runtime. The hook only reads the recorded runtime and never
+/// initializes one.
+#[pyfunction]
+fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
+    // At most two, so there is nothing here worth allocating for.
+    let process = rs::Worker::existing_process_runtime();
+    let bridge = BRIDGE_RUNTIME
+        .get()
+        .copied()
+        .filter(|bridge| !matches!(process, Some(rt) if std::ptr::eq(rt, *bridge)));
+    let runtimes: [Option<&'static tokio::runtime::Runtime>; 2] = [process, bridge];
+    if runtimes.iter().all(Option::is_none) {
+        return;
+    }
+    let alive = || -> usize {
+        runtimes
+            .iter()
+            .flatten()
+            .map(|rt| rt.metrics().num_alive_tasks())
+            .sum()
+    };
+    // An atexit callback holds the GIL and the tasks being waited on need it, so
+    // waiting without releasing it would deadlock against those same threads.
+    py.allow_threads(|| {
+        let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
+        while alive() > 0 {
+            if std::time::Instant::now() >= deadline {
+                // At the default level, and once per process at most: it is the only thing
+                // that accounts for the extra exit delay the operator just waited through.
+                tracing::info!(
+                    alive_tasks = alive(),
+                    runtimes = runtimes.iter().flatten().count(),
+                    "tasks still running at interpreter exit; continuing without them"
+                );
+                break;
+            }
+            sleep(BRIDGE_DRAIN_POLL);
+        }
+    });
+}
+
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
@@ -197,6 +308,13 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
              has to build its own runtime it will fall back to Tokio's unbounded defaults"
         ),
     }
+
+    // atexit runs before the interpreter is finalized, the last point where a bridge task
+    // still touching Python objects can be waited for.
+    m.py().import("atexit")?.call_method1(
+        "register",
+        (wrap_pyfunction!(wait_for_bridge_tasks_at_exit, m)?,),
+    )?;
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
@@ -233,14 +351,12 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
-    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
+    m.add_class::<llm::entrypoint::AisPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
-    m.add_class::<llm::replay::SglangArgs>()?;
-    m.add_class::<llm::replay::TrtllmArgs>()?;
-    m.add_class::<llm::replay::MockEngineArgs>()?;
+    m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -290,48 +406,47 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn worker_selection_policy_factory(
-    config: &KvRouterConfig,
-) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+pub(crate) fn router_plugins(config: &KvRouterConfig) -> anyhow::Result<RouterPlugins> {
     #[cfg(feature = "custom-policy")]
     {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| registry.resolve(config))
-            .transpose()?
-            .flatten())
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
 
     #[cfg(not(feature = "custom-policy"))]
     {
         if let Some(instance) = config.selected_worker_selection_policy_instance()? {
             anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked router plugin catalog; rebuild with --features custom-policy"
             );
         }
-        Ok(None)
+        if config.request_classifier_config()?.is_some() {
+            anyhow::bail!(
+                "request_classifier is configured, but no router plugin catalog is installed; rebuild with --features custom-policy"
+            );
+        }
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_default_does_not_require_custom_frontend() {
+    let config = KvRouterConfig::default();
+    let registry = dynamo_llm::kv_router::plugins::router_plugin_registry();
+    assert!(registry.resolve(&config).unwrap().is_some());
+    let plugins = router_plugins(&config).unwrap();
+    assert!(plugins.worker_selection().is_some());
+    assert!(!plugins.has_custom_plugins());
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    #[cfg(feature = "custom-policy")]
-    {
-        WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        WorkerSelectionPolicyRegistry::default()
-    }
+pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry {
+    dynamo_llm::kv_router::plugins::router_plugin_registry()
 }
 
 #[cfg(feature = "custom-policy")]
-fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
     dynamo_custom_policy_builtin::register(&mut registry)
@@ -339,11 +454,11 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
-    WORKER_SELECTION_POLICY_REGISTRY
-        .set(registry)
-        .map_err(|_| {
-            PyRuntimeError::new_err("worker-selection policy registry already installed")
-        })?;
+    if !dynamo_llm::kv_router::plugins::install_router_plugin_registry(registry) {
+        return Err(PyRuntimeError::new_err(
+            "router plugin registry already installed",
+        ));
+    }
     register_core(m)
 }
 
@@ -351,7 +466,7 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core_with_custom_worker_selection_policy(m)
+    register_core_with_router_plugins(m)
 }
 
 /// The stock extension-module entrypoint.
@@ -475,7 +590,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 #[pyo3(text_signature = "(model_id, model_dir)")]
 fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32> {
     let dir = std::path::Path::new(model_dir);
-    llm_rs::preprocessor::lightseek_mm::resolve_exact_routing_image_token_id(model_id, dir)
+    llm_rs::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id(model_id, dir)
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
@@ -488,7 +603,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -513,6 +628,7 @@ fn register_model<'p>(
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
+    skip_model_assets: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -570,6 +686,7 @@ fn register_model<'p>(
 
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
+    let is_audios = model_type.inner.supports_audios();
     let is_videos = model_type.inner.supports_videos();
     let is_realtime = model_type.inner.supports_realtime();
 
@@ -662,14 +779,24 @@ fn register_model<'p>(
         cfg.validate_config()?;
     }
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let lifecycle_role = match worker_type_unwrapped {
+        WorkerType::Prefill => rs::telemetry::LifecycleOperationRole::Prefill,
+        WorkerType::Decode => rs::telemetry::LifecycleOperationRole::Decode,
+        WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
+        WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
+    };
+    endpoint
+        .inner
+        .set_lifecycle_operation_role(lifecycle_role)
+        .map_err(to_pyerr)?;
+
+    crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
 
-        // For TensorBased, Images, Videos, and Realtime models, skip
-        // HuggingFace downloads and register directly. These model types
-        // handle model loading internally; no tokenizer extraction is
-        // needed and the source path is not required to be a HF repo.
-        if is_tensor_based || is_images || is_videos || is_realtime {
+        // These model types handle model loading internally. External adapters can
+        // opt into the same minimal card without resolving local or HF assets.
+        // Ordinary audio registrations retain the builder's metadata and checksum.
+        if is_tensor_based || is_images || is_videos || is_realtime || skip_model_assets {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).
@@ -690,13 +817,15 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
-            // Aliases are only honored on the LLM surfaces (their handlers
-            // canonicalize alias→primary); ignore them for these types.
-            if !model_aliases.is_empty() {
+            // The audio handler resolves aliases to the primary model name.
+            // Preserve the existing alias behavior for other minimal-card types.
+            if is_audios {
+                card.set_aliases(model_aliases);
+            } else if !model_aliases.is_empty() {
                 tracing::warn!(
                     model_name = %model_name,
                     "Ignoring served-model-name aliases: not supported for \
-                     tensor/images/videos/realtime models"
+                     non-audio minimal model cards"
                 );
             }
 
@@ -818,7 +947,7 @@ fn unregister_model<'p>(
 ) -> PyResult<Bound<'p, PyAny>> {
     let lora_name_owned = lora_name.map(|s| s.to_string());
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         // Unified detach method handles both base models and LoRA adapters
         LocalModel::detach_from_endpoint(&endpoint.inner, lora_name_owned.as_deref())
             .await
@@ -835,7 +964,7 @@ fn update_model_taints<'p>(
     endpoint: Endpoint,
     taints: std::collections::HashSet<String>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         update_model_taints_rs(&endpoint.inner, taints)
             .await
             .map_err(to_pyerr)
@@ -849,10 +978,7 @@ static FETCH_MODEL_RUNTIME_MISMATCH_WARNING: std::sync::Once = std::sync::Once::
 fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
     let primary = rs::Worker::ensure_process_runtime()?;
 
-    // `Err(())` only means that the bridge runtime was already selected. It may already be
-    // borrowing `primary`, so identity has to be checked independently.
-    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+    let bridge = adopt_bridge_runtime(primary);
 
     if !std::ptr::eq(bridge, primary) {
         FETCH_MODEL_RUNTIME_MISMATCH_WARNING.call_once(|| {
@@ -882,7 +1008,7 @@ fn fetch_model<'p>(
     let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
     let repo = remote_name.to_string();
     ensure_fetch_model_runtime().map_err(to_pyerr)?;
-    pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+    crate::future_into_py_with_locals(py, locals, async move {
         LocalModel::fetch(&repo, ignore_weights)
             .await
             .map_err(to_pyerr)
@@ -1100,6 +1226,11 @@ impl ModelType {
         inner: llm_rs::model_type::ModelType::Pooling,
     };
 
+    #[classattr]
+    const Rerank: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Rerank,
+    };
+
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
     }
@@ -1114,6 +1245,10 @@ impl ModelType {
 
     fn supports_pooling(&self) -> bool {
         self.inner.supports_pooling()
+    }
+
+    fn supports_rerank(&self) -> bool {
+        self.inner.supports_rerank()
     }
 
     fn __or__(&self, other: &Self) -> Self {
@@ -1232,14 +1367,12 @@ impl DistributedRuntime {
         // frontend in `future_into_py`, which spawns through `get_runtime()`, so this is the
         // call that decides which runtime serves traffic.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
-        INIT.get_or_init(|| {
-            // An `Err` means the bridge already holds a runtime, and it never hands one back.
-            // That is a state to accept rather than a failure to report: `backend::Worker` may
-            // have registered this same `RT`, and `dynamo.sglang` reaches `get_runtime()`
-            // before we run. Refusing here broke every sglang test.
-            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
-                && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
-            {
+        // The bridge keeping a runtime of its own is a state to accept rather than a failure to
+        // report: `backend::Worker` may have registered this same `RT`, and `dynamo.sglang`
+        // reaches `get_runtime()` before we run. Refusing here broke every sglang test.
+        let bridge = adopt_bridge_runtime(primary);
+        if !std::ptr::eq(bridge, primary) {
+            INIT.get_or_init(|| {
                 // Both runtimes are sized from DYN_RUNTIME_*, since module init handed the
                 // bridge the same builder. The cost is that there are two of them, so the
                 // process carries twice the threads that configuration describes.
@@ -1248,8 +1381,8 @@ impl DistributedRuntime {
                      DistributedRuntime was created, so the process now has two; both are sized \
                      from DYN_RUNTIME_*, so the thread counts it describes are doubled"
                 );
-            }
-        });
+            });
+        }
 
         // The bridge needed the tokio runtime; this wraps that same one in a dynamo `Runtime`.
         let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
@@ -1283,6 +1416,8 @@ impl DistributedRuntime {
 
     #[staticmethod]
     fn detached(py: Python) -> PyResult<Self> {
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        adopt_bridge_runtime(primary);
         let rt = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
         let handle = rt.primary();
 
@@ -1341,15 +1476,9 @@ impl DistributedRuntime {
     /// Workers use this in their RL request-plane route descriptor so the
     /// frontend does not need to derive worker system URLs from static env vars.
     fn system_status_server_url(&self) -> Option<String> {
-        self.inner.system_status_server_info().map(|info| {
-            let socket_addr = info.socket_addr;
-            if socket_addr.ip().is_unspecified() {
-                let host = dynamo_runtime::utils::ip_resolver::local_ip_for_advertise();
-                format!("http://{host}:{}", socket_addr.port())
-            } else {
-                format!("http://{socket_addr}")
-            }
-        })
+        self.inner
+            .system_status_server_info()
+            .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
     /// Register an async Python callback for /engine/{route_name}
@@ -1466,7 +1595,7 @@ impl Endpoint {
         worker_type: WorkerType,
     ) -> PyResult<Bound<'p, PyAny>> {
         let endpoint = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             Ok(
                 llm_rs::first_token::FirstTokenSource::for_endpoint(&endpoint, worker_type.into())
                     .await
@@ -1588,7 +1717,7 @@ impl Endpoint {
         }
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             builder
                 .graceful_shutdown(graceful_shutdown)
                 .start()
@@ -1660,7 +1789,7 @@ impl Endpoint {
         // builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             builder
                 .graceful_shutdown(graceful_shutdown)
                 .start()
@@ -1678,7 +1807,7 @@ impl Endpoint {
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router =
                 rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
@@ -1712,7 +1841,7 @@ impl Endpoint {
     /// and should not receive any requests.
     fn unregister_endpoint_instance<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .unregister_endpoint_instance()
                 .await
@@ -1728,7 +1857,7 @@ impl Endpoint {
     /// and should start receiving requests.
     fn register_endpoint_instance<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner.register_endpoint_instance().await.map_err(to_pyerr)?;
             Ok(())
         })
@@ -1772,9 +1901,9 @@ impl Client {
     /// Replaces wait_for_endpoints.
     fn wait_for_instances<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.router.client.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
-                .wait_for_instances()
+                .wait_for_routable_instances()
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
@@ -1792,7 +1921,7 @@ impl Client {
         timeout_s: Option<f64>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let endpoint = self.endpoint.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let last_matches = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
             let wait_state = last_matches.clone();
             let error_key = key.clone();
@@ -1854,6 +1983,76 @@ impl Client {
         })
     }
 
+    /// Wait until at least `min_count` ready endpoint instances have MDC runtime_data
+    /// containing the requested JSON string value; returns their sorted worker ids.
+    #[pyo3(signature = (key, value, min_count, timeout_s=None))]
+    fn wait_for_instances_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        min_count: usize,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        if min_count == 0 {
+            return Err(PyValueError::new_err("min_count must be positive"));
+        }
+        let endpoint = self.endpoint.clone();
+        crate::future_into_py(py, async move {
+            // Scope the discovery watcher to this lookup so every exit path stops it.
+            let lifecycle = endpoint.drt().primary_token().child_token();
+            let _guard = lifecycle.clone().drop_guard();
+            let mut last_matches: Vec<u64> = Vec::new();
+            let wait = async {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint, lifecycle.clone())
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let mut matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+                    matches.sort_unstable();
+
+                    if matches.len() >= min_count {
+                        return Ok(matches);
+                    }
+                    last_matches = matches;
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                let result = tokio::time::timeout(timeout, wait).await;
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(PyTimeoutError::new_err(format!(
+                        "Timed out waiting for {min_count} endpoint instances with runtime_data[{key:?}] == {value:?}; last_match_count={}, matching_ids={last_matches:?}",
+                        last_matches.len(),
+                    ))),
+                }
+            } else {
+                wait.await
+            }
+        })
+    }
+
     /// Issue a request to the endpoint using the default routing strategy.
     #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn generate<'p>(
@@ -1882,7 +2081,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -1916,7 +2115,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -1954,7 +2153,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     let span = get_span_for_context(&context, "device_aware_weighted");
@@ -1991,7 +2190,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -2076,17 +2275,12 @@ impl AsyncResponseStream {
         let rx = self.rx.clone();
         let annotated = self.annotated;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             loop {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = match pyobj.ok() {
-                            Ok(pyobj) => pyobj,
-                            Err(e) => {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
-                            }
-                        };
+                        let pyobj = crate::errors::check_response_error(pyobj)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };
@@ -2145,7 +2339,7 @@ impl PyAsyncRequestStream {
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let rx = self.rx.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             match rx.lock().await.recv().await {
                 Some(pyobj) => Ok(pyobj),
                 None => Err(PyStopAsyncIteration::new_err("Request stream exhausted")),
