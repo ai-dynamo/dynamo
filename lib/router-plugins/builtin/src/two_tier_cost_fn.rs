@@ -11,9 +11,7 @@
 //!    exceeds `balance_rel_threshold` times the smallest, select the least-loaded worker.
 //! 2. Cache tier: otherwise, if the largest *effective* KV overlap is strictly greater than
 //!    `cache_threshold` of the request's block count, select the least-loaded worker holding that
-//!    maximum overlap. Effective overlap is device-resident blocks plus host-pinned (CPU offload)
-//!    blocks scaled by `host_cache_weight`, so a worker holding the prefix in CPU can win the cache
-//!    tier over one holding nothing. At the default weight, an equal device-resident hit wins.
+//!    maximum overlap. Effective overlap is `device_blocks + host_cache_weight * host_blocks`.
 //! 3. Otherwise, select the least-loaded worker.
 //!
 //! Both load gates must hold to take step 1, so load displaces cache affinity only when the
@@ -25,10 +23,8 @@
 //! instance parameters defaulting to that router's values. Set `host_cache_weight` to 0.0 to
 //! reproduce its device-only cache ranking.
 //!
-//! `host_cache_weight` defaults to [`KvRouterConfig::host_cache_hit_weight`], which
-//! `DYN_ROUTER_HOST_CACHE_HIT_WEIGHT` sets (0.75 by default) and which Dynamo's built-in selector
-//! already applies to the same quantity — so the two tiers agree on what a CPU hit is worth unless
-//! an instance deliberately overrides it. Set the weight to 0.0 to restore device-only ranking.
+//! `host_cache_weight` inherits [`KvRouterConfig::host_cache_hit_weight`]
+//! (`DYN_ROUTER_HOST_CACHE_HIT_WEIGHT`, default 0.75) unless overridden per instance.
 //!
 //! Ties between equally ranked workers resolve on candidate row order, which the host leaves
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
@@ -70,11 +66,8 @@ struct Parameters {
     balance_abs_threshold: usize,
     /// Minimum ratio of largest to smallest active-request count before the load tier applies.
     balance_rel_threshold: f64,
-    /// Weight applied to host-pinned (CPU offload) overlap when ranking cache affinity.
-    ///
-    /// `None` — inherit `KvRouterConfig::host_cache_hit_weight`, i.e. whatever
-    /// `DYN_ROUTER_HOST_CACHE_HIT_WEIGHT` is set to. Set explicitly only when this policy must
-    /// value CPU residency differently from the built-in selector.
+    /// CPU overlap weight. Omission inherits `KvRouterConfig::host_cache_hit_weight`;
+    /// an explicit zero disables CPU cache credit.
     host_cache_weight: Option<f64>,
 }
 
@@ -138,10 +131,7 @@ fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> 
     rows.min_by_key(|&row| load[row].active_requests())
 }
 
-/// Blocks this worker can reuse, counting CPU-offloaded blocks at `host_cache_weight`.
-///
-/// Device and host overlap are disjoint prefix measurements from the same indexer, so they add
-/// rather than max. A weight of 0.0 reproduces the device-only ranking this policy shipped with.
+/// Add disjoint device and host matches with weighted host credit.
 fn effective_overlap(cache: WorkerCacheInput<'_>, host_cache_weight: f64) -> f64 {
     cache.device_overlap_blocks() + host_cache_weight * cache.host_overlap_blocks()
 }
@@ -181,8 +171,7 @@ fn select_row(
         return least_loaded(
             load,
             cache.iter().enumerate().filter_map(|(row, item)| {
-                // Recomputed identically to `max_overlap`, so the equality is exact, not a
-                // tolerance comparison on independently derived floats.
+                // Both values use the same expression, so exact equality is intentional.
                 (effective_overlap(item, parameters.host_cache_weight) == max_overlap)
                     .then_some(row)
             }),
@@ -218,9 +207,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
     }
 }
 
-/// Validate instance parameters and build a factory that resolves the host weight per policy.
-///
-/// An explicit instance weight takes precedence over the supplied router configuration.
+/// Build a policy factory with instance overrides taking precedence over router settings.
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
@@ -300,8 +287,7 @@ mod tests {
         )
     }
 
-    /// Select among workers given as
-    /// `(worker_id, device_blocks, host_pinned_blocks, active_requests)`.
+    /// Select with `(worker_id, device_blocks, host_blocks, active_requests)` fixtures.
     fn select_tiers(
         parameters: Parameters,
         workers: [(u64, usize, usize, usize); 2],
