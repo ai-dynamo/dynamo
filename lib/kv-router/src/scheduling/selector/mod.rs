@@ -345,6 +345,31 @@ fn build_selection_trace(
     }
 }
 
+/// Log every scored candidate at TRACE, one row per worker and rank, stamped with
+/// `request_id` and `worker_type` because the scheduler actor task has no request span.
+fn log_scored_candidates(
+    request: &SchedulingRequest,
+    worker_type: &'static str,
+    candidates: &[ScoredWorkerCandidate],
+    selected_row: usize,
+) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let request_id = request.mode.request_id().unwrap_or("-");
+    for (row, candidate) in candidates.iter().enumerate() {
+        tracing::trace!(
+            request_id,
+            worker_type,
+            worker_id = candidate.worker.worker_id,
+            dp_rank = candidate.worker.dp_rank,
+            cost = candidate.cost,
+            selected = row == selected_row,
+            "Scored worker candidate"
+        );
+    }
+}
+
 fn log_selection<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
@@ -494,6 +519,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
+                log_scored_candidates(request, worker_type, candidates, row);
                 let trace = request.selection_trace.map(|spec| {
                     build_selection_trace(
                         candidates,

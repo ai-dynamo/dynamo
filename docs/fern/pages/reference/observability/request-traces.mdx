@@ -124,7 +124,9 @@ cost. By default each row keeps the 16 lowest-cost candidates plus the dispatche
 among the candidates; locate it by joining the `request_end` row's worker id on `request_id`. Costs
 are in the policy's units (scheduler-tracked KV blocks for the builtin policy) at full precision.
 The record does not include the cost formula's inputs; custom policies own their formula, so the
-host only knows the final cost.
+host only knows the final cost. For ad-hoc inspection without tracing,
+`DYN_LOG='info,dynamo_kv_router::scheduling::selector=trace'` logs the same per-candidate costs as
+`Scored worker candidate` lines, each stamped with `request_id`, `worker_type`, and `selected`.
 
 ## Record Schema
 
