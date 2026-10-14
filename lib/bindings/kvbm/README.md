@@ -17,6 +17,13 @@ limitations under the License.
 
 # Dynamo KVBM
 
+> [!WARNING]
+> KVBM (KV Block Manager) is deprecated in v1.5.0 and removal is targeted for v1.7.0. The `kvbm` wheel and the vLLM KVBM launch and deploy examples ship unchanged for v1.5.0.
+>
+> **Migrate:** Use the engine's native KV offloading for host and disk tiering. Cross-node KV cache sharing is the scope of the separate, early-stage KV Cache Runner (KVCR) project, which does not replace KVBM.
+>
+> See the [Deprecations](https://docs.nvidia.com/dynamo/reference/releases/deprecations#v150) ledger.
+
 The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It cleanly separates memory management from inference runtimes (vLLM, TensorRT-LLM, and SGLang), enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
 
 ![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/fern/assets/img/kvbm-components.svg)
