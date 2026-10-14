@@ -94,7 +94,7 @@ mod python_payload;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
-    ManyOut<python_payload::PythonResponseItem>,
+    ManyOut<python_payload::EncodedPythonResponse>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -109,10 +109,13 @@ type PythonPushEgressIngress = Ingress<
     python_payload::PythonIngressPayloadAdapter,
 >;
 
+/// Ingress for bidirectional endpoints, which backend admission never sees:
+/// its own adapter decodes request frames without the rank probe and encodes
+/// responses without classifying them.
 type PythonBidirectionalIngress = Ingress<
     rs::pipeline::ManyIn<python_payload::PythonPayload>,
     ManyOut<python_payload::PythonResponseItem>,
-    python_payload::PythonIngressPayloadAdapter,
+    python_payload::PythonBidirectionalPayloadAdapter,
 >;
 
 static INIT: OnceCell<()> = OnceCell::new();
@@ -785,10 +788,17 @@ fn register_model<'p>(
         WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
         WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
     };
+    // Recording the role, before the card is built and published, is also what
+    // makes this endpoint a model backend, whose requests the backend admission
+    // gate admits from now on, even if it is already serving. The gate's
+    // metrics are exposed with the endpoint's own.
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
         .map_err(to_pyerr)?;
+    llm_rs::admission_gate::register_metrics(rs::metrics::MetricsHierarchy::get_metrics_registry(
+        &endpoint.inner,
+    ));
 
     crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
@@ -1613,6 +1623,10 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        // The network engines read the role per request, so one recorded later
+        // by `register_model` takes effect from then on.
+        let backend_role = engine::BackendRole::of(&self.inner);
+
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`
         // off its generator on a tokio thread once per response. Selected per
@@ -1658,6 +1672,7 @@ impl Endpoint {
                 Arc::new(push_egress::PythonPushEngine::new(
                     generator,
                     self.event_loop.clone(),
+                    backend_role,
                 )),
                 python_payload::PythonIngressPayloadAdapter,
             )
@@ -1669,7 +1684,7 @@ impl Endpoint {
                 generator,
                 self.event_loop.clone(),
             )?);
-            let network_engine = Arc::new(engine.network_engine());
+            let network_engine = Arc::new(engine.network_engine(backend_role));
             let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
                 network_engine,
                 python_payload::PythonIngressPayloadAdapter,
@@ -1753,9 +1768,11 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<PythonBidirectionalIngress> =
-            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
-                .map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> = Ingress::for_engine_with_adapter(
+            engine,
+            python_payload::PythonBidirectionalPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         let builder = self
             .inner
