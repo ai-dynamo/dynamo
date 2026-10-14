@@ -1677,6 +1677,24 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
     return SimpleNamespace(**defaults)
 
 
+class TestSkipTokenizerInitPassthrough:
+    """The worker must not force `skip_tokenizer_init` off. vLLM guards every
+    tokenizer use on the pre-tokenized path, and the Dynamo frontend already
+    tokenizes and detokenizes, so an operator can opt out of the engine-side
+    tokenizer (and the per-request token-id validation and detokenizer that
+    come with it) with vLLM's own `--skip-tokenizer-init` / `--tokens-only`.
+    """
+
+    @pytest.mark.parametrize("explicit", [True, False])
+    def test_operator_value_is_preserved(self, explicit):
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(skip_tokenizer_init=explicit)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.skip_tokenizer_init is explicit
+
+
 class TestPoolingWorkerPrefixCachingDefault:
     """Pooling-family workers must not default prefix caching on: pooling
     engines never decode, and force-enabling it crashes hybrid-attention
