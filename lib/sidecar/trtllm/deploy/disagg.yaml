@@ -3,13 +3,9 @@
 #
 # EXPERIMENTAL. Disaggregated TensorRT-LLM deployment using the Rust sidecar.
 #
-# Prefill and decode run as separate worker pods. Each pod = two containers:
-#   - main: Dynamo worker (dynamo-trtllm-sidecar), no GPU; talks to its engine
-#     over gRPC on 127.0.0.1. Its --disaggregation-mode (prefill|decode) also
-#     picks the component it registers under. Must be named "main" (operator
-#     injects env + probes).
-#   - trtllm-engine: TRT-LLM image with OpenEngine gRPC support, holds the GPU,
-#     runs the OpenEngine gRPC server as a native sidecar (see initContainers).
+# Prefill and decode run as separate worker pods. Each pod has a stock
+# TensorRT-LLM engine named main and a Dynamo native sidecar named runtime.
+# The runtime's --disaggregation-mode selects its prefill or decode role.
 #
 # The frontend routes to a prefill worker, gets back a `KvSessionRef` handoff,
 # then routes to a decode worker carrying it. The KV cache itself moves
@@ -33,8 +29,8 @@
 #     manifest asks for. On a real RDMA fabric, add `rdma/ib: "1"` to each
 #     engine's resource limits and requests. Configure memory-lock limits and
 #     any additional capabilities only as required by that deployment.
-#   - Set the sidecar image to nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>,
-#     or build lib/sidecar/Dockerfile.
+#   - The frontend, operator, and Dynamo runtime images must use compatible
+#     versions; the pinned nightlies below were validated together.
 
 apiVersion: v1
 kind: ConfigMap
@@ -72,6 +68,7 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
+    runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
         containers:
@@ -79,11 +76,12 @@ spec:
         - name: main
           # 1.4.0 or newer: the 1.3.0 router fails a disaggregated request
           # whose one-token prefill stops on EOS or a stop match.
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261013-2210b07
 
   - name: TRTLLMPrefillWorker
     type: prefill
     replicas: 1
+    runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
         volumes:
@@ -95,33 +93,41 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        # trtllm-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after.
-        initContainers:
-        - name: trtllm-engine
+        # The engine is main; the Dynamo runtime below is a native sidecar.
+        containers:
+        - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
-          restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
-          # startupProbe gates `main`; readinessProbe drops dead workers.
+          # The stock engine image has grpc but no openengine Python bindings.
+          # HealthResponse.state is protobuf field 1; 08 02 means READY.
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
             periodSeconds: 5
             timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
-            failureThreshold: 60   # ~5 min for model load; raise for big models
+            failureThreshold: 360   # Up to 30 min for model load and warmup.
           readinessProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
           env:
           # TensorRT-LLM would otherwise start its TP=1 worker by spawning an
           # MPI process, and that spawn fails inside a pod: PRTE reaches
@@ -189,15 +195,16 @@ spec:
           - "4096"
           - --extra_llm_api_options
           - /config/config.yaml
-        containers:
-        # Sidecar worker. Use nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
-        # or build from lib/sidecar/Dockerfile; add
-        # imagePullSecrets if private. Must be named "main" (operator injects
-        # discovery env + probes by name).
-        - name: main
-          image: <your-registry>/dynamo-sidecar:1.3.0
+        initContainers:
+        # Dynamo runtime starts first and receives discovery env and probes.
+        # Replace this nightly image with a matching release when available.
+        - name: runtime
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          restartPolicy: Always
           command:
-          - dynamo-trtllm-sidecar
+          - python3
+          - -m
+          - dynamo.trtllm.sidecar
           args:
           - --disaggregation-mode
           - prefill
@@ -215,6 +222,7 @@ spec:
   - name: TRTLLMDecodeWorker
     type: decode
     replicas: 1
+    runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
         volumes:
@@ -225,28 +233,36 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        initContainers:
-        - name: trtllm-engine
+        containers:
+        - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
-          restartPolicy: Always
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
             periodSeconds: 5
             timeoutSeconds: 10
-            failureThreshold: 60
+            failureThreshold: 360
           readinessProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if r[:2]==bytes((8,2)) else 1)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
           env:
           # See the prefill engine above: run the TP=1 worker in-process rather
           # than spawning it over MPI, which does not work inside a pod. This is
@@ -294,11 +310,14 @@ spec:
           - "4096"
           - --extra_llm_api_options
           - /config/config.yaml
-        containers:
-        - name: main
-          image: <your-registry>/dynamo-sidecar:1.3.0
+        initContainers:
+        - name: runtime
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          restartPolicy: Always
           command:
-          - dynamo-trtllm-sidecar
+          - python3
+          - -m
+          - dynamo.trtllm.sidecar
           args:
           - --disaggregation-mode
           - decode
@@ -311,3 +330,4 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+  backendFramework: trtllm
