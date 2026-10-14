@@ -108,6 +108,26 @@ TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
 )
 
 
+async def close_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import close_configured_artifact_runtime as close
+
+    await close()
+
+
+async def initialize_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import (
+        initialize_configured_artifact_runtime as initialize,
+    )
+
+    await initialize()
+
+
+async def _close_worker_resources(
+    state_agent_lifecycle: StateAgentLifecycle,
+) -> None:
+    await state_agent_lifecycle.close()
+
+
 def uses_modelexpress_load_format(config: Config) -> bool:
     return getattr(config.engine_args, "load_format", None) in MX_LOAD_FORMATS
 
@@ -231,8 +251,15 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        await initialize_configured_artifact_runtime()
+
     shutdown_event = asyncio.Event()
     state_agent_lifecycle = StateAgentLifecycle()
+
+    async def close_worker_resources() -> None:
+        await _close_worker_resources(state_agent_lifecycle)
+
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
@@ -252,26 +279,34 @@ async def worker(argv: list[str] | None = None) -> None:
         runtime,
         shutdown_endpoints,
         shutdown_event,
-        pre_shutdown_callback=state_agent_lifecycle.close,
+        pre_shutdown_callback=close_worker_resources,
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
-    factory = WorkerFactory(
-        setup_vllm_engine_fn=setup_vllm_engine,
-        setup_kv_event_publisher_fn=setup_kv_event_publisher,
-        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
-        register_vllm_model_fn=register_vllm_model,
-        setup_fpm_relay_fn=setup_fpm_relay,
-        setup_metrics_collection_fn=setup_metrics_collection,
-        state_agent_lifecycle=state_agent_lifecycle,
-    )
-    await factory.create(
-        runtime,
-        config,
-        shutdown_event,
-        shutdown_endpoints,
-        snapshot_engine=snapshot_engine,
-    )
+    try:
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=setup_vllm_engine,
+            setup_kv_event_publisher_fn=setup_kv_event_publisher,
+            setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
+            register_vllm_model_fn=register_vllm_model,
+            setup_fpm_relay_fn=setup_fpm_relay,
+            setup_metrics_collection_fn=setup_metrics_collection,
+            state_agent_lifecycle=state_agent_lifecycle,
+        )
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+    finally:
+        try:
+            await close_worker_resources()
+        finally:
+            # Accepted generations can finalize after the pre-shutdown hook.
+            if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+                await close_configured_artifact_runtime()
 
     logger.debug("Worker function completed, exiting...")
 
