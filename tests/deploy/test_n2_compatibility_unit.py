@@ -24,6 +24,7 @@ from tests.deploy.dgd_utils import (
 from tests.deploy.n2_utils import (
     DEFAULT_RELEASE_LINE,
     MODELS,
+    VersionPair,
     compatibility_spec,
     runtime_version,
     version_matrix,
@@ -80,23 +81,35 @@ def test_matrix_names_missing_release_catalog_entry():
 
 
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])
-def test_example_patching_preserves_command_and_sets_component_versions(scenario):
-    releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
-    pair = version_matrix(
-        releases,
-        "1.5",
-        "registry:5000/fe:1.5.0-ci-abc",
-        "registry:5000/wk:1.5.0-ci-abc",
-    )[0]
+@pytest.mark.parametrize("worker_version", ["1.4.2", "1.5.0", "1.6.0"])
+def test_example_patching_preserves_command_and_sets_component_versions(
+    scenario, worker_version
+):
+    pair = VersionPair(
+        "test",
+        "registry:5000/fe:1.4.2",
+        f"registry:5000/wk:{worker_version}-ci-abc",
+    )
     spec = compatibility_spec(ROOT, pair, scenario, "test", "shared", "/models")
     components = spec.spec()["spec"]["components"]
     assert components[0]["runtimeVersionOverride"] == "1.4.2"
-    assert components[1]["runtimeVersionOverride"] == "1.5.0"
+    assert components[1]["runtimeVersionOverride"] == worker_version
     worker = components[1]["podTemplate"]["spec"]["containers"][0]
     assert worker["command"] == ["python3", "-m", "dynamo.sglang"]
     if scenario == "embedding":
         assert "--embedding-worker" in worker["args"]
         assert "--use-sglang-tokenizer" in worker["args"]
+    payloads = [e for e in worker["env"] if e["name"] == "DYN_HEALTH_CHECK_PAYLOAD"]
+    if scenario == "embedding" and worker_version == "1.5.0":
+        assert len(payloads) == 1
+        assert json.loads(payloads[0]["value"]) == {
+            "model": MODELS[scenario][0],
+            "input": "Test",
+        }
+    else:
+        assert payloads == []
+    frontend = components[0]["podTemplate"]["spec"]["containers"][0]
+    assert all(e["name"] != "DYN_HEALTH_CHECK_PAYLOAD" for e in frontend["env"])
     assert MODELS[scenario][1] in spec["decode"].model
     assert "pvcs" not in spec.spec()["spec"]
     for component in components:

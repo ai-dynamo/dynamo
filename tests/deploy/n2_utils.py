@@ -3,6 +3,7 @@
 
 """Version selection and example patching for component compatibility tests."""
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +88,14 @@ def compatibility_spec(
         spec.set_service_env_var(service, "HF_HUB_OFFLINE", "1")
         spec.set_service_env_var(service, "TRANSFORMERS_OFFLINE", "1")
         spec.set_service_env_var(service, "DYN_REQUEST_PLANE", "tcp")
+    # Dynamo 1.5.0 embedding canaries need the explicit DGD payload documented
+    # in the compatibility guide; its default payload has a generation shape.
+    if scenario == "embedding" and runtime_version(pair.worker) == "1.5.0":
+        spec.set_service_env_var(
+            "decode",
+            "DYN_HEALTH_CHECK_PAYLOAD",
+            json.dumps({"model": model, "input": "Test"}),
+        )
     # Check the mounted snapshot before starting the worker. Reading a byte also
     # catches missing blob targets behind Hugging Face snapshot symlinks.
     worker = next(c for c in spec.spec()["spec"]["components"] if c["name"] == "decode")
