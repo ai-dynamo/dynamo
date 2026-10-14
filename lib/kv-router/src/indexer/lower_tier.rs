@@ -51,32 +51,47 @@ pub struct KvTransferExtensions {
 }
 
 impl KvTransferExtensions {
-    fn record_match<'a>(
-        &mut self,
-        pos: usize,
-        child_hash: ExternalSequenceBlockHash,
-        workers: impl IntoIterator<Item = &'a WorkerWithDpRank>,
-        hint_sources: impl IntoIterator<Item = &'a ResidencyOwnerKey>,
-    ) {
+    /// Record the matched child hash at `pos` in the root-aligned chain.
+    /// Returns false when another group already recorded a different hash
+    /// there; the caller must not credit its owners past `pos`.
+    fn record_block(&mut self, pos: usize, child_hash: ExternalSequenceBlockHash) -> bool {
+        if self
+            .block_hashes
+            .last()
+            .is_none_or(|(last_pos, _)| *last_pos < pos)
+        {
+            self.block_hashes.push((pos, child_hash));
+            return true;
+        }
         match self
             .block_hashes
             .binary_search_by_key(&pos, |(existing_pos, _)| *existing_pos)
         {
-            Ok(idx) => {
-                if self.block_hashes[idx].1 != child_hash {
-                    return;
-                }
+            Ok(idx) => self.block_hashes[idx].1 == child_hash,
+            Err(idx) => {
+                self.block_hashes.insert(idx, (pos, child_hash));
+                true
             }
-            Err(idx) => self.block_hashes.insert(idx, (pos, child_hash)),
         }
+    }
 
-        for worker in workers {
-            self.owner_prefix_blocks
-                .insert(KvTransferCandidateSource::Worker(*worker), pos + 1);
-        }
-        for owner in hint_sources {
-            self.owner_prefix_blocks
-                .insert(KvTransferCandidateSource::CacheOwner(*owner), pos + 1);
+    /// Credit `source` with a root-aligned prefix of `blocks`. Owners are
+    /// credited once, when they leave the walk, instead of at every matched
+    /// block; an earlier entry is a cap from a chain conflict and never rises.
+    fn record_prefix(&mut self, source: KvTransferCandidateSource, blocks: usize) {
+        self.owner_prefix_blocks
+            .entry(source)
+            .and_modify(|existing| *existing = (*existing).min(blocks))
+            .or_insert(blocks);
+    }
+
+    fn record_hint_source_prefixes(
+        &mut self,
+        sources: impl IntoIterator<Item = ResidencyOwnerKey>,
+        blocks: usize,
+    ) {
+        for source in sources {
+            self.record_prefix(KvTransferCandidateSource::CacheOwner(source), blocks);
         }
     }
 }
@@ -1005,6 +1020,11 @@ impl LowerTierIndexer {
 
             let hits = final_pos.saturating_sub(continuation.start_pos);
             results.hits.insert(*worker, hits);
+            if hits > 0
+                && let Some(extensions) = results.kv_transfer_extensions.as_mut()
+            {
+                extensions.record_prefix(KvTransferCandidateSource::Worker(*worker), final_pos);
+            }
 
             let next_continuation = if hits == 0 {
                 *continuation
@@ -1219,6 +1239,9 @@ fn advance_state_to_breakpoint(
             local_hash: local_hashes[cur_pos],
         }) else {
             finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
+            if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
+                extensions.record_hint_source_prefixes(active_hint_sources.drain(), cur_pos);
+            }
             active_hint_sources.clear();
             break;
         };
@@ -1260,6 +1283,18 @@ fn advance_state_to_breakpoint(
                 &active_hint_sources,
                 &mut hint_source_scratch,
             );
+            // Sources missing from this edge matched every block before it.
+            if hint_source_scratch.len() < active_hint_sources.len()
+                && let Some(extensions) = kv_transfer_extensions.as_deref_mut()
+            {
+                extensions.record_hint_source_prefixes(
+                    active_hint_sources
+                        .iter()
+                        .copied()
+                        .filter(|source| !hint_source_scratch.contains(source)),
+                    cur_pos,
+                );
+            }
             std::mem::swap(&mut active_hint_sources, &mut hint_source_scratch);
         }
 
@@ -1268,13 +1303,13 @@ fn advance_state_to_breakpoint(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
-            extensions.record_match(
-                cur_pos,
-                child_hash,
-                active_workers.iter(),
-                active_hint_sources.iter(),
-            );
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
+            && !extensions.record_block(cur_pos, child_hash)
+        {
+            for worker in &active_workers {
+                extensions.record_prefix(KvTransferCandidateSource::Worker(*worker), cur_pos);
+            }
+            extensions.record_hint_source_prefixes(active_hint_sources.iter().copied(), cur_pos);
         }
         cur_hash = Some(child_hash);
         cur_pos += 1;
@@ -1308,6 +1343,9 @@ fn advance_state_to_breakpoint(
     // the next breakpoint for continued walking.
     if cur_pos >= local_hashes.len() {
         finalize_workers(final_states, active_workers, cur_pos, cur_hash);
+        if let Some(extensions) = kv_transfer_extensions {
+            extensions.record_hint_source_prefixes(active_hint_sources, cur_pos);
+        }
     } else {
         let next = overflow.entry(cur_hash).or_default();
         next.workers.extend(active_workers);
@@ -1346,13 +1384,10 @@ fn advance_single_worker(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
-            extensions.record_match(
-                *cur_pos,
-                child_hash,
-                std::iter::once(&worker),
-                std::iter::empty(),
-            );
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
+            && !extensions.record_block(*cur_pos, child_hash)
+        {
+            extensions.record_prefix(KvTransferCandidateSource::Worker(worker), *cur_pos);
         }
         *cur_hash = Some(child_hash);
         *cur_pos += 1;
@@ -1995,6 +2030,55 @@ mod tests {
         assert_eq!(
             extensions.block_hashes,
             vec![(0, ExternalSequenceBlockHash(101))]
+        );
+    }
+
+    #[test]
+    fn hint_sources_are_credited_where_they_leave_the_walk() {
+        let owner_a = cache_owner_id();
+        let owner_b = CacheOwnerId::new(
+            owner_a.pool(),
+            StableDpSlotId::new([5; 16], IdentitySource::Explicit),
+        );
+        let mut index = TestLowerTierIndex::new();
+        let store = |event_id, local: &[u64], external: &[u64]| {
+            store_event_in_domain(
+                7,
+                event_id,
+                None,
+                local,
+                external,
+                ResidencyDomain::CacheOwner,
+            )
+        };
+        index
+            .apply_event(store(0, &[11, 12, 13], &[101, 102, 103]))
+            .unwrap();
+        index
+            .apply_event(store(1, &[11], &[101]).with_state_source(owner_b))
+            .unwrap();
+        let metadata = RouterHintSourceMetadata {
+            source_control_endpoint: "tcp://owner:23280".to_string(),
+            worker_type: "prefill".to_string(),
+        };
+        let snapshot = ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [owner_a, owner_b].map(|owner| (owner, metadata.clone(), None)),
+        );
+
+        // Source b drops at the second edge; source a reaches the end.
+        let details = index.index.query_match_details_with_options_and_snapshot(
+            &local_hashes(&[11, 12, 13]),
+            &FxHashMap::<WorkerWithDpRank, LowerTierContinuation>::default(),
+            true,
+            &snapshot,
+        );
+        let key = |owner| {
+            KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+        };
+        assert_eq!(
+            details.kv_transfer_extensions.unwrap().owner_prefix_blocks,
+            FxHashMap::from_iter([(key(owner_a), 3), (key(owner_b), 1)])
         );
     }
 
