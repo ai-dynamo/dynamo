@@ -7,10 +7,12 @@ package lpx
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
@@ -23,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 func TestGetPipelineRequests(t *testing.T) {
@@ -387,6 +390,75 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 				partitions = append(partitions, compilerIDs)
 			}
 			require.Equal(t, tc.wantPartitions, partitions)
+		})
+	}
+}
+
+func TestResolvePipelineRequestsCarriesHXShapes(t *testing.T) {
+	registry := newTestDataModelRegistry(t, t.TempDir())
+	reconciler := &graphReconciler{config: &configv1alpha1.OperatorConfiguration{}, modelRegistry: registry}
+	fullTray := []int64{16, 1, 1, 1}
+	for _, tc := range []struct {
+		fixture        string
+		wantPartitions []int64
+		wantExtents    [][]int64
+		wantConnectors [][2]string
+	}{
+		{
+			fixture:        "node-local-v3-hx-split-io",
+			wantPartitions: []int64{0, 1, 2},
+			wantExtents:    [][]int64{fullTray, fullTray, fullTray},
+		},
+		{
+			fixture:        "node-local-v3-hx-multitray",
+			wantPartitions: []int64{0, 1, 2},
+			wantExtents:    [][]int64{fullTray, {16, 2, 1, 1}, fullTray},
+		},
+		{
+			fixture:        "node-local-v3-hx-propsync",
+			wantPartitions: []int64{0, 1, 2, 3},
+			wantExtents:    [][]int64{fullTray, fullTray, fullTray, fullTray},
+			wantConnectors: [][2]string{{"partition-002", "partition-003"}},
+		},
+		{
+			fixture:        "node-local-v3-hx-propsync-local",
+			wantPartitions: []int64{0, 1},
+			wantExtents:    [][]int64{fullTray, fullTray},
+		},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			t.Log("Resolve the authored HX hybrid DGD")
+			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + tc.fixture + ".input.yaml")
+			require.NoError(t, err)
+			var dgd v1beta1.DynamoGraphDeployment
+			require.NoError(t, yaml.Unmarshal(payload, &dgd))
+			deployment := newLPXRenderDeployment(t, &dgd)
+			workloads, plans, err := reconciler.resolveWorkloads(t.Context(), deployment, &dgd)
+			require.NoError(t, err)
+			require.Len(t, workloads, 1)
+
+			t.Log("Publish the remote partitions with their HX extents and PropSync connectors")
+			for name, workload := range workloads {
+				_, missing := resolvePipelineRequests(deployment, nil, workload, plans[name])
+				require.Len(t, missing, 1)
+				spec := missing[0].Spec
+				require.Equal(t, lpxv1alpha1.WorkloadModeV3HxStrictHybrid, spec.WorkloadMode)
+				partitions := make([]int64, 0, len(spec.Partitions))
+				extents := make([][]int64, 0, len(spec.Partitions))
+				for _, partition := range spec.Partitions {
+					partitions = append(partitions, partition.CompilerPartitionID)
+					require.NotNil(t, partition.Extent)
+					extents = append(extents, *partition.Extent)
+				}
+				require.Equal(t, tc.wantPartitions, partitions)
+				require.Equal(t, tc.wantExtents, extents)
+				connectors := make([][2]string, 0, len(spec.PropSyncConnectors))
+				for _, connector := range spec.PropSyncConnectors {
+					require.Equal(t, lpxv1alpha1.PropSyncConnectorKindHxPropSyncV1, connector.Requirement.Kind)
+					connectors = append(connectors, [2]string{connector.FromPartitionID, connector.ToPartitionID})
+				}
+				require.ElementsMatch(t, tc.wantConnectors, connectors)
+			}
 		})
 	}
 }

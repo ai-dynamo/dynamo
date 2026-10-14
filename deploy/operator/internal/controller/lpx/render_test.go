@@ -73,6 +73,10 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/node-local-v3-hx-hybrid",
 		"from_dgd_yaml/node-local-v3-hx-hybrid-all-local",
 		"from_dgd_yaml/lpx-v3-hx-local-partitions",
+		"from_dgd_yaml/node-local-v3-hx-split-io",
+		"from_dgd_yaml/node-local-v3-hx-propsync",
+		"from_dgd_yaml/node-local-v3-hx-multitray",
+		"from_dgd_yaml/node-local-v3-hx-propsync-local",
 		"from_dgd_yaml/single_v2",
 		"from_dgd_yaml/lpu-cyborg-specdec",
 		"from_dgd_yaml/lpu-gpu-specdecode",
@@ -746,6 +750,30 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			lpuPartitions:     14,
 			firstPartitionID:  0,
 		},
+		// Two I/O FPGA endpoints need one Cyborg client for each endpoint.
+		"node-local-v3-hx-split-io-lpx": {
+			compilationMode:   manifestcapnpv2.CompilationMode_lpx,
+			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
+			lpuPartitions:     3,
+			firstPartitionID:  0,
+			ioFPGACount:       2,
+		},
+		// A terminal PropSync chain packs partitions 2 and 3 into one runtime partition.
+		"node-local-v3-hx-propsync-lpx": {
+			compilationMode:       manifestcapnpv2.CompilationMode_lpx,
+			nonLPUDeviceTypes:     []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
+			lpuPartitions:         4,
+			firstPartitionID:      0,
+			selectedPropSyncChain: []uint32{2, 3},
+		},
+		// Partition 1 spans two HX trays.
+		"node-local-v3-hx-multitray-lpx": {
+			compilationMode:   manifestcapnpv2.CompilationMode_lpx,
+			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
+			lpuPartitions:     3,
+			firstPartitionID:  0,
+			partitionShapes:   map[int][4]uint32{1: {16, 2, 1, 1}},
+		},
 		"node-local-v3-hx-sd-draft":  {},
 		"node-local-v3-hx-sd-target": {},
 	}
@@ -978,8 +1006,41 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 	if fixture.lpuPartitions != 0 {
 		lpuPartitions, firstPartitionID, numLPUNodes = fixture.lpuPartitions, fixture.firstPartitionID, uint32(fixture.lpuPartitions)
 	}
-	_, program := newTestGraphProgram(t, manifest, fixture.compilationMode, numLPUNodes, 8192)
+	trays := func(index int) uint32 {
+		if shape, ok := fixture.partitionShapes[index]; ok {
+			return shape[1] * shape[2] * shape[3]
+		}
+		return 1
+	}
+	if fixture.lpuPartitions != 0 {
+		numLPUNodes = 0
+		for index := range lpuPartitions {
+			numLPUNodes += trays(index)
+		}
+	}
+	deployment, program := newTestGraphProgram(t, manifest, fixture.compilationMode, numLPUNodes, 8192)
 	program.SetNumKvCaches(1)
+
+	// Describe a complete batch when a fixture uses multiple endpoints or clients.
+	runtimeIO, err := deployment.RuntimeIo()
+	require.NoError(t, err)
+	if fixture.ioFPGACount != 0 {
+		runtimeIO.SetProtocol(1)
+		runtimeIO.SetIoFpgaCount(fixture.ioFPGACount)
+	}
+	if fixture.ioFanoutFactor != 0 {
+		runtimeIO.SetFanoutFactor(fixture.ioFanoutFactor)
+	}
+	program.SetBatchSize(runtimeIO.IoFpgaCount() * runtimeIO.FanoutFactor())
+	if len(fixture.selectedPropSyncChain) != 0 {
+		chains, err := deployment.NewSelectedPropSyncChains(1)
+		require.NoError(t, err)
+		partitionIDs, err := chains.At(0).NewPartitionIds(int32(len(fixture.selectedPropSyncChain)))
+		require.NoError(t, err)
+		for index, partitionID := range fixture.selectedPropSyncChain {
+			partitionIDs.Set(index, partitionID)
+		}
+	}
 
 	artifacts, err := manifest.NewArtifacts()
 	require.NoError(t, err)
@@ -997,8 +1058,18 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 		require.NoError(t, err)
 		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partitionID)))
 		require.NoError(t, detail.SetTopology("opaque-v3-topology"))
-		detail.SetNumChips(16)
+		detail.SetNumChips(16 * trays(index))
 		detail.SetDevicesPerNode(16)
+		if shape, ok := fixture.partitionShapes[index]; ok {
+			metadata, err := detail.NewTopologyMetadata()
+			require.NoError(t, err)
+			require.NoError(t, metadata.SetTopologyFamily("16x8x2x3"))
+			extent, err := metadata.NewPartitionShape(int32(len(shape)))
+			require.NoError(t, err)
+			for axis, size := range shape {
+				extent.Set(axis, size)
+			}
+		}
 		setTestChipArchitecture(t, detail, "polarisB0")
 	}
 
@@ -1032,6 +1103,12 @@ type testV3GraphManifestFixture struct {
 	lpuPartitions int
 	// firstPartitionID is the first compiler ID when lpuPartitions is nonzero.
 	firstPartitionID uint32
+	// partitionShapes gives an HX extent to the LPU partition at each index.
+	partitionShapes map[int][4]uint32
+	// selectedPropSyncChain lists the compiler IDs of one selected chain.
+	selectedPropSyncChain []uint32
+	ioFPGACount           uint32
+	ioFanoutFactor        uint32
 }
 
 func writeTestGraphBuild(t *testing.T, registryRoot, buildID string, manifest []byte) {
