@@ -117,11 +117,7 @@ async def close_configured_artifact_runtime() -> None:
 async def _close_worker_resources(
     state_agent_lifecycle: StateAgentLifecycle,
 ) -> None:
-    try:
-        await state_agent_lifecycle.close()
-    finally:
-        if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-            await close_configured_artifact_runtime()
+    await state_agent_lifecycle.close()
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -294,7 +290,12 @@ async def worker(argv: list[str] | None = None) -> None:
             snapshot_engine=snapshot_engine,
         )
     finally:
-        await close_worker_resources()
+        try:
+            await close_worker_resources()
+        finally:
+            # Accepted generations can finalize after the pre-shutdown hook.
+            if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+                await close_configured_artifact_runtime()
 
     logger.debug("Worker function completed, exiting...")
 
