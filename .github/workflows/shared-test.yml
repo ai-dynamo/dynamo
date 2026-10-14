@@ -7,12 +7,7 @@ on:
   workflow_call:
     inputs:
       amd_runner_labels:
-        description: 'Optional JSON array of GPU tier, cluster and workload labels for AMD64'
-        required: false
-        type: string
-        default: ''
-      amd_runner_secondary_labels:
-        description: 'Optional JSON label array for AMD64 GPU shard 1; empty uses the primary selector'
+        description: 'Optional JSON array of hardware-tier and cluster labels for AMD64'
         required: false
         type: string
         default: ''
@@ -106,11 +101,6 @@ on:
         description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
         required: false
         type: string
-      gpu_test_shards:
-        description: 'AMD64 GPU shards (1 or 2). CPU/ARM tests run once on shard 0.'
-        required: false
-        type: number
-        default: 1
       gpu_test_timeout_minutes:
         description: 'Timeout in minutes for each GPU test stage (parallel and sequential each get this budget)'
         required: false
@@ -188,18 +178,13 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-        shard: ${{ fromJson(inputs.gpu_test_shards == 2 && '[0,1]' || '[0]') }}
-        exclude:
-          - platform: arm64
-            shard: 1
-    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}${{ inputs.gpu_test_shards == 2 && matrix.platform == 'amd64' && format(' (shard {0}/2)', matrix.shard == 0 && '1' || '2') || '' }}
-    runs-on: ${{ matrix.platform == 'amd64' && (matrix.shard == 1 && inputs.amd_runner_secondary_labels != '' && fromJson(inputs.amd_runner_secondary_labels) || inputs.amd_runner_labels != '' && fromJson(inputs.amd_runner_labels) || inputs.amd_runner) || 'prod-tester-arm-v2' }}
+    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform == 'amd64' && (inputs.amd_runner_labels != '' && fromJson(inputs.amd_runner_labels) || inputs.amd_runner) || 'prod-tester-arm-v2' }}
     container:
-      # Match the effective AMD64 selector, including shard 1's primary-label
-      # fallback. ARM and callers without regional labels keep ECR_REGISTRY
-      # (west). shared-build-image publishes the same test tag to both regions.
+      # Match the AMD64 runner region. ARM and callers without regional labels
+      # keep ECR_REGISTRY (west). The build publishes test tags to both regions.
       # ECR_REGISTRY_EAST may override this repository's east registry.
-      image: ${{ matrix.platform == 'amd64' && contains(fromJson(matrix.shard == 1 && inputs.amd_runner_secondary_labels != '' && inputs.amd_runner_secondary_labels || inputs.amd_runner_labels || '[]'), 'aws-ci-prod-east') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ matrix.platform == 'amd64' && contains(fromJson(inputs.amd_runner_labels || '[]'), 'aws-ci-prod-east') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -289,7 +274,7 @@ jobs:
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
       - name: Run Sanity Check on Runtime Image
-        if: ${{ inputs.run_sanity_check && matrix.shard == 0 }}
+        if: ${{ inputs.run_sanity_check }}
         shell: bash
         # Run from the container's baked-in workspace, not the GHA checkout,
         # so the sanity check reflects what the image actually ships.
@@ -307,7 +292,7 @@ jobs:
 
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
-        if: ${{ inputs.run_cpu_only_tests && matrix.shard == 0 }}
+        if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: $/.github/actions/pytest-local
         with:
@@ -325,7 +310,7 @@ jobs:
         id: cpu-e2e-tests
         # Long-lived deployment tests should not compete with the xdist unit
         # pool or retry until the parent step kills the runner container.
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests && matrix.shard == 0 }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
         timeout-minutes: ${{ inputs.cpu_e2e_test_timeout_minutes }}
         uses: $/.github/actions/pytest-local
         with:
@@ -359,8 +344,6 @@ jobs:
           max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
-          gpu_shard_count: ${{ inputs.gpu_test_shards == 2 && 2 || 1 }}
-          gpu_shard_index: ${{ matrix.shard }}
           verify_gpu: ${{ inputs.verify_gpu }}
       - name: Run GPU tests (sequential)
         id: gpu-sequential-tests
@@ -385,8 +368,6 @@ jobs:
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
-          gpu_shard_count: ${{ inputs.gpu_test_shards == 2 && 2 || 1 }}
-          gpu_shard_index: ${{ matrix.shard }}
           verify_gpu: ${{ inputs.verify_gpu }}
 
       # One JUnit upload per job (one XML per stage inside). The name must keep
