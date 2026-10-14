@@ -62,6 +62,21 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### CRD and admission breaking changes
 
+##### DynamoPoolRelay CRD
+
+**Change:** The operator always registers the DynamoPoolRelay controller and requires
+`dynamopoolrelays.nvidia.com` to be installed.
+
+**Affected:** Operator upgrades with separately managed CRDs, including
+namespace-restricted installations.
+
+**Action:** Apply the version-matched CRDs before upgrading these operators.
+Cluster-wide installations with `dynamo-operator.upgradeCRD=true` apply them
+from the operator image through the existing init container.
+
+**Existing deployments:** The Relay controller creates workloads only for
+DynamoPoolRelay resources and does not modify inference DGDs.
+
 ##### Reserved runtime init container name
 
 **Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo

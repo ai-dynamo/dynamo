@@ -193,6 +193,9 @@ func TestProjectConsumerContract(t *testing.T) {
 			RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 		}}, got.Spec.InitContainers)
 	})
+	t.Run("Relay acknowledgement retains the Pod address", func(t *testing.T) {
+		assert.Equal(t, "10.0.0.1", got.Status.PodIP)
+	})
 	t.Run("unused heavyweight fields are removed", func(t *testing.T) {
 		assert.Nil(t, got.ManagedFields)
 		assert.Empty(t, got.Spec.InitContainers[0].Image)
@@ -200,7 +203,6 @@ func TestProjectConsumerContract(t *testing.T) {
 		assert.Empty(t, got.Spec.Containers[0].Image)
 		assert.Empty(t, got.Spec.Containers[0].Env)
 		assert.Empty(t, got.Spec.Containers[0].Resources)
-		assert.Empty(t, got.Status.PodIP)
 		assert.Empty(t, got.Status.ContainerStatuses[0].Image)
 		assert.Zero(t, got.Status.ContainerStatuses[1].State.Terminated.Signal)
 		assert.Empty(t, got.Status.ContainerStatuses[1].State.Terminated.ContainerID)

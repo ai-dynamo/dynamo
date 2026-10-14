@@ -30,6 +30,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 - [DynamoModel](#dynamomodel)
+- [DynamoPoolRelay](#dynamopoolrelay)
 
 
 
@@ -698,6 +699,137 @@ _Appears in:_
 | `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelay
+
+
+
+DynamoPoolRelay is an experimental, independently managed Pool Relay.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoPoolRelay` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoPoolRelaySpec](#dynamopoolrelayspec)_ |  |  |  |
+| `status` _[DynamoPoolRelayStatus](#dynamopoolrelaystatus)_ |  |  | Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelayDGDRef
+
+
+
+DynamoPoolRelayDGDRef names an inference graph in the Relay's Kubernetes namespace.
+
+
+
+_Appears in:_
+- [DynamoPoolRelayDGDSelection](#dynamopoolrelaydgdselection)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the DGD metadata.name. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` <br /> |
+
+
+#### DynamoPoolRelayDGDSelection
+
+
+
+DynamoPoolRelayDGDSelection resolves the union of label selection and explicit references.
+
+
+
+_Appears in:_
+- [DynamoPoolRelaySourcesSpec](#dynamopoolrelaysourcesspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `labelSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta)_ | LabelSelector selects DGD metadata labels in this Kubernetes namespace.<br />An explicit empty selector selects all DGDs. Results are unioned with Refs. |  | Optional: \{\} <br /> |
+| `refs` _[DynamoPoolRelayDGDRef](#dynamopoolrelaydgdref) array_ | Refs additionally selects named DGDs in this Kubernetes namespace.<br />Missing references are reported in status and retried when they appear. |  | MaxItems: 64 <br />MinItems: 1 <br />Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelayServiceSpec
+
+
+
+DynamoPoolRelayServiceSpec configures publication without overriding ownership or selectors.
+
+
+
+_Appears in:_
+- [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `ports` _[ServicePort](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#serviceport-v1-core) array_ | Ports replace the default publication port. Named targets must exist in the Pod. |  | MaxItems: 32 <br />MinItems: 1 <br /> |
+
+
+#### DynamoPoolRelaySourcesSpec
+
+
+
+DynamoPoolRelaySourcesSpec groups source selection independently of publication.
+
+
+
+_Appears in:_
+- [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `dgds` _[DynamoPoolRelayDGDSelection](#dynamopoolrelaydgdselection)_ | DGDs selects inference graphs in the Relay's Kubernetes namespace. |  |  |
+
+
+#### DynamoPoolRelaySpec
+
+
+
+DynamoPoolRelaySpec configures one namespace-local Pool Relay. Conversion is
+unaffected: DynamoPoolRelay is a new, single-version API with no hub or spoke.
+
+
+
+_Appears in:_
+- [DynamoPoolRelay](#dynamopoolrelay)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `clusterId` _string_ | ClusterID is the stable discovery-cluster identity, retained across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^\S(.*\S)?$` <br /> |
+| `replicas` _integer_ | Replicas is the number of active Relay processes. Each observes all selected<br />sources and maintains independent state. Defaults to two; one disables redundancy. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `sources` _[DynamoPoolRelaySourcesSpec](#dynamopoolrelaysourcesspec)_ | Sources selects the DGDs observed by every Relay replica. |  |  |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures the Relay Pod, like a DGD component. Exactly one<br />container named main with a nonempty image is required; other containers<br />are user-managed sidecars. Transport, identity and sources remain derived. |  |  |
+| `service` _[DynamoPoolRelayServiceSpec](#dynamopoolrelayservicespec)_ | Service configures the generated ClusterIP ports. The port named grpc is<br />the publication endpoint. Omission exposes the main listener on 5561. |  | Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelayStatus
+
+
+
+DynamoPoolRelayStatus reports deployment availability, not pool or model readiness.
+
+
+
+_Appears in:_
+- [DynamoPoolRelay](#dynamopoolrelay)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the last successfully reconciled spec generation. |  | Optional: \{\} <br /> |
+| `endpoint` _string_ | Endpoint is the internal Service address of the port named grpc. |  | Optional: \{\} <br /> |
+| `deploymentName` _string_ | DeploymentName identifies the managed Deployment for logs and inspection. |  | Optional: \{\} <br /> |
+| `desiredSourcesRevision` _string_ | DesiredSourcesRevision identifies the published source configuration. |  | Optional: \{\} <br /> |
+| `appliedSourcesRevision` _string_ | AppliedSourcesRevision is set only when every requested current replica<br />acknowledges DesiredSourcesRevision and no superseded active Pods remain. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the number of non-terminated Deployment replicas. |  | Optional: \{\} <br /> |
+| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the desired Pod template. |  | Optional: \{\} <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of available Deployment replicas. |  | Optional: \{\} <br /> |
+| `sourcesAppliedReplicas` _integer_ | SourcesAppliedReplicas counts current, non-terminating replicas that<br />acknowledged the desired source and connection revisions with their own Pod UID. |  | Optional: \{\} <br /> |
+| `selectedDGDs` _integer_ | SelectedDGDs reports the number of active objects in the resolved union. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reports Ready when all requested current replicas are available;<br />this does not imply model or KV recovery readiness. |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig

@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"maps"
+	"reflect"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -399,4 +400,50 @@ func dcdFromAlpha(t *testing.T, spec v1alpha1.DynamoComponentDeploymentSpec) *v1
 		t.Fatalf("ConvertTo(v1beta1) error = %v", err)
 	}
 	return beta
+}
+
+func TestGetDGDComponentPodAnnotationsMatchesRenderingDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		metadata, spec, template string
+		want                     string
+	}{
+		{name: "metadata default", metadata: "container", want: "container"},
+		{name: "spec overrides metadata", metadata: "container", spec: "pod", want: "pod"},
+		{name: "template overrides spec", metadata: "pod", spec: "pod", template: "container", want: "container"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Declare discovery annotations at the supported DGD and template scopes")
+			key := commonconsts.KubeAnnotationDynamoKubeDiscoveryMode
+			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{key: tc.metadata, commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}}}
+			if tc.spec != "" {
+				dgd.Spec.Annotations = map[string]string{key: tc.spec}
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "authored-origin"}}}}
+			if tc.template != "" {
+				component.PodTemplate.Annotations[key] = tc.template
+			}
+			beforeDGD, beforeComponent := dgd.DeepCopy(), component.DeepCopy()
+
+			t.Log("Compare the read-only resolver with the existing renderer defaulting path")
+			resolved := GetDGDComponentPodAnnotations(dgd, component)
+			rendered := component.DeepCopy()
+			applyDGDTemplateDefaults(rendered, dgd, nil)
+			if !maps.Equal(resolved, rendered.PodTemplate.Annotations) || resolved[key] != tc.want {
+				t.Fatalf("resolved annotations %v differ from rendered %v or expected mode %q", resolved, rendered.PodTemplate.Annotations, tc.want)
+			}
+			if resolved[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] != "1.6.0" {
+				t.Fatal("DGD metadata must retain authoritative origin")
+			}
+
+			t.Log("Verify resolution preserves its inputs and returns independent metadata")
+			if !reflect.DeepEqual(beforeDGD, dgd) || !reflect.DeepEqual(beforeComponent, component) {
+				t.Fatal("annotation resolution mutated its inputs")
+			}
+			resolved[key] = "modified"
+			if !reflect.DeepEqual(beforeDGD, dgd) || !reflect.DeepEqual(beforeComponent, component) {
+				t.Fatal("resolved annotation map aliases its inputs")
+			}
+		})
+	}
 }
