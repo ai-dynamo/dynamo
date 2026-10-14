@@ -3,9 +3,10 @@
 
 //! Edge and coverage state of one node, kept behind the node's state lock.
 
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::edge_index::EdgeIndex;
+use super::worker_set::WorkerSet;
 use crate::protocols::*;
 
 pub(super) struct RemoveOutcome {
@@ -25,7 +26,7 @@ pub(super) struct CrtcNodeState {
     /// has cached `edge[0..k]`, where `0 < k < edge.len()`.
     pub(super) worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
     /// Workers with full edge coverage.
-    pub(super) full_edge_workers: FxHashSet<WorkerWithDpRank>,
+    pub(super) full_edge_workers: WorkerSet,
 }
 
 impl CrtcNodeState {
@@ -35,7 +36,7 @@ impl CrtcNodeState {
             edge_index: EdgeIndex::build(&edge),
             edge,
             worker_cutoffs: FxHashMap::default(),
-            full_edge_workers: FxHashSet::default(),
+            full_edge_workers: WorkerSet::default(),
         }
     }
 
@@ -307,6 +308,8 @@ impl CrtcNodeState {
 mod tests {
     use std::collections::HashMap;
 
+    use rustc_hash::FxHashSet;
+
     use super::super::edge_index::SCAN_MAX_LEN;
     use super::*;
 
@@ -445,7 +448,7 @@ mod tests {
 
         assert_eq!(state.edge.len(), 3);
         assert_eq!(
-            state.full_edge_workers,
+            *state.full_edge_workers,
             FxHashSet::from_iter([full, at_split, past_split])
         );
         assert_eq!(state.worker_cutoffs, FxHashMap::from_iter([(short, 1)]));
@@ -453,7 +456,7 @@ mod tests {
         assert_eq!(state.position(ExternalSequenceBlockHash(4)), None);
 
         assert_eq!(suffix.edge.len(), 3);
-        assert_eq!(suffix.full_edge_workers, FxHashSet::from_iter([full]));
+        assert_eq!(*suffix.full_edge_workers, FxHashSet::from_iter([full]));
         assert_eq!(
             suffix.worker_cutoffs,
             FxHashMap::from_iter([(past_split, 2)])

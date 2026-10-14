@@ -349,7 +349,6 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			t.Log("Create a hybrid HX build with partitions 1-4, a selected chain 2-3, and one CUDA artifact")
 			fixture := newV3CompilerFixture()
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = 4
 			for id := uint32(2); id <= 4; id++ {
 				partition := fixture.partitions[0]
 				partition.id = id
@@ -455,7 +454,6 @@ func TestProjectModelV3LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 	t.Log("Create a hybrid HX build with one more partition than the LPX limit")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.numLPUNodes = maxLPXPartitions + 1
 	for id := uint32(2); id <= maxLPXPartitions+1; id++ {
 		partition := fixture.partitions[0]
 		partition.id = id

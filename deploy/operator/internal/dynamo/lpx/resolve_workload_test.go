@@ -178,7 +178,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					fixture.partitions = []testV3CapnpPartition{fixture.partitions[0], fixture.partitions[0]}
 					fixture.partitions[1].id++
 					fixture.selectedPropSyncChains = [][]uint32{{fixture.partitions[0].id, fixture.partitions[1].id}}
-					fixture.numLPUNodes, agentCounts[index], requestCounts[index] = 1, 1, 1
+					agentCounts[index], requestCounts[index] = 1, 1
 				}
 				snapshots[index] = acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			}

@@ -28,7 +28,11 @@ from tests.utils.payload_builder import (
     disaggregated_token_count_payload,
     http_cancellation_payloads,
 )
-from tests.utils.payloads import ChatPayload, KvTransferPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    KvTransferPayload,
+    OmittedMaxTokensChatPayload,
+)
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
@@ -148,6 +152,14 @@ sidecar_configs = {
         env={"PYTHONUNBUFFERED": "1"},
         request_payloads=[
             chat_payload_default(),
+            OmittedMaxTokensChatPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Tell me about rivers."}],
+                    "ignore_eos": True,
+                },
+                expected_response=[],
+                expected_log=[],
+            ),
         ],
     ),
     "trtllm_aggregated": EngineConfig(

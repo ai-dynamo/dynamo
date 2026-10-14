@@ -5,7 +5,7 @@ import logging
 from typing import AsyncGenerator
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 from tritonserver import MemoryType as TritonMemoryType
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
@@ -28,7 +28,7 @@ class RequestHandler:
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: mc.ModelConfig,
+        triton_model_config: TritonModelConfigPb.ModelConfig,
     ):
         self._server = server
         self._model = model
