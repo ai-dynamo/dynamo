@@ -149,7 +149,10 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 
     fn discard_prepared(&self, prepared: Self::Prepared);
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
+    async fn list_instances(
+        &self,
+        namespace_filter: &NamespaceFilter,
+    ) -> anyhow::Result<Vec<DiscoveryInstance>>;
 }
 
 #[derive(Clone)]
@@ -284,6 +287,19 @@ struct ReconciliationResult {
     instances: anyhow::Result<Vec<DiscoveryInstance>>,
 }
 
+/// A reconciliation list after `ControllerHost::normalize` ran over every model card, so the
+/// controller task only has to apply verdicts.
+struct NormalizedReconciliation {
+    revision: u64,
+    instances: anyhow::Result<Vec<NormalizedInstance>>,
+}
+
+struct NormalizedInstance {
+    key: String,
+    /// Applied, and a rejection logged, only if no newer event superseded the card.
+    verdict: anyhow::Result<Option<DesiredInstance>>,
+}
+
 pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     host: Arc<H>,
     desired: HashMap<String, DesiredInstance>,
@@ -294,7 +310,7 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     /// it can carry an instance the resync removed, so its result is discarded.
     resync_revision: u64,
     builds: JoinSet<BuildResult<H::Prepared>>,
-    reconciliations: JoinSet<ReconciliationResult>,
+    reconciliations: JoinSet<NormalizedReconciliation>,
     active_builds: usize,
     max_concurrent_builds: usize,
     next_build_generation: u64,
@@ -357,11 +373,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     }
                 }
                 _ = reconciliation_interval.tick(), if self.reconciliations.is_empty() => {
-                    self.start_reconciliation();
+                    self.start_reconciliation(&namespace_filter);
                 }
                 result = self.reconciliations.join_next(), if !self.reconciliations.is_empty() => {
                     match result {
-                        Some(Ok(result)) => self.apply_reconciliation(result, &namespace_filter),
+                        Some(Ok(result)) => self.apply_normalized_reconciliation(result),
                         Some(Err(error)) => tracing::error!(%error, "Model reconciliation task failed"),
                         None => {}
                     }
@@ -1145,22 +1161,51 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         while self.reconciliations.join_next().await.is_some() {}
     }
 
-    fn start_reconciliation(&mut self) {
+    fn start_reconciliation(&mut self, namespace_filter: &NamespaceFilter) {
         let host = self.host.clone();
         let revision = self.revision;
+        let namespace_filter = namespace_filter.clone();
         self.reconciliations.spawn(async move {
-            ReconciliationResult {
+            let instances = match host.list_instances(&namespace_filter).await {
+                Ok(instances) => instances,
+                Err(error) => {
+                    return NormalizedReconciliation {
+                        revision,
+                        instances: Err(error),
+                    };
+                }
+            };
+            // Deserializing and checksumming every card is CPU-bound (tens of milliseconds for
+            // a large deployment, on every tick), so it runs off the runtime workers.
+            let instances = tokio::task::spawn_blocking(move || {
+                normalize_reconciliation(host.as_ref(), instances, &namespace_filter)
+            })
+            .await
+            .map_err(anyhow::Error::from);
+            NormalizedReconciliation {
                 revision,
-                instances: host.list_instances().await,
+                instances,
             }
         });
     }
 
+    /// Normalizes and applies a list on the controller task; the periodic reconciliation
+    /// normalizes off it first and calls `apply_normalized_reconciliation` directly.
     fn apply_reconciliation(
         &mut self,
         result: ReconciliationResult,
         namespace_filter: &NamespaceFilter,
     ) {
+        let instances = result.instances.map(|instances| {
+            normalize_reconciliation(self.host.as_ref(), instances, namespace_filter)
+        });
+        self.apply_normalized_reconciliation(NormalizedReconciliation {
+            revision: result.revision,
+            instances,
+        });
+    }
+
+    fn apply_normalized_reconciliation(&mut self, result: NormalizedReconciliation) {
         if result.revision < self.resync_revision {
             tracing::debug!(
                 "Discarding a model reconciliation snapshot that predates a discovery resync"
@@ -1176,11 +1221,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         };
         let mut observed = HashSet::new();
         let mut normalized = Vec::new();
-        for instance in instances {
-            let DiscoveryInstanceId::Model(mcid) = instance.id() else {
-                continue;
-            };
-            let key = mcid.to_path();
+        for NormalizedInstance { key, verdict } in instances {
             observed.insert(key.clone());
             if self
                 .instance_revisions
@@ -1189,7 +1230,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             {
                 continue;
             }
-            match self.host.normalize(instance, namespace_filter) {
+            match verdict {
                 Ok(Some(instance)) => normalized.push(instance),
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
@@ -1222,6 +1263,27 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             self.desired.contains_key(key) || observed.contains(key) || *revision > result.revision
         });
     }
+}
+
+/// Runs the host's normalization over a reconciliation list. It reads no controller state, so
+/// it can run on any thread; `apply_normalized_reconciliation` decides what to keep.
+fn normalize_reconciliation<H: ControllerHost>(
+    host: &H,
+    instances: Vec<DiscoveryInstance>,
+    namespace_filter: &NamespaceFilter,
+) -> Vec<NormalizedInstance> {
+    instances
+        .into_iter()
+        .filter_map(|instance| {
+            let DiscoveryInstanceId::Model(mcid) = instance.id() else {
+                return None;
+            };
+            Some(NormalizedInstance {
+                key: mcid.to_path(),
+                verdict: host.normalize(instance, namespace_filter),
+            })
+        })
+        .collect()
 }
 
 fn admitted_ids(members: &[DesiredInstance]) -> Vec<u64> {
@@ -1363,6 +1425,8 @@ mod tests {
         discarded: AtomicUsize,
         inventory: super::super::worker_inventory::WorkerInventory,
         prepared_replacements: AtomicUsize,
+        listed: Mutex<Result<Vec<DiscoveryInstance>, String>>,
+        list_filters: Mutex<Vec<NamespaceFilter>>,
     }
 
     impl FakeHost {
@@ -1384,6 +1448,8 @@ mod tests {
                     discarded: AtomicUsize::new(0),
                     inventory: Default::default(),
                     prepared_replacements: AtomicUsize::new(0),
+                    listed: Mutex::new(Ok(Vec::new())),
+                    list_filters: Mutex::new(Vec::new()),
                 }),
                 start_rx,
             )
@@ -1592,8 +1658,19 @@ mod tests {
             self.discarded.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
-            Ok(Vec::new())
+        async fn list_instances(
+            &self,
+            namespace_filter: &NamespaceFilter,
+        ) -> anyhow::Result<Vec<DiscoveryInstance>> {
+            self.list_filters
+                .lock()
+                .unwrap()
+                .push(namespace_filter.clone());
+            self.listed
+                .lock()
+                .unwrap()
+                .clone()
+                .map_err(|error| anyhow::anyhow!(error))
         }
     }
 
@@ -2427,6 +2504,92 @@ mod tests {
             &NamespaceFilter::Global,
         );
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
+    }
+
+    #[tokio::test]
+    async fn a_periodic_list_is_normalized_off_the_controller_and_applied_as_before() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let namespace_filter = NamespaceFilter::Exact("namespace".to_string());
+        let incumbent = instance(1, "spec");
+        let vanished = instance(2, "spec");
+        let superseded = instance(3, "old");
+        for member in [&incumbent, &vanished, &superseded] {
+            controller.apply_added(member.clone());
+        }
+        let mut foreign = instance(4, "spec");
+        foreign.mcid.namespace = "other".to_string();
+        foreign.key = foreign.mcid.to_path();
+        let malformed = DiscoveryInstance::Model {
+            namespace: "namespace".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 5,
+            card_json: serde_json::json!({}),
+            model_suffix: None,
+        };
+        let endpoint = DiscoveryInstance::Endpoint(dynamo_runtime::component::Instance {
+            namespace: "namespace".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 6,
+            transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:1".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        });
+        *host.listed.lock().unwrap() = Ok(vec![
+            discovery_instance(&superseded),
+            discovery_instance(&foreign),
+            malformed,
+            endpoint,
+            discovery_instance(&incumbent),
+        ]);
+
+        let list_revision = controller.revision;
+        controller.start_reconciliation(&namespace_filter);
+        // Events that arrive while the list is in flight must win over its stale view.
+        controller.apply_removed(&superseded.key);
+        let replaced = instance(3, "new");
+        controller.apply_added(replaced.clone());
+
+        let result = controller
+            .reconciliations
+            .join_next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.revision, list_revision);
+        assert_eq!(
+            host.list_filters.lock().unwrap().as_slice(),
+            [namespace_filter]
+        );
+        let replaced_revision = controller.instance_revisions[&replaced.key];
+        controller.apply_normalized_reconciliation(result);
+
+        assert_eq!(
+            controller.desired.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([incumbent.key.clone(), replaced.key.clone()])
+        );
+        assert_eq!(
+            controller.desired[&replaced.key].projection_fingerprint,
+            replaced.projection_fingerprint
+        );
+        // The stale card was dropped before `apply_added`, not rejected by it.
+        assert_eq!(
+            controller.instance_revisions[&replaced.key],
+            replaced_revision
+        );
+        *host.listed.lock().unwrap() = Err("discovery unavailable".to_string());
+        controller.start_reconciliation(&NamespaceFilter::Global);
+        let result = controller
+            .reconciliations
+            .join_next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.instances.is_err());
+        controller.apply_normalized_reconciliation(result);
+        assert_eq!(controller.desired.len(), 2);
     }
 
     #[tokio::test]
