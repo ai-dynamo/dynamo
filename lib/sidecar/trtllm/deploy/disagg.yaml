@@ -100,6 +100,7 @@ spec:
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
           # The stock engine image has grpc but no openengine Python bindings.
+          # It does not yet serve grpc.health.v1.Health; use Control.Health.
           # HealthResponse.state is protobuf field 1 (varint); READY is 2.
           # Int32Value decodes that field and skips any other fields.
           startupProbe:
@@ -107,7 +108,15 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
+              - |
+                import grpc
+                from google.protobuf.wrappers_pb2 import Int32Value
+
+                channel = grpc.insecure_channel("127.0.0.1:50051")
+                response = channel.unary_unary("/openengine.v1.Control/Health")(
+                    b"", timeout=3
+                )
+                raise SystemExit(Int32Value.FromString(response).value != 2)
             periodSeconds: 5
             timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
             failureThreshold: 360   # Up to 30 min for model load and warmup.
@@ -116,20 +125,18 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
+              - |
+                import grpc
+                from google.protobuf.wrappers_pb2 import Int32Value
+
+                channel = grpc.insecure_channel("127.0.0.1:50051")
+                response = channel.unary_unary("/openengine.v1.Control/Health")(
+                    b"", timeout=3
+                )
+                raise SystemExit(Int32Value.FromString(response).value != 2)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
-          livenessProbe:
-            # A responsive RPC keeps the process live during transient DEGRADED states.
-            exec:
-              command:
-              - python3
-              - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3)
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 6
           env:
           # TensorRT-LLM would otherwise start its TP=1 worker by spawning an
           # MPI process, and that spawn fails inside a pod: PRTE reaches
@@ -243,7 +250,15 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
+              - |
+                import grpc
+                from google.protobuf.wrappers_pb2 import Int32Value
+
+                channel = grpc.insecure_channel("127.0.0.1:50051")
+                response = channel.unary_unary("/openengine.v1.Control/Health")(
+                    b"", timeout=3
+                )
+                raise SystemExit(Int32Value.FromString(response).value != 2)
             periodSeconds: 5
             timeoutSeconds: 10
             failureThreshold: 360
@@ -252,19 +267,18 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(0 if Int32Value.FromString(r).value==2 else 1)
+              - |
+                import grpc
+                from google.protobuf.wrappers_pb2 import Int32Value
+
+                channel = grpc.insecure_channel("127.0.0.1:50051")
+                response = channel.unary_unary("/openengine.v1.Control/Health")(
+                    b"", timeout=3
+                )
+                raise SystemExit(Int32Value.FromString(response).value != 2)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
-          livenessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3)
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 6
           env:
           # See the prefill engine above: run the TP=1 worker in-process rather
           # than spawning it over MPI, which does not work inside a pod. This is
