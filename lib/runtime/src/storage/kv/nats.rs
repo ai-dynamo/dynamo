@@ -52,6 +52,13 @@ impl Store for NATSStore {
         // TODO: Track and delete any owned keys
         // The TTL should ensure NATS does it, but best we do it immediately
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        if self.client.client().connection_state() != async_nats::connection::State::Connected {
+            return Err(StoreError::NATSError("NATS is disconnected".into()));
+        }
+        Ok(())
+    }
 }
 
 impl NATSStore {
@@ -183,6 +190,9 @@ impl Bucket for NATSBucket {
             .map_err(|e| StoreError::NATSError(e.to_string()))
     }
 
+    /// Replays the existing entries as individual [`kv::WatchEvent::Put`] events, not as the
+    /// initial [`kv::WatchEvent::Resync`] the [`kv::Bucket::watch`] contract asks for. Discovery
+    /// does not select this store, so nothing depends on that order here.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + 'life0>>, StoreError>

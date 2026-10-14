@@ -46,6 +46,12 @@ Hardware-specific deployment templates for Intel GPUs using Kubernetes Dynamic R
 
 See the [XPU deployment README](./xpu/README.md) for detailed prerequisites and usage instructions.
 
+### Gateway API Inference Extension
+
+[gaie/agg.yaml](gaie/agg.yaml) uses a native Dynamo EPP and a direct-mode frontend sidecar
+per SGLang worker. For model selection before worker selection, see the
+[Switchyard deployment example](gaie/switchyard/README.md).
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

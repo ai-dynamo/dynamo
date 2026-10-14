@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -498,6 +499,9 @@ pub struct SelectionSessionContext {
     pub session_final: Option<bool>,
     #[serde(default)]
     pub input_trigger: Option<SelectionInputTrigger>,
+    /// Opaque agent headers supplied by the caller's ingress.
+    #[serde(default)]
+    pub agent_headers: Option<Arc<BTreeMap<String, Vec<String>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -516,8 +520,9 @@ impl From<SelectionSessionContext> for SessionContext {
             parent_session_id,
             session_final,
             input_trigger,
+            agent_headers,
         } = context;
-        SessionContext::new(
+        let session = SessionContext::new(
             session_id,
             parent_session_id,
             session_final,
@@ -526,7 +531,12 @@ impl From<SelectionSessionContext> for SessionContext {
                 SelectionInputTrigger::ToolResult => WorkerSelectionInputTrigger::ToolResult,
                 SelectionInputTrigger::Other => WorkerSelectionInputTrigger::Other,
             }),
-        )
+        );
+        if let Some(headers) = agent_headers {
+            session.with_agent_headers(headers)
+        } else {
+            session
+        }
     }
 }
 
@@ -696,6 +706,39 @@ mod tests {
             context.input_trigger(),
             Some(WorkerSelectionInputTrigger::UserMessage)
         );
+        assert!(context.agent_headers().is_empty());
+    }
+
+    #[test]
+    fn selection_requests_preserve_agent_headers() {
+        let payload = serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "session_context": {
+                "session_id": "child",
+                "agent_headers": {
+                    "x-claude-code-request-class": ["subagent", "future-class"],
+                    "x-codex-future": ["{invalid json", ""]
+                }
+            }
+        });
+        let mut select: SelectRequest =
+            serde_json::from_value(payload.clone()).expect("valid select request");
+        let mut reserve: SelectAndReserveRequest =
+            serde_json::from_value(payload).expect("valid reserve request");
+        for context in [
+            select.take_session_context(),
+            reserve.take_session_context(),
+        ] {
+            let context = context.expect("structured session context");
+            assert_eq!(
+                context.agent_headers()["x-claude-code-request-class"],
+                ["subagent", "future-class"]
+            );
+            assert_eq!(
+                context.agent_headers()["x-codex-future"],
+                ["{invalid json", ""]
+            );
+        }
     }
 
     #[test]
@@ -708,6 +751,7 @@ mod tests {
         let context = request.take_session_context().expect("legacy context");
         assert_eq!(context.session_id(), "legacy");
         assert_eq!(context.parent_session_id(), None);
+        assert!(context.agent_headers().is_empty());
 
         let mut request: SelectAndReserveRequest =
             serde_json::from_value(serde_json::json!({ "token_ids": [1, 2, 3, 4] }))

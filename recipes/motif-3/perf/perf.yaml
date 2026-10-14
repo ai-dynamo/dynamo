@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: motif3-aiperf-config
+data:
+  perf.yaml: |
+    schemaVersion: "2.0"
+    benchmark:
+      model: ${TARGET_MODEL}
+      tokenizer:
+        name: ${TOKENIZER}
+        trust_remote_code: true
+      endpoint:
+        url: ${INFERENCE_URL}
+        type: chat
+        streaming: true
+        timeout: 7200
+        use_server_token_count: true
+        extra:
+          ignore_eos: true
+      dataset:
+        type: file
+        path: ${TRACE_FILE}
+        format: mooncake_trace
+        sampling: sequential
+        synthesis:
+          max_isl: ${MAX_ISL:262144}
+          max_osl: ${CAP_OSL:12000}
+      warmup:
+        type: concurrency
+        concurrency: 6
+        requests: 6
+      profiling:
+        type: concurrency
+        concurrency: ${CONCURRENCY}
+        requests: ${REQUESTS}
+      runtime:
+        ui: none
+      artifacts:
+        dir: ${ARTIFACT_DIR}
+        summary: [json]
+        records: [jsonl]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: motif3-aiperf-job
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: aiperf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.13.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              export REQUESTS="$(wc -l < "$TRACE_FILE" | tr -d '[:space:]')"
+              exec aiperf profile --config /etc/aiperf/perf.yaml
+          env:
+            - name: TARGET_MODEL
+              value: Motif-Technologies/Motif-3-NVFP4
+            - name: TOKENIZER
+              value: Motif-Technologies/Motif-3-NVFP4
+            - name: INFERENCE_URL
+              value: http://motif3-agg-b200-frontend:8000/v1/chat/completions
+            - name: TRACE_FILE
+              value: /shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
+            - name: CONCURRENCY
+              value: "11"
+            - name: ARTIFACT_DIR
+              value: /shared-model-cache/aiperf-artifacts
+            - name: HF_HOME
+              value: /shared-model-cache
+          volumeMounts:
+            - name: aiperf-config
+              mountPath: /etc/aiperf
+              readOnly: true
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: aiperf-config
+          configMap:
+            name: motif3-aiperf-config
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

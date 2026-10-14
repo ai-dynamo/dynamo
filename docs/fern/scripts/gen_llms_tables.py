@@ -337,8 +337,8 @@ DECL_RE = re.compile(
 )
 
 
-def parse_data_module(path: Path) -> dict:
-    """Parse every top-level const in releases.data.ts into a dict."""
+def parse_literal_module(path: Path, required_exports: list[str]) -> dict:
+    """Parse a disciplined TypeScript literal module into a dict."""
     try:
         src = strip_comments(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -357,10 +357,33 @@ def parse_data_module(path: Path) -> dict:
         if parser.peek() == ";":
             parser.i += 1
 
-    missing = [n for n in REQUIRED_EXPORTS if n not in env]
+    missing = [n for n in required_exports if n not in env]
     if missing:
         raise TSParseError(f"missing required exports: {', '.join(missing)}")
     return env
+
+
+def parse_data_module(path: Path) -> dict:
+    """Parse every top-level const in releases.data.ts into a dict."""
+    return parse_literal_module(path, REQUIRED_EXPORTS)
+
+
+def load_nightly_builds(path: Path) -> list[dict]:
+    """Load generated ledger rows for a docs-publish run."""
+    builds = parse_literal_module(path, ["NIGHTLY_BUILDS"])["NIGHTLY_BUILDS"]
+    if not isinstance(builds, list):
+        raise TSParseError("NIGHTLY_BUILDS must be an array")
+    for build in builds:
+        if not isinstance(build, dict) or not all(
+            isinstance(build.get(field), expected)
+            for field, expected in (("version", str), ("date", str), ("packages", list))
+        ):
+            raise TSParseError(
+                "NIGHTLY_BUILDS rows require version, date, and packages"
+            )
+        if not all(isinstance(package, str) for package in build["packages"]):
+            raise TSParseError("NIGHTLY_BUILDS packages must be strings")
+    return builds
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +844,10 @@ def render_release_artifacts(data: dict) -> str:
     if data.get("NIGHTLY_BUILDS"):
         parts.append("**Recent nightly wheel builds**")
         parts.append(nightlies_table(data))
+    # The note covers the channel itself, not the rows: it holds the install
+    # pattern and the container tags, so it stays whether or not this run
+    # resolved ledger rows. releases-machine-readable.mdx already does this.
+    if data.get("NIGHTLIES_NOTE"):
         parts.append(data["NIGHTLIES_NOTE"])
 
     parts.append("**Crates: first published version on crates.io**")
@@ -1305,6 +1332,11 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="write only assets/releases.json and assets/releases-atom.xml",
     )
+    ap.add_argument(
+        "--nightly-data",
+        type=Path,
+        help="generated nightly-selector module to use for nightly ledger rows",
+    )
     args = ap.parse_args(argv)
 
     try:
@@ -1312,6 +1344,14 @@ def main(argv: list[str]) -> int:
     except TSParseError as exc:
         print(f"error: failed to parse {DATA_TS}: {exc}", file=sys.stderr)
         return 2
+    if args.nightly_data:
+        # Its own handler: the generated nightly module is a separate input, and
+        # blaming releases.data.ts for it sends the reader to the wrong file.
+        try:
+            data["NIGHTLY_BUILDS"] = load_nightly_builds(args.nightly_data)
+        except TSParseError as exc:
+            print(f"error: failed to parse {args.nightly_data}: {exc}", file=sys.stderr)
+            return 2
 
     # Render every selected output up front so a rendering failure emits nothing.
     try:

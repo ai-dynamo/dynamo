@@ -365,12 +365,17 @@ present, the flat `session_id` field is ignored.
     "session_id": "child-session",
     "parent_session_id": "root-session",
     "session_final": false,
-    "input_trigger": "tool_result"
+    "input_trigger": "tool_result",
+    "agent_headers": {
+      "x-claude-code-request-class": ["subagent"]
+    }
   }
 }
 ```
 
 Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionContext::session_context()`.
+
+The optional `agent_headers` map carries upstream-captured header names and ordered lists of string values to the policy's `SessionContext.agent_headers()` accessor. Both selection endpoints preserve these values without interpreting them. Supply the map in the request body; the selection API does not extract coding-agent metadata from its own HTTP headers.
 
 ## Ray Select-Then-Reserve Flow
 
