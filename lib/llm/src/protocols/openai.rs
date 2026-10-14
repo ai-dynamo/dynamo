@@ -29,6 +29,7 @@ pub mod pooling;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
+mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;

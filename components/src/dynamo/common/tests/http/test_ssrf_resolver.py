@@ -79,10 +79,10 @@ async def test_configured_egress_proxy_is_not_filtered(monkeypatch) -> None:
     monkeypatch.delenv("http_proxy", raising=False)
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
 
-    resolver = BlocklistResolver(allow_private_ips=False)
+    resolver = BlocklistResolver(allow_private_ips=False, via_proxy=True)
     resolver._inner = _FakeInner(["10.1.2.3"])
 
-    hosts = await resolver.resolve("proxy.internal")
+    hosts = await resolver.resolve("proxy.internal", 3128)
 
     assert [h["host"] for h in hosts] == ["10.1.2.3"]
 
@@ -92,11 +92,39 @@ async def test_a_non_proxy_host_is_still_filtered(monkeypatch) -> None:
     monkeypatch.delenv("http_proxy", raising=False)
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
 
+    resolver = BlocklistResolver(allow_private_ips=False, via_proxy=True)
+    resolver._inner = _FakeInner(["10.1.2.3"])
+
+    with pytest.raises(SsrfBlockedAddress):
+        await resolver.resolve("origin.example.com", 3128)
+
+
+async def test_another_port_on_the_proxy_host_is_filtered(monkeypatch) -> None:
+    """aiohttp resolves a proxy at its own port, so another port is an origin."""
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
+
+    resolver = BlocklistResolver(allow_private_ips=False, via_proxy=True)
+    resolver._inner = _FakeInner(["10.1.2.3"])
+
+    with pytest.raises(SsrfBlockedAddress):
+        await resolver.resolve("proxy.internal", 8443)
+
+
+async def test_a_direct_resolver_does_not_exempt_the_proxy(monkeypatch) -> None:
+    """Only a connector that dials the proxy may resolve it unfiltered.
+
+    A direct fetch reaches this resolver with the proxy's host and port when
+    NO_PROXY covers that host, and it is an origin like any other.
+    """
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
+
     resolver = BlocklistResolver(allow_private_ips=False)
     resolver._inner = _FakeInner(["10.1.2.3"])
 
     with pytest.raises(SsrfBlockedAddress):
-        await resolver.resolve("origin.example.com")
+        await resolver.resolve("proxy.internal", 3128)
 
 
 async def test_blocked_message_bounds_the_hostname() -> None:

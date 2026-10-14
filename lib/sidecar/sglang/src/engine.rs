@@ -48,6 +48,7 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
+    combined_token_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -313,11 +314,16 @@ impl LLMEngine for SglangSidecarEngine {
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
+        let combined_token_limit = combined_token_limit(&discovery);
+        if combined_token_limit.is_none() {
+            tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
+        }
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
+                combined_token_limit,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -332,7 +338,7 @@ impl LLMEngine for SglangSidecarEngine {
 
     async fn generate(
         &self,
-        request: PreprocessedRequest,
+        mut request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let state = self
@@ -351,7 +357,14 @@ impl LLMEngine for SglangSidecarEngine {
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
-            return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
+            return Ok(native_http.generate(native_request, ctx, self.cancel.child_token()));
+        }
+        if request.stop_conditions.max_tokens.is_none() {
+            request.stop_conditions.max_tokens = omitted_max_tokens_default(
+                state.combined_token_limit,
+                request.token_ids.len(),
+                request.stop_conditions.min_tokens,
+            );
         }
         let mut grpc_client = state.pool.stream_client();
 
@@ -384,12 +397,15 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
+            let stopped_ctx = ctx.inner_arc();
+            let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
+            let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
 
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
-                _ = ctx.stopped() => None,
-                _ = cancel.cancelled() => None,
+                _ = &mut request_cancellation => None,
+                _ = &mut shutdown_cancellation => None,
                 response = grpc_client.generate(grpc_request) => Some(response),
             };
             let Some(opened) = opened else {
@@ -423,12 +439,12 @@ impl LLMEngine for SglangSidecarEngine {
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => {
+                    _ = &mut request_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
-                    _ = cancel.cancelled() => {
+                    _ = &mut shutdown_cancellation => {
                         yield Ok(LLMEngineOutput::cancelled()
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
@@ -918,6 +934,41 @@ fn sglang_eagle_enabled(server_info: &Value) -> bool {
         })
 }
 
+/// Context length minus the EAGLE draft-token reserve, which SGLang counts
+/// against the context once `max_new_tokens` is set. Adaptive speculation does
+/// not report its reserve.
+fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
+    let server_info = &discovery.server_info;
+    let reserved = if !sglang_eagle_enabled(server_info) {
+        0
+    } else if server_info
+        .get("speculative_adaptive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    } else {
+        let field = |key| client::json_u32(server_info, key);
+        field("speculative_eagle_topk")?
+            .saturating_mul(field("speculative_num_steps")?)
+            .max(field("speculative_num_draft_tokens")?)
+    };
+    discovery.max_model_len?.checked_sub(reserved)
+}
+
+/// SGLang's gRPC bridge turns an unset `max_new_tokens` into its 128-token
+/// default, so ask for the room left in the context. Leave it unset when that
+/// room cannot hold `min_tokens`, and SGLang clamps the request itself.
+fn omitted_max_tokens_default(
+    combined_token_limit: Option<u32>,
+    prompt_len: usize,
+    min_tokens: Option<u32>,
+) -> Option<u32> {
+    combined_token_limit?
+        .checked_sub(u32::try_from(prompt_len).ok()?)
+        .filter(|remaining| *remaining >= min_tokens.unwrap_or(0).max(1))
+}
+
 fn is_deepseek_v4_arch(model_info: &Value) -> bool {
     model_info
         .get("architectures")
@@ -1100,9 +1151,9 @@ mod tests {
 
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
-        SglangSidecarEngine, build_engine_config, discover_kv_event_sources,
+        SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
         discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1604,6 +1655,41 @@ mod tests {
                 "{server_info} must not advertise enable_eagle"
             );
         }
+    }
+
+    #[test]
+    fn combined_token_limit_subtracts_sglang_eagle_reserve() {
+        let limit = |server_info| {
+            let mut discovery = discovery(server_info);
+            discovery.max_model_len = Some(4096);
+            combined_token_limit(&discovery)
+        };
+        let eagle = json!({
+            "speculative_algorithm": "EAGLE",
+            "speculative_eagle_topk": 1,
+            "speculative_num_steps": 3,
+            "speculative_num_draft_tokens": 4,
+        });
+        assert_eq!(limit(json!({})), Some(4096));
+        assert_eq!(limit(eagle.clone()), Some(4092));
+        let mut adaptive = eagle.clone();
+        adaptive["speculative_adaptive"] = true.into();
+        assert_eq!(limit(adaptive), None);
+        let mut incomplete = eagle;
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("speculative_num_steps");
+        assert_eq!(limit(incomplete), None);
+    }
+
+    #[test]
+    fn omitted_max_tokens_default_fills_the_remaining_budget() {
+        assert_eq!(omitted_max_tokens_default(Some(4096), 3, None), Some(4093));
+        assert_eq!(omitted_max_tokens_default(Some(8), 3, Some(5)), Some(5));
+        assert_eq!(omitted_max_tokens_default(Some(8), 3, Some(6)), None);
+        assert_eq!(omitted_max_tokens_default(Some(3), 3, None), None);
+        assert_eq!(omitted_max_tokens_default(None, 3, None), None);
     }
 
     #[test]
