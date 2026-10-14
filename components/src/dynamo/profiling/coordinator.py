@@ -4,7 +4,6 @@
 """Callable coordinator; HTTP and process hosting are separate adapters."""
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -99,8 +98,6 @@ class Coordinator:
             if artifact_validator is not None
             else SharedFilesystemValidator()
         )
-        self.frontend_pid = runtime.frontend_pid
-        self.frontend_epoch = runtime.frontend_epoch
         self.workers = {worker.target_id: worker for worker in runtime.workers}
         if len(self.workers) != len(runtime.workers) or "frontend" in self.workers:
             raise ValueError("Worker target IDs must be unique and cannot be frontend")
@@ -114,7 +111,7 @@ class Coordinator:
         return [
             {
                 "target_id": "frontend",
-                "process_epoch": self.frontend_epoch,
+                "process_epoch": self.runtime.frontend_epoch,
                 "collectors": (
                     ["linux_perf"] if self.config.frontend_perf_enabled else []
                 )
@@ -156,12 +153,17 @@ class Coordinator:
         target_ids = [target.target_id for target in plan.targets]
         if not target_ids or len(target_ids) != len(set(target_ids)):
             raise BadRequest("targets must be nonempty and unique")
-        epochs = {item["target_id"]: item["process_epoch"] for item in self.targets()}
         prefixes = []
         for target in plan.targets:
-            if target.target_id not in epochs:
+            worker = self.workers.get(target.target_id)
+            epoch = (
+                self.runtime.frontend_epoch
+                if target.target_id == "frontend"
+                else worker and worker.process_epoch
+            )
+            if epoch is None:
                 raise BadRequest("Unknown target; use GET targets")
-            if epochs[target.target_id] != target.process_epoch:
+            if epoch != target.process_epoch:
                 raise Conflict("Target process epoch does not match inventory")
             if not self.builtin_collectors:
                 continue
@@ -180,7 +182,10 @@ class Coordinator:
                 raise Unsupported("Nsight requires a prepared launch/output prefix")
             if not Path(prefix).is_absolute():
                 raise Unsupported("Nsight output prefixes must be absolute")
-            if target.target_id == "frontend" and self.frontend_pid != os.getpid():
+            if (
+                target.target_id == "frontend"
+                and self.runtime.frontend_pid != os.getpid()
+            ):
                 raise Unsupported("NVTX frontend capture requires an embedded host")
             prefixes.append(prefix)
         if len(set(prefixes)) != len(prefixes):
@@ -269,8 +274,8 @@ class Coordinator:
                 "artifact_validation_timeout_s": self.config.artifact_validation_timeout_s,
             },
             "frontend": {
-                "pid": self.frontend_pid,
-                "process_epoch": self.frontend_epoch,
+                "pid": self.runtime.frontend_pid,
+                "process_epoch": self.runtime.frontend_epoch,
                 "profiling_enabled": frontend_enabled,
                 "omission_reason": None
                 if frontend_enabled
@@ -314,15 +319,16 @@ class Coordinator:
 
     def persist(self, session: Session) -> None:
         pending = session.directory / "manifest.json.tmp"
-        pending.write_text(json.dumps(self.build_manifest(session), indent=2) + "\n")
+        encoded = msgspec.json.encode(self.build_manifest(session))
+        pending.write_bytes(msgspec.json.format(encoded, indent=2) + b"\n")
         pending.replace(session.directory / "manifest.json")
 
-    def persist_progress(self, session: Session) -> None:
+    async def persist_progress(self, session: Session) -> None:
         # Once a collector is owned, a full/unavailable artifact filesystem
         # must not prevent stop and cleanup. Initial acceptance still requires
         # a successful manifest write through persist().
         try:
-            self.persist(session)
+            await asyncio.to_thread(self.persist, session)
         except Exception as exc:
             error = f"Manifest persistence failed: {exc}"
             if error not in session.errors:
@@ -339,7 +345,6 @@ class Coordinator:
 
     async def capture(self, session: Session) -> None:
         session.state = "starting"
-        self.persist_progress(session)
         assert session.runtime is not None
         workers = {worker.target_id: worker for worker in session.runtime.workers}
         selected = [
@@ -349,8 +354,6 @@ class Coordinator:
         ]
         capture_ok = False
         try:
-            if session.errors:
-                raise CollectionError("Manifest write failed before collector startup")
             # Probe and start targets concurrently: startup skew is bounded by
             # the slowest target rather than accumulating across targets.
             budget = self.start_budget(session, "runtime validation")
@@ -387,11 +390,10 @@ class Coordinator:
             )
             if failures:
                 raise CollectionError("; ".join(failures))
-            self.persist_progress(session)
+            session.state = "recording"
+            await self.persist_progress(session)
             if session.errors:
                 raise CollectionError("Manifest write failed after collector startup")
-            session.state = "recording"
-            self.persist_progress(session)
             remaining = session.deadline_monotonic - asyncio.get_running_loop().time()
             try:
                 await asyncio.wait_for(session.stop_requested.wait(), max(0, remaining))
@@ -410,7 +412,7 @@ class Coordinator:
                         "Capture interrupted by an unexpected failure"
                     )
                 session.state = "finalizing"
-                self.persist_progress(session)
+                await self.persist_progress(session)
                 # Stop all collectors concurrently: slow worker trace serialization
                 # must not keep other targets recording beyond their lease.
                 stop_errors = await errors_of(
@@ -442,7 +444,7 @@ class Coordinator:
                             f"{validation['target_id']}: artifacts {validation['status']}"
                         )
                 session.state = "failed" if session.errors else "completed"
-                self.persist_progress(session)
+                await self.persist_progress(session)
             finally:
                 # Release the lease even if finalization fails unexpectedly.
                 self.active = None

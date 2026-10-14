@@ -28,7 +28,6 @@ attributed per kernel.
 
 import argparse
 import gzip
-import hashlib
 import json
 import re
 import shutil
@@ -41,7 +40,7 @@ from pathlib import Path
 
 import ijson
 
-from .artifacts import inspect_target
+from .inspection import inspect_target, sha256_file
 
 
 def attrs(span: dict) -> dict:
@@ -371,14 +370,6 @@ class Timeline:
         return self.count
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def write_lifecycle(paths: list[Path], selected: set[str], output: Path) -> None:
     """Keep collector export batches, filtered to selected (uncut) traces."""
     with output.open("w") as lifecycle:
@@ -705,7 +696,10 @@ def build(
         "timeline": {"file": "timeline.json.gz", "events": window_events},
         "per_request_timelines": per_request,
         "files": {
-            str(p.relative_to(output)): {"bytes": p.stat().st_size, "sha256": sha256(p)}
+            str(p.relative_to(output)): {
+                "bytes": p.stat().st_size,
+                "sha256": sha256_file(p),
+            }
             for p in sorted(output.rglob("*"))
             if p.is_file() and p.name != "bundle.json"
         },
@@ -760,7 +754,9 @@ def archive(output: Path, summary: dict) -> Path:
                 source,
                 arcname=f"{output.name}/profiles/{profile['target_id']}/{source.name}",
             )
-    path.with_name(path.name + ".sha256").write_text(f"{sha256(path)}  {path.name}\n")
+    path.with_name(path.name + ".sha256").write_text(
+        f"{sha256_file(path)}  {path.name}\n"
+    )
     return path
 
 
@@ -796,7 +792,7 @@ def main() -> None:
     summary = build(args.session, otel, output, args.per_request)
     path = archive(output, summary)
     print(json.dumps(summary["coverage"], indent=2))
-    print(f"archive: {path} ({path.stat().st_size} bytes, sha256 {sha256(path)})")
+    print(f"archive: {path} ({path.stat().st_size} bytes, sha256 {sha256_file(path)})")
 
 
 if __name__ == "__main__":

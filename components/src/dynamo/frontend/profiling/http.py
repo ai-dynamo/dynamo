@@ -47,17 +47,17 @@ def application(coordinator: Coordinator) -> web.Application:
 
     async def submit(request: web.Request) -> web.Response:
         session = coordinator.submit(await read_plan(request))
-        return web.json_response(coordinator.manifest(session), status=202)
+        return web.json_response(coordinator.build_manifest(session), status=202)
 
     def lookup(request: web.Request):
         return coordinator.lookup(request.match_info["session_id"])
 
     async def status(request: web.Request) -> web.Response:
-        return web.json_response(coordinator.manifest(lookup(request)))
+        return web.json_response(coordinator.build_manifest(lookup(request)))
 
     async def stop(request: web.Request) -> web.Response:
         session = coordinator.stop(request.match_info["session_id"])
-        return web.json_response(coordinator.manifest(session), status=202)
+        return web.json_response(coordinator.build_manifest(session), status=202)
 
     prefix = "/admin/profiling/v1"
     app.add_routes(

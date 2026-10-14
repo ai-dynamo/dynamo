@@ -33,10 +33,10 @@ from dynamo.profiling import (
     Coordinator,
     adapters,
     agent,
-    artifacts,
     bundle,
     collectors,
     errors,
+    inspection,
     nsys,
 )
 from dynamo.profiling.adapters import CollectorRegistry
@@ -632,7 +632,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
         assert manifest["artifact_status"] == "present"
         assert validation["coverage"] == "present"
         assert len(validation["artifacts"]) == 2
-        inspected = artifacts.inspect_kineto(validation, config)
+        inspected = inspection.inspect_kineto(validation, config)
         if case == "corrupt":
             assert inspected["status"] == "invalid"
             assert [item["validation"] for item in inspected["artifacts"]] == [
@@ -702,7 +702,7 @@ async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
     result = await validator.validate(evidence, Config("socket", str(tmp_path)))
     assert result["status"] == "invalid"
     assert result["duplicate_rank_files"] is True
-    inspected = artifacts.inspect_kineto(
+    inspected = inspection.inspect_kineto(
         result, Config("socket", str(tmp_path), max_trace_bytes=10)
     )
     assert all(item["validation"] == "invalid" for item in inspected["artifacts"])
@@ -730,11 +730,11 @@ async def test_uncompressed_rank_traces_are_present_and_inspected(tmp_path):
     )
     # Presence does not parse, so the truncated rank is only caught offline.
     assert result["status"] == "present"
-    inspected = artifacts.inspect_target(result, evidence)
+    inspected = inspection.inspect_target(result, evidence)
     assert inspected["status"] == "invalid"
     assert [a["validation"] for a in inspected["artifacts"]] == ["valid", "invalid"]
     path.write_text(json.dumps(payload))
-    assert artifacts.inspect_target(result, evidence)["status"] == "verified"
+    assert inspection.inspect_target(result, evidence)["status"] == "verified"
 
 
 @pytest.mark.asyncio
@@ -887,7 +887,7 @@ async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, c
         Config("unused", str(tmp_path)),
     )
     assert result["status"] == "present"
-    inspected = artifacts.inspect_kineto(result, Config("unused", str(tmp_path)))
+    inspected = inspection.inspect_kineto(result, Config("unused", str(tmp_path)))
     assert inspected["status"] == "verified"
     bounds = inspected["artifacts"][0]["recording_bounds"]
     if case == "observed":
@@ -1068,7 +1068,7 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
     else:
         # Activity and rank checks run offline in the bundle job.
         assert result["status"] == "present"
-        result = nsys.inspect_nsys(
+        result = inspection.inspect_nsys(
             {"artifacts": [{"location": str(path)}]}, evidence, config
         )
         assert result["status"] == "invalid"
@@ -1103,7 +1103,7 @@ async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
     with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
         conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY(globalPid INTEGER)")
         conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (0)")
-    result = nsys.inspect_nsys(
+    result = inspection.inspect_nsys(
         {"artifacts": [{"location": str(path)}]},
         {"required_activity": "cuda_events", "expected_gpu_processes": 1},
         Config("unused", str(tmp_path), artifact_validation_timeout_s=0.05),

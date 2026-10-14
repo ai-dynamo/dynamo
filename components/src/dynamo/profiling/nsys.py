@@ -5,7 +5,6 @@
 
 import asyncio
 import contextlib
-import hashlib
 import os
 import re
 import sqlite3
@@ -23,18 +22,6 @@ except ImportError:
 
 from .collectors import CollectionError, TorchCollector, process_epoch
 from .models import Config, Plan, RuntimeSnapshot
-
-CPU_TABLES = ("COMPOSITE_EVENTS", "SCHED_EVENTS", "OSRT_API", "NVTX_EVENTS")
-CUDA_TABLES = (
-    "CUPTI_ACTIVITY_KIND_KERNEL",
-    "CUPTI_ACTIVITY_KIND_MEMCPY",
-    "CUPTI_ACTIVITY_KIND_MEMSET",
-)
-
-
-def file_state(path: Path) -> tuple[int, int]:
-    stat = path.stat()
-    return stat.st_size, stat.st_mtime_ns
 
 
 def report_paths(prefix: Path) -> list[Path]:
@@ -76,7 +63,7 @@ class NsysFrontendCollector:
             or process_epoch(os.getpid()) != self.runtime.frontend_epoch
         ):
             raise CollectionError("NVTX frontend capture requires an embedded host")
-        prepare_reports(self.evidence)
+        await asyncio.to_thread(prepare_reports, self.evidence)
         # Nsight can block range transitions while it starts or ends a capture;
         # keep that off the serving loop so worker controls are not delayed.
         self.evidence["start_requested_at_ns"] = time.time_ns()
@@ -116,7 +103,7 @@ class NsysWorkerCollector(TorchCollector):
         )
 
     async def start(self) -> None:
-        prepare_reports(self.evidence)
+        await asyncio.to_thread(prepare_reports, self.evidence)
         await super().start()
 
 
@@ -171,20 +158,53 @@ def report_bounds(conn, tables: set) -> dict:
     return bounds
 
 
-def inspect_report(
-    report: Path, evidence: dict, config: Config, deadline: float
-) -> dict:
-    """Validate the automatic export and hash its associated native report."""
+def ready_report(prefix: Path, baseline: set[str], config: Config) -> dict | None:
+    """One poll (directory scan + export check); None until the report exists."""
+    reports = [path for path in report_paths(prefix) if str(path) not in baseline]
+    if len(reports) > 1:
+        return {
+            "status": "invalid",
+            "coverage": "partial",
+            "error": "Ambiguous Nsight reports for one window",
+        }
+    return check_report(reports[0], config) if reports else None
+
+
+async def validate_reports(evidence: dict, config: Config) -> dict:
+    if "previous_reports" not in evidence:
+        return {
+            "status": "invalid",
+            "coverage": "unknown",
+            "error": "Nsight capture was not prepared",
+        }
+    prefix = Path(evidence["output_prefix"])
+    baseline = set(evidence["previous_reports"])
+    deadline = time.monotonic() + config.artifact_validation_timeout_s
+    error = "Automatic Nsight report/SQLite export has not arrived"
+    while time.monotonic() < deadline:
+        # The prefix is on shared storage: keep scans off the serving loop.
+        try:
+            result = await asyncio.to_thread(ready_report, prefix, baseline, config)
+        except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
+            error = str(exc)
+        else:
+            if result is not None:
+                return result
+        await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
+    return {"status": "partial", "coverage": "partial", "error": error}
+
+
+def open_export(report: Path, config: Config):
+    """Open this report's finished automatic SQLite export read-only.
+
+    Returns (paths, sizes, connection, tables); the caller closes the connection.
+    """
     paths = (report, report.with_suffix(".sqlite"))
-    before = [file_state(path) for path in paths]
-    if any(size <= 0 or size > config.max_trace_bytes for size, _ in before):
+    sizes = [path.stat().st_size for path in paths]
+    if any(size <= 0 or size > config.max_trace_bytes for size in sizes):
         raise ValueError("Nsight artifact is empty or exceeds the byte limit")
-    with closing(
-        sqlite3.connect(paths[1].as_uri() + "?mode=ro", uri=True, timeout=0.1)
-    ) as conn:
-        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10000)
-        if conn.execute("PRAGMA quick_check").fetchone() != ("ok",):
-            raise ValueError("Nsight SQLite export is corrupt")
+    conn = sqlite3.connect(paths[1].as_uri() + "?mode=ro", uri=True, timeout=0.1)
+    try:
         tables = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -199,142 +219,20 @@ def inspect_report(
             raise ValueError(
                 "Nsight SQLite export is incomplete or belongs to another report"
             )
-        counts = {}
-        for table in (*CPU_TABLES, *CUDA_TABLES):
-            conditions = ["cpuCycles = 1"] if table == "COMPOSITE_EVENTS" else []
-            parameters = []
-            if evidence.get("pid") and table in CPU_TABLES:
-                conditions.append("((globalTid >> 24) & 16777215) = ?")
-                parameters.append(evidence["pid"])
-            where = " WHERE " + " AND ".join(conditions) if conditions else ""
-            query = f'SELECT COUNT(*) FROM "{table}"{where}'
-            counts[table] = (
-                conn.execute(query, parameters).fetchone()[0] if table in tables else 0
-            )
-        if evidence["required_activity"] == "cpu_events" and not (
-            counts["COMPOSITE_EVENTS"] or counts["SCHED_EVENTS"] or counts["OSRT_API"]
-        ):
-            raise ValueError("Frontend report contains no CPU activity beyond NVTX")
-        gpu_processes = sorted(
-            {
-                row[0]
-                for table in CUDA_TABLES
-                if counts[table]
-                for row in conn.execute(f'SELECT DISTINCT globalPid FROM "{table}"')
-                if row[0] is not None
-            }
-        )
-        if evidence["required_activity"] == "cuda_events":
-            if not gpu_processes:
-                raise ValueError(
-                    "Worker report contains no CUDA kernel or memory activity"
-                )
-            expected = evidence.get("expected_gpu_processes", 0)
-            if expected and len(gpu_processes) != expected:
-                raise ValueError(
-                    "Worker CUDA process count differs from configured rank count"
-                )
-        bounds = report_bounds(conn, tables)
-        diagnostics = (
-            [
-                row[0][:512]
-                for row in conn.execute(
-                    "SELECT text FROM DIAGNOSTIC_EVENT WHERE severity >= 2 LIMIT 16"
-                )
-            ]
-            if "DIAGNOSTIC_EVENT" in tables
-            else []
-        )
-    artifacts = []
-    for path in paths:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(65536), b""):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Nsight artifact validation deadline expired")
-                digest.update(chunk)
-        artifacts.append(
-            {
-                "location": str(path),
-                "bytes": path.stat().st_size,
-                "sha256": digest.hexdigest(),
-            }
-        )
-    if before != [file_state(path) for path in paths]:
-        raise ValueError("Nsight export is still changing")
-    return {
-        "status": "verified",
-        "coverage": "observed_required_activity",
-        "artifacts": artifacts,
-        "events": counts,
-        "cpu_sampling_status": (
-            "observed" if counts["COMPOSITE_EVENTS"] else "not_observed"
-        ),
-        "context_switch_status": (
-            "observed" if counts["SCHED_EVENTS"] else "not_observed"
-        ),
-        "gpu_processes": gpu_processes,
-        "recording_bounds": bounds,
-        "diagnostics": diagnostics,
-        "rank_identity": "unattested",
-        "association": "new_report_in_dedicated_launch_prefix",
-        "validation_scope": "SQLite integrity and required activity; native report transport hash",
-    }
-
-
-async def validate_reports(evidence: dict, config: Config) -> dict:
-    if "previous_reports" not in evidence:
-        return {
-            "status": "invalid",
-            "coverage": "unknown",
-            "error": "Nsight capture was not prepared",
-        }
-    prefix = Path(evidence["output_prefix"])
-    baseline = set(evidence.get("previous_reports", []))
-    deadline = time.monotonic() + config.artifact_validation_timeout_s
-    error = "Automatic Nsight report/SQLite export has not arrived"
-    while time.monotonic() < deadline:
-        reports = [path for path in report_paths(prefix) if str(path) not in baseline]
-        if len(reports) > 1:
-            return {
-                "status": "invalid",
-                "coverage": "partial",
-                "error": "Ambiguous Nsight reports for one window",
-            }
-        if reports:
-            try:
-                return await asyncio.to_thread(check_report, reports[0], config)
-            except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
-                error = str(exc)
-        await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
-    return {"status": "partial", "coverage": "partial", "error": error}
+    except BaseException:
+        conn.close()
+        raise
+    return paths, sizes, conn, tables
 
 
 def check_report(report: Path, config: Config) -> dict:
     """Cheap readiness check on the capture path: this report's export finished.
 
     Full inspection (integrity scan, required activity, GPU process count and
-    hashes) runs offline in the bundle job via inspect_nsys.
+    hashes) runs offline in the bundle job (dynamo.profiling.inspection).
     """
-    paths = (report, report.with_suffix(".sqlite"))
-    sizes = [path.stat().st_size for path in paths]
-    if any(size <= 0 or size > config.max_trace_bytes for size in sizes):
-        raise ValueError("Nsight artifact is empty or exceeds the byte limit")
-    with closing(
-        sqlite3.connect(paths[1].as_uri() + "?mode=ro", uri=True, timeout=0.1)
-    ) as conn:
-        tables = {
-            row[0]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        metadata = dict(conn.execute("SELECT name, value FROM META_DATA_EXPORT"))
-        if (
-            not metadata.get("EXPORT_TIME")
-            or metadata.get("EXPORT_PARAM_INPUT_FILE") != report.name
-        ):
-            raise ValueError(
-                "Nsight SQLite export is incomplete or belongs to another report"
-            )
+    paths, sizes, conn, tables = open_export(report, config)
+    with closing(conn):
         bounds = report_bounds(conn, tables)
     return {
         "status": "present",
@@ -346,26 +244,3 @@ def check_report(report: Path, config: Config) -> dict:
         "association": "new_report_in_dedicated_launch_prefix",
         "inspection": "deferred_to_bundle",
     }
-
-
-def inspect_nsys(item: dict, evidence: dict, config: Config) -> dict:
-    """Full offline inspection of a target's Nsight report and SQLite export."""
-    report = next(
-        (
-            Path(a["location"])
-            for a in item.get("artifacts", [])
-            if a["location"].endswith(".nsys-rep")
-        ),
-        None,
-    )
-    if report is None:
-        return {"status": "invalid", "error": "no Nsight report"}
-    try:
-        return inspect_report(
-            report,
-            evidence,
-            config,
-            time.monotonic() + config.artifact_validation_timeout_s,
-        )
-    except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
-        return {"status": "invalid", "error": str(exc)}

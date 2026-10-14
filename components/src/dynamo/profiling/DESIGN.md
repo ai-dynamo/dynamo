@@ -38,9 +38,11 @@ flowchart LR
 - `ClockSampler` probes selected workers' control-process epochs and estimates
   host offsets and uncertainty before and after capture. It does not change
   clocks, synchronize starts, or attest individual engine-rank clocks.
-- `ArtifactValidator` checks accessible Kineto files, hashes, and expected rank
-  membership independently of control acknowledgments. Other stores/formats can
-  implement the same protocol.
+- `ArtifactValidator` checks on the capture path only that each target's native
+  files are present: expected Kineto rank files, or this window's finished Nsight
+  report and SQLite export. Full inspection (parsing, hashes, recording bounds,
+  required activity) runs offline in `dynamo.profiling.inspection`, called by
+  the bundle command. Other stores/formats can implement the same protocol.
 - `dynamo.frontend.profiling` owns HTTP routing, the private Unix socket, runtime
   snapshot creation, and shutdown draining. Embedded and standalone hosts call
   the same coordinator. Workers expose `ProfilingAgent.info` through their
@@ -64,8 +66,9 @@ are deferred. Nsight requires separately prepared frontend/worker launches with
 repeat capture and automatic SQLite export. The embedded frontend opens and
 closes `ROI@app`; vLLM/SGLang controls dispatch to GPU execution processes.
 Only explicitly selected targets participate. The validator waits for new
-report/export pairs within each launch's dedicated output prefix, checks export
-metadata, SQLite integrity, required CPU/GPU activity, and transport hashes.
+report/export pairs within each launch's dedicated output prefix and checks the
+export metadata; the bundle job later checks SQLite integrity, required CPU/GPU
+activity, and transport hashes.
 Frontend CPU activity may consist of OS runtime events when host policy denies
 sampling/context switches; each report records those capabilities and diagnostics.
 GPU process counts can be checked against expected rank counts, but rank identities
