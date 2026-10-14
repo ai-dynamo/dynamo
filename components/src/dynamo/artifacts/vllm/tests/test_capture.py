@@ -131,6 +131,7 @@ async def test_delivery_rejection_is_not_reported_as_invalid_capture():
     result = await capture.finalize()
     assert result["state"] == "failed"
     assert result["error_code"] == "delivery_rejected"
+    assert "delivery full" not in str(result)
     assert capture.reserved_bytes == 0
 
 
