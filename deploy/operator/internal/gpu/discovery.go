@@ -86,23 +86,24 @@ const (
 
 // --- GPU model tokens ---
 const (
-	tokenGB200  = "GB200"
-	tokenGB10   = "GB10"
-	tokenB300   = "B300"
-	tokenB200   = "B200"
-	tokenH200   = "H200"
-	tokenH100   = "H100"
-	tokenA100   = "A100"
-	tokenA30    = "A30"
-	tokenL40S   = "L40S"
-	tokenL40    = "L40"
-	tokenL4     = "L4"
-	tokenV100   = "V100"
-	tokenT4     = "T4"
-	tokenMI300  = "MI300"
-	tokenMI250  = "MI250"
-	tokenMI200  = "MI200"
-	LabelNVLink = "nvlink"
+	tokenVRNVL72 = "VRNVL72"
+	tokenGB200   = "GB200"
+	tokenGB10    = "GB10"
+	tokenB300    = "B300"
+	tokenB200    = "B200"
+	tokenH200    = "H200"
+	tokenH100    = "H100"
+	tokenA100    = "A100"
+	tokenA30     = "A30"
+	tokenL40S    = "L40S"
+	tokenL40     = "L40"
+	tokenL4      = "L4"
+	tokenV100    = "V100"
+	tokenT4      = "T4"
+	tokenMI300   = "MI300"
+	tokenMI250   = "MI250"
+	tokenMI200   = "MI200"
+	LabelNVLink  = "nvlink"
 )
 
 // awsInstanceTypePrefixes matches known GPU/accelerator instance families on EKS. See: https://aws.amazon.com/ec2/instance-types/
@@ -121,13 +122,17 @@ var gcpMachineSeries = []string{
 }
 
 type gpuRule struct {
-	token     string
-	sxmSKU    nvidiacomv1beta1.GPUSKUType
-	pcieSKU   nvidiacomv1beta1.GPUSKUType
-	singleSKU nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
+	token        string
+	boundedToken bool // require a complete model token instead of a substring match
+	sxmSKU       nvidiacomv1beta1.GPUSKUType
+	pcieSKU      nvidiacomv1beta1.GPUSKUType
+	singleSKU    nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
 }
 
 var gpuRules = []gpuRule{
+	// Vera Rubin
+	{token: tokenVRNVL72, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72},
+
 	// Blackwell
 	{token: tokenGB200, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB200},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
@@ -140,7 +145,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
-	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
+	{token: tokenA30, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -956,7 +961,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
-		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+		if rule.boundedToken && !containsModelToken(gpuProduct, rule.token) {
 			continue
 		}
 
@@ -1009,18 +1014,29 @@ func normalize(input string) string {
 
 func containsModelToken(input, token string) bool {
 	upper := strings.ToUpper(input)
-	for start := 0; start < len(upper); {
-		idx := strings.Index(upper[start:], token)
-		if idx < 0 {
-			return false
+	token = normalize(token)
+	for start := 0; start < len(upper); start++ {
+		if start > 0 && isASCIIAlphaNum(upper[start-1]) {
+			continue
 		}
-		idx += start
-		end := idx + len(token)
-		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
-			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+
+		inputIndex := start
+		tokenIndex := 0
+		for inputIndex < len(upper) && tokenIndex < len(token) {
+			if upper[inputIndex] == ' ' || upper[inputIndex] == '-' {
+				inputIndex++
+				continue
+			}
+			if upper[inputIndex] != token[tokenIndex] {
+				break
+			}
+			inputIndex++
+			tokenIndex++
+		}
+		if tokenIndex == len(token) &&
+			(inputIndex == len(upper) || !isASCIIAlphaNum(upper[inputIndex])) {
 			return true
 		}
-		start = idx + 1
 	}
 	return false
 }

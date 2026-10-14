@@ -87,6 +87,15 @@ class DynamoReplayRunnerFactory:
                 "weka",
             ),
             supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
+            supports_agentic_host_offload=(
+                engine_capabilities.supports_agentic_host_offload
+            ),
+            # The composed mocker path preserves HBM-only MTP and decode-speedup
+            # support. The shared G2 gate and native guard reject that combination.
+            supports_agentic_speculative_decoding=True,
+            supports_agentic_snapshots=engine_capabilities.supports_agentic_snapshots,
+            supports_agentic_warmup=engine_capabilities.supports_agentic_warmup,
+            supports_agentic_profile=engine_capabilities.supports_agentic_profile,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(
@@ -169,8 +178,10 @@ class DynamoReplayRunner:
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
-        if trace_format in {"weka", "agentic_mooncake"} or (
-            trace_format == "dynamo" and agentic_lanes is not None
+        if (
+            "agentic_graph" in metadata
+            or trace_format in {"weka", "agentic_mooncake"}
+            or (trace_format == "dynamo" and agentic_lanes is not None)
         ):
             metadata.update(
                 agentic_qualification=self.capabilities.agentic_qualification,
@@ -311,9 +322,16 @@ class DynamoReplayRunner:
                 candidates += [config.get("model_path"), config.get("model")]
         if isinstance(raw_engine_args, Mapping):
             candidates.append(raw_engine_args.get("aic_model_path"))
-            ais_config = raw_engine_args.get("ais_perf_config")
-            if isinstance(ais_config, Mapping):
-                candidates.append(ais_config.get("model"))
+            rank = raw_engine_args.get("rank", raw_engine_args)
+            if isinstance(rank, Mapping):
+                ais_config = rank.get("ais_perf_config")
+                if isinstance(ais_config, Mapping):
+                    candidates.append(ais_config.get("model"))
+                timing = rank.get("timing_model")
+                if isinstance(timing, Mapping) and isinstance(
+                    timing.get("config"), Mapping
+                ):
+                    candidates.append(timing["config"].get("model"))
         for model in candidates:
             if isinstance(model, str) and model.strip():
                 return model.strip()
@@ -366,6 +384,11 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
+        agentic_options = {
+            name: spec.workload[name]
+            for name in ("agentic_snapshot", "agentic_warmup", "agentic_profile")
+            if name in spec.workload
+        }
         trace_block_size = spec.workload.get("trace_block_size")
         # Weka and Dynamo traces carry their source block size in the trace
         # metadata. Leave it unset so AISimulate can validate and use that
@@ -382,6 +405,7 @@ class DynamoReplayRunner:
                 trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
+                **agentic_options,
                 execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
@@ -396,6 +420,7 @@ class DynamoReplayRunner:
             trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
+            **agentic_options,
             execution_model=execution_model,
             prefill_engine_args=self._engine_args(deployment, "prefill"),
             decode_engine_args=self._engine_args(deployment, "decode"),
@@ -516,9 +541,15 @@ class DynamoReplayRunner:
         else:
             trace_report = dict(report)
 
-        for name in ("agentic_graph", "agentic_model_projection"):
+        for name in (
+            "agentic_graph",
+            "agentic_model_projection",
+            "agentic_snapshots",
+            "agentic_phases",
+            "agentic_profile",
+        ):
             value = trace_report.get(name)
-            if isinstance(value, dict):
+            if isinstance(value, (dict, list)):
                 metadata[name] = value
         resolved_weka_basis = trace_report.get("weka_nested_timestamp_basis")
         if isinstance(resolved_weka_basis, str):

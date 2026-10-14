@@ -11,7 +11,7 @@ use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
+use dynamo_kv_router::sequences::{LocalWorkerLoad, SchedulerLoadSnapshot};
 use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -24,7 +24,7 @@ impl SequencePublisher for ReplayNoopPublisher {
 
     fn publish_scheduler_load(&self, _load: SchedulerLoadSnapshot) {}
 
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: LocalWorkerLoad) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
