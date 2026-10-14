@@ -9364,7 +9364,7 @@ spec:
                 - message: exactly one of native v1beta1 fields or v1beta2 must be specified
                   rule: has(self.v1beta2) != has(self.model)
                 - message: v1beta2 is mutually exclusive with native v1beta1 fields
-                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:

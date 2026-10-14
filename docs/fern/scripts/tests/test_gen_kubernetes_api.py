@@ -77,6 +77,13 @@ V1BETA1_DEDUP_TYPES = (
     "DynamoGraphDeploymentSpec",
     "DynamoComponentDeploymentSharedSpec",
 )
+V1BETA2_DEDUP_TYPES = (
+    "DynamoGraphDeploymentRequest",
+    "DynamoGraphDeploymentRequestSpec",
+    "DynamoGraphDeploymentRequestStatus",
+    "HardwareSpec",
+    "WorkloadSpec",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +226,28 @@ def test_v1beta1_shared_type_names_use_deduplicated_anchors(
         assert display in by_display, f"v1beta1 missing renamed type '{display}'"
         expected_anchor = f"v1beta1-{type_name.lower()}"
         assert by_display[display].anchor == expected_anchor
+
+
+def test_v1beta2_shared_type_names_use_deduplicated_anchors(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    """``fix-api-anchors.py`` prefixes actual v1beta2 duplicates with ``v1beta2-``."""
+    v1beta2_pkg = next(p for p in reference.packages if p.name == "nvidia.com/v1beta2")
+    by_display = {t.display_name: t for t in v1beta2_pkg.types}
+    for type_name in V1BETA2_DEDUP_TYPES:
+        display = f"v1beta2 {type_name}"
+        assert display in by_display, f"v1beta2 missing renamed type '{display}'"
+        expected_anchor = f"v1beta2-{type_name.lower()}"
+        assert by_display[display].name == type_name
+        assert by_display[display].anchor == expected_anchor
+
+    run = next(t for t in v1beta2_pkg.types if t.name == "DynamoGraphDeploymentRun")
+    run_spec = next(field for field in run.fields if field.name == "spec")
+    assert (
+        run_spec.type
+        == "[DynamoGraphDeploymentRequestSpec]"
+        "(#v1beta2-dynamographdeploymentrequestspec)"
+    )
 
 
 def test_removed_dynamocheckpoint_types_are_absent(

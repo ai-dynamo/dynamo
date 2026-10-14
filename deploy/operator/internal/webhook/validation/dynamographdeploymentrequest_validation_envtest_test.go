@@ -24,6 +24,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -105,6 +106,19 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 			gpuDiscovery: true,
 			wantCELErr:   `spec: Invalid value: exactly one of native v1beta1 fields or v1beta2 must be specified`,
+		},
+		{
+			name: "v1beta2 envelope rejects runtime version override",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec = nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					RuntimeVersionOverride: "1.1.0",
+					V1Beta2: &apiextensionsv1.JSON{
+						Raw: []byte(`{"model":{"name":"Qwen/Qwen3-0.6B"}}`),
+					},
+				}
+			}),
+			gpuDiscovery: true,
+			wantCELErr:   `spec: Invalid value: v1beta2 is mutually exclusive with native v1beta1 fields`,
 		},
 		{
 			name: "v1beta1 SLA optimization enum is rejected by source schema",
