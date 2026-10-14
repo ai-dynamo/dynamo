@@ -70,10 +70,6 @@ name = "video_decode"
 harness = false
 required-features = ["media-ffmpeg"]
 
-[[bench]]
-name = "response_merge"
-harness = false
-
 [dependencies]
 dynamo-custom-policy-builtin = { workspace = true }
 # repo
@@ -259,6 +255,7 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+proptest = "1.5"
 
 lazy_static = "1.4"
 mockito = "1.7.0"
@@ -266,7 +263,6 @@ dynamo-bench = { path = "../bench", default-features = false, features = [
   "kv-router-stress-support",
 ] }
 tokio-tungstenite = "0.26"
-stats_alloc = "0.1.10"
 
 [[test]]
 name = "lora_simulation"

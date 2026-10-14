@@ -2764,6 +2764,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "prometheus",
+ "proptest",
  "prost 0.13.5",
  "rand 0.9.4",
  "rayon",
@@ -2775,7 +2776,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.10.9",
- "stats_alloc",
  "strum",
  "temp-env",
  "tempfile",
@@ -9530,12 +9530,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "stats_alloc"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stdio-override"

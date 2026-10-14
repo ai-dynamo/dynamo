@@ -499,7 +499,7 @@ async fn dispatch(
             }
         };
     }
-    // One buffer reused across chunks; see benches/response_merge.rs.
+    // One buffer reused across chunks.
     let mut buffer = Vec::new();
     let render = move |response: &serde_json::Value| {
         buffer.clear();

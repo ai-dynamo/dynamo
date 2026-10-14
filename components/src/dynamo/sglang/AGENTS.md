@@ -33,6 +33,13 @@ uses 0.5.11; retain only the older fallbacks it needs until that pin is upgraded
 component files. Do not version-check with `sglang.__version__` -- import probing is
 more reliable since SGLang's internal layout doesn't always match the version string.
 
+**When you bump SGLang**: the frontend joins native `/generate` responses (streamed
+chunks into one unary response, prefill's prompt-side outputs into decode's) with rules
+in `lib/llm/src/protocols/sglang/merge_rules.json`. Those rules copy SGLang code listed
+in the header of `lib/llm/src/protocols/sglang/merge.rs`. Re-check that code, and run
+`tests/test_sglang_generate_merge_contract.py`, which fails on any unclassified response
+field or request flag.
+
 ## Multi-process gateway (`--gateway-workers N`)
 
 `gateway.py`. One `dynamo.sglang` process fronts every DP rank of its engine: SGLang's

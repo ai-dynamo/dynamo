@@ -231,10 +231,9 @@ impl RuleSet {
 /// `target` unchanged, when either value is not padded standard base64.
 fn overlay_base64_prefix(prefix: &str, target: &mut String) -> bool {
     let decoded_len = |text: &str| text.trim_end_matches('=').len() * 3 / 4;
-    let grouped = |text: &str| text.len().is_multiple_of(4);
     let len = decoded_len(prefix);
     let whole = len / 3 * 4;
-    if !grouped(prefix) || !grouped(target) || !prefix.is_char_boundary(whole) {
+    if !is_padded_base64(prefix) || !is_padded_base64(target) {
         return false;
     }
     if decoded_len(target) <= len {
@@ -261,15 +260,23 @@ fn overlay_base64_prefix(prefix: &str, target: &mut String) -> bool {
         };
         group_len = written;
     }
-    if !target.is_char_boundary(whole) || !target.is_char_boundary(whole + group_len) {
-        return false;
-    }
     // Overwrite in place: memcpy, then one validation pass to get a `String` back.
     let mut bytes = std::mem::take(target).into_bytes();
     bytes[..whole].copy_from_slice(&prefix.as_bytes()[..whole]);
     bytes[whole..whole + group_len].copy_from_slice(&group[..group_len]);
-    *target = String::from_utf8(bytes).expect("char-aligned UTF-8 writes keep UTF-8 valid");
+    *target = String::from_utf8(bytes).expect("base64 is ASCII");
     true
+}
+
+/// Whole 4-character groups of the standard alphabet, with at most two `=`
+/// at the end. A byte scan, so the overlay can copy groups without decoding.
+fn is_padded_base64(text: &str) -> bool {
+    let body = text.trim_end_matches('=');
+    text.len().is_multiple_of(4)
+        && text.len() - body.len() <= 2
+        && body
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
 }
 
 /// Builds one client response from engine pieces.
@@ -324,10 +331,13 @@ impl ResponseAssembler {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
 
+    /// `/text` and `/m/ids` stream as deltas, `/m/prompt` and `/m/blob` come
+    /// from prefill, and `/m/n` is a snapshot without a rule.
     fn rules() -> Arc<dyn ResponseMerger> {
         let rule = |path: &str, op, drop_if_missing| FieldRule {
             path: path.into(),
@@ -346,39 +356,170 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn steps_append_deltas_and_keep_the_last_snapshot() {
-        let mut assembler = ResponseAssembler::new(rules());
-        assembler.push(json!({"text": "a", "m": {"ids": [1], "n": 1}}));
-        assembler.push(json!({"text": "b", "m": {"n": 2}}));
-        assembler.push(json!({"text": "c", "m": {"ids": [2, 3], "n": 3}}));
-        assert_eq!(
-            assembler.finish().unwrap(),
-            json!({"text": "abc", "m": {"ids": [1, 2, 3], "n": 3}})
-        );
+    /// One streamed chunk: a text delta, an optional ids delta (absent key
+    /// when `None`), and the current snapshot `n`.
+    fn step() -> impl Strategy<Value = (String, Option<Vec<u32>>, u32)> {
+        (
+            "\\PC{0,4}",
+            prop::option::of(prop::collection::vec(any::<u32>(), 0..4)),
+            any::<u32>(),
+        )
+    }
+
+    /// A decode chunk: an optional prompt value and an optional blob, plus a
+    /// snapshot that prefill must not touch.
+    fn decode_chunk() -> impl Strategy<Value = Value> {
+        (
+            prop::option::of(prop::collection::vec(any::<u32>(), 0..3)),
+            prop::option::of(prop::collection::vec(any::<u8>(), 0..24)),
+            any::<u32>(),
+        )
+            .prop_map(|(prompt, blob, n)| {
+                let mut m = json!({ "n": n });
+                if let Some(prompt) = prompt {
+                    m["prompt"] = json!(prompt);
+                }
+                if let Some(blob) = blob {
+                    m["blob"] = json!(STANDARD.encode(blob));
+                }
+                json!({ "m": m })
+            })
+    }
+
+    fn prefill() -> impl Strategy<Value = Value> {
+        (
+            prop::option::of(prop::collection::vec(any::<u32>(), 0..3)),
+            prop::option::of(prop::collection::vec(any::<u8>(), 0..24)),
+        )
+            .prop_map(|(prompt, blob)| {
+                let mut m = json!({ "other": "prefill-only" });
+                if let Some(prompt) = prompt {
+                    m["prompt"] = json!(prompt);
+                }
+                if let Some(blob) = blob {
+                    m["blob"] = json!(STANDARD.encode(blob));
+                }
+                json!({ "m": m })
+            })
+    }
+
+    /// What one decode chunk must look like with prefill's values joined in.
+    fn expected_join(prefill: &Value, decode: &Value) -> Value {
+        let mut expected = decode.clone();
+        let m = expected["m"].as_object_mut().unwrap();
+        if let Some(prompt) = prefill["m"].get("prompt") {
+            m.insert("prompt".into(), prompt.clone());
+        }
+        match (prefill["m"].get("blob"), m.get("blob").cloned()) {
+            (Some(head), Some(tail)) => {
+                let mut bytes = STANDARD.decode(head.as_str().unwrap()).unwrap();
+                let tail = STANDARD.decode(tail.as_str().unwrap()).unwrap();
+                bytes.extend_from_slice(tail.get(bytes.len()..).unwrap_or_default());
+                m.insert("blob".into(), json!(STANDARD.encode(bytes)));
+            }
+            (None, Some(_)) => {
+                m.remove("blob");
+            }
+            _ => {}
+        }
+        expected
+    }
+
+    proptest! {
+        /// Joining streamed chunks appends the delta fields in order and keeps
+        /// the last chunk's other fields; a delta field missing from every
+        /// chunk stays missing (SGLang's `_coalesce_streaming_chunks`).
+        #[test]
+        fn steps_append_deltas_and_keep_the_last_snapshot(
+            steps in prop::collection::vec(step(), 1..6)
+        ) {
+            let mut assembler = ResponseAssembler::new(rules());
+            for (text, ids, n) in &steps {
+                let mut m = json!({ "n": n });
+                if let Some(ids) = ids {
+                    m["ids"] = json!(ids);
+                }
+                assembler.push(json!({ "text": text, "m": m }));
+            }
+            let mut expected = json!({
+                "text": steps.iter().map(|(text, ..)| text.as_str()).collect::<String>(),
+                "m": { "n": steps.last().unwrap().2 },
+            });
+            if steps.iter().any(|(_, ids, _)| ids.is_some()) {
+                let ids: Vec<u32> = steps.iter().flat_map(|(_, ids, _)| ids.iter().flatten()).copied().collect();
+                expected["m"]["ids"] = json!(ids);
+            }
+            prop_assert_eq!(assembler.finish().unwrap(), expected);
+        }
+
+        /// Streaming joins prefill's values into every chunk and leaves
+        /// prefill intact for the next one.
+        #[test]
+        fn streamed_chunks_get_prefill_values_and_prefill_survives(
+            prefill in prefill(),
+            chunks in prop::collection::vec(decode_chunk(), 1..5),
+        ) {
+            let mut assembler = ResponseAssembler::new(rules());
+            assembler.set_prefill(prefill.clone());
+            for chunk in chunks {
+                let expected = expected_join(&prefill, &chunk);
+                prop_assert_eq!(assembler.render_chunk(chunk, Value::clone), expected);
+                prop_assert_eq!(assembler.prefill.as_ref(), Some(&prefill));
+            }
+        }
+
+        /// A client that joins the streamed chunks itself gets the unary
+        /// response: joining prefill commutes with joining chunks.
+        #[test]
+        fn unary_response_equals_joined_streamed_chunks(
+            prefill in prefill(),
+            chunks in prop::collection::vec(decode_chunk(), 1..5),
+        ) {
+            let mut streamed = ResponseAssembler::new(rules());
+            streamed.set_prefill(prefill.clone());
+            let mut client = ResponseAssembler::new(rules());
+            let mut unary = ResponseAssembler::new(rules());
+            unary.set_prefill(prefill);
+            for chunk in chunks {
+                client.push(streamed.render_chunk(chunk.clone(), Value::clone));
+                unary.push(chunk);
+            }
+            prop_assert_eq!(unary.finish(), client.finish());
+        }
+
+        /// The in-place overlay equals decode, splice, encode.
+        #[test]
+        fn overlay_matches_decode_splice_encode(
+            prefix in prop::collection::vec(any::<u8>(), 0..64),
+            target in prop::collection::vec(any::<u8>(), 0..64),
+        ) {
+            let mut expected = prefix.clone();
+            expected.extend_from_slice(target.get(prefix.len()..).unwrap_or_default());
+            let mut encoded = STANDARD.encode(&target);
+            prop_assert!(overlay_base64_prefix(&STANDARD.encode(&prefix), &mut encoded));
+            prop_assert_eq!(encoded, STANDARD.encode(&expected));
+        }
+
+        /// Near-base64 text (stray `=`, invalid and multi-byte characters)
+        /// never panics or yields invalid base64; a refused overlay leaves
+        /// the target unchanged.
+        #[test]
+        fn overlay_of_arbitrary_text_is_safe(
+            prefix in "[A-Za-z0-9+/=!é]{0,12}",
+            target in "[A-Za-z0-9+/=!é]{0,16}",
+        ) {
+            let mut result = target.clone();
+            if overlay_base64_prefix(&prefix, &mut result) {
+                prop_assert!(is_padded_base64(&prefix) && is_padded_base64(&result));
+            } else {
+                prop_assert_eq!(result, target);
+            }
+        }
     }
 
     #[test]
-    fn prefill_values_move_into_decode_and_back() {
+    fn prefill_need_requires_every_field_of_a_group() {
         let merger = rules();
-        let mut prefill = json!({"m": {"prompt": [1, 2], "blob": STANDARD.encode([9, 9])}});
-        let original = prefill.clone();
-        for decode in [
-            json!({"m": {"prompt": [], "blob": STANDARD.encode([0, 0, 5])}}),
-            json!({"m": {}}),
-        ] {
-            let mut chunk = decode.clone();
-            merger.join_prefill(&mut prefill, &mut chunk);
-            assert_eq!(chunk["m"]["prompt"], json!([1, 2]));
-            if decode["m"].get("blob").is_some() {
-                assert_eq!(chunk["m"]["blob"], STANDARD.encode([9, 9, 5]));
-            }
-            merger.restore_prefill(&mut prefill, &mut chunk);
-            assert_eq!(prefill, original);
-        }
-        let mut chunk = json!({"m": {"blob": STANDARD.encode([0, 5])}});
-        merger.join_prefill(&mut json!({"m": {}}), &mut chunk);
-        assert_eq!(chunk, json!({"m": {}}));
         for (request, need) in [
             (json!({"want": [false, true]}), PrefillNeed::BeforeLast),
             (
@@ -391,29 +532,6 @@ mod tests {
         ] {
             assert_eq!(merger.prefill_need(&request), need, "{request}");
         }
-    }
-
-    #[test]
-    fn overlay_matches_decode_splice_encode_for_every_boundary() {
-        for prefix_len in 0..12usize {
-            for target_len in 0..14usize {
-                let prefix: Vec<u8> = (0..prefix_len).map(|i| 200 + i as u8).collect();
-                let target: Vec<u8> = (0..target_len).map(|i| i as u8).collect();
-                let mut expected = prefix.clone();
-                expected.extend_from_slice(target.get(prefix_len..).unwrap_or_default());
-                let mut encoded = STANDARD.encode(&target);
-                assert!(overlay_base64_prefix(
-                    &STANDARD.encode(&prefix),
-                    &mut encoded
-                ));
-                assert_eq!(
-                    encoded,
-                    STANDARD.encode(&expected),
-                    "{prefix_len} {target_len}"
-                );
-            }
-        }
-        assert!(!overlay_base64_prefix("AAA", &mut "AAAA".into()));
     }
 
     #[test]
