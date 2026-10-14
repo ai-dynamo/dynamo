@@ -168,6 +168,66 @@ pub(crate) struct CacheSnapshot<'a> {
     pub(crate) has_tier_matches: bool,
 }
 
+/// Rows and request-wide cache facts owned by a reader outside worker selection.
+pub(crate) struct WorkerInputRows {
+    inputs: WorkerInputs,
+    rows: Vec<CandidateData>,
+    shared_hits: Option<SharedCacheHits>,
+    has_tier_matches: bool,
+}
+
+impl WorkerInputRows {
+    pub(crate) fn new(
+        inputs: WorkerInputs,
+        rows: Vec<CandidateData>,
+        cache_snapshot: CacheSnapshot<'_>,
+    ) -> Self {
+        Self {
+            inputs,
+            rows,
+            shared_hits: if inputs.contains(WorkerInputs::CACHE) {
+                cache_snapshot.shared_hits.cloned()
+            } else {
+                None
+            },
+            has_tier_matches: cache_snapshot.has_tier_matches,
+        }
+    }
+
+    /// Rows for a reader that declared no inputs.
+    pub(crate) fn empty() -> Self {
+        Self {
+            inputs: WorkerInputs::NONE,
+            rows: Vec::new(),
+            shared_hits: None,
+            has_tier_matches: false,
+        }
+    }
+
+    /// Lend the rows as a view restricted to the declared inputs.
+    pub(crate) fn read<R>(&self, read: impl FnOnce(WorkerCandidates<'_>) -> R) -> R {
+        let cache_snapshot = CacheSnapshot {
+            shared_hits: self.shared_hits.as_ref(),
+            has_tier_matches: self.has_tier_matches,
+        };
+        read(WorkerCandidates::new(
+            &self.rows,
+            self.inputs,
+            &cache_snapshot,
+        ))
+    }
+}
+
+impl std::fmt::Debug for WorkerInputRows {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerInputRows")
+            .field("inputs", &self.inputs)
+            .field("rows", &self.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Numeric cache row retained in host buffers between selections.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct WorkerCacheData {

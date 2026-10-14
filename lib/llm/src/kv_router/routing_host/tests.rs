@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::kv_router::SelectionPolicySource;
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
     config::KvRouterConfig,
     protocols::RoutingConstraints,
@@ -1798,7 +1799,11 @@ struct RecordingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RecordingClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move { Ok(request) })
     }
@@ -1831,7 +1836,11 @@ struct RejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
     }
@@ -1901,7 +1910,11 @@ struct TypedRejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let error_type = self.error_type;
         Box::pin(async move {
@@ -2100,7 +2113,11 @@ struct PausingClassifier {
 }
 
 impl RequestClassifier for PausingClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
         let resumed = Arc::clone(&self.resumed);
         Box::pin(async move {
@@ -2215,7 +2232,11 @@ struct TokenContractClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TokenContractClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.classified
             .send((request.input_tokens(), request.progress().clone()))
             .unwrap();

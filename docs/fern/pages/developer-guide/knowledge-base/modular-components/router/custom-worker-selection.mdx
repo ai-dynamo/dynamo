@@ -563,11 +563,12 @@ For example, a classifier can inspect the sequence while retaining the request i
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 
 struct InspectPrefixes;
 
 impl RequestClassifier for InspectPrefixes {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         Box::pin(async move {
             let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
             Ok(request)
