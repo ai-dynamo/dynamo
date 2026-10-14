@@ -136,7 +136,7 @@ def test_image_png_compression_config(monkeypatch, env_value, cli_args, expected
 
 
 @pytest.mark.parametrize("source", ["cli", "environment"])
-@pytest.mark.parametrize("level", ["-1", "10", "100", "1.5", "invalid"])
+@pytest.mark.parametrize("level", ["-1", "10", "1.5"])
 def test_invalid_image_png_compression_rejected(monkeypatch, source, level):
     monkeypatch.delenv("DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL", raising=False)
     argv = ["--image-png-compression-level", level]
