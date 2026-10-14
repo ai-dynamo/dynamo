@@ -78,6 +78,9 @@ class _CommonReplayOptions(TypedDict, total=False):
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
+    agentic_snapshot: dict[str, Any] | None
+    agentic_warmup: bool
+    agentic_profile: dict[str, Any] | None
     execution_model: str | None
     weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
     trace_block_size: int | None
@@ -240,6 +243,9 @@ def run_trace_replay(
     num_decode_workers=1,
     replay_concurrency=None,
     agentic_lanes=None,
+    agentic_snapshot=None,
+    agentic_warmup=False,
+    agentic_profile=None,
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
@@ -276,6 +282,10 @@ def run_trace_replay(
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
 
+    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
+    workload controls on the existing offline trace path. Native validation owns
+    their schemas and lifecycle constraints.
+
     Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
     leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
     the replay loop, so their latency contributes to replay wall time. The
@@ -311,6 +321,9 @@ def run_trace_replay(
         "num_decode_workers": num_decode_workers,
         "replay_concurrency": replay_concurrency,
         "agentic_lanes": agentic_lanes,
+        "agentic_snapshot": agentic_snapshot,
+        "agentic_warmup": agentic_warmup,
+        "agentic_profile": agentic_profile,
         "replay_mode": replay_mode,
         "router_mode": router_mode,
         "arrival_speedup_ratio": arrival_speedup_ratio,

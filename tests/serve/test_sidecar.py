@@ -22,7 +22,11 @@ from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import LONG_PROMPT_FOR_CACHING, chat_payload_default
-from tests.utils.payloads import ChatPayload, DisaggregatedChatPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    DisaggregatedChatPayload,
+    OmittedMaxTokensChatPayload,
+)
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     deallocate_ports,
@@ -133,6 +137,14 @@ sidecar_configs = {
         env={"PYTHONUNBUFFERED": "1"},
         request_payloads=[
             chat_payload_default(),
+            OmittedMaxTokensChatPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Tell me about rivers."}],
+                    "ignore_eos": True,
+                },
+                expected_response=[],
+                expected_log=[],
+            ),
         ],
     ),
     "trtllm_aggregated": EngineConfig(

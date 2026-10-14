@@ -246,11 +246,14 @@ impl NativeHttp {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
             let mut prefill_handoff = request.prefill_handoff;
+            let stopped_ctx = ctx.inner_arc();
+            let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
+            let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
             let opened = tokio::select! {
                 biased;
-                _ = ctx.stopped() => None,
-                _ = cancel.cancelled() => None,
+                _ = &mut request_cancellation => None,
+                _ = &mut shutdown_cancellation => None,
                 response = self.open(&request.body) => Some(response),
             };
             let Some(response) = opened else {
@@ -290,8 +293,8 @@ impl NativeHttp {
             loop {
                 let selected = tokio::select! {
                     biased;
-                    _ = ctx.stopped() => None,
-                    _ = cancel.cancelled() => None,
+                    _ = &mut request_cancellation => None,
+                    _ = &mut shutdown_cancellation => None,
                     line = lines.next() => Some(line),
                 };
                 let Some(line) = selected else {

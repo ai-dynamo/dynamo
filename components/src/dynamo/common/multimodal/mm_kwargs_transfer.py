@@ -15,17 +15,18 @@ This module provides:
 - MmKwargsNixlSender: NIXL RDMA implementation (cross-node)
 - MmKwargsShmSender: shared memory implementation (same-node, ~2ms)
 - MmKwargsNixlReceiver: pulls tensors via NIXL READ on the backend side
-- MmKwargsShmReceiver: reads pickled mm_kwargs from shared memory
+- MmKwargsShmReceiver: reads serialized mm_kwargs from shared memory
 - MmKwargsTransferMetadata: the wire protocol between the two
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import multiprocessing.shared_memory as shm
 import os
-import pickle
+import struct
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
@@ -38,6 +39,104 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
+
+
+# The mm_kwargs transfer serializes vLLM's Python-only MultiModalKwargsItem
+# objects. We use vLLM's own typed msgpack serializer (vllm.v1.serial_utils),
+# the same one vLLM uses for its engine-core<->worker MultiModalKwargs transfer.
+# It is typed and restricted to the target type, so the receiver reconstructs
+# only MultiModalKwargsItem values, and the receiver refuses every msgpack
+# extension code except the raw tensor view. MsgpackEncoder.encode() returns
+# a sequence of buffers (msgpack plus any large-tensor "aux" buffers); the
+# SHM/NIXL transport carries a single bytes blob per item, so we frame the
+# sequence with a small length prefix and reverse it on receive. The vllm
+# imports are lazy so non-vLLM code paths that import this module do not require
+# vLLM.
+
+
+def _pack_buffers(bufs) -> bytes:
+    """Frame a sequence of buffers into one bytes blob for the byte transport."""
+    out = bytearray(struct.pack("<I", len(bufs)))
+    for b in bufs:
+        mv = memoryview(b)
+        out += struct.pack("<Q", mv.nbytes)
+        out += mv
+    return bytes(out)
+
+
+def _unpack_buffers(blob) -> list:
+    """Inverse of _pack_buffers: split a framed blob back into buffers.
+
+    Raises ValueError on a malformed frame -- a truncated header, a declared
+    length that runs past the blob, or trailing bytes after the last buffer --
+    so a corrupt or foreign payload fails into the receiver's fallback instead
+    of yielding wrong buffers. The message names only counts and offsets, never
+    payload bytes.
+    """
+    mv = memoryview(blob)
+    total = mv.nbytes
+    if total < 4:
+        raise ValueError(f"frame too short for count prefix: {total} bytes")
+    (count,) = struct.unpack_from("<I", mv, 0)
+    # Each buffer carries an 8-byte length prefix, so a count larger than the
+    # remaining bytes allow is corrupt; this check also bounds the loop.
+    if count > (total - 4) // 8:
+        raise ValueError(f"frame declares {count} buffers but is only {total} bytes")
+    offset = 4
+    bufs = []
+    for _ in range(count):
+        (length,) = struct.unpack_from("<Q", mv, offset)
+        offset += 8
+        if offset + length > total:
+            raise ValueError("frame buffer length runs past the end of the frame")
+        bufs.append(mv[offset : offset + length])
+        offset += length
+    if offset != total:
+        raise ValueError("frame has trailing bytes after the declared buffers")
+    return bufs
+
+
+def encode_mm_kwargs_item(obj) -> bytes:
+    """Serialize a vLLM ``MultiModalKwargsItem`` to transport bytes with vLLM's
+    typed msgpack encoder (no pickle). Inverse of :func:`decode_mm_kwargs_item`.
+    A fresh encoder is used per call: it accumulates aux-buffer state and is not
+    thread-safe."""
+    from vllm.v1.serial_utils import MsgpackEncoder
+
+    return _pack_buffers(MsgpackEncoder().encode(obj))
+
+
+@functools.lru_cache(maxsize=1)
+def _raw_view_only_decoder_cls():
+    """Return a vLLM ``MsgpackDecoder`` subclass that accepts only raw views.
+
+    vLLM's decoder honors its pickle extension codes when the process-wide
+    ``VLLM_ALLOW_INSECURE_SERIALIZATION`` is set, and other vLLM features can
+    need that variable. This decoder refuses every extension code except the
+    raw tensor view, whatever the variable says.
+    """
+    from vllm.v1.serial_utils import CUSTOM_TYPE_RAW_VIEW, MsgpackDecoder
+
+    class _RawViewOnlyMsgpackDecoder(MsgpackDecoder):
+        def ext_hook(self, code: int, data: memoryview) -> Any:
+            if code == CUSTOM_TYPE_RAW_VIEW:
+                return data
+            raise NotImplementedError(f"Extension type code {code} is not supported")
+
+    return _RawViewOnlyMsgpackDecoder
+
+
+def decode_mm_kwargs_item(blob):
+    """Deserialize bytes from :func:`encode_mm_kwargs_item` back into a
+    ``MultiModalKwargsItem``. The decoder yields only the target type and
+    accepts only the raw tensor-view extension code, so it refuses the pickle
+    extension codes even when ``VLLM_ALLOW_INSECURE_SERIALIZATION`` is set. A
+    fresh decoder is used per call (not thread-safe)."""
+    from vllm.multimodal.inputs import MultiModalKwargsItem
+
+    decoder_cls = _raw_view_only_decoder_cls()
+    return decoder_cls(MultiModalKwargsItem).decode(_unpack_buffers(blob))
+
 
 # Upper bound on how long cleanup() waits for the backend to read a transferred
 # payload before releasing the NIXL-registered buffer anyway. Unbounded waiting
@@ -71,7 +170,7 @@ class MmKwargsTransferMetadata(BaseModel):
 
 
 class MmKwargsShmItem(BaseModel):
-    """Metadata for a single shared-memory segment carrying one pickled item."""
+    """Metadata for a single shared-memory segment carrying one serialized item."""
 
     name: str
     size: int
@@ -118,8 +217,8 @@ class MmKwargsSender(ABC):
     _nvtx_label: str = "mm_frontend:sender_prepare"
     _nvtx_color: str = "cyan"
 
-    # Subclass hook label used for the pickle step.
-    _pickle_nvtx_label: str = "mm_frontend:pickle_dumps"
+    # Subclass hook label used for the serialize step.
+    _serialize_nvtx_label: str = "mm_frontend:serialize"
 
     def _is_available(self) -> bool:
         """Return True if this transport is usable. Default True; NIXL overrides."""
@@ -133,7 +232,7 @@ class MmKwargsSender(ABC):
         """Serialize and register mm_kwargs for transfer to the backend.
 
         Walks mm_features, collects per-feature mm_hashes, skips
-        ``data is None`` features, pickles each remaining ``feat.data``,
+        ``data is None`` features, serializes each remaining ``feat.data``,
         and delegates the transport-specific hand-off to
         :meth:`_encode_item`. Once all items are encoded, calls
         :meth:`_assemble_extra_args` to build the dict returned to the
@@ -160,10 +259,10 @@ class MmKwargsSender(ABC):
                 if feat.data is None:
                     continue
 
-                with _nvtx.annotate(self._pickle_nvtx_label, color=self._nvtx_color):
-                    pickled = pickle.dumps(feat.data)
+                with _nvtx.annotate(self._serialize_nvtx_label, color=self._nvtx_color):
+                    serialized = encode_mm_kwargs_item(feat.data)
 
-                encoded, cleanup = await self._encode_item(i, pickled)
+                encoded, cleanup = await self._encode_item(i, serialized)
                 encoded_items.append(encoded)
                 if cleanup is not None:
                     cleanup_items.append(cleanup)
@@ -177,8 +276,8 @@ class MmKwargsSender(ABC):
             )
 
     @abstractmethod
-    async def _encode_item(self, idx: int, pickled: bytes) -> tuple[Any, Any | None]:
-        """Subclass hook: hand off pickled bytes to the transport.
+    async def _encode_item(self, idx: int, serialized: bytes) -> tuple[Any, Any | None]:
+        """Subclass hook: hand off serialized bytes to the transport.
 
         Returns ``(encoded_item, cleanup_item)`` — ``encoded_item`` is whatever
         the subclass wants to collect (e.g. a ``TensorTransferSpec`` or
@@ -214,7 +313,7 @@ class MmKwargsNixlSender(MmKwargsSender):
 
     _nvtx_label = "mm_frontend:nixl_sender_prepare"
     _nvtx_color = "magenta"
-    _pickle_nvtx_label = "mm_nixl:pickle_dumps"
+    _serialize_nvtx_label = "mm_nixl:serialize"
 
     def __init__(self) -> None:
         # Lazy import to avoid hard dependency when NIXL is not available.
@@ -232,9 +331,9 @@ class MmKwargsNixlSender(MmKwargsSender):
         return self._available
 
     async def _encode_item(
-        self, idx: int, pickled: bytes
+        self, idx: int, serialized: bytes
     ) -> tuple[TensorTransferSpec, Any]:
-        """Register pickled bytes with NIXL and return the spec + operation.
+        """Register serialized bytes with NIXL and return the spec + operation.
 
         The second element is the ``ReadableOperation`` itself, typed as ``Any``
         to match the base hook's opaque ``cleanup_item`` contract and to avoid
@@ -242,15 +341,17 @@ class MmKwargsNixlSender(MmKwargsSender):
         module stays importable where NIXL is unavailable.
         """
         with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
-            pickled_tensor = torch.frombuffer(bytearray(pickled), dtype=torch.uint8)
-            descriptor = self._nixl_connect.Descriptor(pickled_tensor)
+            serialized_tensor = torch.frombuffer(
+                bytearray(serialized), dtype=torch.uint8
+            )
+            descriptor = self._nixl_connect.Descriptor(serialized_tensor)
             readable_op = await self._connector.create_readable(descriptor)
         logger.debug(
-            "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(pickled)
+            "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(serialized)
         )
         spec = TensorTransferSpec(
             field_name="__pickled_kwargs_item__",
-            shape=[len(pickled)],
+            shape=[len(serialized)],
             dtype_str="uint8",
             serialized_request=readable_op.metadata().model_dump(),
         )
@@ -394,10 +495,10 @@ class MmKwargsReceiver(ABC):
     _nvtx_color: str = "cyan"
 
     async def receive(self, metadata: BaseModel) -> dict[str, Any]:
-        """Fetch pickled mm_kwargs items using this transport.
+        """Fetch serialized mm_kwargs items using this transport.
 
         Returns a dict keyed by field name (typically a single key
-        ``"__pickled_kwargs_item__"`` → ``list[bytes]``).
+        ``"__pickled_kwargs_item__"`` → ``list[bytearray]``).
         """
         with _nvtx.annotate(self._nvtx_label, color=self._nvtx_color):
             return await self._receive(metadata)
@@ -407,7 +508,7 @@ class MmKwargsReceiver(ABC):
         """Subclass hook: do the actual transport-specific read."""
 
 
-# Default max pickled kwargs size: 8MB (covers most single-image models).
+# Default max serialized kwargs size: 8MB (covers most single-image models).
 _DEFAULT_MAX_ITEM_BYTES = 8 * 1024 * 1024
 # Number of pre-warmed descriptors (concurrent images in flight).
 _DEFAULT_POOL_SIZE = 16
@@ -423,7 +524,7 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
 
         receiver = MmKwargsNixlReceiver()
         mm_kwargs = await receiver.receive(transfer_metadata)
-        # mm_kwargs is a dict like {"__pickled_kwargs_item__": [bytes, ...]}
+        # mm_kwargs is a dict like {"__pickled_kwargs_item__": [bytearray, ...]}
     """
 
     _nvtx_label = "mm_backend:nixl_receiver_read"
@@ -546,9 +647,10 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
         results: dict[str, Any] = {}
         for idx, name, tensor_view, sz in task_meta:
             if name == "__pickled_kwargs_item__":
-                results.setdefault(name, []).append(
-                    bytes(tensor_view[:sz].numpy().tobytes())
-                )
+                # One copy into a writable buffer: the decoder builds tensors
+                # over it, and PyTorch does not support tensors over read-only
+                # memory.
+                results.setdefault(name, []).append(bytearray(tensor_view[:sz].numpy()))
             else:
                 results[name] = tensor_view[:sz]
 
@@ -565,7 +667,7 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
 
 
 class MmKwargsShmSender(MmKwargsSender):
-    """Transfers pickled mm_kwargs via shared memory (same-node only).
+    """Transfers serialized mm_kwargs via shared memory (same-node only).
 
     ~30x faster than NIXL for CPU→CPU same-machine transfers.
 
@@ -579,23 +681,23 @@ class MmKwargsShmSender(MmKwargsSender):
 
     _nvtx_label = "mm_frontend:shm_sender_prepare"
     _nvtx_color = "cyan"
-    _pickle_nvtx_label = "mm_shm:pickle_dumps"
+    _serialize_nvtx_label = "mm_shm:serialize"
 
     async def _encode_item(
-        self, idx: int, pickled: bytes
+        self, idx: int, serialized: bytes
     ) -> tuple[MmKwargsShmItem, shm.SharedMemory]:
-        """Write pickled bytes to a fresh shared-memory segment."""
+        """Write serialized bytes to a fresh shared-memory segment."""
         name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{idx}"
         with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
-            sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
-            sm.buf[: len(pickled)] = pickled
+            sm = shm.SharedMemory(name=name, create=True, size=len(serialized))
+            sm.buf[: len(serialized)] = serialized
         logger.debug(
             "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
             idx,
-            len(pickled),
+            len(serialized),
             name,
         )
-        return MmKwargsShmItem(name=name, size=len(pickled)), sm
+        return MmKwargsShmItem(name=name, size=len(serialized)), sm
 
     def _assemble_extra_args(
         self,
@@ -627,23 +729,23 @@ class MmKwargsShmSender(MmKwargsSender):
 
 
 class MmKwargsShmReceiver(MmKwargsReceiver):
-    """Reads pickled mm_kwargs from shared memory.
+    """Reads serialized mm_kwargs from shared memory.
 
     Usage::
 
         receiver = MmKwargsShmReceiver()
         result = await receiver.receive(shm_metadata)
-        # result is {"__pickled_kwargs_item__": [bytes, bytes, ...]}
+        # result is {"__pickled_kwargs_item__": [bytearray, bytearray, ...]}
     """
 
     _nvtx_label = "mm_backend:shm_receiver_read"
     _nvtx_color = "cyan"
 
     async def _receive(self, metadata: BaseModel) -> dict[str, Any]:
-        """Read from shared memory and return pickled bytes.
+        """Read from shared memory and return a writable copy of each item.
 
         Returns:
-            Dict with "__pickled_kwargs_item__" key mapping to list of bytes.
+            Dict with "__pickled_kwargs_item__" key mapping to list of bytearray.
         """
         assert isinstance(metadata, MmKwargsShmTransferMetadata)
         results: dict[str, Any] = {}
@@ -651,7 +753,8 @@ class MmKwargsShmReceiver(MmKwargsReceiver):
         for item in metadata.items:
             with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
                 sm = shm.SharedMemory(name=item.name, create=False)
-                data = bytes(sm.buf[: item.size])
+                # One copy into a writable buffer, as in the NIXL receiver.
+                data = bytearray(sm.buf[: item.size])
                 sm.close()
             results.setdefault("__pickled_kwargs_item__", []).append(data)
             logger.debug(

@@ -159,7 +159,9 @@ impl TrtllmMockerService {
             served_model_name: config.model.clone(),
             served_model_aliases: Vec::new(),
             max_context_length: Some(config.context_length),
-            max_output_tokens: Some(request::MAX_NEW_TOKENS),
+            // Preserve the sidecar's default budget when max_tokens is omitted.
+            // Explicit requests may use the larger request::MAX_NEW_TOKENS cap.
+            max_output_tokens: Some(32_768),
             tokenizer_modes: Vec::new(),
             supports_text_input: Some(false),
             supports_token_ids_input: Some(true),
