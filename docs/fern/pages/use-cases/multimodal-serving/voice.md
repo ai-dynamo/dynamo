@@ -27,7 +27,7 @@ for a cascaded pipeline, or a vLLM-Omni model for audio input and output.
   Follow the example's runtime-image requirements; it currently requires
   compatible source-built Dynamo images, not the published 1.5.0 images.
 - **Separate vLLM/vLLM-Omni speech workers:** Use the
-  [Voxtral realtime transcription launcher](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+  [Qwen3-ASR realtime transcription launcher](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
   and [Qwen3-TTS launcher](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
   to exercise each endpoint independently before connecting them to an LLM.
 - **Audio-in/audio-out with vLLM-Omni:** Run the

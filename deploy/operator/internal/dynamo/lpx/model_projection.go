@@ -59,6 +59,7 @@ type ModelProjection struct {
 	stage                  string
 	pipeline               Pipeline
 	configuredBuild        Build
+	contractFormat         buildContractFormat
 	allocationMetadata     json.RawMessage
 	// partitions describes the partitions requested from LPX. Packing can combine
 	// several configuredBuild.Partitions into one LPX partition.
