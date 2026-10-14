@@ -25,12 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# Shared lib/ crates inherit versions and dependencies from the root manifest.
+COPY Cargo.toml rust-toolchain.toml ./
 COPY .cargo/ .cargo/
 COPY lib/ lib/
-COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
-COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
-COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 COPY examples/nemotron_speech_cascaded_pipeline/riva/ examples/nemotron_speech_cascaded_pipeline/riva/
 
 ARG TARGETARCH
