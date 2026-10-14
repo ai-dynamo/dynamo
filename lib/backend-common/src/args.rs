@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use dynamo_llm::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
 
 use crate::disagg::DisaggregationMode;
 
@@ -76,6 +77,20 @@ pub struct CommonArgs {
     )]
     pub exclude_tools_when_tool_choice_none: bool,
 
+    /// Structural-tag guided decoding for tool calls, matching the Python
+    /// workers' `--dyn-structural-tag`: `true` enables scope `always` with
+    /// schema `auto`, `false` disables it, and a JSON object sets individual
+    /// fields. Unset, each backend applies its own default; read it through
+    /// [`CommonArgs::structural_tag`].
+    #[arg(
+        long = "dyn-structural-tag",
+        env = "DYN_STRUCTURAL_TAG",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_structural_tag
+    )]
+    pub dyn_structural_tag: Option<StructuralTagFlag>,
+
     /// Disaggregation role: `agg` (default), `prefill`, `decode`, or `encode`.
     /// Prefill workers register with `ModelType::empty()` and
     /// `WorkerType::Prefill` regardless of `endpoint_types`; decode and encode
@@ -105,6 +120,28 @@ pub struct CommonArgs {
     pub enable_rl: bool,
 }
 
+/// An explicit `--dyn-structural-tag` value; `StructuralTagFlag(None)` is `false`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralTagFlag(pub Option<StructuralTagConfig>);
+
+impl CommonArgs {
+    /// The structural-tag policy to publish: the flag's value when set,
+    /// otherwise scope `always` with schema `auto` when `on_by_default`.
+    pub fn structural_tag(&self, on_by_default: bool) -> Option<StructuralTagConfig> {
+        match &self.dyn_structural_tag {
+            Some(StructuralTagFlag(config)) => config.clone(),
+            None => on_by_default.then(always_on),
+        }
+    }
+}
+
+fn always_on() -> StructuralTagConfig {
+    StructuralTagConfig {
+        scope: StructuralTagScope::Always,
+        ..Default::default()
+    }
+}
+
 fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
     let Ok(suffix) = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") else {
         return Ok(namespace.to_owned());
@@ -119,9 +156,31 @@ fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infal
     Ok(format!("{namespace}{suffix}"))
 }
 
+fn parse_structural_tag(value: &str) -> Result<StructuralTagFlag, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => return Ok(StructuralTagFlag(Some(always_on()))),
+        "false" | "0" | "no" | "off" => return Ok(StructuralTagFlag(None)),
+        _ => {}
+    }
+    let mut config: serde_json::Value =
+        serde_json::from_str(value).map_err(|error| error.to_string())?;
+    let Some(fields) = config.as_object_mut() else {
+        return Err("expected true, false, or a JSON object".to_string());
+    };
+    // The deployment setting defaults scope to `always`; the wire type
+    // defaults to `auto` for cards published before scope existed.
+    fields.entry("scope").or_insert_with(|| "always".into());
+    StructuralTagConfig::from_value_strict(config)
+        .map(|config| StructuralTagFlag(Some(config)))
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use dynamo_llm::local_model::runtime_config::{
+        StructuralTagConfig, StructuralTagSchemaMode, StructuralTagScope,
+    };
 
     use super::CommonArgs;
 
@@ -183,5 +242,54 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn structural_tag_flag_overrides_the_backend_default() {
+        let enabled = StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Auto,
+            ..Default::default()
+        };
+        // (env, argv, policy for a default-on backend, for a default-off one)
+        for (env, argv, on, off) in [
+            (None, &["test"][..], Some(enabled.clone()), None),
+            (
+                None,
+                &["test", "--dyn-structural-tag"][..],
+                Some(enabled.clone()),
+                Some(enabled.clone()),
+            ),
+            (None, &["test", "--dyn-structural-tag", "false"][..], None, None),
+            (Some("off"), &["test"][..], None, None),
+            (Some("on"), &["test"][..], Some(enabled.clone()), Some(enabled.clone())),
+        ] {
+            temp_env::with_var("DYN_STRUCTURAL_TAG", env, || {
+                let args = TestArgs::try_parse_from(argv).unwrap();
+                assert_eq!(args.common.structural_tag(true), on, "{env:?} {argv:?}");
+                assert_eq!(args.common.structural_tag(false), off, "{env:?} {argv:?}");
+            });
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn structural_tag_json_keeps_always_scope_unless_set() {
+        temp_env::with_var_unset("DYN_STRUCTURAL_TAG", || {
+            let parse = |value: &str| {
+                TestArgs::try_parse_from(["test", "--dyn-structural-tag", value])
+                    .map(|args| args.common.structural_tag(false).unwrap())
+            };
+            let strict = parse(r#"{"schema": "strict"}"#).unwrap();
+            assert_eq!(strict.scope, StructuralTagScope::Always);
+            assert_eq!(strict.schema, StructuralTagSchemaMode::Strict);
+            assert_eq!(
+                parse(r#"{"scope": "auto"}"#).unwrap().scope,
+                StructuralTagScope::Auto
+            );
+            assert!(parse(r#"{"unknown": true}"#).is_err());
+            assert!(parse("[]").is_err());
+        });
     }
 }

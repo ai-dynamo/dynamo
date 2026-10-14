@@ -173,6 +173,9 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
+        // SGLang compiles Dynamo's structural tags natively, so this sidecar
+        // publishes them by default, like the in-process worker.
+        let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
             namespace: common.namespace,
@@ -194,6 +197,7 @@ impl SglangSidecarEngine {
             tool_call_parser: common
                 .dyn_tool_call_parser
                 .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+            structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
             enable_rl: common.enable_rl,
@@ -1175,6 +1179,7 @@ mod tests {
     use tokio::time::Instant;
 
     use clap::Parser;
+    use dynamo_backend_common::args::StructuralTagFlag;
     use dynamo_backend_common::{BackendError, ErrorType, ModelInput};
     use dynamo_sidecar_common::GrpcEndpoint;
     use serde_json::json;
@@ -1305,6 +1310,18 @@ mod tests {
             assert!(config.reasoning_parser.is_none());
             assert!(config.tool_call_parser.is_none());
         }
+    }
+
+    #[test]
+    fn worker_publishes_structural_tag_policy() {
+        let (_, config) =
+            SglangSidecarEngine::from_discovered(args(), discovery(json!({}))).unwrap();
+        assert!(config.structural_tag.is_some());
+
+        let mut args = args();
+        args.sidecar.common.dyn_structural_tag = Some(StructuralTagFlag(None));
+        let (_, config) = SglangSidecarEngine::from_discovered(args, discovery(json!({}))).unwrap();
+        assert!(config.structural_tag.is_none());
     }
 
     #[test]

@@ -509,6 +509,10 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         !aggregated.enable_kv_routing,
         "the sidecar has no KV events"
     );
+    // Structural tags are off by default on TensorRT-LLM and can be enabled.
+    assert!(aggregated.structural_tag.is_none());
+    let (_, tagged) = parse(&["--dyn-structural-tag"]).expect("opt-in parses");
+    assert!(tagged.structural_tag.is_some());
 
     for (mode, expected) in [
         (DisaggregationMode::Prefill, "prefill"),
