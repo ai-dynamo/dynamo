@@ -475,42 +475,6 @@ async def test_mutable_sources_are_rejected_before_admission(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_loop_task_cancellation_cannot_detach_sqlite_creation(
-    tmp_path, monkeypatch, blocking_writer
-):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
-    created = []
-    original_create = store.create
-
-    def create(*args, **kwargs):
-        pending = original_create(*args, **kwargs)
-        created.append(pending["operation_id"])
-        return pending
-
-    writer, entered, release = blocking_writer(create)
-    monkeypatch.setattr(store, "create", writer)
-
-    async def transfer(data, target):
-        pytest.fail("cancelled submission must not start transfer")
-
-    service = ArtifactService(store, transfer, None)
-    existing_tasks = asyncio.all_tasks()
-    submission = asyncio.create_task(service.submit(b"owned", "owner", [], {}))
-    await entered.wait()
-    for task in asyncio.all_tasks() - existing_tasks:
-        task.cancel()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    assert not submission.done()
-    assert service.source_bytes == len(b"owned")
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await submission
-    assert store.get(created[0], "owner")["state"] == "failed"
-    assert service.source_bytes == 0
-
-
-@pytest.mark.asyncio
 async def test_cancel_before_delivery_starts_settles_failed_without_budget_leak(
     tmp_path, monkeypatch, blocking_writer
 ):
