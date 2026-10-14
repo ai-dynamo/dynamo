@@ -94,7 +94,7 @@ import time
 import uuid
 from array import array
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
@@ -3002,8 +3002,8 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_sd_outputs: dict[int, _SpeculativeBenchmarkStep] = {}
             self._bench_sd_live_outputs: set[int] = set()
             self._bench_sd_steps: dict[int, _SpeculativeBenchmarkStep] = {}
-            self._bench_sd_restore_native = None
-            self._bench_sd_restore_factory = None
+            self._bench_sd_restore_native: Callable[[], None] | None = None
+            self._bench_sd_restore_factory: Callable[[], None] | None = None
             self._bench_sd_sampling = SamplingParams.from_optional(
                 **vllm_config.model_config.get_diff_sampling_param()
             )
@@ -7606,6 +7606,8 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_sd_measuring = False
             # Real long-context prefill can outlast the short AR result/barrier
             # budget. It is bounded by the campaign deadline instead.
+            if self._bench_deadline_monotonic is None:
+                raise RuntimeError("SD benchmark campaign deadline is not initialized")
             self._bench_point_deadline = self._bench_deadline_monotonic
             contexts = self._bench_decode_context_lengths(
                 point.total_kv_read_tokens, point.batch_size

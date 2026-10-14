@@ -2737,6 +2737,18 @@ def test_eagle_long_prefill_uses_campaign_budget(eagle_benchmark, monkeypatch):
         stub._bench_step_speculative_decode()
 
 
+def test_eagle_requires_initialized_campaign_deadline(eagle_benchmark):
+    stub = eagle_benchmark
+    stub._bench_frees_pending = lambda: False
+    stub._bench_stop_at_timeout_boundary = lambda phase: False
+    stub._bench_grid.append(
+        BenchmarkPoint("decode", batch_size=1, total_kv_read_tokens=32)
+    )
+    assert stub._bench_deadline_monotonic is None
+    with pytest.raises(RuntimeError, match="campaign deadline is not initialized"):
+        stub._bench_step_speculative_decode()
+
+
 @pytest.mark.parametrize("unsupported", ["runtime", "port", "sync"])
 def test_eagle_native_timing_requirements_fail_closed(
     eagle_benchmark, monkeypatch, unsupported
