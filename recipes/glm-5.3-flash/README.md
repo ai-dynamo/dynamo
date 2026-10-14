@@ -20,14 +20,17 @@ overlays. These recipes use `RadixArk/GLM-5.3-Flash-NVFP4` at revision
 | Weight / KV precision | NVFP4 / FP8 E4M3 | NVFP4 / FP8 E4M3 | NVFP4 / FP8 E4M3 |
 | Routing | Round-robin | Round-robin | KV-aware, worker KV events |
 | Speculative decoding | EAGLE, 3 steps / 4 draft tokens, ReplaySSM | Same | Same, decode only |
-| HiCache CPU capacity | 100 GiB | 100 GiB | 100 GiB per prefill worker |
+| HiCache CPU capacity | 100 GB per TP rank; ~400 GB per worker Pod | Same | 100 GB per prefill TP rank; ~400 GB per prefill Pod; none on decode |
+| Host memory request / limit per worker Pod | 448 GiB / 448 GiB | 448 GiB / 448 GiB | Prefill: 448 GiB / 448 GiB; decode: 256 GiB request, no explicit limit |
 | Static memory fraction | 0.70 | 0.70 | Prefill 0.70 / decode 0.82 |
 | Maximum running requests | 64 | 64 | Prefill 64 / decode 128 per worker |
 | Maximum decode CUDA graph batch size | 64 | 64 | 128 on decode |
 | KV transfer | Not applicable | Not applicable | Mooncake over NVLink with MNNVL |
 | ComputeDomain | None | Created by overlay | Created by overlay |
 | Overlay | `nscale` | `gb200` | `gb200` |
-| Input modalities | Text, images, video | Text, images, video | Text, images, video |
+| Input modalities | Text, images, video | Text, images, video | Text, images |
+
+Video input is unavailable in the SGLang disaggregated recipe because frontend decoding is unsupported on this path and the runtime image omits SGLang's video decoder dependencies.
 
 ### SGLang Prerequisites
 
@@ -167,7 +170,8 @@ sglang/<mode>-<sku>-agentic/
 
 Edit `kustomize/base/deploy.yaml` for serving settings. GB200 components cover
 `scheduling`, `compute-domain`, and optional `synthetic-acceptance`. The B200
-`nscale` component covers placement and worker probes.
+`nscale` component covers placement and worker probes; B200 also has an optional
+`synthetic-acceptance` component.
 Regenerate the public overlay and manifest after edits:
 
 ```bash
@@ -194,21 +198,22 @@ python3 scripts/kustomize-matrix.py check "$RECIPE/.kustomize-matrix.yaml"
 ### Synthetic Acceptance
 
 Real speculative verification is the default for all three targets. To use
-synthetic acceptance on GB200, select the aggregated or disaggregated recipe
+synthetic acceptance on B200 or GB200, select a target below
 and compose its optional component. The component sets
 `SGLANG_SIMULATE_ACC_LEN=2.5657`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`,
 and `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token` on the aggregated worker
 or disaggregated decode worker.
 
 ```bash
-export MODE=agg  # or disagg
-export RECIPE="recipes/glm-5.3-flash/sglang/${MODE}-gb200-agentic"
+export TARGET=agg-b200-agentic
+export OVERLAY=nscale
+export RECIPE="recipes/glm-5.3-flash/sglang/${TARGET}"
 python3 scripts/kustomize-matrix.py compose \
-  "$RECIPE/kustomize/overlays/gb200" \
+  "$RECIPE/kustomize/overlays/$OVERLAY" \
   "$RECIPE/kustomize/components/synthetic-acceptance" \
-  > "/tmp/glm53-sglang-${MODE}-synthetic.yaml"
-kubectl apply --dry-run=server -f "/tmp/glm53-sglang-${MODE}-synthetic.yaml" -n "$NAMESPACE"
-kubectl apply -f "/tmp/glm53-sglang-${MODE}-synthetic.yaml" -n "$NAMESPACE"
+  > "/tmp/glm53-sglang-${TARGET}-synthetic.yaml"
+kubectl apply --dry-run=server -f "/tmp/glm53-sglang-${TARGET}-synthetic.yaml" -n "$NAMESPACE"
+kubectl apply -f "/tmp/glm53-sglang-${TARGET}-synthetic.yaml" -n "$NAMESPACE"
 ```
 
 Synthetic acceptance changes token verification and is for performance

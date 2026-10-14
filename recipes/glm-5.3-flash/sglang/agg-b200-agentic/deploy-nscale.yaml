@@ -51,7 +51,7 @@ spec:
             value: "1"
           - name: DYN_ROUTER_MODE
             value: round-robin
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -166,7 +166,7 @@ spec:
             value: "1"
           - name: NCCL_P2P_LEVEL
             value: NVL
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
           imagePullPolicy: IfNotPresent
           livenessProbe:
             failureThreshold: 60
@@ -191,7 +191,7 @@ spec:
               nvidia.com/gpu: "4"
             requests:
               cpu: "16"
-              memory: 256Gi
+              memory: 448Gi
               nvidia.com/gpu: "4"
           securityContext:
             capabilities:

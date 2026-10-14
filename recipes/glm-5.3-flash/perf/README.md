@@ -49,10 +49,22 @@ The deployment bases use real speculative verification by default. The perf Job
 does not enable synthetic acceptance or change serving flags. Record any optional
 synthetic-acceptance component separately when comparing results.
 
-For GB200 synthetic measurements, first follow the
+For B200 or GB200 synthetic measurements, first follow the
 [synthetic deployment procedure](../README.md#synthetic-acceptance) and wait for
 the replacement workers to become ready. It sets acceptance length `2.5657`,
-method `match-expected`, and token mode `real-draft-token`. 
+method `match-expected`, and token mode `real-draft-token`.
+
+Before creating the Job, set its `CONCURRENCY` environment variable in
+[perf.yaml](perf.yaml) for the corresponding published synthetic result:
+
+| Target | `CONCURRENCY` |
+| --- | ---: |
+| B200 aggregated | `56` |
+| GB200 aggregated | `56` |
+| GB200 disaggregated (2P1D) | `128` |
+
+The default `64` does not match those rows. Change `INFERENCE_URL` and the
+frontend pod-affinity selector as described above for the selected target.
 
 ## Trace and load settings
 

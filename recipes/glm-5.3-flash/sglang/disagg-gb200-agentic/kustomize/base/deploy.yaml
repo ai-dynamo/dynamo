@@ -29,7 +29,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - python3
@@ -69,7 +69,7 @@ spec:
                 claimName: shared-model-cache
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - python3
@@ -162,8 +162,6 @@ spec:
                   value: '1'
                 - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
                   value: '1'
-                - name: DYN_FORWARDPASS_METRIC_PORT
-                  value: ''
                 - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
                   value: NVLINK
                 - name: MC_FORCE_MNNVL
@@ -183,7 +181,7 @@ spec:
               resources:
                 requests:
                   cpu: '16'
-                  memory: 256Gi
+                  memory: 448Gi
                   nvidia.com/gpu: '4'
                 limits:
                   nvidia.com/gpu: '4'
@@ -210,7 +208,7 @@ spec:
                 claimName: shared-model-cache
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - python3
@@ -307,8 +305,6 @@ spec:
                   value: '1'
                 - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
                   value: '1'
-                - name: DYN_FORWARDPASS_METRIC_PORT
-                  value: ''
                 - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
                   value: NVLINK
                 - name: MC_FORCE_MNNVL

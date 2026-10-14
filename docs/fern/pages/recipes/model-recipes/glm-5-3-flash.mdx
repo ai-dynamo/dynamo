@@ -77,7 +77,7 @@ Deploy Z.AI's GLM-5.3-Flash with NVIDIA Dynamo using SGLang or vLLM. The SGLang 
 <span><b>GPUs</b> 4x GB200, one TP4 worker</span>
 <span><b>Routing</b> Round-robin</span>
 <span><b>Speculation</b> EAGLE, 3 steps / 4 draft tokens, ReplaySSM</span>
-<span><b>HiCache</b> 100 GiB CPU cache</span>
+<span><b>HiCache</b> 100 GB per TP rank; ~400 GB per worker Pod</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 <span><b>Checkpoint</b> RadixArk/GLM-5.3-Flash-NVFP4</span>
@@ -86,7 +86,7 @@ Deploy Z.AI's GLM-5.3-Flash with NVIDIA Dynamo using SGLang or vLLM. The SGLang 
 <span><b>Parallelism</b> 2x prefill TP4/EP4 + 1x decode TP4</span>
 <span><b>Routing</b> KV-aware routing with worker events, Mooncake NVLink transfer</span>
 <span><b>Speculation</b> EAGLE ReplaySSM on decode</span>
-<span><b>HiCache</b> 100 GiB CPU cache per prefill worker</span>
+<span><b>HiCache</b> 100 GB per prefill TP rank; ~400 GB per prefill Pod</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg">
 <span><b>Checkpoint</b> RadixArk/GLM-5.3-Flash-NVFP4</span>
@@ -94,7 +94,7 @@ Deploy Z.AI's GLM-5.3-Flash with NVIDIA Dynamo using SGLang or vLLM. The SGLang 
 <span><b>GPUs</b> 4x B200 on one amd64 node, one TP4 worker</span>
 <span><b>Routing</b> Round-robin</span>
 <span><b>Speculation</b> EAGLE, 3 steps / 4 draft tokens, ReplaySSM</span>
-<span><b>HiCache</b> 100 GiB CPU cache</span>
+<span><b>HiCache</b> 100 GB per TP rank; ~400 GB per worker Pod</span>
 <span><b>Overlay</b> nscale, single-node NVLink without ComputeDomain</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="disagg">
@@ -373,7 +373,9 @@ curl --fail-with-body http://localhost:8000/v1/chat/completions \
   -d '{"model":"RadixArk/GLM-5.3-Flash-NVFP4","messages":[{"role":"user","content":"What is 2 + 2?"}],"max_tokens":128,"temperature":0}'
 ```
 
-The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser. All three recipes enable `--enable-multimodal` and `--mm-enable-dp-encoder`. Aggregated workers enable `--frontend-decoding`, so the Dynamo frontend decodes images and videos before passing them to the backend. Disaggregated workers omit `--frontend-decoding` on both prefill and decode workers. Send text, image, or video content to the chat completions endpoint.
+The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser. All three recipes enable `--enable-multimodal` and `--mm-enable-dp-encoder`. Aggregated workers enable `--frontend-decoding`, so the Dynamo frontend decodes images and videos before passing them to the backend. Disaggregated workers omit `--frontend-decoding` on both prefill and decode workers and support text and image input only.
+
+Video input is unavailable in the SGLang disaggregated recipe because frontend decoding is unsupported on this path and the runtime image omits SGLang's video decoder dependencies.
 
 </div>
 
@@ -381,9 +383,15 @@ The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser
 
 <div data-recipe-framework="sglang" data-sku="b200 gb200">
 
-Use the [AIPerf benchmark guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/README.md) and [benchmark manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/perf.yaml) for agentic text trace replay.  These measurements describe the source configurations with simulated acceptance length `2.5657`, method `match-expected`, and token mode `real-draft-token`.
+Use the [AIPerf benchmark guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/README.md) and [benchmark manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/perf/perf.yaml) for agentic text trace replay.
 
-| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+### Synthetic Acceptance Results
+
+These measurements describe the source configurations with simulated acceptance length `2.5657`, method `match-expected`, and token mode `real-draft-token`. The default deployment overlays use real speculative verification. To configure synthetic acceptance, follow the [compose, dry-run, and apply procedure](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/README.md#synthetic-acceptance) with the optional component for [B200 aggregated](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5.3-flash/sglang/agg-b200-agentic/kustomize/components/synthetic-acceptance), [GB200 aggregated](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5.3-flash/sglang/agg-gb200-agentic/kustomize/components/synthetic-acceptance), or [GB200 disaggregated](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/kustomize/components/synthetic-acceptance). Wait for replacement workers to become ready before measurement.
+
+Set the `CONCURRENCY` environment variable in the benchmark Job to **56 for either aggregated target** or **128 for GB200 disaggregated**, as listed below. The Job's default is **64** and does not match these rows. Select the matching endpoint and frontend pod affinity using the benchmark guide.
+
+| Workload | Framework | Recipe | SKU | `CONCURRENCY` | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
 | Agentic (15% subset) | SGLang | Aggregated (1 worker) | B200 | 56 | 579.1 | 50.7 | 189 |
 | Agentic (15% subset) | SGLang | Aggregated (1 worker) | GB200 | 56 | 590.34 | 51.05 | 316 |
@@ -413,7 +421,8 @@ All four vLLM targets serve the same FP8-quantized GLM-5.3-Flash checkpoint on v
 
 ### SGLang
 
-All three SGLang targets use the pinned NVFP4 checkpoint and FP8 E4M3 KV cache. Worker Pods request 16 CPUs, 256 GiB of host memory, four GPUs, and 64 GiB of shared memory.
+All three SGLang targets use the pinned NVFP4 checkpoint and FP8 E4M3 KV cache. Worker Pods request 16 CPUs and four GPUs, with a 64 GiB shared-memory volume. Aggregated workers and disaggregated prefill workers have a host-memory request and limit of 448 GiB.
+
 
 | Setting | B200 Aggregated | GB200 Aggregated | GB200 Disaggregated |
 | --- | --- | --- | --- |
@@ -421,7 +430,8 @@ All three SGLang targets use the pinned NVFP4 checkpoint and FP8 E4M3 KV cache. 
 | **GPUs** | 4 | 4 | 12 |
 | **Parallelism** | TP4 | TP4 | Prefill TP4/EP4, decode TP4 |
 | **Speculation** | EAGLE, 3 steps / 4 draft tokens, ReplaySSM | Same | Same, decode only |
-| **HiCache CPU capacity** | 100 GiB | 100 GiB | 100 GiB per prefill worker |
+| **HiCache CPU capacity** | 100 GB per TP rank; ~400 GB per worker Pod | Same | 100 GB per prefill TP rank; ~400 GB per prefill Pod; none on decode |
+| **Host memory request / limit per worker Pod** | 448 GiB / 448 GiB | 448 GiB / 448 GiB | Prefill: 448 GiB / 448 GiB; decode: 256 GiB request, no explicit limit |
 | **Maximum running requests** | 64 | 64 | 64 per prefill worker / 128 decode |
 | **Maximum decode CUDA graph batch size** | 64 | 64 | 128 on decode |
 | **Chunked prefill size** | 16,384 tokens | 16,384 tokens | 16,384 tokens |
@@ -430,7 +440,7 @@ All three SGLang targets use the pinned NVFP4 checkpoint and FP8 E4M3 KV cache. 
 | **KV transfer** | Not applicable | Not applicable | Mooncake over NVLink with MNNVL |
 | **ComputeDomain** | None | Created by overlay | Created by overlay |
 | **Overlay** | `nscale` | `gb200` | `gb200` |
-| **Input modalities** | Text, images, video | Text, images, video | Text, images, video |
+| **Input modalities** | Text, images, video | Text, images, video | Text, images |
 
 ## Related Feature Benchmarks
 
@@ -452,7 +462,7 @@ No controlled feature benchmark is linked to this recipe. Browse the [Feature Be
 - The pinned SGLang runtime image includes the cuDNN workaround for the vision encoder downsampling operation.
 - All worker bases set `DYN_HEALTH_CHECK_REQUEST_TIMEOUT=300` and an explicit `/live` liveness probe on port `system`, with period 5 seconds, timeout 4 seconds, and failure threshold 60. GB200 components provide placement and ComputeDomain wiring; startup and readiness probes use operator defaults.
 - GB200 disaggregated routing uses worker KV events. Both prefill and decode workers set `--kv-events-config` to a ZMQ publisher on `tcp://*:5557` with topic `kv-events`. The router block size and SGLang page size are both 64.
-- The GB200 default overlays omit the source configurations' `SGLANG_SIMULATE_ACC_*` variables. Add the optional component only when reproducing synthetic acceptance measurements.
+- All three SGLang default overlays omit the source configurations' `SGLANG_SIMULATE_ACC_*` variables. Add the optional component only when reproducing synthetic acceptance measurements.
 
 ## Source
 

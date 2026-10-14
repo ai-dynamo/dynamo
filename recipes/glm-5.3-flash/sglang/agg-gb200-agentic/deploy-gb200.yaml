@@ -51,7 +51,7 @@ spec:
             value: "1"
           - name: DYN_ROUTER_MODE
             value: round-robin
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -77,6 +77,7 @@ spec:
         - args:
           - -m
           - dynamo.sglang
+          - --trust-remote-code
           - --enable-multimodal
           - --frontend-decoding
           - --mm-enable-dp-encoder
@@ -164,7 +165,7 @@ spec:
             value: "1"
           - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
             value: "1"
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
           imagePullPolicy: IfNotPresent
           livenessProbe:
             failureThreshold: 60
@@ -184,7 +185,7 @@ spec:
               nvidia.com/gpu: "4"
             requests:
               cpu: "16"
-              memory: 256Gi
+              memory: 448Gi
               nvidia.com/gpu: "4"
           securityContext:
             capabilities:

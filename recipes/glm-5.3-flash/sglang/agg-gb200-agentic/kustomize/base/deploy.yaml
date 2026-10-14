@@ -29,7 +29,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - python3
@@ -67,13 +67,14 @@ spec:
                 claimName: shared-model-cache
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - python3
               args:
                 - -m
                 - dynamo.sglang
+                - --trust-remote-code
                 - --enable-multimodal
                 - --frontend-decoding
                 - --mm-enable-dp-encoder
@@ -172,7 +173,7 @@ spec:
               resources:
                 requests:
                   cpu: '16'
-                  memory: 256Gi
+                  memory: 448Gi
                   nvidia.com/gpu: '4'
                 limits:
                   nvidia.com/gpu: '4'
