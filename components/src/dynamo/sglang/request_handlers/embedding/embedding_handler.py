@@ -12,6 +12,7 @@ import sglang as sgl
 from sglang.srt.managers.io_struct import EmbeddingReqInput
 
 from dynamo._core import Context
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -99,7 +100,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
         """
         if request.get("messages") is not None:
-            raise ValueError(
+            raise InvalidArgument(
                 "chat-style embedding input (`messages`) is supported on vLLM "
                 "embedding workers only; send `input` to SGLang"
             )

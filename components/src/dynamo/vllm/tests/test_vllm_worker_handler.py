@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import numpy as np
 import pytest
 import torch
-from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 
@@ -2789,22 +2788,21 @@ class TestEmbeddingWorkerHandlerChatInput:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    @pytest.mark.parametrize(
-        "error",
-        [
+    @pytest.mark.parametrize("case", ["text_only_model", "unsupported_modality"])
+    async def test_unsupported_media_is_invalid_argument(self, case):
+        """vLLM's rejection reaches the client as a 400 with its message,
+        instead of a generic "Invalid request" or a 500."""
+        from vllm.exceptions import VLLMValidationError
+
+        error = {
             # vLLM on a text-only model given media.
-            ValueError("test-model is not a multimodal model"),
+            "text_only_model": ValueError("test-model is not a multimodal model"),
             # vLLM on a model without the modality (not a ValueError).
-            VLLMValidationError(
+            "unsupported_modality": VLLMValidationError(
                 "At most 0 audio(s) may be provided in one prompt.",
                 parameter="audio",
             ),
-        ],
-        ids=["text_only_model", "unsupported_modality"],
-    )
-    async def test_unsupported_media_is_invalid_argument(self, error):
-        """vLLM's rejection reaches the client as a 400 with its message,
-        instead of a generic "Invalid request" or a 500."""
+        }[case]
         handler, encoded = self._make_handler()
         handler.engine_client.renderer.render_chat_async = AsyncMock(side_effect=error)
 
