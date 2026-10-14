@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import asdict
 from functools import cache
 from pathlib import Path
@@ -68,10 +69,15 @@ class ArtifactRuntime:
         for name, profile in config.get("profiles", {}).items():
             if profile.get("immutable") is not True:
                 raise ValueError("artifact profile requires certified immutability")
+            prefixes = profile["allowed_prefixes"]
+            if (
+                not isinstance(prefixes, Sequence)
+                or isinstance(prefixes, (str, bytes, bytearray))
+                or not all(isinstance(prefix, str) for prefix in prefixes)
+            ):
+                raise ValueError("artifact profile requires a prefix sequence")
             operator = opendal.AsyncOperator(profile["service"], **profile["options"])
-            self.profiles[name] = ManagedProfile(
-                operator, tuple(profile["allowed_prefixes"])
-            )
+            self.profiles[name] = ManagedProfile(operator, tuple(prefixes))
         self.verifiers = config.get("verifiers", {})
         database = Path(config["operation_db"]).resolve()
         database.parent.mkdir(parents=True, exist_ok=True)
@@ -192,10 +198,12 @@ class ArtifactRuntime:
         """Settle owned transfers before releasing this database's authority."""
         self._closing = True
         async with self._admission_lock:
-            await self.service.drain()
-            if self._authority_file is not None:
-                self._authority_file.close()
-                self._authority_file = None
+            try:
+                await self.service.drain()
+            finally:
+                if self._authority_file is not None:
+                    self._authority_file.close()
+                    self._authority_file = None
 
 
 @cache
