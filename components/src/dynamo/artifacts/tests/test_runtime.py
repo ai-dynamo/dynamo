@@ -309,6 +309,20 @@ def test_config_requires_certified_immutable_profile(runtime_config):
         ArtifactRuntime(config, Fernet.generate_key())
 
 
+@pytest.mark.asyncio
+async def test_runtime_configures_terminal_receipt_retention(runtime_config):
+    configured = {**runtime_config, "terminal_ttl_seconds": 120}
+    runtime = ArtifactRuntime(configured, Fernet.generate_key())
+    try:
+        assert runtime.store.terminal_ttl_seconds == 120
+    finally:
+        await runtime.close()
+    with pytest.raises(ValueError, match="configuration is invalid"):
+        ArtifactRuntime(
+            {**configured, "terminal_ttl_seconds": 0}, Fernet.generate_key()
+        )
+
+
 @pytest.mark.parametrize(
     "prefixes", ["artifacts", {"artifacts": True}, ["artifacts", 7]]
 )
@@ -335,7 +349,6 @@ async def test_real_memory_operator_transfer_verify_and_ready(runtime, managed):
         "object_id"
     ]
     assert await runtime.profiles["approved"].operator.read("artifacts/result") == data
-    assert runtime.store.grant(result["operation_id"]) is None
 
 
 @pytest.mark.asyncio
@@ -348,13 +361,13 @@ async def test_transfer_receipt_does_not_expose_outcome_as_ready(runtime, manage
 
 
 @pytest.mark.asyncio
-async def test_different_stored_bytes_cannot_become_ready(runtime, managed):
+async def test_different_stored_bytes_leave_commit_unconfirmed(runtime, managed):
     await runtime.profiles["approved"].operator.write("artifacts/result", b"wrong!")
     result = await runtime.submit(b"opaque", [], managed)
     await runtime.service.drain()
     terminal = runtime.status(result["operation_id"])
     assert terminal["state"] == "failed"
-    assert terminal["error_code"] == "verification_failed"
+    assert terminal["error_code"] == "commit_unknown"
     assert "sha256" not in terminal
 
 

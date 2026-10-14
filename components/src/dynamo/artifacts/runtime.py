@@ -92,7 +92,10 @@ class ArtifactRuntime:
         )
         self._authority_file = os.fdopen(lock_fd, "r+b")
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.store = ArtifactOperationStore(database, capability_key)
+        self.store = ArtifactOperationStore(
+            database,
+            terminal_ttl_seconds=config.get("terminal_ttl_seconds", 86400),
+        )
         self.store.recover()
         self.service = ArtifactService(
             self.store,
