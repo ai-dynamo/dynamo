@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 
 from ..custom.model_profiles import model_case_profile
 from . import CONTRACT_VERSION
+from .bfcl_capture import FAILURES_FILE, TRACE_FILE
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILES = ROOT / "profiles.json"
@@ -654,13 +655,15 @@ def _bfcl_commands(
         "-c",
         BFCL_PREFLIGHT_SCRIPT,
     ]
+    capture_path = "/opt/dynamo-verifier/bfcl_capture.py"
     generate = _docker_prefix(
         image,
         output_dir,
         forwarded_environment=("OPENAI_API_KEY",),
-        read_only_mounts=selection_mount,
+        read_only_mounts=(*selection_mount, (ROOT / "bfcl_capture.py", capture_path)),
     ) + [
-        "bfcl",
+        "python",
+        capture_path,
         "generate",
         *common,
         "--run-ids",
@@ -780,6 +783,22 @@ def _bfcl_counts(output_dir: Path) -> tuple[int, int]:
 
 
 def _run_bfcl(
+    args: argparse.Namespace, config: Mapping[str, Any], result: dict[str, Any]
+) -> None:
+    try:
+        _run_bfcl_evaluation(args, config, result)
+    finally:
+        # Keep evidence paths on early returns and generation/evaluator failures.
+        for key, filename in (
+            ("http_trace", TRACE_FILE),
+            ("http_failures", FAILURES_FILE),
+        ):
+            path = Path(args.output_dir) / filename
+            if path.is_file():
+                result["artifacts"][key] = str(path)
+
+
+def _run_bfcl_evaluation(
     args: argparse.Namespace, config: Mapping[str, Any], result: dict[str, Any]
 ) -> None:
     output_dir = Path(args.output_dir)

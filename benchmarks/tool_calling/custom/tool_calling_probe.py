@@ -2413,6 +2413,37 @@ def post_json(
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def response_reasoning(
+    fields: dict[str, Any], parse_errors: list[dict[str, Any]]
+) -> str:
+    """Read compatible reasoning aliases once, retaining conflicting-field errors."""
+    candidates: list[tuple[str, str]] = []
+    provider = fields.get("provider_specific_fields")
+    sources = [("", fields)]
+    if isinstance(provider, dict):
+        sources.append(("provider_specific_fields.", provider))
+    for prefix, source in sources:
+        for name in ("reasoning_content", "reasoning"):
+            value = source.get(name)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str):
+                parse_errors.append(
+                    error("malformed_reasoning", f"{prefix}{name} is not a string")
+                )
+                continue
+            candidates.append((f"{prefix}{name}", value))
+    if not candidates:
+        return ""
+    selected_name, selected = candidates[0]
+    for name, value in candidates[1:]:
+        if value != selected:
+            parse_errors.append(
+                error("reasoning_mismatch", f"{selected_name} differs from {name}")
+            )
+    return selected
+
+
 def request_nonstream(
     url: str,
     payload: dict[str, Any],
@@ -2458,20 +2489,7 @@ def request_nonstream(
         return result
 
     result.content = message.get("content") or ""
-    msg_reasoning = message.get("reasoning_content") or ""
-    provider = message.get("provider_specific_fields") or {}
-    provider_reasoning = ""
-    if isinstance(provider, dict):
-        provider_reasoning = provider.get("reasoning_content") or ""
-    result.reasoning_content = msg_reasoning or provider_reasoning
-
-    if msg_reasoning and provider_reasoning and msg_reasoning != provider_reasoning:
-        result.parse_errors.append(
-            error(
-                "reasoning_mismatch",
-                "message.reasoning_content differs from provider_specific_fields",
-            )
-        )
+    result.reasoning_content = response_reasoning(message, result.parse_errors)
 
     raw_tool_calls = message.get("tool_calls") or []
     if raw_tool_calls and not isinstance(raw_tool_calls, list):
@@ -2562,11 +2580,9 @@ def request_stream(
 
                 if delta.get("content"):
                     content_parts.append(delta["content"])
-                if delta.get("reasoning_content"):
-                    reasoning_parts.append(delta["reasoning_content"])
-                provider = delta.get("provider_specific_fields") or {}
-                if isinstance(provider, dict) and provider.get("reasoning_content"):
-                    reasoning_parts.append(provider["reasoning_content"])
+                reasoning = response_reasoning(delta, result.parse_errors)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
 
                 for tc_delta in delta.get("tool_calls") or []:
                     if not isinstance(tc_delta, dict):

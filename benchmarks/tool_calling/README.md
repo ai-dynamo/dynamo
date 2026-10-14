@@ -47,6 +47,11 @@ including tool choice, schemas, parallel calls, streaming finish reasons,
 reasoning separation, parser-marker leakage, truncation, history, and
 multi-turn tool execution.
 
+Response readers accept both `reasoning` and `reasoning_content` in messages,
+streaming deltas, and provider fields. Matching aliases are read once;
+conflicting fields remain validation errors. Finish-reason and truncated-tool
+argument checks are unchanged.
+
 ```mermaid
 flowchart LR
     M[Served model ID] --> P[Resolve model profile]
@@ -97,6 +102,13 @@ flowchart LR
 The container uses host networking to reach the harness port-forward and
 mounts the suite output directory at `/results`. Live, executable, and
 long-context categories are intentionally outside this bounded selection.
+
+Generation retains `bfcl-http-trace.jsonl` with complete prepared request bodies,
+responses, case IDs, and per-case request sequences. HTTP and transport failures
+also appear in `bfcl-http-failures.jsonl`; authorization headers are excluded.
+The observer preserves the evaluator's requests and exceptions. A generation
+error still prevents evaluation and yields no numeric score. Captured responses
+are public API output, not pre-parser backend generations.
 
 ## tau2 flow
 
