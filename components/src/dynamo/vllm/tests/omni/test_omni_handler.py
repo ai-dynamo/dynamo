@@ -344,15 +344,16 @@ class TestHealthCanaries:
             ):
                 pytest.fail("A completed chunk must not hide a later failure")
 
+    @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
     @pytest.mark.asyncio
-    async def test_normal_generation_propagates_engine_failure(self):
+    async def test_normal_generation_propagates_engine_failure(self, error_type):
         handler = _make_handler()
         handler.config.output_modalities = ["image"]
         context = MagicMock()
         context.id.return_value = "image-request"
 
         async def fail_generation(**kwargs):
-            raise RuntimeError("Stage-0 has no live replica")
+            raise error_type("Stage-0 has no live replica")
             yield  # pragma: no cover
 
         @asynccontextmanager
@@ -361,7 +362,7 @@ class TestHealthCanaries:
 
         handler.engine_client.generate = fail_generation
         handler._abort_monitor = no_abort_monitor
-        with pytest.raises(RuntimeError, match="Stage-0 has no live replica"):
+        with pytest.raises(error_type, match="Stage-0 has no live replica"):
             async for _ in handler.generate({"prompt": "A teapot"}, context):
                 pytest.fail("An engine failure must not count as successful activity")
 
@@ -1850,6 +1851,32 @@ class TestImageEndpointSizeValidation:
         handler.engine_client.generate.assert_not_called()
 
 
+class TestChatAudioValidation:
+    @pytest.mark.parametrize(
+        "modality,payload,reason",
+        [
+            ("text", {"messages": []}, "No user message"),
+            ("image", {"messages": []}, "No user message"),
+            ("audio", {"input": "   "}, "Input text cannot be empty"),
+            ("audio", {"input": None}, "input"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_client_validation_raises_invalid_argument(
+        self, modality, payload, reason
+    ):
+        handler = _make_handler()
+        handler.config.output_modalities = [modality]
+        handler.audio = _make_audio_handler()
+        context = MagicMock()
+        context.id.return_value = "invalid-request"
+
+        with pytest.raises(InvalidArgument, match=reason):
+            async for _ in handler.generate(payload, context):
+                pytest.fail("Invalid requests must not produce response chunks")
+        handler.engine_client.generate.assert_not_called()
+
+
 class TestVideoEndpointValidation:
     """Video requests reject invalid controls before generation."""
 
@@ -1956,11 +1983,10 @@ class TestAudioHandlerFieldMapping:
 
 
 class TestRefAudioRejection:
-    """A rejected ref_audio URL reaches the client as a failed response."""
+    """A rejected ref_audio URL is a client validation failure."""
 
     @pytest.mark.asyncio
     async def test_a_blocked_ref_audio_url_fails_the_request(self, monkeypatch):
-        """The frontend answers a failed audio response with a 400."""
         monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
         monkeypatch.setattr(dynamo_http, "_default", AiohttpClient())
         handler = _make_handler()
@@ -1971,14 +1997,12 @@ class TestRefAudioRejection:
             side_effect=AssertionError("engine must not run for a rejected request")
         )
 
-        chunks = [
-            chunk
-            async for chunk in handler._generate_openai_mode(
+        context = MagicMock()
+        context.id.return_value = "req-1"
+        with pytest.raises(InvalidArgument, match="blocked range"):
+            async for _ in handler.generate(
                 {"input": "hi", "ref_audio": "https://100.64.0.1/ref.wav"},
-                MagicMock(),
-                "req-1",
-            )
-        ]
-
-        assert [chunk["status"] for chunk in chunks] == ["failed"]
-        assert "blocked range" in chunks[0]["error"]
+                context,
+            ):
+                pytest.fail("Invalid references must not produce response chunks")
+        handler.engine_client.generate.assert_not_called()

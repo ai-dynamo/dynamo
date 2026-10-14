@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,6 +36,56 @@ def test_token_payload_is_rejected_for_image_canary(monkeypatch):
     monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", '{"token_ids":[1]}')
     with pytest.raises(ValueError, match="configured Omni request protocol"):
         build_omni_health_check_payload(["image"])
+
+
+@pytest.mark.parametrize("modality", ["text", "image"])
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [],
+        "hello",
+        [{}],
+        [{"role": "user", "content": 42}],
+        [{"role": "assistant", "content": "hello"}],
+        [{"role": "user", "content": "   "}],
+    ],
+)
+def test_invalid_chat_canary_is_rejected(monkeypatch, modality, messages):
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", json.dumps({"messages": messages}))
+    with pytest.raises(ValueError, match="configured Omni request protocol"):
+        build_omni_health_check_payload([modality])
+
+
+@pytest.mark.parametrize("modality", ["text", "image"])
+def test_valid_chat_canary_preserves_request(monkeypatch, modality):
+    payload = {
+        "messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "A teapot."},
+        ],
+        "max_tokens": 1,
+        "extra_body": {"height": 256, "width": 256},
+    }
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", json.dumps(payload))
+    assert build_omni_health_check_payload([modality]) == {
+        **payload,
+        HEALTH_CHECK_KEY: True,
+    }
+
+
+@pytest.mark.parametrize("modality", ["text", "image"])
+@pytest.mark.asyncio
+async def test_invalid_chat_canary_fails_before_model_loading(monkeypatch, modality):
+    from dynamo.vllm.omni.main import init_omni
+
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", '{"messages":[]}')
+    runtime = MagicMock()
+    config = SimpleNamespace(output_modalities=[modality])
+    with patch("dynamo.vllm.omni.OmniHandler") as handler:
+        with pytest.raises(ValueError, match="configured Omni request protocol"):
+            await init_omni(runtime, config, MagicMock())
+        handler.assert_not_called()
+    runtime.endpoint.assert_not_called()
 
 
 @pytest.mark.parametrize("value", [None, "{}"])

@@ -6,6 +6,8 @@
 import os
 from typing import Any
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.health_check import HEALTH_CHECK_KEY, load_health_check_from_env
 
@@ -26,7 +28,23 @@ def build_omni_health_check_payload(output_modalities: list[str]) -> dict[str, A
     payload = {**(payload or {}), HEALTH_CHECK_KEY: True}
     if len(payload) > 1:
         try:
-            parse_request_type(payload, output_modalities)
+            _, request_type = parse_request_type(payload, output_modalities)
+            if request_type == RequestType.CHAT_COMPLETION:
+                messages = ChatCompletionRequest.model_validate(payload).messages
+                content = next(
+                    (
+                        message.get("content")
+                        for message in reversed(messages)
+                        if message["role"] == "user"
+                    ),
+                    None,
+                )
+                # Omni's chat input builder uses the last user's string content.
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError(
+                        "A chat canary requires a nonempty user message with "
+                        "string content"
+                    )
         except ValueError as error:
             raise ValueError(
                 "Invalid DYN_HEALTH_CHECK_PAYLOAD for the configured Omni request "

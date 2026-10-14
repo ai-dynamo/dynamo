@@ -366,9 +366,12 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request_raw, request_type = parse_request_type(
-            request, self.config.output_modalities
-        )
+        try:
+            parsed_request_raw, request_type = parse_request_type(
+                request, self.config.output_modalities
+            )
+        except ValueError as error:
+            raise InvalidArgument(str(error)) from error
         parsed_request = cast(
             Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
             parsed_request_raw,
@@ -400,19 +403,8 @@ class OmniHandler(BaseOmniHandler):
             inputs = await self.build_engine_inputs(
                 parsed_request, request_type, image=image, request_id=request_id
             )
-        except (ValueError, NotImplementedError, RuntimeError) as e:
-            logger.error(f"Invalid request {request_id}: {e}")
-            if isinstance(e, ValueError) and request_type in (
-                RequestType.IMAGE_GENERATION,
-                RequestType.VIDEO_GENERATION,
-            ):
-                # Media endpoints cannot interpret the chat.completion.chunk
-                # returned by _error_chunk as a request rejection. Re-raise as
-                # the registered binding exception so the HTTP layer returns a
-                # 400 with the validation reason before generation begins.
-                raise InvalidArgument(str(e)) from e
-            yield self._error_chunk(request_id, str(e), request_type)
-            return
+        except ValueError as error:
+            raise InvalidArgument(str(error)) from error
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
