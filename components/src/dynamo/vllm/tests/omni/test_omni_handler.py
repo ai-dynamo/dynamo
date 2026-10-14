@@ -1475,6 +1475,38 @@ def image_request_handler():
 
 class TestImageReferenceInputs:
     @pytest.mark.asyncio
+    async def test_edit_capability_uses_resolved_pipeline_not_request_alias(
+        self, image_request_handler
+    ):
+        handler = image_request_handler
+        handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
+        image = Image.new("RGB", (2, 2), "red")
+        handler._image_loader.load_image = AsyncMock(return_value=image)
+        metadata = SimpleNamespace(
+            supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+        )
+        with patch(
+            "dynamo.vllm.omni.image_edit.get_diffusion_model_metadata",
+            return_value=metadata,
+        ) as lookup:
+            async for _ in handler._generate_openai_mode(
+                {
+                    "prompt": "edit",
+                    "model": "a-served-model-alias",
+                    "input_reference": "https://example.com/reference.png",
+                },
+                None,
+                "req-1",
+            ):
+                pass
+        lookup.assert_called_once_with("Flux2KleinPipeline")
+        handler._image_loader.load_image.assert_awaited_once_with(
+            "https://example.com/reference.png"
+        )
+        prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
+        assert prompt["multi_modal_data"]["image"] == [image]
+
+    @pytest.mark.asyncio
     async def test_rejected_controls_do_not_load_reference(self, image_request_handler):
         handler = image_request_handler
         handler._image_loader.load_image.side_effect = AssertionError(
