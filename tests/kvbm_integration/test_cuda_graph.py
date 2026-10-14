@@ -33,6 +33,16 @@ logger = logging.getLogger(__name__)
 
 HAS_TRTLLM = check_module_available("tensorrt_llm")
 
+# TRT-LLM's bundled NIXL ships no POSIX plugin, so the KVBM disk tier these tests
+# enable cannot start. KVBM is deprecated and this will not be fixed (#16171).
+KVBM_DISK_TIER_UNAVAILABLE = pytest.mark.skip(
+    reason=(
+        "TRT-LLM bundled NIXL lacks the POSIX plugin required by the KVBM disk "
+        "tier; KVBM is deprecated (won't fix, #16171). Remove with KVBM: "
+        "https://github.com/ai-dynamo/dynamo/issues/16406"
+    )
+)
+
 # Just need a model to show the config works rather than any stress of the system.
 MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 SERVED_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -153,6 +163,7 @@ def send_completion_request(
 # Todo: enable the rest when kvbm is built in the ci
 
 
+@KVBM_DISK_TIER_UNAVAILABLE
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.e2e
@@ -190,6 +201,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
             logger.info(f"Completion request succeeded: {response.status_code}")
 
 
+@KVBM_DISK_TIER_UNAVAILABLE
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.e2e
