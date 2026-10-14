@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NAMESPACE, DYNAMO_IMAGE, DYNAMO_RUNTIME_VERSION, MOCKER_MAX_NUM_SEQS,
+# MOCKER_TIMING_FLAG, and MOCKER_TIMING_VALUE are required render inputs. The
+# checked-in template uses an emptyDir cache and no pull secret so it is valid
+# YAML and works with a locally loaded image. The campaign driver accepts
+# MODEL_CACHE_CLAIM and IMAGE_PULL_SECRET to opt into cluster resources while
+# it renders the final manifest. hf-token-secret remains a required prerequisite
+# inherited from the parent Batch backend recipe; the frontend and Mocker use
+# it for authenticated Hub access when populating a cold model cache.
+#
+# This intentionally keeps the production-shaped DGD, component, service, and
+# model names used by Batch Gateway, llm-d Async, and Planner. It replaces only
+# the GPU worker implementation with one CPU-only Mocker worker. DYNAMO_IMAGE
+# must be an immutable full Dynamo image built from the same source revision as
+# the Planner campaign; a planner-only source overlay is insufficient because
+# the frontend metrics and Mocker implementation live outside planner/.
+#
+# For an exact-head confirmatory run, select --extra-engine-args and the mounted
+# JSON below with MOCKER_MAX_NUM_SEQS=16. The fixed 75/12 ms timings are per
+# non-empty scheduler pass and intentionally create deterministic contention;
+# they are not Qwen GPU measurements. For a released-1.4.2 plumbing pilot,
+# select --planner-profile-data, the bundled H200_TP1P_TP1D path, and
+# MOCKER_MAX_NUM_SEQS=10. That profile is a measured Llama 3.1 8B proxy, not a
+# Qwen3-0.6B performance claim. Promote neither calibration without a pilot.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen3-0-6b-batch-mocker-config
+  namespace: ${NAMESPACE}
+data:
+  engine-args.json: |
+    {
+      "engine_type": "vllm",
+      "num_gpu_blocks": 512,
+      "block_size": 64,
+      "max_model_len": 4096,
+      "max_num_seqs": ${MOCKER_MAX_NUM_SEQS},
+      "max_num_batched_tokens": 8192,
+      "enable_prefix_caching": false,
+      "enable_chunked_prefill": true,
+      "speedup_ratio": 1.0,
+      "decode_speedup_ratio": 1.0,
+      "dp_size": 1,
+      "worker_type": "aggregated",
+      "timing_model": {
+        "type": "fixed",
+        "prefill_ms": 75.0,
+        "decode_ms": 12.0
+      }
+    }
+---
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-0-6b-batch
+  namespace: ${NAMESPACE}
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: "${DYNAMO_RUNTIME_VERSION}"
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_IMAGE}
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --router-mode
+                - round-robin
+                - --http-port
+                - "8000"
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+              workingDir: /workspace
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+          volumes:
+            - name: model-cache
+              emptyDir: {}
+          imagePullSecrets: []
+    - name: worker
+      type: worker
+      replicas: 1
+      runtimeVersionOverride: "${DYNAMO_RUNTIME_VERSION}"
+      scalingAdapter: {}
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_IMAGE}
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.mocker
+              args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --model-name
+                - Qwen/Qwen3-0.6B
+                - --num-workers
+                - "1"
+                - --disaggregation-mode
+                - agg
+                - --num-gpu-blocks-override
+                - "512"
+                - --block-size
+                - "64"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "${MOCKER_MAX_NUM_SEQS}"
+                - --max-num-batched-tokens
+                - "8192"
+                - --no-enable-prefix-caching
+                - --speedup-ratio
+                - "1.0"
+                - ${MOCKER_TIMING_FLAG}
+                - ${MOCKER_TIMING_VALUE}
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+                - name: mocker-config
+                  mountPath: /etc/dynamo/mocker
+                  readOnly: true
+              workingDir: /workspace
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+          volumes:
+            - name: model-cache
+              emptyDir: {}
+            - name: mocker-config
+              configMap:
+                name: qwen3-0-6b-batch-mocker-config
+          imagePullSecrets: []

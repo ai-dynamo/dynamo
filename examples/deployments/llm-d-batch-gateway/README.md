@@ -16,7 +16,7 @@ You need:
 
 - A Kubernetes cluster with the Dynamo platform installed.
 - One available GPU.
-- `kubectl`, Helm 3, and Python 3.9 or newer.
+- `kubectl`, Helm 3, `envsubst` (from gettext), and Python 3.9 or newer.
 - A `model-cache` PVC for the model worker.
 - An `hf-token-secret` secret in the target namespace.
 - A default storage class that supports `ReadWriteMany` persistent volumes.
@@ -47,8 +47,11 @@ Set a namespace and apply the dedicated backend:
 ```bash
 cd examples/deployments/llm-d-batch-gateway
 export NAMESPACE=dynamo-batch-example
+export FRONTEND_IMAGE="${FRONTEND_IMAGE:-nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0}"
 
-kubectl apply -n "${NAMESPACE}" -f dynamo.yaml
+: "${FRONTEND_IMAGE:?set FRONTEND_IMAGE to the intended Dynamo frontend image}"
+envsubst '${FRONTEND_IMAGE}' < dynamo.yaml \
+  | kubectl apply -n "${NAMESPACE}" -f -
 kubectl wait -n "${NAMESPACE}" \
   --for=condition=Ready \
   dynamographdeployment/qwen3-0-6b-batch \
@@ -198,13 +201,15 @@ kubectl port-forward -n "${NAMESPACE}" \
   deployment/async-dispatch-llm-d-async 9090:9090
 ```
 
-Scale the worker component to zero:
+Scale the worker component to zero through its authoritative DGDSA Scale
+subresource:
 
 ```bash
 kubectl patch -n "${NAMESPACE}" \
-  dynamographdeployment/qwen3-0-6b-batch \
-  --type=json \
-  --patch='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]'
+  dynamographdeploymentscalingadapter/qwen3-0-6b-batch-worker \
+  --subresource=scale \
+  --type=merge \
+  --patch='{"spec":{"replicas":0}}'
 ```
 
 Wait for the gate to close. This loop fails if the metrics request fails and exits successfully only after the dispatch budget is exactly `0`. The source-availability metric is diagnostic: `1` means Async read an explicit readiness value of zero, and `0` means the series was absent and Async used its fail-closed fallback:
@@ -238,9 +243,10 @@ Restore one worker. The pending client should complete after the worker register
 
 ```bash
 kubectl patch -n "${NAMESPACE}" \
-  dynamographdeployment/qwen3-0-6b-batch \
-  --type=json \
-  --patch='[{"op":"replace","path":"/spec/components/1/replicas","value":1}]'
+  dynamographdeploymentscalingadapter/qwen3-0-6b-batch-worker \
+  --subresource=scale \
+  --type=merge \
+  --patch='{"spec":{"replicas":1}}'
 
 kubectl wait -n "${NAMESPACE}" \
   --for=condition=Ready \
@@ -314,7 +320,8 @@ Delete only resources created by this example:
 helm uninstall async-dispatch -n "${NAMESPACE}" --ignore-not-found
 helm uninstall batch-gateway -n "${NAMESPACE}"
 kubectl delete -n "${NAMESPACE}" -f batch-infra.yaml
-kubectl delete -n "${NAMESPACE}" -f dynamo.yaml
+envsubst '${FRONTEND_IMAGE}' < dynamo.yaml \
+  | kubectl delete -n "${NAMESPACE}" -f -
 ```
 
 The StatefulSet PVC may remain after deletion. Inspect it before removing it:
