@@ -64,7 +64,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// component. With apiVersion `grove.io/v1alpha1`, target is
 	// `PodCliqueTemplateSpec` for a single-node component or
 	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
-	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD
+	// OpenAPI omits this field.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
@@ -502,8 +503,8 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
-// ComputeDynamoNamespace computes the Dynamo namespace. It delegates to
-// v1beta1.ComputeDynamoNamespace so both API versions always agree.
+// ComputeDynamoNamespace uses the hub API's namespace computation so both API
+// versions preserve the same runtime identity and Kubernetes label value.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
 	return v1beta1.ComputeDynamoNamespace(globalDynamoNamespace, k8sNamespace, dgdName)
 }

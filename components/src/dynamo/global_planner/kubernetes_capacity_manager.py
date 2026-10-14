@@ -39,9 +39,10 @@ logger = logging.getLogger(__name__)
 
 # Mirrors ComputeDynamoNamespace in deploy/operator/api/v1beta1: the Dynamo
 # namespace is also a label value, so the operator shortens values over 63
-# bytes to a prefix, ``-``, and 8 hex characters of SHA-256 of the full value.
+# bytes to a prefix, ``-``, and 16 hex characters of SHA-256 of the original
+# Kubernetes namespace/name pair, separated by ``/``.
 _MAX_DYNAMO_NAMESPACE_LENGTH = 63
-_DYNAMO_NAMESPACE_HASH_LENGTH = 8
+_DYNAMO_NAMESPACE_HASH_LENGTH = 16
 
 
 def compute_dynamo_namespace(k8s_namespace: str, deployment_name: str) -> str:
@@ -49,7 +50,10 @@ def compute_dynamo_namespace(k8s_namespace: str, deployment_name: str) -> str:
     value = f"{k8s_namespace}-{deployment_name.replace('.', '-')}"
     if len(value) <= _MAX_DYNAMO_NAMESPACE_LENGTH:
         return value
-    digest = hashlib.sha256(value.encode()).hexdigest()[:_DYNAMO_NAMESPACE_HASH_LENGTH]
+    identity = f"{k8s_namespace}/{deployment_name}"
+    digest = hashlib.sha256(identity.encode()).hexdigest()[
+        :_DYNAMO_NAMESPACE_HASH_LENGTH
+    ]
     prefix = value[
         : _MAX_DYNAMO_NAMESPACE_LENGTH - _DYNAMO_NAMESPACE_HASH_LENGTH - 1
     ].rstrip("-")

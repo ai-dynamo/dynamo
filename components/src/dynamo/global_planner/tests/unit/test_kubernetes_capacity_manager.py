@@ -106,24 +106,35 @@ def test_compute_dynamo_namespace_short_value_unchanged():
     # 36 + 1 + 26 = 63 bytes: still within the label value limit.
     assert (
         compute_dynamo_namespace(
-            "dgdr16-ab-length-20261013-abcdefghij", "gaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", "gaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
-        == "dgdr16-ab-length-20261013-abcdefghij-gaaaaaaaaaaaaaaaaaaaaaaaaa"
+        == "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaaaaaaaaaaaaaaaaaaa"
     )
 
 
-def test_compute_dynamo_namespace_matches_operator_for_long_value():
-    # Expected values come from ComputeDynamoNamespace in the Go operator.
-    assert (
-        compute_dynamo_namespace(
-            "dgdr16-ab-length-20261013-abcdefghij", "gaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        )
-        == "dgdr16-ab-length-20261013-abcdefghij-gaaaaaaaaaaaaaaaa-f238bda2"
-    )
-    assert (
-        compute_dynamo_namespace("default", "model.v1-" + "a" * 46 + "-bbbbbbbbbb")
-        == "default-model-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-8fa18592"
-    )
+@pytest.mark.parametrize(
+    "deployment_name, expected",
+    [
+        (
+            "gaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaa-27479653da05e5b6",
+        ),
+        (
+            "gggggggggggggggggggggggggggggg.v1",
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-ggggggggg-f10edfd42a3d1379",
+        ),
+        (
+            "gggggggggggggggggggggggggggggg-v1",
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-ggggggggg-5e504c90d7339d87",
+        ),
+    ],
+)
+def test_compute_dynamo_namespace_matches_operator_for_long_value(
+    deployment_name, expected
+):
+    # Golden values from deploy/operator/api/dynamo_namespace_test.go also
+    # distinguish dotted and hyphenated names before normalization.
+    assert compute_dynamo_namespace("n" * 36, deployment_name) == expected
 
 
 # ---------------------------------------------------------------------------- #
@@ -160,7 +171,7 @@ def test_discover_explicit_mode():
 
 
 def test_discover_explicit_mode_long_deployment_name():
-    namespace = "dgdr16-ab-length-20261013-abcdefghij"
+    namespace = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
     long_name = "gaaaaaaaaaaaaaaaaaaaaaaaaaa"
     cm = KubernetesCapacityManager(namespace)
     with (
@@ -182,7 +193,7 @@ def test_discover_explicit_mode_long_deployment_name():
         # The operator shortened this DGD's Dynamo namespace, so the DGD name
         # cannot be recovered by removing the namespace prefix.
         discovered = cm.discover(
-            {"dgdr16-ab-length-20261013-abcdefghij-gaaaaaaaaaaaaaaaa-f238bda2"}
+            {"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaa-27479653da05e5b6"}
         )
 
         assert discovered == [long_name]
