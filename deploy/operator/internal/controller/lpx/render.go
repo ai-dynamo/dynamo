@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"path"
 	"slices"
 	"time"
 
@@ -40,10 +42,14 @@ const (
 	deploymentUIDLabel = "lpx.nvidia.com/deployment-uid"
 	// clientCertAnnotation publishes an agent Pod's client certificate, base64 DER.
 	clientCertAnnotation = "lpx.nvidia.com/client-cert"
-	// clientIdentityAnnotation names a scaling group's identity Secret. Under OnDelete the layout
-	// check compares group annotations, so adopting the identity replaces the PCS whole instead of
-	// mixing Pods that hold different SSH keys.
+	// clientIdentityAnnotation names the identity Secret and its certificate's SHA-256 on every
+	// clique and scaling group. New keys change it, so every Pod rolls; under OnDelete the layout
+	// check compares group annotations, so the PCS is replaced whole instead of mixing Pods that
+	// hold different SSH keys.
 	clientIdentityAnnotation = "lpx.nvidia.com/client-identity"
+	// identityVolume and identityMountPath belong to the operator in agent templates.
+	identityVolume    = "lpx-identity"
+	identityMountPath = "/etc/lpx/identity"
 )
 
 // resolveWorkloads resolves every component group and finalizes its resource names.
@@ -274,18 +280,24 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 		}
 		return []corev1.KeyToPath{{Key: "private.key", Path: "private.key"}, {Key: "private.key.pub", Path: "private.key.pub"}}
 	}
+	// A recreated Secret holds new keys under the same name, so the marker names the certificate too.
+	marker := fmt.Sprintf("%s/%x", name, sha256.Sum256(block.Bytes))
 	for i := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
 		group := &pcs.Spec.Template.PodCliqueScalingGroupConfigs[i]
 		if group.Annotations == nil {
 			group.Annotations = make(map[string]string)
 		}
-		group.Annotations[clientIdentityAnnotation] = name
+		group.Annotations[clientIdentityAnnotation] = marker
 	}
 	for _, clique := range pcs.Spec.Template.Cliques {
 		if clique.Labels == nil {
 			clique.Labels = make(map[string]string)
 		}
 		clique.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
+		if clique.Annotations == nil {
+			clique.Annotations = make(map[string]string)
+		}
+		clique.Annotations[clientIdentityAnnotation] = marker
 		for i := range clique.Spec.PodSpec.Volumes {
 			volume := &clique.Spec.PodSpec.Volumes[i]
 			if volume.Secret != nil && volume.Secret.SecretName == r.config.MPI.SSHSecretName {
@@ -304,7 +316,10 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 		}
 		clique.Annotations[clientCertAnnotation] = base64.StdEncoding.EncodeToString(block.Bytes)
 		spec := &clique.Spec.PodSpec
-		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "lpx-identity", VolumeSource: corev1.VolumeSource{
+		if slices.ContainsFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == identityVolume }) {
+			return fmt.Errorf("LPX agent template %s already defines volume %q, which the operator adds", clique.Name, identityVolume)
+		}
+		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{
 			Projected: &corev1.ProjectedVolumeSource{DefaultMode: ptr.To(int32(0o440)), Sources: []corev1.VolumeProjection{
 				{Secret: &corev1.SecretProjection{
 					LocalObjectReference: corev1.LocalObjectReference{Name: name},
@@ -319,10 +334,15 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 			}},
 		}})
 		for i := range spec.Containers {
-			if spec.Containers[i].Name == v1beta1.ComponentRoleLPXAgent {
-				spec.Containers[i].VolumeMounts = append(spec.Containers[i].VolumeMounts,
-					corev1.VolumeMount{Name: "lpx-identity", MountPath: "/etc/lpx/identity", ReadOnly: true})
+			container := &spec.Containers[i]
+			if container.Name != v1beta1.ComponentRoleLPXAgent {
+				continue
 			}
+			if slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool { return path.Clean(m.MountPath) == identityMountPath }) {
+				return fmt.Errorf("LPX agent template %s already mounts %s, which the operator owns", clique.Name, identityMountPath)
+			}
+			container.VolumeMounts = append(container.VolumeMounts,
+				corev1.VolumeMount{Name: identityVolume, MountPath: identityMountPath, ReadOnly: true})
 		}
 	}
 	return checkPodCliqueSetSize(pcs)

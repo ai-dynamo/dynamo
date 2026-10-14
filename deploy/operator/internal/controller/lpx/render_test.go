@@ -5,6 +5,7 @@ package lpx
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -1183,9 +1184,11 @@ func TestStampClientIdentity(t *testing.T) {
 	require.NotEmpty(t, secret.Data["private.key.pub"])
 	block, _ := pem.Decode(secret.Data["client.pem"])
 	require.NotNil(t, block)
+	marker := fmt.Sprintf("lpx-id-dgd-uid/%x", sha256.Sum256(block.Bytes))
 	agents := 0
 	for _, clique := range pcs.Spec.Template.Cliques {
 		require.Equal(t, "dgd-uid", clique.Labels[consts.KubeLabelDynamoGraphDeploymentUID])
+		require.Equal(t, marker, clique.Annotations[clientIdentityAnnotation], clique.Name)
 		mounted := slices.ContainsFunc(clique.Spec.PodSpec.Containers, func(c corev1.Container) bool {
 			return slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == "/etc/lpx/identity" })
 		})
@@ -1199,12 +1202,13 @@ func TestStampClientIdentity(t *testing.T) {
 	}
 	require.Positive(t, agents)
 	for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-		require.Equal(t, "lpx-id-dgd-uid", group.Annotations[clientIdentityAnnotation])
+		require.Equal(t, marker, group.Annotations[clientIdentityAnnotation])
 	}
 
-	t.Log("Later renders reuse the key")
+	t.Log("Later renders reuse the key, so the rollout marker stays put")
 	again := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
 	require.Equal(t, pcs.Spec.Template.Cliques, again.Spec.Template.Cliques)
+	require.Equal(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, again.Spec.Template.PodCliqueScalingGroupConfigs)
 
 	t.Log("References to the cluster-wide MPI SSH Secret get the DGD's own key pair; template items still resolve")
 	config := *r.config
@@ -1240,10 +1244,49 @@ func TestStampClientIdentity(t *testing.T) {
 	require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, again), "is not controlled by this DGD")
 }
 
+func TestRecreatedClientIdentityReplacesOnDeletePodCliqueSet(t *testing.T) {
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	metav1.SetMetaDataAnnotation(&dgd.ObjectMeta, consts.KubeAnnotationGroveUpdateStrategy, "OnDelete")
+	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	live := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	require.Equal(t, grovev1alpha1.OnDeleteStrategy, live.Spec.UpdateStrategy.Type)
+
+	t.Log("The Secret is deleted while the workload runs; the next render generates new keys under the same name")
+	require.NoError(t, r.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}}))
+	recreated := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	for i, clique := range recreated.Spec.Template.Cliques {
+		require.NotEqual(t, live.Spec.Template.Cliques[i].Annotations[clientIdentityAnnotation], clique.Annotations[clientIdentityAnnotation], clique.Name)
+	}
+	require.False(t, podCliqueSetLayoutMatches(live, recreated), "OnDelete must replace the PodCliqueSet whole")
+}
+
+func TestClientIdentityRejectsAuthoredVolumeOrMount(t *testing.T) {
+	for name, author := range map[string]func(*corev1.PodSpec){
+		"volume": func(spec *corev1.PodSpec) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		},
+		"mount": func(spec *corev1.PodSpec) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "authored", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "authored", MountPath: identityMountPath + "/"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			author(&dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec)
+			r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			name := desired.workload.ServingComponentName()
+			pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, map[string]*lpx.Workload{name: desired.workload}, map[string]*lpx.MaterializationPlan{name: desired.plan}, nil)
+			require.NoError(t, err)
+			require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, pcs), "LPX agent template")
+		})
+	}
+}
+
 func TestOnlyLPXAgentsHoldLPUsOrPublishACertificate(t *testing.T) {
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-	dgd.UID = "dgd-uid"
 
 	t.Log("A hybrid DGD authors an LPU request and a certificate on its GPU worker")
 	const forged = "Zm9yZ2Vk"
