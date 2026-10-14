@@ -16,12 +16,13 @@ opendal = pytest.importorskip("opendal")
 fernet = pytest.importorskip("cryptography.fernet")
 Fernet = fernet.Fernet
 
-from dynamo.artifacts.runtime import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.runtime import (
     ArtifactRuntime,
     close_configured_artifact_runtime,
     configured_artifact_runtime,
+    initialize_configured_artifact_runtime,
 )
-from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.storage import (
     ArtifactStorageError,
     ManagedProfile,
 )
@@ -177,6 +178,124 @@ def test_delegated_verifier_cannot_escape_profile_prefix(runtime, delegated):
         runtime.validate(delegated, "object_store")
 
 
+def test_dynamic_verifier_accepts_fresh_grants_for_confined_keys(
+    runtime_config, delegated
+):
+    runtime_config["verifiers"] = {
+        "verifier-42": {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket/artifacts/",
+            "object_key_prefix": "artifacts",
+        }
+    }
+    runtime = ArtifactRuntime(runtime_config, Fernet.generate_key())
+    try:
+        first = {
+            **delegated,
+            "url": "https://objects.example/bucket/artifacts/one?signature=first",
+        }
+        second = {
+            **delegated,
+            "url": "https://objects.example/bucket/artifacts/two?signature=second",
+        }
+        runtime.validate(first, "object_store")
+        runtime.validate(second, "object_store")
+        assert runtime._binding(first) == ("approved", "artifacts/one")
+        assert runtime._binding(second) == ("approved", "artifacts/two")
+    finally:
+        asyncio.run(runtime.close())
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://objects.example/bucket/elsewhere/one?signature=x",
+        "https://other.example/bucket/artifacts/one?signature=x",
+        "https://objects.example/bucket/artifacts/%2e%2e/secret?signature=x",
+        "https://objects.example/bucket/artifacts/../secret?signature=x",
+        "https://objects.example/bucket/artifacts//secret?signature=x",
+    ],
+)
+def test_dynamic_verifier_rejects_unbound_or_ambiguous_paths(
+    runtime_config, delegated, url
+):
+    runtime_config["storage_policy"]["allowed_hosts"].append("other.example")
+    runtime_config["verifiers"] = {
+        "verifier-42": {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket/artifacts/",
+            "object_key_prefix": "artifacts",
+        }
+    }
+    runtime = ArtifactRuntime(runtime_config, Fernet.generate_key())
+    try:
+        with pytest.raises((ValueError, ArtifactStorageError)):
+            runtime.validate({**delegated, "url": url}, "object_store")
+    finally:
+        asyncio.run(runtime.close())
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [
+        {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket/",
+            "object_key_prefix": "private",
+        },
+        {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket",
+            "object_key_prefix": "artifacts",
+        },
+        {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket/?query=x",
+            "object_key_prefix": "artifacts",
+        },
+        {
+            "profile": "approved",
+            "url_prefix": "https://unapproved.example/bucket/",
+            "object_key_prefix": "artifacts",
+        },
+        {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket/../artifacts/",
+            "object_key_prefix": "artifacts",
+        },
+    ],
+)
+def test_dynamic_verifier_rejects_unsafe_configuration(runtime_config, verifier):
+    runtime_config["verifiers"] = {"verifier-42": verifier}
+    with pytest.raises(ValueError, match="configuration is invalid"):
+        ArtifactRuntime(runtime_config, Fernet.generate_key())
+
+
+@pytest.mark.asyncio
+async def test_dynamic_verifier_reads_the_url_bound_key(runtime_config, delegated):
+    runtime_config["verifiers"] = {
+        "verifier-42": {
+            "profile": "approved",
+            "url_prefix": "https://objects.example/bucket/artifacts/",
+            "object_key_prefix": "artifacts",
+        }
+    }
+    runtime = ArtifactRuntime(runtime_config, Fernet.generate_key())
+    target = {
+        **delegated,
+        "url": "https://objects.example/bucket/artifacts/new-object?signature=fresh",
+    }
+    try:
+        await runtime.profiles["approved"].operator.write(
+            "artifacts/new-object", b"opaque"
+        )
+        verified = await runtime._verify(b"opaque", target, {})
+        assert verified["sha256"] == hashlib.sha256(b"opaque").hexdigest()
+        assert verified["object_id"] == delegated["object_id"]
+    finally:
+        await runtime.close()
+
+
 def test_delegated_egress_policy_applies_before_generation(runtime, delegated):
     with pytest.raises(ArtifactStorageError, match="host"):
         runtime.validate(
@@ -304,6 +423,23 @@ async def test_configured_runtime_is_cached(tmp_path, runtime_config, monkeypatc
     path.write_text("invalid config after startup")
     assert configured_artifact_runtime() is first
     await first.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_initializer_fails_before_first_artifact_request(
+    tmp_path, runtime_config, monkeypatch
+):
+    path = tmp_path / "artifact-config.json"
+    path.write_text(json.dumps(runtime_config))
+    monkeypatch.setenv("DYNAMO_ARTIFACT_CONFIG", str(path))
+    monkeypatch.setenv("DYNAMO_ARTIFACT_CAPABILITY_KEY", Fernet.generate_key().decode())
+    runtime = await initialize_configured_artifact_runtime()
+    assert runtime is configured_artifact_runtime()
+    await runtime.close()
+    configured_artifact_runtime.cache_clear()
+    path.write_text("invalid config")
+    with pytest.raises(ValueError, match="configuration is invalid"):
+        await initialize_configured_artifact_runtime()
 
 
 @pytest.mark.asyncio
