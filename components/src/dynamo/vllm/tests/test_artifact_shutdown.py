@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -108,7 +109,7 @@ async def test_shutdown_without_artifact_config_does_not_touch_runtime(
 
 
 @pytest.mark.asyncio
-async def test_signal_hook_closes_state_agent_and_artifact_runtime(
+async def test_signal_hook_keeps_artifact_runtime_open_for_accepted_work(
     monkeypatch, tmp_path, vllm_main
 ) -> None:
     monkeypatch.setenv("DYNAMO_ARTIFACT_CONFIG", str(tmp_path / "artifact.json"))
@@ -116,16 +117,29 @@ async def test_signal_hook_closes_state_agent_and_artifact_runtime(
     monkeypatch.setattr(
         vllm_main, "close_configured_artifact_runtime", close_artifact_runtime
     )
-    lifecycle, signal_handlers = _patch_worker_startup(
-        vllm_main, monkeypatch, tmp_path, factory_create=None
-    )
+    accepted = asyncio.Event()
+    finished = asyncio.Event()
 
-    await vllm_main.worker([])
-    callback = signal_handlers.call_args.kwargs["pre_shutdown_callback"]
-    await callback()
+    async def serve_accepted_request(*_args, **_kwargs):
+        accepted.set()
+        await finished.wait()
+
+    lifecycle, signal_handlers = _patch_worker_startup(
+        vllm_main, monkeypatch, tmp_path, factory_create=serve_accepted_request
+    )
+    worker = asyncio.create_task(vllm_main.worker([]))
+    try:
+        await accepted.wait()
+        callback = signal_handlers.call_args.kwargs["pre_shutdown_callback"]
+        await callback()
+        lifecycle.close.assert_awaited_once_with()
+        close_artifact_runtime.assert_not_awaited()
+    finally:
+        finished.set()
+        await worker
 
     assert lifecycle.close.await_count == 2
-    assert close_artifact_runtime.await_count == 2
+    close_artifact_runtime.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
