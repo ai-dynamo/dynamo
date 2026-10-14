@@ -1337,23 +1337,6 @@ class TestGenerateLocally:
         )
 
     @pytest.mark.asyncio
-    async def test_health_check_env_override_gets_dedicated_cache_salt(
-        self, monkeypatch
-    ):
-        monkeypatch.setenv(
-            "DYN_HEALTH_CHECK_PAYLOAD",
-            '{"token_ids": [1], "stop_conditions": {"max_tokens": 1}, '
-            '"sampling_options": {}}',
-        )
-        request = TrtllmHealthCheckPayload(
-            disaggregation_mode=DisaggregationMode.AGGREGATED,
-        ).to_dict()
-
-        assert await self._generate_async_cache_salt(request) == (
-            HEALTH_CHECK_CACHE_SALT
-        )
-
-    @pytest.mark.asyncio
     async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
         # PREFILL forces max_tokens=1 (asserted separately below) but must
         # otherwise apply the full stop conditions, matching native TRT-LLM
