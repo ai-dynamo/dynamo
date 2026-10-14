@@ -13,7 +13,7 @@ msgspec = pytest.importorskip("msgspec")
 np = pytest.importorskip("numpy")
 zstd = pytest.importorskip("zstandard")
 
-from dynamo.artifacts.vllm.format import (  # noqa: E402
+from dynamo.artifacts.vllm.format import (
     CODEC_NONE,
     CODEC_ZSTD,
     GenerationArtifactChoice,
@@ -30,7 +30,12 @@ from dynamo.artifacts.vllm.format import (  # noqa: E402
     iter_generation_artifact,
 )
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.vllm,
+]
 PRELUDE = struct.Struct("<8sHHHIQ")
 
 
@@ -74,6 +79,31 @@ def test_token_only_roundtrip_and_whole_object_digest(codec):
     assert result.byte_count == len(result.data)
     assert result.sha256 == hashlib.sha256(result.data).hexdigest()
     assert result.data == b"".join(iter_generation_artifact(_view(), codec=codec))
+
+
+@pytest.mark.parametrize("codec", [CODEC_NONE, CODEC_ZSTD])
+@pytest.mark.parametrize("as_view", [False, True])
+def test_decode_accepts_mutable_buffers_without_retaining_them(codec, as_view):
+    encoded = encode_generation_artifact(_view(), codec=codec)
+    source = bytearray(encoded.data)
+    data = memoryview(source) if as_view else source
+    decoded = decode_generation_artifact(data)
+    source[-1] ^= 1
+    assert decoded == _view()
+
+
+def test_decode_rejects_noncontiguous_buffer():
+    encoded = encode_generation_artifact(_view()).data
+    with pytest.raises(GenerationArtifactFormatError, match="buffer"):
+        decode_generation_artifact(memoryview(encoded)[::2])
+
+
+def test_unknown_minor_version_requires_explicit_reader_support():
+    encoded = encode_generation_artifact(_view()).data
+    magic, major, _, codec, manifest_bytes, payload_bytes = PRELUDE.unpack_from(encoded)
+    header = PRELUDE.pack(magic, major, 1, codec, manifest_bytes, payload_bytes)
+    with pytest.raises(GenerationArtifactFormatError, match="version"):
+        decode_generation_artifact(header + encoded[PRELUDE.size :])
 
 
 @pytest.mark.parametrize("experts,expected", [(256, "u8"), (257, "u16")])
@@ -401,3 +431,23 @@ def test_tensor_owns_source_and_checks_narrowing():
     assert tensor.as_array().tolist() == [1, 2]
     with pytest.raises(GenerationArtifactFormatError, match="out of range"):
         Tensor.from_array(np.asarray([256]), dtype="u8")
+
+
+@pytest.mark.parametrize(
+    "source", [np.asarray([1.0], dtype=np.float64), np.asarray([True])]
+)
+def test_unsupported_inferred_source_dtype_has_specific_error(source):
+    with pytest.raises(GenerationArtifactFormatError, match="unsupported source dtype"):
+        Tensor.from_array(source)
+
+
+def test_floating_conversion_checks_range_even_with_negative_infinity():
+    source = np.asarray([float("-inf"), -70000.0], dtype=np.float32)
+    with pytest.raises(GenerationArtifactFormatError, match="out of range"):
+        Tensor.from_array(source, dtype="fp16")
+
+
+def test_floating_conversion_rejects_nan_and_positive_infinity():
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(GenerationArtifactFormatError, match="nonfinite"):
+            Tensor.from_array(np.asarray([value], dtype=np.float32), dtype="fp16")
