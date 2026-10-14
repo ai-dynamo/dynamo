@@ -356,6 +356,8 @@ python -m dynamo.frontend \
 
 Concurrent requests can share a binding. Versioned updates prevent an older concurrent request from replacing a newer soft rebind. Active requests prevent expiry. When a request lease ends after EOF, early drop, error, or cancellation, the idle timer restarts. A missing hard-bound worker or a non-cancellation hard-mode selection, setup, dispatch, or target-validation failure invalidates the binding.
 
+When one model is served by more than one WorkerSet, for example during a rolling update that adds a new worker generation, a request with a live `hard` binding is routed to the WorkerSet whose router holds that binding, as long as the bound worker is still a member of that set and the set is still eligible to serve. Adding a WorkerSet or changing worker counts does not move the session. After the bound worker disappears, the next request selects a WorkerSet by the usual worker-count weighting and that set's router creates a new binding. Requests in `soft` mode, requests with an explicit worker target, and requests without a session identity keep the weighted selection. The preference is frontend-local: a binding this frontend has not observed, through its own dispatch or through replication, cannot steer its selection.
+
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.

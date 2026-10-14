@@ -599,7 +599,7 @@ def test_mocker_two_kv_router(
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)  # includes the WorkerSet rollout phase (second mocker set)
 def test_mocker_session_affinity(
     request,
     runtime_services_dynamic_ports,
@@ -607,18 +607,37 @@ def test_mocker_session_affinity(
     file_storage_backend,
     store_backend,
 ):
-    """Replica affinity overrides conflicting per-frontend KV-prefix placement."""
+    """Replica affinity overrides conflicting per-frontend KV-prefix placement,
+    and a session stays on its WorkerSet through a rolling update."""
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
-        store_backend=store_backend,
-    ) as mockers:
+    # The initial set lives in its own ExitStack so the scenario can retire it while
+    # the replacement set and the frontends keep running.
+    with contextlib.ExitStack() as stack:
+        initial_workers = contextlib.ExitStack()
+        stack.callback(initial_workers.close)
+        mockers = initial_workers.enter_context(
+            MockerProcess(
+                request,
+                mocker_args=mocker_args,
+                num_mockers=NUM_MOCKERS,
+                store_backend=store_backend,
+            )
+        )
+
+        def replacement_workers():
+            return MockerProcess(
+                request,
+                mocker_args=mocker_args,
+                num_mockers=NUM_MOCKERS + 1,
+                store_backend=store_backend,
+                namespace=mockers.namespace,
+                component_name="mocker-rollout",
+            )
+
         _test_session_affinity(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
@@ -626,6 +645,8 @@ def test_mocker_session_affinity(
             router_ports=allocate_frontend_ports(request, 2),
             test_payload=TEST_PAYLOAD,
             store_backend=store_backend,
+            replacement_workers_factory=replacement_workers,
+            retire_initial_workers=initial_workers.close,
         )
 
 

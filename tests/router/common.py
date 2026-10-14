@@ -707,8 +707,17 @@ def _test_session_affinity(
     router_ports: list[int],
     test_payload: dict[str, Any],
     store_backend: str = "etcd",
+    replacement_workers_factory: Callable[[], Any] | None = None,
+    retire_initial_workers: Callable[[], None] | None = None,
 ):
-    """Verify replica affinity overrides conflicting per-frontend KV placement."""
+    """Verify replica affinity overrides conflicting per-frontend KV placement.
+
+    When ``replacement_workers_factory`` and ``retire_initial_workers`` are given,
+    also run a rolling-update scenario: a second WorkerSet for the same model with
+    more workers joins, an established session must stay on its bound worker in the
+    first set, and once that set is retired the session binds to one replacement
+    worker and stays there.
+    """
     with (
         FrontendRouterProcess(
             request,
@@ -882,6 +891,130 @@ def _test_session_affinity(
                 assert await send(
                     client, urls[1], payload(prefix_b), session_a_headers
                 ) == (worker_a, 0)
+
+            if replacement_workers_factory is None or retire_initial_workers is None:
+                return
+
+            async def wait_for_aggregated_workers(
+                client: aiohttp.ClientSession, url: str, expected: int
+            ) -> None:
+                """Both WorkerSets share one namespace; the readiness view sums them."""
+                ready_url = url.replace(
+                    "/v1/chat/completions",
+                    f"/v1/models/{test_payload['model']}/ready",
+                )
+                for _ in range(300):
+                    async with client.get(ready_url) as response:
+                        body = await response.json()
+                    workers = sum(
+                        namespace.get("worker_types", {})
+                        .get("aggregated", {})
+                        .get("workers", 0)
+                        for namespace in body.get("namespaces", {}).values()
+                    )
+                    if workers == expected:
+                        return
+                    await asyncio.sleep(0.2)
+                raise AssertionError(
+                    f"{ready_url} did not report {expected} aggregated workers: {body}"
+                )
+
+            async def wait_for_session_target(
+                client: aiohttp.ClientSession,
+                url: str,
+                content: str,
+                headers: dict[str, str],
+                expected: tuple[int, int],
+            ) -> None:
+                """Replicated bindings are best effort; probe read-only until they land."""
+                observed = None
+                for _ in range(100):
+                    observed = await send(
+                        client, url, payload(content, query_only=True), headers
+                    )
+                    if observed == expected:
+                        return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    f"{url} did not observe session target {expected}: {observed}"
+                )
+
+            rollout_headers = {"x-dynamo-session-id": f"rollout-{uuid.uuid4()}"}
+            prefix_c = " ".join([f"affinity-gamma-{suffix}"] * (block_size * 2))
+            initial_ids = set(worker_ids)
+            async with aiohttp.ClientSession() as client:
+                bound = await send(client, urls[0], payload(prefix_c), rollout_headers)
+                assert bound[0] in initial_ids, (bound, initial_ids)
+                logger.info(
+                    "Rollout session bound to %s in the initial WorkerSet %s",
+                    bound,
+                    sorted(initial_ids),
+                )
+                await wait_for_session_target(
+                    client, urls[1], prefix_c, rollout_headers, bound
+                )
+
+                with replacement_workers_factory() as replacement_workers:
+                    replacement_endpoint = runtime.endpoint(
+                        f"{replacement_workers.namespace}."
+                        f"{replacement_workers.component_name}.generate"
+                    )
+                    replacement_ids = set(
+                        await poll_for_worker_instances(
+                            replacement_endpoint, replacement_workers.num_workers
+                        )
+                    )
+                    assert replacement_ids.isdisjoint(initial_ids)
+                    assert replacement_workers.num_workers > len(
+                        initial_ids
+                    ), "the replacement set must outweigh the original one"
+                    total = len(initial_ids) + replacement_workers.num_workers
+                    for url in urls:
+                        await wait_for_aggregated_workers(client, url, total)
+                    logger.info(
+                        "Replacement WorkerSet %s is serving alongside %s",
+                        sorted(replacement_ids),
+                        sorted(initial_ids),
+                    )
+
+                    # The heavier replacement set must not pull the session away while
+                    # its bound worker is still serving.
+                    for _ in range(10):
+                        for url in urls:
+                            assert (
+                                await send(
+                                    client, url, payload(prefix_c), rollout_headers
+                                )
+                                == bound
+                            ), url
+
+                    retire_initial_workers()
+                    for url in urls:
+                        await wait_for_aggregated_workers(
+                            client, url, replacement_workers.num_workers
+                        )
+
+                    # The binding's worker is gone: the session rebinds once, to a
+                    # replacement worker, and stays there.
+                    rebound = await send(
+                        client, urls[0], payload(prefix_c), rollout_headers
+                    )
+                    assert rebound[0] in replacement_ids, (rebound, replacement_ids)
+                    logger.info(
+                        "Rollout session rebound to %s after the initial WorkerSet retired",
+                        rebound,
+                    )
+                    await wait_for_session_target(
+                        client, urls[1], prefix_c, rollout_headers, rebound
+                    )
+                    for _ in range(10):
+                        for url in urls:
+                            assert (
+                                await send(
+                                    client, url, payload(prefix_c), rollout_headers
+                                )
+                                == rebound
+                            ), url
 
         asyncio.run(run_test())
 

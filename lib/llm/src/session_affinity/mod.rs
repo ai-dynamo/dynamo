@@ -29,6 +29,28 @@ pub(crate) fn subagent_group_affinity_id(parent_session_id: &str) -> String {
     format!("\u{1}sg:{}", digest.to_hex())
 }
 
+/// The group key for a subagent: a request that carries a parent session id binds under the
+/// parent's group instead of its own session, so siblings share a worker while the parent
+/// keeps its own binding. An explicit per-request target stays on the request's own session so
+/// it cannot be rejected against, or rebind, the group.
+///
+/// Shared by `RoutingHost` and the pre-selection WorkerSet affinity check so both derive the
+/// same effective key.
+pub(crate) fn subagent_group_binding_id(
+    parent_session_id: Option<&str>,
+    explicit: Option<AffinityTarget>,
+) -> Option<std::sync::Arc<crate::protocols::common::extensions::SessionAffinityId>> {
+    if explicit.is_some() {
+        return None;
+    }
+    let parent_session_id = parent_session_id?;
+    Some(std::sync::Arc::new(
+        crate::protocols::common::extensions::SessionAffinityId::new(subagent_group_affinity_id(
+            parent_session_id,
+        )),
+    ))
+}
+
 pub(crate) async fn create_affinity_coordinator(
     ttl: Option<Duration>,
     mode: SessionAffinityMode,

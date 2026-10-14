@@ -14,9 +14,11 @@ use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
+use super::session_selection::SessionInitCoordination;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use crate::protocols::common::extensions::SessionAffinityId;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -101,6 +103,23 @@ struct NamespaceReadinessEval {
 
 type WorkerSetMap = HashMap<String, Arc<WorkerSet>>;
 
+/// One WorkerSet that passed the zero-worker and namespace-readiness gates.
+struct EligibleWorkerSet<'a> {
+    /// The full discovery key this set is registered under.
+    key: &'a str,
+    worker_set: &'a WorkerSet,
+    /// Read once so the readiness gate and the selection weight agree.
+    worker_count: usize,
+}
+
+/// Outcome of looking a session up across a model's eligible WorkerSets.
+pub(crate) enum SessionLookup<T> {
+    /// An eligible WorkerSet holds a live `Hard` binding for the session.
+    Bound(T),
+    /// No binding; `coordinate` is whether any eligible set could create one.
+    Miss { coordinate: bool },
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
@@ -109,6 +128,8 @@ pub struct Model {
     /// without writing shared state and writers publish a modified copy.
     worker_sets: ArcSwap<WorkerSetMap>,
     update_lock: parking_lot::Mutex<()>,
+    /// Shared with every snapshot and alias of this model; see `session_selection`.
+    session_init: Arc<SessionInitCoordination>,
 }
 
 impl Model {
@@ -117,7 +138,22 @@ impl Model {
             name,
             worker_sets: ArcSwap::from_pointee(WorkerSetMap::new()),
             update_lock: parking_lot::Mutex::new(()),
+            session_init: Arc::default(),
         }
+    }
+
+    /// A model that shares `scope`'s session-initialization coordination: an alias or
+    /// adapter view dispatches through the same routers, so its sessions bind in the same
+    /// tables and must initialize under the same guard.
+    pub(crate) fn new_sharing_session_init(name: String, scope: &Model) -> Self {
+        Self {
+            session_init: scope.session_init.clone(),
+            ..Self::new(name)
+        }
+    }
+
+    pub(crate) fn session_init(&self) -> &Arc<SessionInitCoordination> {
+        &self.session_init
     }
 
     fn update_worker_sets<R>(&self, update: impl FnOnce(&mut WorkerSetMap) -> R) -> R {
@@ -200,6 +236,7 @@ impl Model {
             name: self.name.clone(),
             worker_sets: ArcSwap::new(self.worker_sets.load_full()),
             update_lock: parking_lot::Mutex::new(()),
+            session_init: self.session_init.clone(),
         }
     }
 
@@ -656,37 +693,54 @@ impl Model {
         &self,
         capability: &str,
     ) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.select_worker_set_with(|worker_set| {
-            worker_set
-                .supports_runtime_capability(capability)
-                .then(|| worker_set.generate_engine.clone())
-                .flatten()
-        })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+        self.select_worker_set_with(|ws| Self::generate_engine_for_capability_from(ws, capability))
+            .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
 
-    /// Select a generate engine and its routing metadata atomically from the
-    /// same WorkerSet. Request-side KV hashing must use the block size and LoRA
-    /// identity advertised by the worker set that will route the request.
-    pub(crate) fn get_generate_engine_for_capability_with_routing(
-        &self,
+    /// The `extract` closures the session-aware `ModelManager` accessors reuse, so a
+    /// session lookup and the weighted fallback accept exactly the same sets.
+    pub(crate) fn chat_engine_with_parsing(
+        ws: &WorkerSet,
+    ) -> Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)> {
+        ws.chat_engine.clone().map(|e| (e, ws.parsing_options()))
+    }
+
+    pub(crate) fn completions_engine_with_parsing(
+        ws: &WorkerSet,
+    ) -> Option<(OpenAICompletionsStreamingEngine, ParsingOptions)> {
+        ws.completions_engine
+            .clone()
+            .map(|e| (e, ws.parsing_options()))
+    }
+
+    /// A generate engine and its routing metadata from one WorkerSet. Request-side KV
+    /// hashing must use the block size and LoRA identity advertised by the worker set
+    /// that will route the request.
+    pub(crate) fn generate_engine_for_capability_with_routing_from(
+        ws: &WorkerSet,
         capability: &str,
-    ) -> Result<GenerateEngineSelection, ModelManagerError> {
-        self.select_worker_set_with(|ws| {
-            ws.supports_runtime_capability(capability)
-                .then(|| ws.generate_engine.clone())
-                .flatten()
-                .map(|engine| GenerateEngineSelection {
-                    engine,
-                    kv_cache_block_size: ws.card().kv_cache_block_size,
-                    lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
-                    tower_connector_lora_enabled: ws
-                        .card()
-                        .runtime_config
-                        .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
-                })
-        })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    ) -> Option<GenerateEngineSelection> {
+        ws.supports_runtime_capability(capability)
+            .then(|| ws.generate_engine.clone())
+            .flatten()
+            .map(|engine| GenerateEngineSelection {
+                engine,
+                kv_cache_block_size: ws.card().kv_cache_block_size,
+                lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                tower_connector_lora_enabled: ws
+                    .card()
+                    .runtime_config
+                    .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
+            })
+    }
+
+    pub(crate) fn generate_engine_for_capability_from(
+        ws: &WorkerSet,
+        capability: &str,
+    ) -> Option<GenerateStreamingEngine> {
+        ws.supports_runtime_capability(capability)
+            .then(|| ws.generate_engine.clone())
+            .flatten()
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -694,19 +748,15 @@ impl Model {
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+        self.select_worker_set_with(Self::chat_engine_with_parsing)
             .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine_with_parsing(
         &self,
     ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| {
-            ws.completions_engine
-                .clone()
-                .map(|e| (e, ws.parsing_options()))
-        })
-        .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+        self.select_worker_set_with(Self::completions_engine_with_parsing)
+            .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     pub fn get_generate_engine_with_parsing(
@@ -756,7 +806,7 @@ impl Model {
     /// Return the appropriate error when no servable WorkerSet was found.
     /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
     /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
-    fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+    pub(crate) fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
         if engine_exists {
             ModelManagerError::ModelUnavailable(self.name.clone())
         } else {
@@ -775,68 +825,112 @@ impl Model {
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
     ///
-    fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
+    pub(crate) fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
+        let worker_sets = self.worker_sets.load();
+        Self::weighted_selection(&self.eligible_worker_sets(&worker_sets), &extract)
+    }
+
+    /// Look `key` up across the eligible WorkerSets before any selection.
+    ///
+    /// A hit is the eligible set whose own router holds a live `Hard` binding for the
+    /// session and that `extract` accepts. When several sets hold one, the
+    /// lexicographically smallest discovery key wins so every frontend that sees the same
+    /// candidates resolves the conflict the same way; this does not recover which binding
+    /// was first. A miss reports whether any eligible set binds in `Hard` mode, which is
+    /// when the caller must coordinate initialization before falling back to
+    /// [`Self::select_worker_set_with`].
+    pub(crate) fn lookup_session_worker_set_with<T, F>(
+        &self,
+        key: &SessionAffinityId,
+        extract: F,
+    ) -> SessionLookup<T>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+    {
+        let worker_sets = self.worker_sets.load();
+        let eligible = self.eligible_worker_sets(&worker_sets);
+        let mut bound: Option<(&str, T)> = None;
+        for candidate in &eligible {
+            if candidate.worker_set.session_binding(key).is_none() {
+                continue;
+            }
+            let Some(value) = extract(candidate.worker_set) else {
+                continue;
+            };
+            if bound
+                .as_ref()
+                .is_none_or(|(bound_key, _)| candidate.key < *bound_key)
+            {
+                bound = Some((candidate.key, value));
+            }
+        }
+        match bound {
+            Some((_, value)) => SessionLookup::Bound(value),
+            None => SessionLookup::Miss {
+                coordinate: eligible
+                    .iter()
+                    .any(|candidate| candidate.worker_set.has_hard_session_affinity()),
+            },
+        }
+    }
+
+    /// The sets that may serve a request: at least one worker, in a namespace whose worker
+    /// set is complete. In-process models (no discovery watcher) report one worker, so they
+    /// always participate.
+    fn eligible_worker_sets<'a>(
+        &self,
+        worker_sets: &'a WorkerSetMap,
+    ) -> Vec<EligibleWorkerSet<'a>> {
         // One immutable membership map drives both the readiness filter and
         // candidate eligibility, so a concurrent add/remove can't make us treat a
         // namespace as complete while routing to a set that lost a peer.
-        let worker_sets = self.worker_sets.load();
-        let snapshot: Vec<&WorkerSet> = worker_sets.values().map(Arc::as_ref).collect();
-
-        // Namespaces whose worker set is complete, evaluated against the snapshot.
-        let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
-        namespaces.sort_unstable();
-        namespaces.dedup();
-        let ready_namespaces: std::collections::HashSet<&str> = namespaces
-            .into_iter()
-            .filter(|ns| {
-                let in_ns: Vec<&WorkerSet> = snapshot
-                    .iter()
-                    .filter(|ws| ws.namespace() == *ns)
-                    .copied()
-                    .collect();
-                self.evaluate_namespace(&in_ns).ready
-            })
-            .collect();
-
-        // Fast path: single set (same zero-worker filtering as the multi-set path below)
-        if snapshot.len() == 1 {
-            let ws = snapshot[0];
-            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
-                return None;
-            }
-            return extract(ws);
-        }
-
-        // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
-        // a namespace whose worker set is incomplete.
-        // In-process models (no discovery watcher) return count=1, so they always participate.
-        // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = snapshot
+        let ready_namespaces: std::collections::HashSet<&str> =
+            Self::sorted_namespaces(worker_sets)
+                .into_iter()
+                .filter(|ns| self.namespace_ready(worker_sets, ns))
+                .collect();
+        worker_sets
             .iter()
-            .filter_map(|&ws| {
-                let count = ws.worker_count();
-                if count == 0 || !ready_namespaces.contains(ws.namespace()) {
-                    return None;
-                }
-                extract(ws).map(|val| (val, count))
+            .filter_map(|(key, ws)| {
+                let worker_count = ws.worker_count();
+                (worker_count > 0 && ready_namespaces.contains(ws.namespace())).then_some(
+                    EligibleWorkerSet {
+                        key: key.as_str(),
+                        worker_set: ws.as_ref(),
+                        worker_count,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Weighted random selection proportional to worker count among the eligible sets
+    /// `extract` accepts.
+    fn weighted_selection<T, F>(eligible: &[EligibleWorkerSet<'_>], extract: &F) -> Option<T>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+    {
+        let candidates: Vec<(T, usize)> = eligible
+            .iter()
+            .filter_map(|candidate| {
+                extract(candidate.worker_set).map(|val| (val, candidate.worker_count))
             })
             .collect();
 
-        if eligible.is_empty() {
+        if candidates.is_empty() {
             return None;
         }
 
-        if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
+        if candidates.len() == 1 {
+            return candidates.into_iter().next().map(|(val, _)| val);
         }
 
-        // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
+        let total_weight: usize = candidates.iter().map(|(_, w)| w).sum();
         let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
+        for (val, weight) in candidates {
             if pick < weight {
                 return Some(val);
             }
@@ -1082,6 +1176,13 @@ mod tests {
         assert!(model.get_generate_engine().is_err());
     }
 
+    fn generate_selection(ws: &WorkerSet) -> Option<GenerateEngineSelection> {
+        Model::generate_engine_for_capability_with_routing_from(
+            ws,
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        )
+    }
+
     #[test]
     fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
         let model = Model::new("generate-model".to_string());
@@ -1094,7 +1195,7 @@ mod tests {
         model.add_worker_set("ns-b".to_string(), worker_set_b);
 
         let selection_a = model
-            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .select_worker_set_with(generate_selection)
             .expect("select live worker set A");
         assert!(Arc::ptr_eq(&selection_a.engine, &engine_a));
         assert_eq!(selection_a.kv_cache_block_size, 16);
@@ -1105,12 +1206,225 @@ mod tests {
         worker_tx_b.send(vec![2]).expect("enable worker set B");
 
         let selection_b = model
-            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .select_worker_set_with(generate_selection)
             .expect("select live worker set B");
         assert!(Arc::ptr_eq(&selection_b.engine, &engine_b));
         assert_eq!(selection_b.kv_cache_block_size, 32);
         assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
         assert!(selection_b.tower_connector_lora_enabled);
+    }
+
+    // -- Session-bound WorkerSet selection (see `session_selection`) --
+
+    use crate::protocols::common::extensions::SessionAffinityId;
+    use crate::session_affinity::AffinityTarget;
+    use std::sync::Mutex;
+
+    /// Bindings a stub router "holds": session key -> target.
+    type StubBindings = Arc<Mutex<HashMap<String, AffinityTarget>>>;
+
+    fn stub_lookup(bindings: &StubBindings) -> super::super::worker_set::SessionBindingLookup {
+        let bindings = bindings.clone();
+        super::super::worker_set::SessionBindingLookup::Stub(Arc::new(
+            move |session: &SessionAffinityId| {
+                bindings.lock().unwrap().get(session.as_str()).copied()
+            },
+        ))
+    }
+
+    /// A generate WorkerSet whose router holds `bindings`, with `worker_ids` live.
+    fn make_session_worker_set(
+        namespace: &str,
+        worker_ids: Vec<u64>,
+        bindings: Option<&StubBindings>,
+    ) -> (
+        Arc<WorkerSet>,
+        GenerateStreamingEngine,
+        watch::Sender<Vec<u64>>,
+    ) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.kv_cache_block_size = 16;
+        card.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        let engine: GenerateStreamingEngine = Arc::new(StubGenerateEngine);
+        let mut worker_set =
+            WorkerSet::new(namespace.to_string(), format!("{namespace}-checksum"), card);
+        worker_set.generate_engine = Some(engine.clone());
+        let (worker_tx, worker_rx) = watch::channel(worker_ids);
+        worker_set.set_instance_watcher(worker_rx);
+        if let Some(bindings) = bindings {
+            worker_set.set_session_binding_lookup(stub_lookup(bindings));
+        }
+        (Arc::new(worker_set), engine, worker_tx)
+    }
+
+    fn bound_engine(lookup: SessionLookup<GenerateEngineSelection>) -> GenerateStreamingEngine {
+        match lookup {
+            SessionLookup::Bound(selection) => selection.engine,
+            SessionLookup::Miss { .. } => panic!("expected a session-bound worker set"),
+        }
+    }
+
+    fn miss_coordinates<T>(lookup: SessionLookup<T>) -> bool {
+        match lookup {
+            SessionLookup::Bound(_) => panic!("expected a session lookup miss"),
+            SessionLookup::Miss { coordinate } => coordinate,
+        }
+    }
+
+    #[test]
+    fn session_binding_wins_over_weight_until_worker_or_set_disappears() {
+        let session = SessionAffinityId::new("session-1");
+        let bindings_a: StubBindings = Default::default();
+        let (set_a, engine_a, tx_a) = make_session_worker_set("ns-a", vec![1], Some(&bindings_a));
+        let bindings_b: StubBindings = Default::default();
+        let (set_b, _engine_b, _tx_b) = make_session_worker_set(
+            "ns-b",
+            vec![10, 11, 12, 13, 14, 15, 16, 17],
+            Some(&bindings_b),
+        );
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns-a".to_string(), set_a);
+        model.add_worker_set("ns-b".to_string(), set_b);
+
+        // No binding anywhere: a miss that must coordinate, since both sets bind in Hard mode.
+        assert!(miss_coordinates(
+            model.lookup_session_worker_set_with(&session, generate_selection)
+        ));
+
+        // A binds the session; B's far larger weight must not move it.
+        bindings_a
+            .lock()
+            .unwrap()
+            .insert("session-1".to_string(), AffinityTarget::worker(1));
+        for _ in 0..50 {
+            let engine =
+                bound_engine(model.lookup_session_worker_set_with(&session, generate_selection));
+            assert!(Arc::ptr_eq(&engine, &engine_a));
+        }
+        // Other sessions still miss.
+        assert!(miss_coordinates(model.lookup_session_worker_set_with(
+            &SessionAffinityId::new("session-2"),
+            generate_selection
+        )));
+
+        // The set must also offer the requested engine.
+        assert!(miss_coordinates(
+            model.lookup_session_worker_set_with(&session, |ws| ws.chat_engine.clone())
+        ));
+
+        // A's only worker leaves: the stale binding is ignored (the stub keeps reporting it,
+        // but a zero-worker set is ineligible) and the fallback is free to pick B.
+        tx_a.send(vec![]).unwrap();
+        assert!(miss_coordinates(
+            model.lookup_session_worker_set_with(&session, generate_selection)
+        ));
+        assert!(model.select_worker_set_with(generate_selection).is_some());
+    }
+
+    #[test]
+    fn session_lookup_ignores_sets_without_hard_affinity() {
+        let session = SessionAffinityId::new("session-1");
+        let (set_a, _engine_a, _tx_a) = make_session_worker_set("ns-a", vec![1], None);
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns-a".to_string(), set_a);
+
+        // No eligible set can bind, so a miss takes the weighted selector without a guard.
+        assert!(!miss_coordinates(
+            model.lookup_session_worker_set_with(&session, generate_selection)
+        ));
+
+        // A set that binds appears: misses now coordinate, even while it is the only binder.
+        let bindings_b: StubBindings = Default::default();
+        let (set_b, _engine_b, _tx_b) = make_session_worker_set("ns-b", vec![2], Some(&bindings_b));
+        model.add_worker_set("ns-b".to_string(), set_b);
+        assert!(miss_coordinates(
+            model.lookup_session_worker_set_with(&session, generate_selection)
+        ));
+    }
+
+    #[test]
+    fn duplicate_session_bindings_resolve_to_the_smallest_worker_set_key() {
+        let session = SessionAffinityId::new("session-1");
+        let bindings: StubBindings = Default::default();
+        bindings
+            .lock()
+            .unwrap()
+            .insert("session-1".to_string(), AffinityTarget::worker(1));
+        let (set_a, engine_a, _tx_a) = make_session_worker_set("ns-a", vec![1], Some(&bindings));
+        let (set_b, engine_b, _tx_b) = make_session_worker_set("ns-b", vec![1], Some(&bindings));
+        let (set_c, _engine_c, _tx_c) = make_session_worker_set("ns-c", vec![1], Some(&bindings));
+        let model = Model::new("llama".to_string());
+        // Full discovery keys, not namespaces, order the tie-break.
+        model.add_worker_set(
+            r#"["ns-c","workers","generate","chat","aggregated"]"#.into(),
+            set_c,
+        );
+        model.add_worker_set(
+            r#"["ns-b","workers","generate","chat","aggregated"]"#.into(),
+            set_b,
+        );
+        model.add_worker_set(
+            r#"["ns-a","workers","generate","chat","aggregated"]"#.into(),
+            set_a,
+        );
+
+        for _ in 0..20 {
+            let engine =
+                bound_engine(model.lookup_session_worker_set_with(&session, generate_selection));
+            assert!(Arc::ptr_eq(&engine, &engine_a));
+        }
+
+        // Once the smallest key's set is gone, the next key wins.
+        model.remove_worker_set(r#"["ns-a","workers","generate","chat","aggregated"]"#);
+        let engine =
+            bound_engine(model.lookup_session_worker_set_with(&session, generate_selection));
+        assert!(Arc::ptr_eq(&engine, &engine_b));
+    }
+
+    #[test]
+    fn session_lookup_requires_a_ready_namespace() {
+        let session = SessionAffinityId::new("session-1");
+        let bindings: StubBindings = Default::default();
+        bindings
+            .lock()
+            .unwrap()
+            .insert("session-1".to_string(), AffinityTarget::worker(1));
+        let (set_a, _engine_a, _tx_a) = make_session_worker_set("ns-a", vec![1], Some(&bindings));
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns-a".to_string(), set_a);
+        // A decode-only sibling in the same namespace with a dead prefill peer makes the
+        // namespace incomplete, which disqualifies the bound set like any other.
+        let mut decode_card = ModelDeploymentCard::default();
+        decode_card.worker_type = Some(crate::worker_type::WorkerType::Decode);
+        decode_card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]];
+        let (decode_set, _tx_decode) = {
+            let (tx, rx) = watch::channel(vec![5]);
+            let mut ws = WorkerSet::new("ns-a".to_string(), "decode".to_string(), decode_card);
+            ws.set_instance_watcher(rx);
+            (Arc::new(ws), tx)
+        };
+        model.add_worker_set("ns-a-decode".to_string(), decode_set);
+
+        assert!(!miss_coordinates(
+            model.lookup_session_worker_set_with(&session, generate_selection)
+        ));
+    }
+
+    #[test]
+    fn snapshot_and_shared_models_share_session_initialization() {
+        let model = Model::new("llama".to_string());
+        let snapshot = model.snapshot();
+        let alias = Model::new_sharing_session_init("alias".to_string(), &model);
+        assert!(Arc::ptr_eq(model.session_init(), snapshot.session_init()));
+        assert!(Arc::ptr_eq(model.session_init(), alias.session_init()));
+        assert!(!Arc::ptr_eq(
+            model.session_init(),
+            Model::new("other".to_string()).session_init()
+        ));
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

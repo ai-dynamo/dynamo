@@ -21,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
-    kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, SessionInitGuard,
+    SessionLookup, SessionSelection, WorkerSet, kv_source_watch::KvSourceMembershipCoordinator,
+    runtime_config_watch,
 };
 
 use dynamo_runtime::{
@@ -493,6 +494,21 @@ impl ModelManager {
             .clone()
     }
 
+    /// `get_or_create_model` for an alias or adapter name of `primary`: a new entry shares
+    /// the primary's session-initialization coordination because it serves through the
+    /// same routers.
+    fn get_or_create_model_sharing(&self, model_name: &str, primary: &Model) -> Arc<Model> {
+        self.models
+            .entry(model_name.to_string())
+            .or_insert_with(|| {
+                Arc::new(Model::new_sharing_session_init(
+                    model_name.to_string(),
+                    primary,
+                ))
+            })
+            .clone()
+    }
+
     /// Get an existing Model, if it exists.
     pub fn get_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.models
@@ -791,11 +807,11 @@ impl ModelManager {
             .map_or("unspecified", |worker_type| worker_type.as_str());
 
         let worker_set = Arc::new(worker_set);
-        self.get_or_create_model(&primary)
-            .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        let primary_model = self.get_or_create_model(&primary);
+        primary_model.add_worker_set(worker_set_key.to_string(), worker_set.clone());
         for alias in &aliases {
             self.alias_to_primary.insert(alias.clone(), primary.clone());
-            self.get_or_create_model(alias)
+            self.get_or_create_model_sharing(alias, &primary_model)
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
             // Emitted from the claim itself so the event cannot report an alias
             // that was not registered, and once per role so a disaggregated
@@ -809,7 +825,7 @@ impl ModelManager {
         }
         for (_, adapter) in &adapters {
             let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
-            self.get_or_create_model(adapter.name())
+            self.get_or_create_model_sharing(adapter.name(), &primary_model)
                 .add_worker_set(worker_set_key.to_string(), adapter_view);
         }
 
@@ -936,14 +952,14 @@ impl ModelManager {
             .collect::<HashMap<_, _>>();
         let lora_before = self.lora_projection_locked();
 
+        let primary_model = self.get_or_create_model(&primary);
         if replacing_worker_set {
-            let primary_model = self.get_or_create_model(&primary);
             if let Some(displaced_worker_set) = primary_model.get_worker_set(&worker_set_key) {
                 Self::clear_worker_set_targets(&displaced_worker_set);
             }
             primary_model.add_worker_set(worker_set_key.clone(), worker_set.clone());
             for alias in &aliases {
-                let alias_model = self.get_or_create_model(alias);
+                let alias_model = self.get_or_create_model_sharing(alias, &primary_model);
                 if let Some(displaced_worker_set) = alias_model.get_worker_set(&worker_set_key) {
                     Self::clear_worker_set_targets(&displaced_worker_set);
                 }
@@ -978,7 +994,7 @@ impl ModelManager {
         drop(group);
 
         for (name, adapter_view) in adapter_views {
-            self.get_or_create_model(&name)
+            self.get_or_create_model_sharing(&name, &primary_model)
                 .add_worker_set(worker_set_key.clone(), adapter_view);
         }
         for name in previous_adapter_names.difference(&desired_adapter_names) {
@@ -1545,21 +1561,6 @@ impl ModelManager {
             .get_generate_engine_for_capability(capability)
     }
 
-    /// Select a Generate engine and its routing metadata from one worker set
-    /// that advertises `capability`.
-    pub(crate) fn get_generate_engine_for_capability_with_routing(
-        &self,
-        model: &str,
-        capability: &str,
-    ) -> Result<GenerateEngineSelection, ModelManagerError> {
-        self.catalog
-            .load()
-            .models
-            .get(model)
-            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_generate_engine_for_capability_with_routing(capability)
-    }
-
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -1614,6 +1615,161 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_with_parsing()
+    }
+
+    // -- Session-aware selection (see `discovery::session_selection`) --
+
+    fn committed_model(&self, model: &str) -> Result<Arc<Model>, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .cloned()
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    fn weighted_or_error<T, F, E>(
+        model: &Model,
+        extract: &F,
+        engine_exists: &E,
+    ) -> Result<T, ModelManagerError>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        E: Fn(&Model) -> bool,
+    {
+        model
+            .select_worker_set_with(extract)
+            .ok_or_else(|| model.engine_error(engine_exists(model)))
+    }
+
+    /// Select from the WorkerSet that already holds `session`'s binding, otherwise through
+    /// the weighted selector.
+    ///
+    /// A miss that could create a binding takes the model's per-session initialization
+    /// guard first, then looks again against freshly loaded membership: a concurrent first
+    /// request may have bound meanwhile, and a WorkerSet may have arrived. The caller holds
+    /// the returned guard through preprocessing and `engine.generate().await` and drops it
+    /// once the pipeline returns its response stream. Requests without a session, explicit
+    /// targets, query-only requests, and models whose eligible sets never bind in `Hard`
+    /// mode take the weighted selector directly.
+    pub(crate) async fn select_for_session<T, F, E>(
+        &self,
+        model: &str,
+        session: Option<&SessionSelection>,
+        extract: F,
+        engine_exists: E,
+    ) -> Result<(T, Option<SessionInitGuard>), dynamo_runtime::pipeline::Error>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        E: Fn(&Model) -> bool,
+    {
+        let committed = self.committed_model(model)?;
+        let Some(session) = session else {
+            return Ok((
+                Self::weighted_or_error(&committed, &extract, &engine_exists)?,
+                None,
+            ));
+        };
+        let coordinate = match committed.lookup_session_worker_set_with(session.key(), &extract) {
+            SessionLookup::Bound(value) => return Ok((value, None)),
+            SessionLookup::Miss { coordinate } => coordinate,
+        };
+        if session.query_only() || !coordinate {
+            return Ok((
+                Self::weighted_or_error(&committed, &extract, &engine_exists)?,
+                None,
+            ));
+        }
+        let guard = committed
+            .session_init()
+            .acquire(session.key(), session.context())
+            .await?;
+        let committed = self.committed_model(model)?;
+        let value = match committed.lookup_session_worker_set_with(session.key(), &extract) {
+            SessionLookup::Bound(value) => value,
+            SessionLookup::Miss { .. } => {
+                Self::weighted_or_error(&committed, &extract, &engine_exists)?
+            }
+        };
+        Ok((value, Some(guard)))
+    }
+
+    pub(crate) async fn get_chat_completions_engine_with_parsing_for_session(
+        &self,
+        model: &str,
+        session: Option<&SessionSelection>,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+            Option<SessionInitGuard>,
+        ),
+        dynamo_runtime::pipeline::Error,
+    > {
+        let ((engine, parsing_options), guard) = self
+            .select_for_session(
+                model,
+                session,
+                Model::chat_engine_with_parsing,
+                Model::has_chat_engine,
+            )
+            .await?;
+        Ok((engine, parsing_options, guard))
+    }
+
+    pub(crate) async fn get_completions_engine_with_parsing_for_session(
+        &self,
+        model: &str,
+        session: Option<&SessionSelection>,
+    ) -> Result<
+        (
+            OpenAICompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+            Option<SessionInitGuard>,
+        ),
+        dynamo_runtime::pipeline::Error,
+    > {
+        let ((engine, parsing_options), guard) = self
+            .select_for_session(
+                model,
+                session,
+                Model::completions_engine_with_parsing,
+                Model::has_completions_engine,
+            )
+            .await?;
+        Ok((engine, parsing_options, guard))
+    }
+
+    pub(crate) async fn get_generate_engine_for_capability_with_routing_for_session(
+        &self,
+        model: &str,
+        capability: &str,
+        session: Option<&SessionSelection>,
+    ) -> Result<(GenerateEngineSelection, Option<SessionInitGuard>), dynamo_runtime::pipeline::Error>
+    {
+        self.select_for_session(
+            model,
+            session,
+            |ws| Model::generate_engine_for_capability_with_routing_from(ws, capability),
+            |model| model.has_generate_engine_for_capability(capability),
+        )
+        .await
+    }
+
+    pub(crate) async fn get_generate_engine_for_capability_for_session(
+        &self,
+        model: &str,
+        capability: &str,
+        session: Option<&SessionSelection>,
+    ) -> Result<(GenerateStreamingEngine, Option<SessionInitGuard>), dynamo_runtime::pipeline::Error>
+    {
+        self.select_for_session(
+            model,
+            session,
+            |ws| Model::generate_engine_for_capability_from(ws, capability),
+            |model| model.has_generate_engine_for_capability(capability),
+        )
+        .await
     }
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
@@ -2891,6 +3047,272 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    mod session_selection {
+        //! `select_for_session`: the pre-selection affinity check and its initialization
+        //! guard, driven through stub routers that report whatever bindings the test sets.
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+
+        use crate::{
+            discovery::{ModelManager, SessionBindingLookup, SessionSelection, WorkerSet},
+            model_card::ModelDeploymentCard,
+            protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+            session_affinity::AffinityTarget,
+            types::openai::generate::GenerateStreamingEngine,
+        };
+
+        struct StubEngine;
+
+        #[async_trait::async_trait]
+        impl
+            dynamo_runtime::engine::AsyncEngine<
+                dynamo_runtime::pipeline::SingleIn<crate::preprocessor::PreprocessedRequest>,
+                dynamo_runtime::pipeline::ManyOut<
+                    crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
+                >,
+                dynamo_runtime::pipeline::Error,
+            > for StubEngine
+        {
+            async fn generate(
+                &self,
+                _request: dynamo_runtime::pipeline::SingleIn<
+                    crate::preprocessor::PreprocessedRequest,
+                >,
+            ) -> Result<
+                dynamo_runtime::pipeline::ManyOut<
+                    crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
+                >,
+                dynamo_runtime::pipeline::Error,
+            > {
+                unimplemented!("selection tests never dispatch")
+            }
+        }
+
+        type StubBindings = Arc<Mutex<std::collections::HashMap<String, AffinityTarget>>>;
+
+        fn worker_set(
+            namespace: &str,
+            worker_ids: Vec<u64>,
+            bindings: &StubBindings,
+        ) -> (WorkerSet, GenerateStreamingEngine) {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            let engine: GenerateStreamingEngine = Arc::new(StubEngine);
+            let mut worker_set =
+                WorkerSet::new(namespace.to_string(), format!("{namespace}-sum"), card);
+            worker_set.generate_engine = Some(engine.clone());
+            let (tx, rx) = tokio::sync::watch::channel(worker_ids);
+            std::mem::forget(tx);
+            worker_set.set_instance_watcher(rx);
+            let bindings = bindings.clone();
+            worker_set.set_session_binding_lookup(SessionBindingLookup::Stub(Arc::new(
+                move |session: &SessionAffinityId| {
+                    bindings.lock().unwrap().get(session.as_str()).copied()
+                },
+            )));
+            (worker_set, engine)
+        }
+
+        fn extract(ws: &WorkerSet) -> Option<GenerateStreamingEngine> {
+            ws.generate_engine.clone()
+        }
+
+        fn session(key: &str, query_only: bool) -> SessionSelection {
+            let mut request = Context::new(());
+            request.insert(SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId::new(key));
+            SessionSelection::from_context(&request, false, query_only)
+                .unwrap()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn first_requests_share_one_worker_set_across_a_membership_update() {
+            let manager = Arc::new(ModelManager::new());
+            let bindings_a: StubBindings = Default::default();
+            let bindings_b: StubBindings = Default::default();
+            let (set_a, engine_a) = worker_set("ns-a", vec![1], &bindings_a);
+            let (set_b, _engine_b) = worker_set("ns-b", vec![10, 11, 12], &bindings_b);
+            assert!(manager.add_worker_set("llama", "ns-a", set_a));
+            assert!(manager.add_worker_set("llama", "ns-b", set_b));
+            let coordination = manager.get_model("llama").unwrap().session_init().clone();
+
+            // No session: the weighted selector, no guard.
+            let (_, guard) = manager
+                .select_for_session(
+                    "llama",
+                    None,
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .unwrap();
+            assert!(guard.is_none());
+
+            // The session's first request misses and takes the initialization guard.
+            let first = session("s1", false);
+            let (_, first_guard) = manager
+                .select_for_session(
+                    "llama",
+                    Some(&first),
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .unwrap();
+            assert!(first_guard.is_some());
+            assert_eq!(coordination.entry_count(), 1);
+
+            // A concurrent first request for the same session waits on it.
+            let second = {
+                let manager = manager.clone();
+                tokio::spawn(async move {
+                    let second = session("s1", false);
+                    manager
+                        .select_for_session(
+                            "llama",
+                            Some(&second),
+                            extract,
+                            crate::discovery::Model::has_generate_engine,
+                        )
+                        .await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert!(
+                !second.is_finished(),
+                "second request must wait for the first"
+            );
+
+            // Discovery republishes the catalog meanwhile; the new snapshot shares the guard.
+            let (set_c, _engine_c) = worker_set("ns-c", vec![20], &Default::default());
+            assert!(manager.add_worker_set("llama", "ns-c", set_c));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!second.is_finished());
+
+            // The first request's router commits to A and the dispatch returns its stream.
+            bindings_a
+                .lock()
+                .unwrap()
+                .insert("s1".to_string(), AffinityTarget::worker(1));
+            drop(first_guard);
+
+            // The waiter re-reads membership, finds the binding, and keeps the guard it took.
+            let (engine, second_guard) = second.await.unwrap().unwrap();
+            assert!(Arc::ptr_eq(&engine, &engine_a));
+            assert!(second_guard.is_some());
+            drop(second_guard);
+            assert_eq!(coordination.entry_count(), 0);
+
+            // A later request hits without any guard, however B is weighted.
+            let later = session("s1", false);
+            let (engine, guard) = manager
+                .select_for_session(
+                    "llama",
+                    Some(&later),
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&engine, &engine_a));
+            assert!(guard.is_none());
+
+            // Query-only misses never initialize, so they take no guard.
+            let query = session("s2", true);
+            let (_, guard) = manager
+                .select_for_session(
+                    "llama",
+                    Some(&query),
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .unwrap();
+            assert!(guard.is_none());
+            assert_eq!(coordination.entry_count(), 0);
+        }
+
+        #[tokio::test]
+        async fn selection_failures_release_the_guard_and_report_model_errors() {
+            let manager = Arc::new(ModelManager::new());
+            let bindings: StubBindings = Default::default();
+            let (set_a, _engine_a) = worker_set("ns-a", vec![1], &bindings);
+            assert!(manager.add_worker_set("llama", "ns-a", set_a));
+            let coordination = manager.get_model("llama").unwrap().session_init().clone();
+
+            let error = manager
+                .select_for_session(
+                    "missing",
+                    Some(&session("s1", false)),
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .err()
+                .expect("unknown model");
+            assert!(matches!(
+                error.downcast_ref::<crate::discovery::ModelManagerError>(),
+                Some(crate::discovery::ModelManagerError::ModelNotFound(_))
+            ));
+
+            // A miss that then finds no engine for the requested surface fails after the guard
+            // was taken; the guard must not leak.
+            let error = manager
+                .select_for_session(
+                    "llama",
+                    Some(&session("s1", false)),
+                    |ws| ws.chat_engine.clone(),
+                    crate::discovery::Model::has_chat_engine,
+                )
+                .await
+                .err()
+                .expect("no chat engine");
+            assert!(matches!(
+                error.downcast_ref::<crate::discovery::ModelManagerError>(),
+                Some(crate::discovery::ModelManagerError::ModelNotFound(_))
+            ));
+            assert_eq!(coordination.entry_count(), 0);
+
+            // A request whose client is gone does not wait behind the holder.
+            let holder = session("s1", false);
+            let (_, held) = manager
+                .select_for_session(
+                    "llama",
+                    Some(&holder),
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .unwrap();
+            assert!(held.is_some());
+            let mut stopped_request = Context::new(());
+            stopped_request.insert(SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId::new("s1"));
+            stopped_request.context().stop();
+            let cancelled = SessionSelection::from_context(&stopped_request, false, false)
+                .unwrap()
+                .unwrap();
+            let error = manager
+                .select_for_session(
+                    "llama",
+                    Some(&cancelled),
+                    extract,
+                    crate::discovery::Model::has_generate_engine,
+                )
+                .await
+                .err()
+                .expect("stopped request abandons the wait");
+            assert!(dynamo_runtime::error::match_error_chain(
+                error.as_ref(),
+                &[dynamo_runtime::error::ErrorType::Cancelled],
+                &[]
+            ));
+            drop(held);
+            assert_eq!(coordination.entry_count(), 0);
+        }
     }
 
     #[test]

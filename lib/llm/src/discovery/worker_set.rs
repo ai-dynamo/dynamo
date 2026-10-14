@@ -19,8 +19,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
-    kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
+    kv_router::{
+        EncoderRouter, RoutingHost, RoutingLoadContext, prefill_router::PrefillRouterLifecycle,
+    },
     model_card::ModelDeploymentCard,
+    protocols::common::extensions::SessionAffinityId,
+    session_affinity::AffinityTarget,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -36,6 +40,48 @@ use crate::{
 };
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+#[cfg(test)]
+type StubSessionBindings = Arc<dyn Fn(&SessionAffinityId) -> Option<AffinityTarget> + Send + Sync>;
+
+/// Read-only access to the session bindings a WorkerSet's own router holds.
+///
+/// Discovery attaches the set's `RoutingHost`; the host keeps ownership of
+/// binding creation, expiry, replication, and leases. This is only the lookup
+/// the pre-selection affinity check in `discovery::session_selection` needs.
+pub(crate) enum SessionBindingLookup {
+    RoutingHost(Arc<RoutingHost>),
+    #[cfg(test)]
+    Stub(StubSessionBindings),
+}
+
+impl Clone for SessionBindingLookup {
+    fn clone(&self) -> Self {
+        match self {
+            Self::RoutingHost(host) => Self::RoutingHost(host.clone()),
+            #[cfg(test)]
+            Self::Stub(lookup) => Self::Stub(lookup.clone()),
+        }
+    }
+}
+
+impl SessionBindingLookup {
+    fn binding(&self, session_id: &SessionAffinityId) -> Option<AffinityTarget> {
+        match self {
+            Self::RoutingHost(host) => host.session_binding(session_id),
+            #[cfg(test)]
+            Self::Stub(lookup) => lookup(session_id),
+        }
+    }
+
+    fn has_hard_session_affinity(&self) -> bool {
+        match self {
+            Self::RoutingHost(host) => host.has_hard_session_affinity(),
+            #[cfg(test)]
+            Self::Stub(_) => true,
+        }
+    }
+}
 
 /// A topology hop must retain the provider's admission and configuration, even
 /// when other cards share its endpoint or the endpoint is reused by a successor.
@@ -244,6 +290,10 @@ pub struct WorkerSet {
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
 
+    /// Session bindings held by this set's decode (or aggregated) router. None
+    /// for sets without a `RoutingHost`, which never bind sessions.
+    session_binding_lookup: Option<SessionBindingLookup>,
+
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
 
@@ -277,6 +327,7 @@ impl WorkerSet {
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            session_binding_lookup: None,
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
@@ -446,20 +497,47 @@ impl WorkerSet {
         }
     }
 
-    /// Current instance membership, excluding canceled and closed lifecycle views.
-    pub(crate) fn available_worker_ids(&self) -> Option<std::collections::HashSet<u64>> {
-        if self
-            .lifecycle_cancellation
+    /// Whether this view is canceled or its membership watch has closed.
+    fn lifecycle_closed(&self) -> bool {
+        self.lifecycle_cancellation
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
-        {
+            || self
+                .instance_count_rx
+                .as_ref()
+                .is_some_and(|rx| rx.has_changed().is_err())
+    }
+
+    /// Current instance membership, excluding canceled and closed lifecycle views.
+    pub(crate) fn available_worker_ids(&self) -> Option<std::collections::HashSet<u64>> {
+        if self.lifecycle_closed() {
             return None;
         }
         let rx = self.instance_count_rx.as_ref()?;
-        if rx.has_changed().is_err() {
+        Some(rx.borrow().iter().copied().collect())
+    }
+
+    pub(crate) fn set_session_binding_lookup(&mut self, lookup: SessionBindingLookup) {
+        self.session_binding_lookup = Some(lookup);
+    }
+
+    /// Whether requests through this set bind sessions in `Hard` mode.
+    pub(crate) fn has_hard_session_affinity(&self) -> bool {
+        self.session_binding_lookup
+            .as_ref()
+            .is_some_and(SessionBindingLookup::has_hard_session_affinity)
+    }
+
+    /// The live `Hard` binding this set's router holds for `session_id`.
+    ///
+    /// Read-only and membership-based: the router confirms the bound worker is
+    /// still discovered (and its DP rank still valid) without consulting load.
+    /// Canceled and closed views report no binding.
+    pub(crate) fn session_binding(&self, session_id: &SessionAffinityId) -> Option<AffinityTarget> {
+        if self.lifecycle_closed() {
             return None;
         }
-        Some(rx.borrow().iter().copied().collect())
+        self.session_binding_lookup.as_ref()?.binding(session_id)
     }
 
     /// Number of active workers in this set, derived from the Client's discovery watcher.
@@ -550,6 +628,9 @@ impl WorkerSet {
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
+            // Adapter requests dispatch through the base set's router, so they
+            // share its session bindings.
+            session_binding_lookup: self.session_binding_lookup.clone(),
             lifecycle_cancellation: self
                 .lifecycle_cancellation
                 .as_ref()
@@ -706,6 +787,49 @@ mod tests {
             observed_lora.lock().unwrap().as_deref(),
             Some("adapter-model")
         );
+    }
+
+    #[test]
+    fn session_binding_follows_lookup_until_the_view_closes() {
+        let session = SessionAffinityId::new("session-1");
+        let bound = AffinityTarget::worker(7);
+        let lookup = SessionBindingLookup::Stub(Arc::new(move |id: &SessionAffinityId| {
+            (id.as_str() == "session-1").then_some(bound)
+        }));
+
+        let mut workers = make_worker_set("ns", "model");
+        assert!(!workers.has_hard_session_affinity());
+        assert_eq!(workers.session_binding(&session), None);
+
+        let (tx, rx) = watch::channel(vec![7]);
+        workers.set_instance_watcher(rx);
+        workers.set_session_binding_lookup(lookup);
+        assert!(workers.has_hard_session_affinity());
+        assert_eq!(workers.session_binding(&session), Some(bound));
+        assert_eq!(
+            workers.session_binding(&SessionAffinityId::new("other")),
+            None
+        );
+
+        // Adapter views dispatch through the base router and see its bindings.
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = workers.adapter_view(adapter_card);
+        assert_eq!(adapter.session_binding(&session), Some(bound));
+
+        // A closed membership watch or a canceled lifecycle reports no binding.
+        drop(tx);
+        assert_eq!(workers.session_binding(&session), None);
+        let (_tx, rx) = watch::channel(vec![7]);
+        workers.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        workers.set_lifecycle_cancellation(cancellation.clone());
+        assert_eq!(workers.session_binding(&session), Some(bound));
+        cancellation.cancel();
+        assert_eq!(workers.session_binding(&session), None);
     }
 
     #[test]

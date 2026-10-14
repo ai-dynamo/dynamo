@@ -87,13 +87,17 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        namespace: Optional[str] = None,
+        component_name: str = "mocker",
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
 
+        # A caller-supplied namespace with a distinct component registers a second
+        # WorkerSet for the same model behind one frontend (rolling-update shape).
         namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
-        self.component_name = "mocker"
+        self.namespace = namespace or f"test-namespace-{namespace_suffix}"
+        self.component_name = component_name
         self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
