@@ -404,6 +404,20 @@ def test_expiry_requires_rfc3339(target, expires_at):
         replace(target, expires_at=expires_at)
 
 
+@pytest.mark.parametrize(
+    ("expires_at", "microsecond"),
+    [
+        ("2026-10-11T10:00:00.1Z", 100000),
+        ("2026-10-11T10:00:00.1234+00:00", 123400),
+        ("2026-10-11T10:00:00.123456789Z", 123456),
+    ],
+)
+def test_expiry_accepts_rfc3339_fractional_seconds(expires_at, microsecond):
+    from dynamo.artifacts.storage import _expiry
+
+    assert _expiry(expires_at).microsecond == microsecond
+
+
 @pytest.mark.asyncio
 async def test_presigned_requires_explicit_authority(target):
     with pytest.raises(ArtifactStorageError, match="host"):
@@ -425,6 +439,10 @@ async def test_http_is_opt_in_even_with_private_network(target, policy):
         "10.42.1.2",
         "169.254.169.254",
         "::ffff:169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+        "::a9fe:a9fe",
+        "64:ff9b::a00:1",
+        "::a00:1",
         "0.0.0.0",
         "224.0.0.1",
     ],
@@ -432,6 +450,11 @@ async def test_http_is_opt_in_even_with_private_network(target, policy):
 def test_addresses_denied_by_default(address):
     with pytest.raises(ArtifactStorageError, match="address"):
         StoragePolicy().check_address(address)
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::808:808", "::808:808"])
+def test_public_embedded_ipv4_addresses_allowed(address):
+    StoragePolicy().check_address(address)
 
 
 @pytest.mark.asyncio
