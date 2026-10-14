@@ -24,6 +24,7 @@
       "date": "Oct 6, 2026",
       "kind": "patch",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.5.1",
+      "enterprise": "Oct 6, 2026",
       "docs": "https://docs.nvidia.com/dynamo",
       "pins": {
         "sglang": "0.5.18",
@@ -36,6 +37,7 @@
       "ucx": "1.21.x",
       "delta": "Patch release. Fixes Router overload-hint expiry, min_tokens on tokenizer-free SGLang decode workers, split stop-sequence leaks, Qwen3-VL video routing across mixed workers, and reinforcement learning worker discovery on Kubernetes. Bounds client-supplied multimodal input (inline data: URL size, remote media downloads, image dimensions, base64 audio) and leaves aiohttp as the only HTTP client backend. Media fetches through an ambient HTTP proxy now require DYN_MM_TRUST_EGRESS_PROXY=1, and local SGLang diffusion input_reference files require DYN_MM_LOCAL_PATH. ModelExpress moves to v0.6.0. Backend pins are unchanged from v1.5.0.",
       "dateIso": "2026-10-06",
+      "enterpriseIso": "2026-10-06",
       "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-5-0#v151"
     },
     {
@@ -44,6 +46,7 @@
       "date": "Sep 18, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.5.0",
+      "enterprise": "Sep 28, 2026",
       "docs": "https://docs.nvidia.com/dynamo",
       "pins": {
         "sglang": "0.5.18",
@@ -57,6 +60,7 @@
       "delta": "KVBM deprecated with removal targeted for v1.7.0; CRD storage version promoted to v1beta1 and the v1alpha1 admission webhook endpoints removed; Go EPP removed in favor of the Rust EPP shipped inside the Frontend image; Dynamo Snapshot moved to a standalone operator and chart, dropping the bundled snapshot chart, snapshot-agent image and DynamoCheckpoint CRD; AIConfigurator renamed to AISimulate; unified-backend entry point removed from the vLLM and SGLang workers; UCX 1.21.x.",
       "notesSummary": "Pluggable worker selection policies and tiered KV indexing in the Router, guided tool-call streaming and request validation in the Frontend, image decoding at the Frontend for encode-prefill-decode deployments, v1beta1 CRD storage with the Rust EPP as the default Endpoint Picker, GPU Memory Service V1, and a standalone Snapshot operator.",
       "dateIso": "2026-09-18",
+      "enterpriseIso": "2026-09-28",
       "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-5-0"
     },
     {
@@ -65,6 +69,7 @@
       "date": "Aug 28, 2026",
       "kind": "patch",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.4.2",
+      "enterprise": "Aug 28, 2026",
       "docs": "https://docs.nvidia.com/dynamo",
       "pins": {
         "sglang": "0.5.16",
@@ -77,6 +82,7 @@
       "ucx": "1.21.x",
       "delta": "Patch release and the first Dynamo Enterprise Support release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for enterprise support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0.",
       "dateIso": "2026-08-28",
+      "enterpriseIso": "2026-08-28",
       "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-4-0#v142"
     },
     {
