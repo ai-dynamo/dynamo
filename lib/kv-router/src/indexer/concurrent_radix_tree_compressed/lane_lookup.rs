@@ -318,7 +318,6 @@ impl LaneLookup {
         });
     }
 
-    #[cfg(test)]
     pub(super) fn block_count(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.workers.get(&worker).map(BlockLookup::len)
     }

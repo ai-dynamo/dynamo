@@ -11,11 +11,11 @@ use crate::indexer::{
 /// Publishes `worker`'s block count once a policy reads resident blocks.
 fn track(
     resident_blocks: &mut Option<ResidentBlockTracker>,
-    lookup: &FxHashMap<WorkerWithDpRank, WorkerLookup>,
+    lookup: &LaneLookup,
     worker: WorkerWithDpRank,
 ) {
     if let Some(tracker) = resident_blocks {
-        tracker.update(worker, lookup.get(&worker).map(WorkerLookup::len));
+        tracker.update(worker, lookup.block_count(worker));
     }
 }
 
@@ -191,12 +191,8 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     let _ = sender.send(());
                 }
                 WorkerTask::TrackResidentBlocks(counts) => {
-                    resident_blocks = Some(ResidentBlockTracker::new(
-                        counts,
-                        lookup
-                            .iter()
-                            .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
-                    ));
+                    resident_blocks =
+                        Some(ResidentBlockTracker::new(counts, lookup.block_counts()));
                 }
                 WorkerTask::Terminate => {
                     break;
