@@ -219,7 +219,7 @@ impl TrtllmClient {
     }
 
     pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
-        tokio::time::timeout(
+        let response = tokio::time::timeout(
             RPC_TIMEOUT,
             self.control()
                 .get_kv_event_sources(pb::GetKvEventSourcesRequest {
@@ -232,23 +232,19 @@ impl TrtllmClient {
                 "GetKvEventSources did not respond within {RPC_TIMEOUT:?}"
             ))
         })?
-        .map(tonic::Response::into_inner)
-        .map(|response| response.sources)
-        .or_else(|status| {
-            if status.code() == tonic::Code::Unimplemented {
-                Ok(Vec::new())
-            } else {
-                Err(status)
-            }
-        })
-        .map_err(|status| status_to_dynamo("GetKvEventSources", status))
+        .map(tonic::Response::into_inner);
+        match response {
+            Ok(response) => Ok(response.sources),
+            Err(status) if status.code() == tonic::Code::Unimplemented => Ok(Vec::new()),
+            Err(status) => Err(status_to_dynamo("GetKvEventSources", status)),
+        }
     }
 
     pub(crate) async fn get_load(
         &self,
         include_per_rank: bool,
     ) -> Result<pb::LoadInfo, DynamoError> {
-        tokio::time::timeout(
+        let response = tokio::time::timeout(
             LOAD_RPC_TIMEOUT,
             self.control()
                 .get_load(pb::GetLoadRequest { include_per_rank }),
@@ -259,15 +255,14 @@ impl TrtllmClient {
                 "GetLoad did not respond within {LOAD_RPC_TIMEOUT:?}"
             ))
         })?
-        .map(tonic::Response::into_inner)
-        .or_else(|status| {
-            if status.code() == tonic::Code::Unimplemented {
+        .map(tonic::Response::into_inner);
+        match response {
+            Ok(response) => Ok(response),
+            Err(status) if status.code() == tonic::Code::Unimplemented => {
                 Ok(pb::LoadInfo::default())
-            } else {
-                Err(status)
             }
-        })
-        .map_err(|status| status_to_dynamo("GetLoad", status))
+            Err(status) => Err(status_to_dynamo("GetLoad", status)),
+        }
     }
 
     /// Polls `GetModelInfo` until the engine reports a usable context length or
