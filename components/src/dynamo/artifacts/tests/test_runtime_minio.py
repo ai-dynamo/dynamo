@@ -5,10 +5,12 @@
 
 import hashlib
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
 np = pytest.importorskip("numpy")
 Fernet = pytest.importorskip("cryptography.fernet").Fernet
@@ -17,16 +19,16 @@ pytest.importorskip("boto3")
 pytest.importorskip("msgspec")
 pytest.importorskip("zstandard")
 
-from dynamo.artifacts.runtime import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.runtime import (
     ArtifactRuntime,
 )
-from dynamo.artifacts.storage import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.storage import (
     ArtifactStorageError,
 )
-from dynamo.artifacts.tests import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.tests import (
     test_storage_minio as test_artifact_storage_minio,
 )
-from dynamo.artifacts.vllm.capture import (  # noqa: E402 -- optional dependency guards
+from dynamo.artifacts.vllm.capture import (
     CaptureBudget,
     VllmArtifactSession,
 )
@@ -45,7 +47,7 @@ pytestmark = [
 
 
 def authority(tmp_path, store, verifiers=None):
-    client, bucket, operator, policy = store
+    _, bucket, _, policy = store
     return ArtifactRuntime(
         {
             "owner": "isolated-worker",
@@ -77,9 +79,25 @@ def authority(tmp_path, store, verifiers=None):
     )
 
 
+@pytest_asyncio.fixture
+async def authority_factory():
+    instances = []
+
+    def create(tmp_path, store, verifiers=None):
+        instance = authority(tmp_path, store, verifiers)
+        instances.append(instance)
+        return instance
+
+    yield create
+    for instance in instances:
+        await instance.close()
+
+
 @pytest.mark.asyncio
-async def test_capture_handoff_and_verified_managed_result(tmp_path, store):
-    runtime = authority(tmp_path, store)
+async def test_capture_handoff_and_verified_managed_result(
+    tmp_path, store, authority_factory
+):
+    runtime = authority_factory(tmp_path, store)
     destination = {
         "kind": "managed_store",
         "profile": "minio",
@@ -126,11 +144,11 @@ async def test_capture_handoff_and_verified_managed_result(tmp_path, store):
 
 @pytest.mark.asyncio
 async def test_presigned_acknowledgement_loss_reconciles_without_retry(
-    tmp_path, store, frozen_artifact
+    tmp_path, store, frozen_artifact, authority_factory
 ):
     client, bucket, _, _ = store
     key = "artifacts/delegated.dynexp"
-    runtime = authority(
+    runtime = authority_factory(
         tmp_path,
         store,
         {
@@ -172,4 +190,8 @@ async def test_presigned_acknowledgement_loss_reconciles_without_retry(
     assert ready["state"] == "ready"
     assert ready["sha256"] == frozen_artifact.sha256
     assert len(calls) == 1
-    assert runtime.store.grant(pending["operation_id"]) is None
+    with sqlite3.connect(runtime.store.path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(operations)")
+        }
+    assert "grant" not in columns
