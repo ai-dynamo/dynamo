@@ -1326,7 +1326,7 @@ class TestGenerateLocally:
     @pytest.mark.asyncio
     async def test_health_check_gets_dedicated_cache_salt(self):
         # An unsalted canary of [1] collides with TRT-LLM's attention-DP dummy
-        # request prefix (DYN-4908), so the canary must use its own salt.
+        # request prefix, so the canary must use its own salt.
         request = TrtllmHealthCheckPayload(
             disaggregation_mode=DisaggregationMode.AGGREGATED,
         ).to_dict()
