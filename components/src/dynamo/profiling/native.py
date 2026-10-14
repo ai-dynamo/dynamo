@@ -75,6 +75,14 @@ def kineto_blocks(stream, chunk: int = 1 << 22):
         raise Layout(f"trailer: {exc}") from exc
 
 
+def decoded(blocks):
+    for block in blocks:
+        try:
+            yield json.loads(block)
+        except ValueError as exc:  # let the token parser decide
+            raise Layout(str(exc)) from exc
+
+
 def open_trace(path: Path):
     return gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb")
 
@@ -92,7 +100,7 @@ def kineto_events(path: Path, fast: bool = True):
             base = next(blocks).get("baseTimeNanoseconds")
             if type(base) is not int:
                 raise Layout("no integer baseTimeNanoseconds")
-            events = map(json.loads, blocks)
+            events = decoded(blocks)
         else:
             header = stream.read(1 << 20).decode(errors="replace")
             match = re.search(r'"baseTimeNanoseconds"\s*:\s*(\d+)', header)
@@ -226,14 +234,23 @@ def draw_shard(task: dict) -> dict:
     """Draw one native file into per-view shards of comma-joined JSON events.
 
     Kineto traces use the fast block reader; on a layout deviation the shards
-    are rewritten from scratch with the ijson reader.
+    are rewritten from scratch with the ijson reader. A trace that still
+    cannot be read fails its target rather than the bundle.
     """
-    if task["collector"] != "torch_profiler":
-        return draw_views(task, NATIVE_READERS[task["collector"]])
     try:
-        return draw_views(task, kineto_events)
-    except Layout:
-        return draw_views(task, partial(kineto_events, fast=False))
+        if task["collector"] != "torch_profiler":
+            return draw_views(task, NATIVE_READERS[task["collector"]])
+        try:
+            return draw_views(task, kineto_events)
+        except Layout:
+            return draw_views(task, partial(kineto_events, fast=False))
+    except Exception as exc:
+        return {
+            "read": 0,
+            "written": 0,
+            "shards": {},
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def draw_views(task: dict, reader) -> dict:

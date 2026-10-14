@@ -17,6 +17,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1481,6 +1482,106 @@ def test_kineto_block_reader_matches_token_parser(tmp_path, suffix):
     )
     assert inspection.inspect_trace(path, config, deadline)["events"] == 3
     assert len(list(native.kineto_events(path, fast=False))) == 3
+
+
+def test_parallel_gzip_is_one_standard_member(tmp_path):
+    data = os.urandom(5000) + b"timeline " * 3000
+    path = tmp_path / "out.gz"
+    stream = bundle.ParallelGzip(path)
+    stream.BLOCK = 1024  # many blocks, compressed on threads
+    for start in range(0, len(data), 777):
+        stream.write(data[start : start + 777])
+    stream.close()
+    assert gzip.decompress(path.read_bytes()) == data
+    # One member: the stream ends exactly at its trailer.
+    reader = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    assert reader.decompress(path.read_bytes()) == data and not reader.unused_data
+
+
+def test_bundle_fails_only_the_target_with_a_malformed_trace(tmp_path):
+    base = 10**18
+    marker = {
+        "ph": "X",
+        "cat": "Trace",
+        "name": "PyTorch Profiler (0)",
+        "pid": "Spans",
+        "tid": 0,
+        "ts": 0,
+        "dur": 100,
+    }
+    good = tmp_path / "good_dp0.1.pt.trace.json"
+    good.write_text(
+        kineto_layout(
+            base,
+            [
+                marker,
+                {
+                    "ph": "X",
+                    "cat": "kernel",
+                    "name": "k",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1,
+                    "dur": 1,
+                },
+            ],
+        )
+    )
+    bad = tmp_path / "bad_dp0.1.pt.trace.json"
+    # Structurally intact (verification passes) but one event is not JSON.
+    kernel = {
+        "ph": "X",
+        "cat": "kernel",
+        "name": "bad-k",
+        "pid": 1,
+        "tid": 1,
+        "ts": 1,
+        "dur": 1,
+    }
+    bad.write_text(
+        kineto_layout(base, [marker, kernel]).replace('"bad-k"', '"bad-k",,')
+    )
+    session = tmp_path / "session"
+    session.mkdir()
+    manifest = {
+        "session_id": "s",
+        "state": "completed",
+        "artifact_status": "present",
+        "accepted_at_ns": base,
+        "plan": {"trace_ids": []},
+        "profiles": [
+            {"target_id": t, "collector": "torch_profiler"} for t in ("good", "bad")
+        ],
+        "clock": {"workers": {}},
+        "artifact_validation": [
+            {
+                "target_id": t,
+                "status": "present",
+                "artifacts": [{"location": str(path), "rank_id": "dp0"}],
+            }
+            for t, path in (("good", good), ("bad", bad))
+        ],
+    }
+    (session / "manifest.json").write_text(json.dumps(manifest))
+    otel = tmp_path / "otel.jsonl"
+    otel.write_text("")
+    summary = bundle.build(session, [otel], tmp_path / "out")
+    native_timeline = summary["coverage"]["native_timeline"]
+    assert native_timeline["good"]["status"] == "included"
+    assert native_timeline["bad"]["status"] == "failed"
+    window = json.loads(
+        gzip.decompress((tmp_path / "out/timeline.json.gz").read_bytes())
+    )
+    assert [e["name"] for e in window["traceEvents"] if e.get("cat") == "kernel"] == [
+        "k"
+    ]
+    names = {
+        e["args"]["name"]
+        for e in window["traceEvents"]
+        if e.get("name") == "process_name"
+    }
+    assert not any(name.startswith("bad ·") for name in names)
+    assert summary["artifact_verification"]["bad"]["status"] == "verified"
 
 
 def test_bundle_reads_nsight_worker_exports(tmp_path):

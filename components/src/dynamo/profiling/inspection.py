@@ -100,22 +100,29 @@ def is_marker(event: dict) -> bool:
 
 
 def scan_blocks(reader) -> tuple:
-    """Count events from Kineto's writer layout; raise Layout to fall back."""
+    """Check and count Kineto's writer layout without decoding every event.
+
+    The header, the trailer and the block structure are checked here and the
+    stream is hashed and size-limited; each event's JSON is decoded during
+    timeline conversion, which reports a malformed event as a failed target.
+    Only profiler-marker blocks are decoded (with Decimal, for exact ns
+    bounds). Raises Layout to fall back to the full token parser.
+    """
     blocks = kineto_blocks(reader)
     base = next(blocks).get("baseTimeNanoseconds")
     events = kernels = 0
     markers = []
     for block in blocks:
-        try:
-            event = json.loads(block)
-            events += 1
-            if event.get("cat") == "kernel":
-                kernels += 1
-            elif is_marker(event) and len(markers) < 2:
-                # Keep the marker's microsecond values exact for ns bounds.
-                markers.append(json.loads(block, parse_float=Decimal))
-        except ValueError as exc:
-            raise Layout(str(exc)) from exc
+        events += 1
+        if '"cat": "kernel"' in block:
+            kernels += 1
+        elif '"PyTorch Profiler' in block and len(markers) < 2:
+            try:
+                event = json.loads(block, parse_float=Decimal)
+            except ValueError as exc:
+                raise Layout(str(exc)) from exc
+            if is_marker(event):
+                markers.append(event)
     return True, events, kernels, base if type(base) is int else None, markers
 
 

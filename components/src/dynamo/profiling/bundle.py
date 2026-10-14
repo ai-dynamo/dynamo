@@ -27,14 +27,16 @@ attributed per kernel.
 """
 
 import argparse
-import gzip
+import io
 import json
 import os
 import shutil
+import struct
 import tarfile
 import tempfile
-from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
+import zlib
+from collections import Counter, defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 from .inspection import inspect_rank, inspect_target, kineto_result, sha256_file
@@ -63,10 +65,63 @@ def load_traces(paths: list[Path]) -> dict[str, dict[str, dict]]:
     return traces
 
 
+def cpus() -> int:
+    # The CPUs this job may use (Slurm affinity), not the whole node.
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else 1
+
+
 def pool(tasks: int) -> ProcessPoolExecutor:
-    # Size by the CPUs this job may use (Slurm affinity), not the whole node.
-    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else 1
-    return ProcessPoolExecutor(max_workers=max(1, min(cpus, tasks)))
+    return ProcessPoolExecutor(max_workers=max(1, min(cpus(), tasks)))
+
+
+class ParallelGzip(io.RawIOBase):
+    """Single-member gzip written by compressing 8 MiB blocks on threads.
+
+    Like pigz, each block is raw deflate ended with a full flush, so the
+    concatenation is one valid deflate stream; zlib releases the GIL while
+    compressing. The CRC is computed in order over the uncompressed data.
+    """
+
+    BLOCK = 8 << 20
+
+    def __init__(self, path: Path, level: int = 1):
+        self.file = path.open("wb")
+        self.file.write(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff")
+        self.level, self.crc, self.size = level, 0, 0
+        self.pending, self.buffer = deque(), bytearray()
+        self.workers = max(1, cpus())
+        self.threads = ThreadPoolExecutor(max_workers=self.workers)
+
+    def writable(self) -> bool:
+        return True
+
+    def deflate(self, block: bytes, mode: int) -> bytes:
+        compressor = zlib.compressobj(self.level, zlib.DEFLATED, -15)
+        return compressor.compress(block) + compressor.flush(mode)
+
+    def submit(self, block: bytes, mode: int) -> None:
+        self.crc = zlib.crc32(block, self.crc)
+        self.size += len(block)
+        self.pending.append(self.threads.submit(self.deflate, block, mode))
+        while len(self.pending) > 2 * self.workers:
+            self.file.write(self.pending.popleft().result())
+
+    def write(self, data) -> int:
+        self.buffer += data
+        while len(self.buffer) >= self.BLOCK:
+            self.submit(bytes(self.buffer[: self.BLOCK]), zlib.Z_FULL_FLUSH)
+            del self.buffer[: self.BLOCK]
+        return len(data)
+
+    def close(self) -> None:
+        if not self.closed:
+            self.submit(bytes(self.buffer), zlib.Z_FINISH)
+            while self.pending:
+                self.file.write(self.pending.popleft().result())
+            self.file.write(struct.pack("<II", self.crc, self.size & 0xFFFFFFFF))
+            self.file.close()
+            self.threads.shutdown()
+        super().close()
 
 
 def verify_native(manifest: dict) -> dict[str, dict]:
@@ -203,7 +258,9 @@ class Timeline:
     """Streaming Chrome/Perfetto JSON writer on the coordinator clock."""
 
     def __init__(self, path: Path, origin_ns: int):
-        self.stream = gzip.open(path, "wt", compresslevel=1)
+        self.stream = io.TextIOWrapper(
+            io.BufferedWriter(ParallelGzip(path), 1 << 20), encoding="utf-8"
+        )
         self.stream.write('{"displayTimeUnit":"ms","traceEvents":[')
         self.origin, self.first, self.count = origin_ns, True, 0
         self.pids: dict = {}
@@ -558,13 +615,27 @@ def build(
                             "prefix": f"{number}-{shard}",
                         }
                     )
+            # A target's files are appended together once all have converted,
+            # or not at all if any failed.
+            remaining, done = Counter(t["target"] for t in tasks), defaultdict(list)
             for task, result in zip(tasks, executor.map(draw_shard, tasks)):
-                stats = native[task["target"]]
-                stats["events_read"] += result["read"] if number == 0 else 0
-                stats["events_written"] += result["written"]
-                for view, (shard, count) in result["shards"].items():
-                    timelines[view].extend(shard, count)
-                    os.remove(shard)
+                target = task["target"]
+                done[target].append(result)
+                remaining[target] -= 1
+                if remaining[target] or native[target]["status"] != "included":
+                    continue
+                results = done.pop(target)
+                failed = [r["error"] for r in results if "error" in r]
+                if failed:
+                    native[target] = {"status": "failed", "reason": "; ".join(failed)}
+                    continue
+                stats = native[target]
+                for result in results:
+                    stats["events_read"] += result["read"] if number == 0 else 0
+                    stats["events_written"] += result["written"]
+                    for view, (shard, count) in result["shards"].items():
+                        timelines[view].extend(shard, count)
+                        os.remove(shard)
             for view, (entry, *_) in batch:
                 entry["timeline_events"] = timelines[view].close()
     window_events = window.close()
@@ -639,7 +710,7 @@ def build(
 def archive(output: Path, summary: dict) -> tuple[Path, str]:
     """Package the bundle with the raw native Kineto/Nsight traces as one tar.gz."""
     path = output.parent / f"{output.name}.tar.gz"
-    with tarfile.open(path, "w:gz", compresslevel=1) as tar:
+    with ParallelGzip(path) as stream, tarfile.open(fileobj=stream, mode="w|") as tar:
         tar.add(output, arcname=output.name)
         for profile in summary["native_profiles"]:
             source = Path(profile["location"])
