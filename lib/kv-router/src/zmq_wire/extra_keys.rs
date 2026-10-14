@@ -47,8 +47,11 @@ pub fn extra_keys_to_cache_namespace(
     let first_block = extra_keys?.first()?.as_ref()?;
     let mut unmatched_lora = lora_name.filter(|name| !name.is_empty());
     first_block.iter().find_map(|key| {
-        let ExtraKeyItem::Hash(value) = key else {
-            return None;
+        let value = match key {
+            ExtraKeyItem::Hash(value) => value.as_str(),
+            // Keep GPU namespace normalization independent of shared-cache eligibility.
+            ExtraKeyItem::Binary(bytes) => std::str::from_utf8(bytes).ok()?,
+            _ => return None,
         };
         if unmatched_lora.is_some_and(|name| name == value) {
             unmatched_lora = None;
@@ -58,6 +61,39 @@ pub fn extra_keys_to_cache_namespace(
             .strip_prefix(DYNAMO_CACHE_SALT_PREFIX)
             .filter(|namespace| !namespace.is_empty())
             .map(str::to_owned)
+    })
+}
+
+pub(super) fn extra_keys_are_text_only(
+    extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
+    lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
+) -> bool {
+    extra_keys.is_none_or(|blocks| {
+        blocks.iter().enumerate().all(|(index, keys)| {
+            let mut unmatched_lora = lora_name.filter(|name| !name.is_empty());
+            let mut unmatched_namespace = if index == 0 {
+                cache_namespace.filter(|namespace| !namespace.is_empty())
+            } else {
+                None
+            };
+            keys.iter().flatten().all(|key| {
+                let ExtraKeyItem::Hash(value) = key else {
+                    return false;
+                };
+                if unmatched_lora == Some(value.as_str()) {
+                    unmatched_lora = None;
+                    return true;
+                }
+                if let Some(namespace) = value.strip_prefix(DYNAMO_CACHE_SALT_PREFIX)
+                    && unmatched_namespace == Some(namespace)
+                {
+                    unmatched_namespace = None;
+                    return true;
+                }
+                false
+            })
+        })
     })
 }
 
@@ -87,6 +123,9 @@ pub fn extra_keys_to_block_mm_infos(
                     | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
                         parse_mm_hash_from_extra_key(hash)
                     }
+                    ExtraKeyItem::Binary(bytes) => std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(parse_mm_hash_from_extra_key),
                     ExtraKeyItem::Bytes(_)
                     | ExtraKeyItem::Signed(_)
                     | ExtraKeyItem::Unsigned(_)

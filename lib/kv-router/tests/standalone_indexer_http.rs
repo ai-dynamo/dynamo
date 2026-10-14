@@ -556,6 +556,7 @@ fn raw_block_stored(
     medium: &str,
 ) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         ownership: None,
         block_hashes: vec![BlockHashValue::Unsigned(block_hash)],
         parent_block_hash: parent_block_hash.map(BlockHashValue::Unsigned),
