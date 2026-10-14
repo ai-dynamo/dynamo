@@ -2532,6 +2532,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 		name                         string
 		replicas                     int32
 		existingDeployment           *appsv1.Deployment
+		existingObjects              []client.Object
 		wantComponentReconcileResult ComponentReconcileResult
 	}{
 		{
@@ -2612,6 +2613,54 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:               "crash-looping Pod of the current revision",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment("2"),
+			existingObjects: []client.Object{
+				crashLoopTestDeploymentReplicaSet("1", "previous"),
+				crashLoopTestDeploymentReplicaSet("2", "current"),
+				crashLoopTestComponentPod("test-component-current-a", "current"),
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   dcdReasonContainerCrashLooping,
+				message:  "pod test-component-current-a container main restarted 3 times, last exit code 1 (Error)",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     ptr.To(int32(0)),
+					AvailableReplicas: ptr.To(int32(0)),
+				},
+			},
+		},
+		{
+			name:               "crash-looping Pod of an older revision",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment("2"),
+			existingObjects: []client.Object{
+				crashLoopTestDeploymentReplicaSet("1", "previous"),
+				crashLoopTestDeploymentReplicaSet("2", "current"),
+				crashLoopTestComponentPod("test-component-previous-a", "previous"),
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     ptr.To(int32(0)),
+					AvailableReplicas: ptr.To(int32(0)),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2662,6 +2711,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				}
 				objects = append(objects, ownedDeployment)
 			}
+			objects = append(objects, tt.existingObjects...)
 
 			// Set up fake client with the DCD and existing Deployment
 			fakeKubeClient := fake.NewClientBuilder().
@@ -2695,6 +2745,66 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
+}
+
+// crashLoopTestDeployment describes the unready Deployment of DCD
+// test-component at revision.
+func crashLoopTestDeployment(revision string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test-component",
+			Namespace:   "default",
+			UID:         "test-component-deployment",
+			Generation:  1,
+			Annotations: map[string]string{deploymentRevisionAnnotation: revision},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+		},
+	}
+}
+
+// crashLoopTestDeploymentReplicaSet describes a ReplicaSet of
+// crashLoopTestDeployment for one template.
+func crashLoopTestDeploymentReplicaSet(revision, podTemplateHash string) *appsv1.ReplicaSet {
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component-" + podTemplateHash,
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:   "test-component",
+				appsv1.DefaultDeploymentUniqueLabelKey: podTemplateHash,
+			},
+			Annotations: map[string]string{deploymentRevisionAnnotation: revision},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "test-component",
+				UID:        "test-component-deployment",
+				Controller: ptr.To(true),
+			}},
+		},
+	}
+}
+
+// crashLoopTestComponentPod describes a not-Ready Pod of DCD test-component
+// whose main container restarted three times after exiting with code 1.
+func crashLoopTestComponentPod(name, podTemplateHash string) *corev1.Pod {
+	pod := crashLoopTestPod(name, podTemplateHash, false, 3, 1)
+	pod.Namespace = "default"
+	pod.Labels[commonconsts.KubeLabelDynamoSelector] = "test-component"
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "test-component-" + podTemplateHash,
+		Controller: ptr.To(true),
+	}}
+	return &pod
 }
 
 func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testing.T) {

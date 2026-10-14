@@ -61,6 +61,7 @@ const (
 	reasonFailedToReconcileResources          Reason = "failed_to_reconcile_the_resources"
 	reasonRollingUpdateFailed                 Reason = "rolling_update_failed"
 	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
+	reasonComponentCrashLooping               Reason = "component_crash_looping"
 	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
 

@@ -27,6 +27,8 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type Reason string
@@ -149,6 +151,42 @@ func checkResourcesReadiness(resources []Resource) ReconcileResult {
 		Message:         Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ComponentStatus: componentStatuses,
 	}
+}
+
+// applyComponentCrashLoops fails the graph while any DCD reports, for its
+// current generation, that a container of its current Pods is crash-looping.
+func applyComponentCrashLoops(
+	result ReconcileResult,
+	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+) ReconcileResult {
+	var crashLoops []string
+	for _, dcd := range dcds {
+		if dcd.Status.ObservedGeneration < dcd.Generation {
+			continue
+		}
+		available := meta.FindStatusCondition(
+			dcd.Status.Conditions,
+			nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+		)
+		if available == nil ||
+			available.Status != metav1.ConditionFalse ||
+			available.Reason != dcdReasonContainerCrashLooping {
+			continue
+		}
+		crashLoops = append(crashLoops, fmt.Sprintf(
+			"Component %s is crash-looping: %s",
+			dynamo.GetDCDComponentName(dcd),
+			available.Message,
+		))
+	}
+	if len(crashLoops) == 0 {
+		return result
+	}
+	sort.Strings(crashLoops)
+	result.State = nvidiacomv1beta1.DGDStateFailed
+	result.Reason = reasonComponentCrashLooping
+	result.Message = Message(strings.Join(crashLoops, "; "))
+	return result
 }
 
 func applyCheckpointStartupReadiness(
