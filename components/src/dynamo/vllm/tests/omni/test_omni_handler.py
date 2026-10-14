@@ -1881,6 +1881,107 @@ class TestVideoEndpointValidation:
     """Video requests reject invalid controls before generation."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reference",
+        ["https://127.0.0.1/reference.png", "data:image/png;base64,%%%", ""],
+        ids=["blocked-url", "invalid-base64", "empty-reference"],
+    )
+    async def test_i2v_invalid_reference_is_a_client_error(
+        self, monkeypatch, reference
+    ):
+        monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = ImageLoader()
+        context = MagicMock()
+        context.id.return_value = "req-1"
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler.generate(
+                {
+                    "prompt": "a drone",
+                    "model": "test-model",
+                    "input_reference": reference,
+                },
+                context,
+            ):
+                pytest.fail("Invalid references must not produce response chunks")
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_i2v_unsupported_reference_preserves_status(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = ImageLoader()
+        context = MagicMock()
+        context.id.return_value = "req-1"
+
+        with pytest.raises(HttpStatusError) as exc_info:
+            async for _ in handler.generate(
+                {
+                    "prompt": "a drone",
+                    "model": "test-model",
+                    "input_reference": "data:image/png;base64,bm90IGFuIGltYWdl",
+                },
+                context,
+            ):
+                pytest.fail("Invalid references must not produce response chunks")
+        assert exc_info.value.status == 415
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_i2v_pixel_limit_is_a_bounded_client_error(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        error = Image.DecompressionBombError("unbounded loader details")
+        handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
+        context = MagicMock()
+        context.id.return_value = "req-1"
+
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler.generate(
+                {
+                    "prompt": "a drone",
+                    "model": "test-model",
+                    "input_reference": "https://example.com/image",
+                },
+                context,
+            ):
+                pytest.fail("Invalid references must not produce response chunks")
+        assert str(exc_info.value) == "Failed to load input_reference"
+        assert exc_info.value.__cause__ is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            HttpStatusError(503, "Service Unavailable", "https://example.com/image"),
+            RuntimeError("Unexpected loader failure"),
+        ],
+        ids=["origin-unavailable", "unexpected-failure"],
+    )
+    async def test_i2v_loader_server_errors_are_preserved(self, error):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
+        context = MagicMock()
+        context.id.return_value = "req-1"
+
+        with pytest.raises(type(error)) as exc_info:
+            async for _ in handler.generate(
+                {
+                    "prompt": "a drone",
+                    "model": "test-model",
+                    "input_reference": "https://example.com/image",
+                },
+                context,
+            ):
+                pytest.fail("Failed references must not produce response chunks")
+        assert exc_info.value is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_video_rejection_propagates_before_generation(self):
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
