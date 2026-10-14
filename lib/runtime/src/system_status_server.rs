@@ -131,6 +131,9 @@ impl Clone for SystemStatusServerInfo {
 pub struct SystemStatusState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
+    // Serializes /metrics renders so overlapping scrapes wait here, on the
+    // runtime, and share one blocking render.
+    scrape_gate: Arc<tokio::sync::Mutex<()>>,
     // Discovery metadata (only for Kubernetes backend)
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
 }
@@ -143,6 +146,7 @@ impl SystemStatusState {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             root_drt: drt,
+            scrape_gate: Arc::new(tokio::sync::Mutex::new(())),
             discovery_metadata,
         })
     }
@@ -530,31 +534,42 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     //
     // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
     // so /metrics traverses registered child registries and produces a single combined output.
-    //
-    // The render runs engine exposition callbacks that cross into Python and
-    // wait for the GIL, for seconds on a loaded worker, so it goes to the
-    // blocking pool rather than parking a runtime worker per scrape.
-    let drt = state.drt().clone();
-    let rendered = tokio::task::spawn_blocking(move || drt.metrics().prometheus_expfmt()).await;
-    let response = match rendered {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::error!("Failed to get metrics from registry: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get metrics".to_string(),
-            );
-        }
+    let registry = state.drt().get_metrics_registry().clone();
+    match render_scrape(&state.scrape_gate, registry).await {
+        Ok(response) => (StatusCode::OK, response),
         Err(e) => {
-            tracing::error!("Metrics render task failed: {e}");
-            return (
+            tracing::error!("Failed to get metrics from registry: {e}");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get metrics".to_string(),
-            );
+            )
         }
-    };
+    }
+}
 
-    (StatusCode::OK, response)
+/// Render `/metrics` for one scrape. Scrapes queue on `gate` without holding a
+/// blocking thread; a scrape that arrived while a render was in flight takes
+/// that render's text, and only an actual render goes to the blocking pool,
+/// where the engine exposition callbacks wait for the GIL.
+async fn render_scrape(
+    gate: &tokio::sync::Mutex<()>,
+    registry: crate::metrics::MetricsRegistry,
+) -> anyhow::Result<String> {
+    render_scrape_at(gate, registry, Instant::now()).await
+}
+
+async fn render_scrape_at(
+    gate: &tokio::sync::Mutex<()>,
+    registry: crate::metrics::MetricsRegistry,
+    requested_at: Instant,
+) -> anyhow::Result<String> {
+    let _serialized = gate.lock().await;
+    if let Some(text) = registry.cached_prometheus_expfmt_since(requested_at) {
+        return Ok(text);
+    }
+    tokio::task::spawn_blocking(move || registry.prometheus_expfmt_combined_since(requested_at))
+        .await
+        .map_err(|e| anyhow::anyhow!("metrics render task failed: {e}"))?
 }
 
 /// Metadata handler
@@ -950,6 +965,63 @@ mod tests {
     use super::*;
     use crate::utils::ip_resolver::test_support::StubResolver;
     use tokio::time::Duration;
+
+    /// Scrapes that overlap a render must share it even when the blocking pool
+    /// has a single thread: queued scrapes wait on the runtime, not in the pool.
+    #[test]
+    fn queued_scrapes_share_one_render_with_one_blocking_thread() {
+        use crate::metrics::MetricsRegistry;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let registry = MetricsRegistry::new();
+            let renders = Arc::new(AtomicUsize::new(0));
+            let counter = renders.clone();
+            registry.add_expfmt_callback(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(300));
+                Ok("engine_metric 1\n".to_string())
+            }));
+            let gate = Arc::new(tokio::sync::Mutex::new(()));
+
+            // All four scrapes arrive before the first render starts.
+            let arrived = Instant::now();
+            let scrapes: Vec<_> = (0..4)
+                .map(|_| {
+                    let gate = gate.clone();
+                    let registry = registry.clone();
+                    tokio::spawn(async move {
+                        render_scrape_at(&gate, registry, arrived)
+                            .await
+                            .expect("render")
+                    })
+                })
+                .collect();
+            for scrape in scrapes {
+                assert!(scrape.await.expect("task").contains("engine_metric 1"));
+            }
+            assert_eq!(
+                renders.load(Ordering::SeqCst),
+                1,
+                "overlapping scrapes share one render"
+            );
+
+            render_scrape(&gate, registry.clone())
+                .await
+                .expect("render");
+            assert_eq!(
+                renders.load(Ordering::SeqCst),
+                2,
+                "a later scrape renders again"
+            );
+        });
+    }
 
     #[test]
     fn advertised_address_stays_in_the_bound_family() {

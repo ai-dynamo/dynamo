@@ -778,18 +778,14 @@ pub struct MetricsRegistry {
     /// registered at Endpoint remain reachable at DRT).
     pub prometheus_typed_callbacks: Arc<std::sync::RwLock<Vec<PrometheusTypedCallback>>>,
 
-    /// Serializes `/metrics` renders and lets a scrape that arrived while a
-    /// render was in flight reuse that render's text instead of starting its
-    /// own. Engine exposition callbacks cross into Python and hold the GIL, so
-    /// concurrent scrapers would otherwise stack renders on top of the engine's
-    /// request path. Arc-wrapped so every clone of the registry shares it.
+    /// Single-flight state for `/metrics` renders: the last render and when it
+    /// started collecting. Shared by every clone of the registry.
     expfmt_single_flight: Arc<std::sync::Mutex<ExpfmtRender>>,
 }
 
-/// The most recent `/metrics` render and when it finished.
 #[derive(Default)]
 struct ExpfmtRender {
-    finished_at: Option<std::time::Instant>,
+    started_at: Option<std::time::Instant>,
     text: String,
 }
 
@@ -896,28 +892,45 @@ impl MetricsRegistry {
     /// - Multiple series for the same name are allowed if labels differ.
     /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
     ///
-    /// Renders are single-flight: concurrent calls wait for the render in
-    /// progress and share its text when it finished after they arrived. The
-    /// render holds that lock while it runs the update and exposition
-    /// callbacks, so a callback must not render the registry it is
-    /// registered on.
+    /// Renders are single-flight; see [`Self::prometheus_expfmt_combined_since`].
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
-        let requested_at = std::time::Instant::now();
+        self.prometheus_expfmt_combined_since(std::time::Instant::now())
+    }
+
+    /// Render for a scrape that arrived at `requested_at`. Renders never
+    /// overlap, and a render that started collecting after `requested_at` is
+    /// returned as is: the scrape sees every update made before it arrived and
+    /// a burst of overlapping scrapes costs at most two passes through the
+    /// engine callbacks. A callback must not render the registry it is
+    /// registered on.
+    pub fn prometheus_expfmt_combined_since(
+        &self,
+        requested_at: std::time::Instant,
+    ) -> anyhow::Result<String> {
         let mut last = self
             .expfmt_single_flight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A render that finished after this scrape arrived already reflects
-        // every update the scrape could observe, so hand it over rather than
-        // rendering again behind it. Renders never overlap, so a burst of
-        // scrapers costs one trip through the engine callbacks, not one each.
-        if last.finished_at.is_some_and(|at| at > requested_at) {
+        if last.started_at.is_some_and(|at| at >= requested_at) {
             return Ok(last.text.clone());
         }
+        let started_at = std::time::Instant::now();
         let text = self.render_expfmt_combined()?;
-        last.finished_at = Some(std::time::Instant::now());
+        last.started_at = Some(started_at);
         last.text.clone_from(&text);
         Ok(text)
+    }
+
+    /// The last render if it started collecting after `requested_at`, without
+    /// waiting on a render in flight.
+    pub fn cached_prometheus_expfmt_since(
+        &self,
+        requested_at: std::time::Instant,
+    ) -> Option<String> {
+        let last = self.expfmt_single_flight.try_lock().ok()?;
+        last.started_at
+            .is_some_and(|at| at >= requested_at)
+            .then(|| last.text.clone())
     }
 
     fn render_expfmt_combined(&self) -> anyhow::Result<String> {
@@ -2331,56 +2344,59 @@ mod test_metric_families_combined {
         }
     }
 
-    /// Scrapes that arrive while a render is in flight share that render.
-    ///
-    /// Engine exposition callbacks hold the GIL for the whole render, so a
-    /// scraper that polls faster than a loaded worker renders would otherwise
-    /// pile renders on top of each other without bound. The waiters are
-    /// released into the burst before the first render can finish, so a
-    /// regression shows as extra callback invocations, not as a timing flake.
+    /// A scrape that arrived before a render started collecting shares that
+    /// render; one that arrived after it started gets a fresh render.
     #[test]
-    fn concurrent_scrapes_share_one_render() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::Duration;
+    fn scrapes_share_a_render_that_started_after_they_arrived() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
 
         let registry = MetricsRegistry::new();
         let renders = StdArc::new(AtomicUsize::new(0));
-        let counter = renders.clone();
+        let rendering = StdArc::new(AtomicBool::new(false));
+        let (counter, flag) = (renders.clone(), rendering.clone());
         registry.add_expfmt_callback(StdArc::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(500));
+            flag.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(300));
             Ok("engine_metric 1\n".to_string())
         }));
 
-        let scrapers = 4;
-        let barrier = StdArc::new(std::sync::Barrier::new(scrapers));
-        let texts: Vec<String> = (0..scrapers)
+        // Four scrapes arrive, then the first one starts the render.
+        let arrived = Instant::now();
+        let first = {
+            let registry = registry.clone();
+            std::thread::spawn(move || registry.prometheus_expfmt_combined_since(arrived))
+        };
+        while !rendering.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // A scrape that arrives during the render must not take its data.
+        let late = Instant::now();
+        let waiters: Vec<_> = (0..3)
             .map(|_| {
                 let registry = registry.clone();
-                let barrier = barrier.clone();
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    registry.prometheus_expfmt_combined().expect("render")
-                })
+                std::thread::spawn(move || registry.prometheus_expfmt_combined_since(arrived))
             })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| handle.join().expect("scraper thread"))
             .collect();
-
-        assert!(
-            texts.iter().all(|t| t.contains("engine_metric 1")),
-            "every scraper must receive the engine text"
-        );
+        assert!(first.join().unwrap().unwrap().contains("engine_metric 1"));
+        for w in waiters {
+            assert!(w.join().unwrap().unwrap().contains("engine_metric 1"));
+        }
         assert_eq!(
             renders.load(Ordering::SeqCst),
             1,
-            "a burst of concurrent scrapes must cost one render"
+            "early arrivals share the render"
         );
 
-        // A scrape after the burst sees nothing newer than itself and renders.
-        registry.prometheus_expfmt_combined().expect("render");
-        assert_eq!(renders.load(Ordering::SeqCst), 2);
+        registry
+            .prometheus_expfmt_combined_since(late)
+            .expect("render");
+        assert_eq!(
+            renders.load(Ordering::SeqCst),
+            2,
+            "a late arrival renders again"
+        );
     }
 
     /// A failing engine callback is skipped, never fatal: one broken engine
