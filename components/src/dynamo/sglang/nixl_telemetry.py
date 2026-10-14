@@ -171,7 +171,7 @@ def scheduler_metrics_ipc_name(server_args: Any, port_args: Any) -> str:
     returned unchanged. Can be removed once SGLang copies the address itself.
     """
     name = port_args.metrics_ipc_name
-    instance_id = getattr(port_args, "instance_id", "")
+    instance_id = port_args.instance_id
     dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     if (
         dp_size <= 1
