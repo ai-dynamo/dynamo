@@ -18,12 +18,18 @@ SCHEMA = "protocol-schema-acquisition/v2"
 
 
 class NoRedirect(HTTPRedirectHandler):
+    """Reject redirects so capture provenance names the actual source URL."""
+
     def redirect_request(self, request, stream, code, message, headers, url):
+        """Return no follow-up request; urllib then raises its redirect HTTPError."""
         return None
 
 
 def write_json(path: Path, value) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    """Overwrite a UTF-8 JSON file with sorted keys; parents must exist and I/O errors propagate."""
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def server_name(value: str) -> str:
@@ -34,6 +40,7 @@ def server_name(value: str) -> str:
 
 
 def read_limited(stream) -> bytes:
+    """Read at most 32 MiB from a binary stream; raise ValueError if it exceeds that limit."""
     raw = stream.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES:
         raise ValueError("OpenAPI document exceeds the 32 MiB capture limit")
@@ -55,18 +62,22 @@ def parse_document(raw: bytes) -> dict:
 
 @dataclass
 class Snapshot:
+    """Parsed schema, exact source bytes, and observations; metadata is not attestation."""
+
     document: dict
     metadata: dict
     raw: bytes
     filename: str = "openapi.raw"
 
     def save(self, directory: Path) -> None:
+        """Create a new directory and save bytes/metadata; failures may leave partial output."""
         directory.mkdir(parents=True, exist_ok=False)
         (directory / self.filename).write_bytes(self.raw)
         write_json(directory / "acquisition.json", self.metadata)
 
 
 def snapshot(raw: bytes, server: str, source: dict, caller_metadata=None) -> Snapshot:
+    """Parse bytes and record their hash/time; validate the identity, not caller annotations."""
     return Snapshot(
         parse_document(raw),
         {
@@ -83,6 +94,12 @@ def snapshot(raw: bytes, server: str, source: dict, caller_metadata=None) -> Sna
 
 
 def acquire(args) -> int:
+    """Capture a CLI-selected file or direct HTTP(S) URL; return 0 after saving it.
+
+    `args` follows the acquire subcommand. HTTP uses no proxies or redirects and
+    a 30-second socket timeout. Invalid inputs and I/O errors propagate; a failed
+    save can leave partial output in the required new directory.
+    """
     server_name(args.server)
     caller_metadata = (
         json.loads(args.metadata.read_text()) if args.metadata is not None else None
@@ -115,6 +132,8 @@ def load_capture(source: Path, server: str) -> Snapshot:
 
     Capture annotations (including legacy deployment provenance) are retained,
     not verified. The raw bytes, not a later reread, are saved with the report.
+    Invalid identities, versions, or checksums raise ValueError; parsing and I/O
+    errors propagate. Neither input files nor directories are modified.
     """
     server_name(server)
     if not source.is_dir():

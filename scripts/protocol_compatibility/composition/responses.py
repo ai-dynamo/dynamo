@@ -25,6 +25,11 @@ def response_manifest() -> dict:
 
 
 def main() -> None:
+    """Compose CLI-selected JSON and pinned OpenAI YAML into a new directory.
+
+    Parsing, composition and I/O errors propagate. A failed save can leave partial
+    output; source files are unchanged.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", type=Path, required=True)
     parser.add_argument("--openai", type=Path, required=True)

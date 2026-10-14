@@ -4,8 +4,8 @@
 
 Call response_document on each retained server export, then compare the returned
 documents with assessment.openapi.compare. These are comparison-only documents:
-SSE schema denotes a parsed event whose JSON data has been decoded, not a wire
-body. Original itemSchema/contentSchema locations accompany coverage gaps.
+SSE projections describe decoded events or explicitly selected chunks, never a
+wire body. Original itemSchema/contentSchema locations accompany coverage gaps.
 
 Only explicit string data alternatives (JSON contentSchema or a string const)
 are decoded. Unsupported encodings/constraints never become a compatibility pass.
@@ -14,6 +14,7 @@ Neither this projection nor a structural diff proves runtime behavior or orderin
 
 import copy
 import json
+import re
 
 import jsonpointer
 from jsonschema import Draft202012Validator, ValidationError
@@ -29,6 +30,237 @@ from .openapi import (
     schema_nodes,
     validate_comparison_document,
 )
+
+
+def prepare_response_source(
+    document: dict, config: dict | None, sha256: str
+) -> tuple[dict, dict, dict]:
+    """Copy a source and validate hash-qualified route/stream selections.
+
+    `sha256` must identify the retained raw bytes, including when `document` is
+    their composed Dynamo derivative. Caller source/revision labels are retained,
+    not attested. Only the two explicit OpenAI /v1 route mappings are supported.
+    Return the projection source, stream selections keyed by media pointer, and
+    provenance. Invalid selectors, hashes, paths or collisions raise ValueError;
+    no input is mutated and no source URL is fetched.
+    """
+    result = copy.deepcopy(document)
+    if config is None:
+        return (
+            result,
+            {},
+            {"sha256": sha256, "interpretation": "native-itemSchema-only"},
+        )
+    required = {"sha256", "source", "revision", "streams"}
+    if (
+        not isinstance(config, dict)
+        or not required <= config.keys()
+        or set(config) - required - {"path_mappings"}
+    ):
+        raise ValueError("Adapter source requires sha256, source, revision and streams")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", str(config["sha256"]))
+        or config["sha256"] != sha256
+    ):
+        raise ValueError("Response adapter raw checksum mismatch")
+    if any(
+        not isinstance(config[key], str) or not config[key].strip()
+        for key in ("source", "revision")
+    ):
+        raise ValueError("Response adapter source and revision must be explicit")
+    mappings = config.get("path_mappings", {})
+    allowed = {
+        "/chat/completions": "/v1/chat/completions",
+        "/completions": "/v1/completions",
+    }
+    if not isinstance(mappings, dict) or any(
+        allowed.get(key) != value for key, value in mappings.items()
+    ):
+        raise ValueError("Only explicit completion /v1 path mappings are supported")
+    routes = []
+    for original, target in mappings.items():
+        paths = result.get("paths", {})
+        if (
+            original not in paths
+            or target in paths
+            or not isinstance(paths[original].get("post"), dict)
+        ):
+            raise ValueError("Missing source operation or colliding mapped endpoint")
+        routes.append(
+            {
+                "source_operation": pointer("paths", original, "post"),
+                "projection_operation": pointer("paths", target, "post"),
+                "server_context": {
+                    "document": copy.deepcopy(document.get("servers", [])),
+                    "path": copy.deepcopy(paths[original].get("servers", [])),
+                    "operation": copy.deepcopy(
+                        paths[original]["post"].get("servers", [])
+                    ),
+                },
+            }
+        )
+        paths[target] = paths.pop(original)
+    if not isinstance(config["streams"], list):
+        raise ValueError("Adapter streams must be a list")
+    streams = {}
+    for entry in config["streams"]:
+        if (
+            not isinstance(entry, dict)
+            or not {"pointer", "interpretation"} <= entry.keys()
+            or set(entry) - {"pointer", "interpretation", "chunk_pointer"}
+        ):
+            raise ValueError("Stream selection requires pointer and interpretation")
+        mode = entry["interpretation"]
+        if mode not in {"event-schema", "event-item-schema", "decoded-chunk"}:
+            raise ValueError("Unknown SSE interpretation")
+        dialect = "3.2." if mode == "event-item-schema" else "3.1."
+        if not str(document.get("openapi", "")).startswith(dialect):
+            raise ValueError(
+                "SSE interpretation does not match the source OpenAPI dialect"
+            )
+        location = entry["pointer"]
+        if not isinstance(location, str) or not location.startswith("#/"):
+            raise ValueError("Stream pointer must be a local JSON Pointer")
+        parts = jsonpointer.JsonPointer(location[1:]).parts
+        keyword = "itemSchema" if mode == "event-item-schema" else "schema"
+        if (
+            len(parts) != 8
+            or parts[0] != "paths"
+            or parts[2:4] != ["post", "responses"]
+            or parts[5:] != ["content", "text/event-stream", keyword]
+            or mappings.get(parts[1], parts[1]) not in ENDPOINTS
+        ):
+            raise ValueError("Stream pointer must select a scoped SSE media schema")
+        jsonpointer.resolve_pointer(document, location[1:])
+        projection_parts = [*parts]
+        projection_parts[1] = mappings.get(parts[1], parts[1])
+        projected_pointer = pointer(*projection_parts)
+        media_pointer = pointer(*projection_parts[:-1])
+        if media_pointer in streams:
+            raise ValueError("Duplicate SSE stream selection")
+        selection = {**copy.deepcopy(entry), "projection_pointer": projected_pointer}
+        if "chunk_pointer" in entry:
+            chunk = entry["chunk_pointer"]
+            if (
+                not isinstance(chunk, str)
+                or not chunk.startswith(location + "/")
+                or not chunk.endswith("/contentSchema")
+                or mode == "decoded-chunk"
+            ):
+                raise ValueError(
+                    "Chunk pointer must select JSON contentSchema within the chosen event"
+                )
+            selection["projection_chunk_pointer"] = (
+                projected_pointer + chunk[len(location) :]
+            )
+        streams[media_pointer] = selection
+    return (
+        result,
+        streams,
+        {
+            "sha256": sha256,
+            "source": config["source"],
+            "revision": config["revision"],
+            "identity_verification": "raw_hash_only; source_and_revision_are_caller_assertions",
+            "path_mappings": routes,
+            "streams": list(streams.values()),
+        },
+    )
+
+
+def decoded_chunk_schema(document: dict, schema: dict) -> dict:
+    """Copy a source-qualified Chat chunk schema after checking its bounded shape.
+
+    Only object declarations with choices and no envelope data property, directly
+    or through pure local component refs, are supported. References and all
+    payload constraints remain unchanged. Ambiguous forms raise ValueError or
+    JsonPointerException so callers can retain a coverage gap.
+    """
+    root, refs = schema, set()
+    while isinstance(root, dict) and "$ref" in root:
+        ref = root["$ref"]
+        if (
+            not isinstance(ref, str)
+            or not ref.startswith("#/components/schemas/")
+            or ref in refs
+            or set(root) != {"$ref"}
+        ):
+            raise ValueError("Unsupported decoded chunk reference")
+        refs.add(ref)
+        root = jsonpointer.resolve_pointer(document, ref[1:])
+    if (
+        not isinstance(root, dict)
+        or root.get("type") != "object"
+        or "choices" not in root.get("properties", {})
+        or "data" in root.get("properties", {})
+        or any(key in root for key in ("anyOf", "oneOf", "allOf"))
+    ):
+        raise ValueError(
+            "Decoded chunk must explicitly describe a Chat choices object, not an event envelope"
+        )
+    return copy.deepcopy(schema)
+
+
+def chunk_document(document: dict, selection: dict) -> tuple[dict, list[dict]]:
+    """Project one explicitly selected decoded chunk for a separate oasdiff probe.
+
+    `selection` comes from prepare_response_source. Event selections must point
+    to a JSON data alternative, not an arbitrary nested schema; refs in that
+    payload are preserved. Return a two-route comparison document and chunk gaps.
+    Unsupported selectors/encodings raise ValueError or JsonPointerException.
+    This probe does not compare envelopes or assert that the selected branch is
+    the complete event union. Inputs are unchanged.
+    """
+    location = selection["projection_pointer"]
+    if selection["interpretation"] == "decoded-chunk":
+        chunk = decoded_chunk_schema(
+            document, jsonpointer.resolve_pointer(document, location[1:])
+        )
+    else:
+        chunk_location = selection.get("projection_chunk_pointer")
+        if not chunk_location:
+            raise ValueError("No explicit shared chunk selector")
+        # Decode the full event first so no unsupported envelope/string assertion
+        # disappears merely because its chunk can be selected.
+        decoded_event_schema(
+            document, jsonpointer.resolve_pointer(document, location[1:])
+        )
+        suffix = chunk_location[len(location) :]
+        if not re.fullmatch(
+            r"(?:/(?:anyOf|oneOf)/[0-9]+)*/properties/data(?:/anyOf/[0-9]+)*/contentSchema",
+            suffix,
+        ):
+            raise ValueError("Chunk selector is not a direct JSON data alternative")
+        data = jsonpointer.resolve_pointer(
+            document, chunk_location[1:].rsplit("/", 1)[0]
+        )
+        decoded_data_schema(data)
+        chunk = data["contentSchema"]
+    parts = jsonpointer.JsonPointer(location[1:]).parts
+    probe = {
+        "openapi": "3.1.0",
+        "info": {"title": "Selected chunk only", "version": "1"},
+        "components": copy.deepcopy(document.get("components", {})),
+        "paths": {
+            endpoint: {"post": {"responses": {"204": {"description": "Not selected"}}}}
+            for endpoint in ENDPOINTS
+        },
+    }
+    probe["paths"][parts[1]]["post"]["responses"] = {
+        parts[4]: {
+            "description": "Selected chunk only",
+            "content": {"application/json": {"schema": copy.deepcopy(chunk)}},
+        }
+    }
+    projected, gaps = response_document(probe)
+    return projected, [
+        {
+            **gap,
+            "layer": "chunk",
+            "source_pointer": selection.get("chunk_pointer", selection["pointer"]),
+        }
+        for gap in gaps
+    ]
 
 
 def decoded_data_schema(schema: dict) -> dict | bool:
@@ -72,7 +304,8 @@ def decoded_event_schema(document: dict, schema: dict, refs: tuple = ()) -> dict
     """Copy an itemSchema, replacing supported data schemas with decoded equivalents.
 
     Resolve local event-envelope refs and anyOf/oneOf event variants, retaining
-    envelope constraints. Payload refs stay refs. Missing/recursive/external event
+    envelope constraints. Unwrap a bare single-alternative event union; payload
+    refs stay refs. Missing/recursive/external event
     refs, allOf envelopes, or unsupported data encodings raise ValueError (or a
     JsonPointerException for an unresolved ref); callers must report a coverage gap.
     """
@@ -92,13 +325,19 @@ def decoded_event_schema(document: dict, schema: dict, refs: tuple = ()) -> dict
     result = copy.deepcopy(schema)
     if "allOf" in result:
         raise ValueError("allOf event envelopes need explicit decoding support")
+    if result.get("type", "object") != "object":
+        raise ValueError("SSE envelope must describe an object")
     found = False
     for keyword in ("anyOf", "oneOf"):
         if keyword in result:
+            if not isinstance(result[keyword], list) or not result[keyword]:
+                raise ValueError("SSE event alternatives must be a nonempty list")
             result[keyword] = [
                 decoded_event_schema(document, branch, refs)
                 for branch in result[keyword]
             ]
+            if set(result) == {keyword} and len(result[keyword]) == 1:
+                return result[keyword][0]
             found = True
     properties = result.get("properties", {})
     if "data" in properties:
@@ -155,16 +394,22 @@ def validate_sse_event(document: dict, item_schema: dict, event: dict) -> None:
     )
 
 
-def response_document(document: dict) -> tuple[dict, list[dict]]:
+def response_document(
+    document: dict, streams: dict | None = None
+) -> tuple[dict, list[dict]]:
     """Copy scoped POST response contracts into comparator inputs and return gaps.
 
     Keep status/media distinctions and reachable payload components. JSON bodies
     retain their schemas; SSE itemSchema becomes a decoded-event comparison schema.
+    `streams` must contain hash-qualified selections from prepare_response_source.
+    Explicit event-schema selections reuse the native decoder; decoded-chunk
+    selections preserve payloads and record missing event layers separately.
     Missing/unsupported schemas are retained as empty comparison placeholders with
     explicit gaps, never evidence of compatibility. Missing operations and invalid
     document dialects raise. Input is unchanged; references are never fetched.
     """
     check_schema_dialect(document)
+    streams = streams or {}
     result = {
         "openapi": "3.1.0",
         "info": {
@@ -206,12 +451,48 @@ def response_document(document: dict) -> tuple[dict, list[dict]]:
                 projected.setdefault("content", {})[media] = {"schema": {}}
                 try:
                     if media == "text/event-stream":
-                        if "schema" in contract or "itemSchema" not in contract:
+                        selection = streams.get(source)
+                        mode = (
+                            selection["interpretation"]
+                            if selection
+                            else "event-item-schema"
+                        )
+                        if mode == "event-item-schema" and not document[
+                            "openapi"
+                        ].startswith("3.2."):
                             raise ValueError(
-                                "SSE comparison requires itemSchema without a whole-stream schema"
+                                "Native SSE itemSchema interpretation requires OpenAPI 3.2"
                             )
-                        source += "/itemSchema"
-                        schema = decoded_event_schema(document, contract["itemSchema"])
+                        keyword = (
+                            "itemSchema" if mode == "event-item-schema" else "schema"
+                        )
+                        if (
+                            keyword not in contract
+                            or ({"schema", "itemSchema"} - {keyword}) & contract.keys()
+                        ):
+                            raise ValueError(
+                                "SSE comparison requires one explicitly selected event representation"
+                            )
+                        source += "/" + keyword
+                        if mode == "decoded-chunk":
+                            schema = decoded_chunk_schema(document, contract[keyword])
+                            gaps.extend(
+                                {
+                                    "endpoint": endpoint,
+                                    "location": selection["pointer"],
+                                    "layer": layer,
+                                    "reason": "Decoded chunk declaration does not specify this event layer",
+                                }
+                                for layer in (
+                                    "envelope",
+                                    "encoding",
+                                    "error",
+                                    "terminator",
+                                    "extensions",
+                                )
+                            )
+                        else:
+                            schema = decoded_event_schema(document, contract[keyword])
                     elif media == "application/json" and "schema" in contract:
                         source += "/schema"
                         schema = copy.deepcopy(contract["schema"])
@@ -259,7 +540,14 @@ def response_document(document: dict) -> tuple[dict, list[dict]]:
                     projected["content"][media]["schema"] = schema
                 except (ValueError, jsonpointer.JsonPointerException) as error:
                     gaps.append(
-                        {"endpoint": endpoint, "location": source, "reason": str(error)}
+                        {
+                            "endpoint": endpoint,
+                            "location": source,
+                            "layer": "event"
+                            if media == "text/event-stream"
+                            else "body",
+                            "reason": str(error),
+                        }
                     )
         result["paths"][endpoint] = {
             "post": {
@@ -267,16 +555,24 @@ def response_document(document: dict) -> tuple[dict, list[dict]]:
                 or {"default": {"description": "Missing contract"}}
             }
         }
-    roots = [
+    validate_comparison_document(result, response_schema_roots(result))
+    return result, gaps
+
+
+def response_schema_roots(document: dict) -> list[str]:
+    """List media schema pointers in a response projection, including empty placeholders.
+
+    Accept output from response_document, not a raw export with itemSchema.
+    Each declared media entry must contain a schema. The document is unchanged.
+    """
+    return [
         pointer(
             "paths", endpoint, "post", "responses", status, "content", media, "schema"
         )
-        for endpoint, path in result["paths"].items()
+        for endpoint, path in document["paths"].items()
         for status, response in path["post"]["responses"].items()
         for media in response.get("content", {})
     ]
-    validate_comparison_document(result, roots)
-    return result, gaps
 
 
 def response_differences(diff: dict) -> list[dict]:
@@ -284,6 +580,8 @@ def response_differences(diff: dict) -> list[dict]:
 
     Deltas follow framework-to-Dynamo orientation and remain candidates, not
     confirmed incompatibilities. Request and component-only noise is excluded.
+    Records refer to raw deltas; treat them as read-only. Added/deleted scoped
+    paths raise ValueError instead of reporting an empty diff.
     """
     findings = []
     for endpoint, change in sorted(diff.get("paths", {}).get("modified", {}).items()):

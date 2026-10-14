@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""Check capture limits and exact-byte provenance without contacting remote servers."""
 
 import hashlib
 import io
@@ -29,6 +30,7 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(parse_document(raw)["itemSchema"], {"type": "object"})
 
     def setUp(self):
+        """Create CLI inputs in a temporary directory removed after each test."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

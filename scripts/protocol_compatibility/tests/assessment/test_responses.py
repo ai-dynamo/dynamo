@@ -3,13 +3,17 @@
 """Guard explicit SSE decoding and response coverage independently of inference."""
 
 import copy
+import hashlib
+import json
 import unittest
 
 from jsonschema import Draft202012Validator, ValidationError
 
 from scripts.protocol_compatibility.assessment.responses import (
+    chunk_document,
     decoded_data_schema,
     decoded_event_schema,
+    prepare_response_source,
     response_differences,
     response_document,
     validate_sse_event,
@@ -50,7 +54,151 @@ def streaming_document():
     return raw
 
 
+def stream_selection(raw, mode, *, chunk=False):
+    """Qualify both fixture SSE media pointers with a deterministic raw-byte hash."""
+    keyword = "itemSchema" if mode == "event-item-schema" else "schema"
+    entries = []
+    for endpoint in raw["paths"]:
+        location = (
+            "#/paths/"
+            + endpoint.replace("/", "~1")
+            + "/post/responses/200/content/text~1event-stream/"
+            + keyword
+        )
+        entry = {"pointer": location, "interpretation": mode}
+        if chunk:
+            entry["chunk_pointer"] = location + "/properties/data/anyOf/1/contentSchema"
+        entries.append(entry)
+    return {
+        "sha256": hashlib.sha256(json.dumps(raw).encode()).hexdigest(),
+        "source": "test-fixture",
+        "revision": "fixture-v1",
+        "streams": entries,
+    }
+
+
 class ResponseProjectionTests(unittest.TestCase):
+    def test_qualified_envelope_reuses_decoder_and_keeps_original_input(self):
+        """Equivalent 3.1 envelope and 3.2 itemSchema forms produce equal projections."""
+        native = streaming_document()
+        legacy = copy.deepcopy(native)
+        legacy["openapi"] = "3.1.0"
+        for path in legacy["paths"].values():
+            media = path["post"]["responses"]["200"]["content"]["text/event-stream"]
+            media["schema"] = media.pop("itemSchema")
+        before = copy.deepcopy(legacy)
+        config = stream_selection(legacy, "event-schema")
+        selected, streams, evidence = prepare_response_source(
+            legacy, config, config["sha256"]
+        )
+        self.assertEqual(
+            response_document(selected, streams), response_document(native)
+        )
+        self.assertEqual(legacy, before)
+        self.assertEqual(
+            evidence["streams"][0]["pointer"], config["streams"][0]["pointer"]
+        )
+        self.assertTrue(response_document(legacy)[1])
+        for change in ("hash", "pointer", "duplicate", "mode"):
+            invalid = copy.deepcopy(config)
+            if change == "hash":
+                invalid["sha256"] = "0" * 64
+            elif change == "pointer":
+                invalid["streams"][0]["pointer"] += "/properties"
+            elif change == "duplicate":
+                invalid["streams"].append(invalid["streams"][0])
+            else:
+                invalid["streams"][0]["interpretation"] = "infer"
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                prepare_response_source(legacy, invalid, config["sha256"])
+
+    def test_chunk_selection_cannot_establish_missing_event_layers(self):
+        """Chunk references/constraints survive; absent envelope layers remain explicit gaps."""
+        raw = streaming_document()
+        raw["openapi"] = "3.1.0"
+        raw["components"]["schemas"]["Response"]["properties"]["choices"] = {
+            "type": "array",
+            "items": {"type": "object"},
+        }
+        for path in raw["paths"].values():
+            path["post"]["responses"]["200"]["content"]["text/event-stream"] = {
+                "schema": {"$ref": "#/components/schemas/Response"}
+            }
+        config = stream_selection(raw, "decoded-chunk")
+        selected, streams, _ = prepare_response_source(raw, config, config["sha256"])
+        projected, gaps = response_document(selected, streams)
+        self.assertEqual(
+            {gap["layer"] for gap in gaps},
+            {"envelope", "encoding", "error", "terminator", "extensions"},
+        )
+        self.assertEqual(
+            projected["components"]["schemas"],
+            {"Response": raw["components"]["schemas"]["Response"]},
+        )
+        probe, missing = chunk_document(selected, next(iter(streams.values())))
+        self.assertFalse(missing)
+        self.assertEqual(
+            probe["components"]["schemas"]["Response"],
+            raw["components"]["schemas"]["Response"],
+        )
+        raw["components"]["schemas"]["Response"] = {"type": "string"}
+        self.assertTrue(response_document(raw, streams)[1])
+
+    def test_path_mapping_is_explicit_collision_safe_and_records_server_context(self):
+        """Map only the two retained OpenAI routes; never infer deployed endpoint identity."""
+        raw = streaming_document()
+        raw["paths"] = {
+            key.removeprefix("/v1"): value for key, value in raw["paths"].items()
+        }
+        raw["servers"] = [{"url": "https://example.invalid/v1"}]
+        config = stream_selection(raw, "event-item-schema")
+        config["path_mappings"] = {key: "/v1" + key for key in raw["paths"]}
+        before = copy.deepcopy(raw)
+        selected, _, evidence = prepare_response_source(raw, config, config["sha256"])
+        self.assertEqual(
+            set(selected["paths"]), {"/v1/chat/completions", "/v1/completions"}
+        )
+        self.assertEqual(raw, before)
+        self.assertEqual(
+            evidence["path_mappings"][0]["server_context"]["document"], raw["servers"]
+        )
+        with self.assertRaises(ValueError):
+            prepare_response_source(
+                raw, {**config, "path_mappings": {}}, config["sha256"]
+            )
+        for change in ("collision", "unknown", "missing"):
+            candidate, settings = copy.deepcopy(raw), copy.deepcopy(config)
+            if change == "collision":
+                candidate["paths"]["/v1/completions"] = candidate["paths"][
+                    "/completions"
+                ]
+            elif change == "unknown":
+                settings["path_mappings"]["/other"] = "/v1/completions"
+            else:
+                del candidate["paths"]["/completions"]["post"]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                prepare_response_source(candidate, settings, config["sha256"])
+
+    def test_chunk_probe_rejects_wrong_selector_and_encoded_string_constraints(self):
+        """Selecting a payload cannot discard material constraints in its containing event."""
+        raw = streaming_document()
+        config = stream_selection(raw, "event-item-schema", chunk=True)
+        selected, streams, _ = prepare_response_source(raw, config, config["sha256"])
+        entry = next(iter(streams.values()))
+        self.assertFalse(chunk_document(selected, entry)[1])
+        bad = {
+            **entry,
+            "projection_chunk_pointer": entry["projection_pointer"]
+            + "/properties/other/contentSchema",
+        }
+        with self.assertRaises(ValueError):
+            chunk_document(selected, bad)
+        selected["paths"]["/v1/chat/completions"]["post"]["responses"]["200"][
+            "content"
+        ]["text/event-stream"]["itemSchema"]["properties"]["data"]["maxLength"] = 100
+        with self.assertRaisesRegex(ValueError, "encoded-string"):
+            chunk_document(selected, entry)
+
     def test_content_validation_cannot_accept_an_unresolved_import_as_an_object(self):
         """A raw native placeholder must fail closed rather than accept arbitrary chunks."""
         raw = streaming_document()
@@ -146,13 +294,22 @@ class ResponseProjectionTests(unittest.TestCase):
 
     def test_unsupported_data_constraints_and_missing_item_schema_report_gaps(self):
         """No omitted constraint or legacy payload schema can silently pass coverage."""
-        for change in ("pattern", "contentEncoding", "missing", "legacy", "external"):
+        for change in (
+            "pattern",
+            "contentEncoding",
+            "missing",
+            "legacy",
+            "legacy-item",
+            "external",
+        ):
             raw = streaming_document()
             contract = raw["paths"]["/v1/chat/completions"]["post"]["responses"]["200"][
                 "content"
             ]["text/event-stream"]
             data = contract["itemSchema"]["properties"]["data"]
-            if change == "missing":
+            if change == "legacy-item":
+                raw["openapi"] = "3.1.0"
+            elif change == "missing":
                 del contract["itemSchema"]
             elif change == "legacy":
                 contract["schema"] = contract.pop("itemSchema")

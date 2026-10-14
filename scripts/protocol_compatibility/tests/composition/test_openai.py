@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""Check import closure, guarded corrections, and preservation of Dynamo-owned schemas."""
 
 import copy
 import hashlib
@@ -14,6 +15,7 @@ from scripts.protocol_compatibility.composition.openai import MARKER, compose
 
 class CompositionTests(unittest.TestCase):
     def setUp(self):
+        """Create fresh recursive baseline components, import slots, and a mutable manifest."""
         self.baseline = {
             "components": {
                 "schemas": {
@@ -55,6 +57,7 @@ class CompositionTests(unittest.TestCase):
         }
 
     def run_composition(self):
+        """Refresh the fixture checksum and compose; propagate failures for test assertions."""
         data = json.dumps(self.baseline).encode()
         self.manifest["openai"]["sha256"] = hashlib.sha256(data).hexdigest()
         return compose(self.raw, self.manifest, baseline_bytes=data)

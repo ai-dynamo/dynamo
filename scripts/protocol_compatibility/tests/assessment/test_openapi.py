@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""Check request projection, aliases, and evidence-linked reporting with synthetic schemas."""
 
 import copy
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import jsonpointer
 from jsonschema import Draft202012Validator
 
 from scripts.protocol_compatibility.assessment.openapi import (
@@ -20,9 +23,20 @@ from scripts.protocol_compatibility.assessment.openapi import (
     request_document,
     request_pointer,
 )
+from scripts.protocol_compatibility.reporting.findings import (
+    build_findings,
+    identifier,
+    related_aliases,
+)
+from scripts.protocol_compatibility.reporting.openapi import (
+    CATEGORY_GUIDE,
+    regenerate,
+    render,
+)
 
 
 def document():
+    """Return independent two-route request/response fixtures with recursive and unused schemas."""
     return {
         "openapi": "3.1.0",
         "info": {"title": "Fixture", "version": "1"},
@@ -229,6 +243,7 @@ class RequestProjectionTests(unittest.TestCase):
 
 class AliasMatchingTests(unittest.TestCase):
     def pair(self):
+        """Return separate Dynamo/target documents with an explicit alias and different required names."""
         own = document()
         del own["components"]["schemas"]["Request"]["default"]
         own["components"]["schemas"]["Request"]["properties"]["value"].update(
@@ -435,6 +450,487 @@ class NullableStringNormalizationTests(unittest.TestCase):
             )
             self.assertEqual(schema["default"], {"a/b~": [], "metadata": union})
             self.assertEqual(schema["required"], ["a/b~"])
+
+
+class FindingReportTests(unittest.TestCase):
+    """Exercise retained-delta explanation without reimplementing or running schema comparison."""
+
+    def fixture(self, delta):
+        """Return one request delta and independent reference/Dynamo projection fixtures."""
+        endpoint = ENDPOINTS[0]
+        report = {
+            "framework_name": "example-engine",
+            "status": "differences_found",
+            "differences": [
+                {
+                    "endpoint": endpoint,
+                    "location": request_pointer(endpoint),
+                    "delta": {
+                        "content": {"modified": {"application/json": {"schema": delta}}}
+                    },
+                }
+            ],
+            "response_differences": [],
+            "coverage_gaps": [],
+            "alias_matches": [],
+            "exclusions": [],
+        }
+        projections = {
+            f"{side}.{kind}.normalized.json": document()
+            for side in ("framework", "dynamo")
+            for kind in ("requests", "responses")
+        }
+        return report, projections
+
+    def test_category_guide_and_details_follow_review_order(self):
+        """Render each category once in review order without changing evidence or dropping unknowns."""
+        order = [
+            "target_only",
+            "both_declared_mismatch",
+            "representation_ambiguity",
+            "missing_coverage",
+            "dynamo_only",
+            "alias_evidence",
+            "intentional_exclusion",
+        ]
+        self.assertEqual([entry[0] for entry in CATEGORY_GUIDE], order)
+        report, sources = self.fixture({"properties": {"deleted": ["value"]}})
+        inventory = build_findings(report, sources)
+        template = inventory["findings"][0]
+        # Presentation fixture: reverse order to prove rendering does not inherit it.
+        inventory["findings"] = [
+            {**template, "id": name, "category": name}
+            for name in reversed(order + ["future_category"])
+        ]
+        inventory["counts"]["categories"] = {
+            row["category"]: 1 for row in inventory["findings"]
+        }
+        report["finding_inventory"] = inventory
+        before = copy.deepcopy(report)
+        markdown = render(report)
+        table_positions, section_positions = [], []
+        for name, title, description in CATEGORY_GUIDE:
+            escaped = name.replace("_", "\\_")
+            table_positions.append(markdown.index(f"| {escaped} | 1 | {description} |"))
+            section_positions.append(markdown.index("## " + title))
+            self.assertEqual(markdown.count(f"### {name} —"), 1)
+        self.assertEqual(table_positions, sorted(table_positions))
+        self.assertEqual(section_positions, sorted(section_positions))
+        self.assertGreater(
+            markdown.index("## future\\_category"), section_positions[-1]
+        )
+        self.assertIn("not to assign severity", markdown)
+        self.assertIn("Exact declared alias matches appear as alias evidence", markdown)
+        self.assertEqual(report, before)
+        empty, sources = self.fixture({})
+        empty["finding_inventory"] = build_findings(empty, sources)
+        self.assertIn("| target\\_only | 0 |", render(empty))
+
+    def test_declared_aliases_replace_one_sided_spelling_categories(self):
+        """Known spellings share alias evidence; value differences and raw IDs survive."""
+        target_name, dynamo_name = "chat_template_kwargs", "chat_template_args"
+        report, sources = self.fixture(
+            {
+                "properties": {
+                    "added": [dynamo_name],
+                    "deleted": [target_name],
+                }
+            }
+        )
+        target = sources["framework.requests.normalized.json"]
+        dynamo = sources["dynamo.requests.normalized.json"]
+        target["components"]["schemas"]["Request"]["properties"] = {
+            target_name: {"type": "string"},
+        }
+        dynamo["components"]["schemas"]["Request"]["properties"] = {
+            dynamo_name: {"type": "integer", "x-dynamo-input-aliases": [target_name]},
+        }
+        baseline = build_findings(report, sources)
+        matches, gaps = match_input_aliases(dynamo, target)
+        self.assertFalse(gaps)
+        match = next(item for item in matches if item["endpoint"] == ENDPOINTS[0])
+        match["value_comparison"] = "differences_found"
+        report["alias_matches"] = [match]
+        before = copy.deepcopy((report, sources))
+        result = build_findings(report, sources)
+        spelling_rows = [row for row in result["findings"] if row["kind"] == "request"]
+        self.assertEqual(len(spelling_rows), 2)
+        for row in spelling_rows:
+            self.assertEqual(row["category"], "alias_evidence")
+            self.assertIn("not a missing field", row["interpretation"])
+            self.assertNotIn("only declaration", row["interpretation"])
+            self.assertEqual(row["alias_report_pointers"], ["#/alias_matches/0"])
+            self.assertTrue(
+                all(side["evidence"] for side in row["declarations"].values())
+            )
+        self.assertEqual(
+            {row["id"]: row["delta"] for row in baseline["findings"]},
+            {row["id"]: row["delta"] for row in spelling_rows},
+        )
+        alias_row = next(
+            row for row in result["findings"] if row["kind"] == "alias_evidence"
+        )
+        self.assertIn(
+            "Value comparison: differences_found", alias_row["interpretation"]
+        )
+        self.assertEqual((report, sources), before)
+        report["alias_matches"] = [{**match, "name_coverage": "unknown"}]
+        categories = {
+            row["category"]
+            for row in build_findings(report, sources)["findings"]
+            if row["kind"] == "request"
+        }
+        self.assertEqual(categories, {"target_only", "dynamo_only"})
+        report["alias_matches"] = [
+            {**match, "dynamo_location": "#/components/schemas/Missing"}
+        ]
+        self.assertTrue(
+            all(
+                row["category"] == "missing_coverage"
+                for row in build_findings(report, sources)["findings"]
+                if row["kind"] == "request"
+            )
+        )
+
+    def test_alias_links_require_matching_instance_path_and_endpoint(self):
+        """A nested alias must not reclassify its parent or an unrelated same-name field."""
+        match = {
+            "endpoint": ENDPOINTS[0],
+            "path": ["messages", None, "reasoning"],
+            "backend_name": "reasoning",
+            "dynamo_name": "reasoning_content",
+        }
+        for name in ("reasoning", "reasoning_content"):
+            steps = ("properties", "messages", "items", "properties", name)
+            self.assertEqual(
+                related_aliases([match], ENDPOINTS[0], steps, exact=True), [0]
+            )
+            self.assertEqual(
+                related_aliases([match], ENDPOINTS[1], steps, exact=True), []
+            )
+            self.assertEqual(
+                related_aliases([match], ENDPOINTS[0], ("properties", name)), []
+            )
+        parent = ("properties", "messages")
+        self.assertEqual(related_aliases([match], ENDPOINTS[0], parent), [0])
+        self.assertEqual(related_aliases([match], ENDPOINTS[0], parent, exact=True), [])
+        self.assertEqual(related_aliases([match], ENDPOINTS[0], ()), [])
+        self.assertEqual(
+            related_aliases([match], ENDPOINTS[0], ("additionalProperties",)), []
+        )
+
+    def test_declaration_categories_follow_source_presence(self):
+        """Split request/response declarations; missing evidence is not field absence."""
+        cases = (
+            ({"type": "string"}, None, "target_only"),
+            ({"type": "string"}, {"type": "integer"}, "both_declared_mismatch"),
+            (None, {}, "dynamo_only"),
+            (None, None, "missing_coverage"),
+        )
+        for kind in ("requests", "responses"):
+            for target, dynamo, expected in cases:
+                with self.subTest(kind=kind, category=expected):
+                    change = "deleted" if dynamo is None else "added"
+                    delta = {"properties": {change: ["value"]}}
+                    if target is not None and dynamo is not None:
+                        delta = {
+                            "properties": {
+                                "modified": {
+                                    "value": {
+                                        "type": {
+                                            "deleted": ["string"],
+                                            "added": ["integer"],
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    report, sources = self.fixture(delta)
+                    if kind == "responses":
+                        request = report["differences"].pop()
+                        report["response_differences"] = [
+                            {
+                                "endpoint": ENDPOINTS[0],
+                                "location": request["location"].split("/requestBody")[0]
+                                + "/responses",
+                                "delta": {"modified": {"200": request["delta"]}},
+                            }
+                        ]
+                    for side, schema in (("framework", target), ("dynamo", dynamo)):
+                        name = "Request" if kind == "requests" else "Response"
+                        sources[f"{side}.{kind}.normalized.json"]["components"][
+                            "schemas"
+                        ][name] = {
+                            "type": "object",
+                            "properties": {} if schema is None else {"value": schema},
+                        }
+                    result = build_findings(report, sources)
+                    self.assertEqual(result["findings"][0]["category"], expected)
+                    self.assertNotIn(
+                        "declaration_mismatch", result["counts"]["categories"]
+                    )
+                    del sources[f"framework.{kind}.normalized.json"]
+                    self.assertEqual(
+                        build_findings(report, sources)["findings"][0]["category"],
+                        "missing_coverage",
+                    )
+
+    def test_missing_default_is_not_null_and_constraints_remain_readable(self):
+        """Read annotation presence from retained sources, not oasdiff's null sentinel."""
+        delta = {
+            "properties": {
+                "modified": {
+                    "value": {
+                        "default": {"from": 1, "to": None},
+                        "min": {"from": None, "to": 0},
+                        "type": {"added": ["integer"], "deleted": ["string"]},
+                    }
+                }
+            },
+            "required": {"added": ["model"], "deleted": ["value"]},
+        }
+        report, sources = self.fixture(delta)
+        reference = sources["framework.requests.normalized.json"]["components"][
+            "schemas"
+        ]["Request"]
+        dynamo = sources["dynamo.requests.normalized.json"]["components"]["schemas"][
+            "Request"
+        ]
+        reference["properties"]["value"] = {"type": "string", "default": 1}
+        dynamo["properties"]["value"] = {"type": ["integer", "null"], "minimum": 0}
+        del dynamo["required"]
+        dynamo["allOf"] = [{"required": ["model"]}]
+        before = copy.deepcopy((report, sources))
+        result = build_findings(report, sources)
+        by_change = {row["change"]: row for row in result["findings"]}
+        self.assertTrue(
+            all(
+                row["category"] == "both_declared_mismatch"
+                for row in result["findings"]
+            )
+        )
+        self.assertIn(
+            "default not directly declared",
+            by_change["default"]["declarations"]["dynamo"]["summary"],
+        )
+        self.assertEqual(
+            by_change["min"]["declarations"]["dynamo"]["summary"], "minimum=0"
+        )
+        self.assertIn('"null"', by_change["type"]["declarations"]["dynamo"]["summary"])
+        self.assertIn(
+            "required not directly declared",
+            by_change["required"]["declarations"]["dynamo"]["summary"],
+        )
+        self.assertEqual((report, sources), before)
+        self.assertIn(
+            "Reported required-member change: added model; deleted value.",
+            render({**report, "finding_inventory": result}),
+        )
+        dynamo["properties"]["value"]["default"] = None
+        explicit = next(
+            row
+            for row in build_findings(report, sources)["findings"]
+            if row["change"] == "default"
+        )
+        self.assertEqual(explicit["declarations"]["dynamo"]["summary"], "default=null")
+        self.assertEqual(explicit["id"], by_change["default"]["id"])
+        self.assertNotEqual(
+            explicit["content_sha256"], by_change["default"]["content_sha256"]
+        )
+
+    def test_union_and_allof_movement_stay_one_ambiguous_group(self):
+        """A root field removed beside added allOf is not reported as a removed wire field."""
+        delta = {
+            "allOf": {"added": [{"properties": {"value": {"type": "string"}}}]},
+            "properties": {"deleted": ["value"]},
+            "required": {"deleted": ["value"]},
+        }
+        report, sources = self.fixture(delta)
+        result = build_findings(report, sources)
+        self.assertEqual(len(result["findings"]), 1)
+        row = result["findings"][0]
+        self.assertEqual(row["category"], "representation_ambiguity")
+        self.assertEqual(row["delta"], delta)
+        self.assertEqual(len(row["candidate_ids"]), 2)
+        self.assertIn("not established", row["interpretation"])
+        for keyword in ("anyOf", "oneOf"):
+            report, sources = self.fixture(
+                {"properties": {"modified": {"value": {keyword: {"deleted": [0]}}}}}
+            )
+            self.assertEqual(
+                build_findings(report, sources)["findings"][0]["category"],
+                "representation_ambiguity",
+            )
+
+    def test_nested_fields_unknown_keys_and_empty_fragments_are_accounted(self):
+        """Unknown sibling keys must have distinct stable IDs, including empty deltas."""
+        delta = {
+            "properties": {
+                "modified": {
+                    "value": {
+                        "items": {
+                            "unknown-a": {"added": [1]},
+                            "unknown-b": {},
+                            "minLength": {"from": 0, "to": 2},
+                        }
+                    }
+                }
+            }
+        }
+        report, sources = self.fixture(delta)
+        result = build_findings(report, sources)
+        self.assertEqual(len(result["findings"]), 3)
+        self.assertEqual(len({row["id"] for row in result["findings"]}), 3)
+        self.assertTrue(all(row["field"] == "value[]" for row in result["findings"]))
+        self.assertEqual(
+            result["accounting"]["raw_terminal_count"],
+            result["accounting"]["owned_terminal_count"],
+        )
+        report["differences"][0]["delta"] = {
+            "content": {"modified": {"application/json": {}}}
+        }
+        self.assertEqual(len(build_findings(report, sources)["findings"]), 1)
+
+    def test_location_ids_survive_reordering_but_content_hashes_change(self):
+        """Historical IDs are location keys, never proof that a declaration is unchanged."""
+        report, sources = self.fixture(
+            {"properties": {"deleted": ["value", "recursive"]}}
+        )
+        first = build_findings(report, sources)
+        report["differences"][0]["delta"]["content"]["modified"]["application/json"][
+            "schema"
+        ]["properties"]["deleted"].reverse()
+        second = build_findings(report, sources)
+        self.assertEqual(
+            [r["id"] for r in first["findings"]], [r["id"] for r in second["findings"]]
+        )
+        self.assertEqual(
+            [g["id"] for g in first["groups"]], [g["id"] for g in second["groups"]]
+        )
+        self.assertIn(
+            identifier("request", ENDPOINTS[0], "value"),
+            [g["id"] for g in first["groups"]],
+        )
+        sources["framework.requests.normalized.json"]["components"]["schemas"][
+            "Request"
+        ]["properties"]["value"]["maxLength"] = 9
+        third = build_findings(report, sources)
+        group = next(g for g in first["groups"] if g["field"] == "value")
+        changed = next(g for g in third["groups"] if g["field"] == "value")
+        self.assertEqual(group["delta_sha256"], changed["delta_sha256"])
+        self.assertNotEqual(group["declaration_sha256"], changed["declaration_sha256"])
+
+    def test_response_sse_error_alias_and_gap_evidence_remain_separate(self):
+        """Retain transport/status context and aliases without promoting them to runtime proof."""
+        report, sources = self.fixture({"properties": {"deleted": ["value"]}})
+        endpoint = ENDPOINTS[0]
+        location = request_pointer(endpoint)
+        report["response_differences"] = [
+            {
+                "endpoint": endpoint,
+                "location": location.split("/requestBody")[0] + "/responses",
+                "delta": {
+                    "added": ["503"],
+                    "modified": {
+                        "200": {
+                            "content": {
+                                "modified": {
+                                    "text/event-stream": {
+                                        "schema": {"anyOf": {"added": [1]}}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                },
+            }
+        ]
+        report["coverage_gaps"] = [
+            {
+                "kind": "response",
+                "side": "framework",
+                "endpoint": endpoint,
+                "location": report["response_differences"][0]["location"] + "/400",
+                "reason": "Body not declared",
+            }
+        ]
+        report["alias_matches"] = [
+            {
+                "endpoint": endpoint,
+                "path": ["value"],
+                "backend_name": "value",
+                "dynamo_name": "alias",
+                "backend_location": "#/components/schemas/Request/properties/value",
+                "dynamo_location": "#/components/schemas/Request/properties/value",
+            }
+        ]
+        report["exclusions"] = [
+            {"field": "nvext", "reason": "Dynamo-specific extension"}
+        ]
+        result = build_findings(report, sources)
+        self.assertTrue(
+            any(
+                row["transport"] == "SSE" and row["status"] == "200"
+                for row in result["findings"]
+            )
+        )
+        self.assertTrue(
+            any(
+                row["status"] == "503"
+                and "Extra possible output" in row["interpretation"]
+                for row in result["findings"]
+            )
+        )
+        self.assertTrue(any(row["alias_report_pointers"] for row in result["findings"]))
+        self.assertEqual(result["counts"]["categories"]["alias_evidence"], 1)
+        self.assertEqual(result["counts"]["categories"]["intentional_exclusion"], 1)
+
+    def test_regeneration_is_portable_escaped_and_preserves_input(self):
+        """Rendering copies frozen evidence, rejects overwrite/nesting, and escapes schema text."""
+        report, sources = self.fixture({"properties": {"added": ["value"]}})
+        report[
+            "framework_name"
+        ] = "<script>alert(1)</script> | [x](javascript:bad)\n# heading"
+        report_before = copy.deepcopy(report)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frozen, output = root / "frozen", root / "rendered"
+            frozen.mkdir()
+            (frozen / "report.json").write_text(json.dumps(report))
+            for name, value in sources.items():
+                (frozen / name).write_text(json.dumps(value))
+            before = {path.name: path.read_bytes() for path in frozen.iterdir()}
+            result = regenerate(frozen, output)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in frozen.iterdir()}, before
+            )
+            self.assertEqual(
+                {k: v for k, v in result.items() if k != "finding_inventory"},
+                report_before,
+            )
+            markdown = (output / "report.md").read_text()
+            self.assertNotIn("<script>", markdown)
+            self.assertNotIn("[x](javascript:", markdown)
+            self.assertIn("evidence/dynamo.requests.normalized.json#", markdown)
+            for row in result["finding_inventory"]["findings"]:
+                for raw in row["raw_report_pointers"]:
+                    jsonpointer.resolve_pointer(result, raw[1:])
+                for side in row["declarations"].values():
+                    for record in side["evidence"]:
+                        retained = json.loads(
+                            (output / "evidence" / record["file"]).read_text()
+                        )
+                        self.assertEqual(
+                            jsonpointer.resolve_pointer(
+                                retained, record["pointer"][1:]
+                            ),
+                            record["declaration"],
+                        )
+            with self.assertRaises(FileExistsError):
+                regenerate(frozen, output)
+            with self.assertRaisesRegex(ValueError, "inside"):
+                regenerate(frozen, frozen / "nested")
+        self.assertIn("projection unavailable", render(report))
 
 
 if __name__ == "__main__":

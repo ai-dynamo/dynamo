@@ -27,14 +27,16 @@ Both inputs must contain JSON POST request schemas for `/v1/chat/completions` an
 or external reference, `assess` stops with an error.
 
 The tool compares responses separately by status code, media type, and payload schema.
-Server-sent event (SSE) comparison requires OpenAPI 3.2 `itemSchema` and explicit data
-encoding. The tool reports older payload-only streaming declarations as coverage gaps.
+Server-sent event (SSE) comparison accepts native OpenAPI 3.2 `itemSchema` with explicit
+data encoding. Source-qualified adapters also support 3.1 event envelopes or decoded
+Chat chunks under `schema`. Chunk-only declarations leave other event layers unverified.
 Headers, other endpoints, ordering, cancellation, and termination behavior are outside
 this comparison.
 
 The framework name labels inputs and reports; it does not select an adapter or schema
-correction. Each framework's recipe specifies versions, model, configuration, deployment,
-and cleanup.
+correction. To select an adapter, supply the exact input hash, source and revision labels,
+and schema pointers. Keep framework versions, model, configuration, deployment, and cleanup
+instructions in the framework's recipe.
 
 ## Schema Inputs and Provenance
 
@@ -42,7 +44,8 @@ Use `generate-frontend-openapi` as the default Dynamo source. It builds the fron
 without a listener and writes `docs/frontends/openapi.json`; no model, GPU, or deployment is
 required. File export includes all standard endpoints and optional chat dispatch events.
 HTTP export includes only registered endpoints and enabled dispatch events. Capture HTTP
-when you need a deployment's configured contract.
+when you need a deployment's configured contract. Match endpoints and configuration,
+and exclude credentials from retained evidence. A capture does not test inference.
 
 The native export contains `x-dynamo-schema-import` placeholders because the pinned
 `async-openai` 0.42.1 types lack the annotations needed to generate their schemas.
@@ -53,8 +56,8 @@ See the [composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/s
 `async-openai` 0.42.2 includes the annotations. Frontend-crates maintainers must enable
 those schemas and replace the placeholder types. Track that integration in
 [frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
-Once Dynamo exports those schemas through updated dependencies, maintainers can remove
-their import mappings. Remove composition when no placeholders remain for the compared schemas.
+After Dynamo exports those schemas through updated dependencies, remove their import mappings.
+Remove composition only when no placeholders remain for the compared schemas.
 
 For each assessment, retain:
 
@@ -79,13 +82,6 @@ When a schema needs correction, update its authoritative definition and regenera
 Acquisition metadata and checksums support repeatability. They do not verify the source
 build, dependencies, configuration, or agreement with runtime behavior. Use dependency
 documents that match the versions in the composition manifest.
-
-### Optional Deployment Inspection
-
-To inspect a deployment's declared contract, capture its HTTP schema. Compare the same
-endpoints and configurations. Capture records the served schema; it does not test inference.
-Keep framework launch, recapture, and cleanup instructions in its recipe. Exclude credentials
-and full environment dumps from retained evidence.
 
 ## Native Response Schemas
 
@@ -145,9 +141,28 @@ Use behavioral tests to check comment-only annotations, keep-alives, and the ord
 usage and finish events.
 
 For comparison, the tool creates schema copies that describe decoded event data.
-The copies preserve the JSON payload constraints in `contentSchema` and distinguish JSON
-from literal data such as `[DONE]`. The raw export remains unchanged. The tool reports
-missing or unsupported event representations as coverage gaps.
+Because oasdiff does not compare `itemSchema` or `contentSchema` directly, the copies
+replace event `data` with `{encoding, value}`. JSON uses `encoding: json` and the decoded
+payload schema; literals use `encoding: literal` and the marker. This distinguishes
+literal `[DONE]` from JSON containing that string. Raw exports remain unchanged.
+Unsupported encodings or string constraints become coverage gaps.
+
+Generic JSON Schema validation does not check JSON encoded in a string against
+`contentSchema`. Runtime tests must parse SSE, decode and validate data, and check
+the stream lifecycle. A description-only error response does not establish its body schema.
+
+For a source that declares chunks or 3.1 event envelopes, select an explicit adapter.
+The adapter interprets only the selected schema pointers. See the
+[adapter configuration](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#source-qualified-sse-adapters).
+
+When a source declares only chunks, the tool compares selected chunks separately and
+records gaps for envelopes, encoding, errors, terminators, and extensions. Chunk agreement
+does not establish event equivalence. The tool does not import Chat error envelopes from
+Responses API documentation.
+
+Event projections retain configured `tool_call_dispatch` and `reasoning_dispatch` alternatives.
+Their presence alone does not prove client compatibility or malformed SSE. Use behavioral
+tests to check ordering, error-path termination, and client handling.
 
 The native exporter derives components with Utoipa 5, then adds OpenAPI 3.2 fields to
 the serialized JSON. Do not deserialize that document back into Utoipa 5: its typed model
@@ -157,14 +172,19 @@ cannot preserve `itemSchema`. The bundled Swagger UI has limited `itemSchema` re
 
 ## Reading the Result
 
-The `assess` command creates separate request and response schema copies with their referenced
-components. It retains the raw exports and composed Dynamo document separately.
-It runs oasdiff 1.33.0 with external reference fetching disabled. It enables `allOf`
-flattening only when the corresponding projection has no coverage gaps.
+The tool runs oasdiff 1.33.0 without external reference fetching. It enables `allOf`
+flattening only when the corresponding projection has no coverage gaps. Original,
+composed, and comparison documents remain separate.
 
-The comparison direction is framework → Dynamo. Additions exist only in Dynamo; deletions
-exist only in the framework. Direction alone does not determine compatibility.
-Start with `report.md`, then inspect the full differences and the normalization and alias records.
+The comparison direction is framework → Dynamo. At the compared location, an addition
+exists only in Dynamo and a deletion exists only in the framework. A structural change,
+such as moving a property into `allOf`, does not by itself prove that the field was removed.
+Direction alone does not determine compatibility.
+
+Start with `report.md`. Each finding shows both declarations, its location, interpretation,
+evidence links, and a suggested check. `findings.json` retains location IDs and accounts for
+every raw delta terminal. An unresolved union or `allOf` change remains a structural group;
+an accounting pass is not a compatibility pass.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -172,9 +192,33 @@ Start with `report.md`, then inspect the full differences and the normalization 
 | Coverage gap | The export or comparison cannot establish the contract; a gap prevents complete coverage |
 | Intentional exclusion | Deliberately omitted from the comparison; compatibility remains unverified |
 
-Resolve findings against the authoritative source contract, then use the
+For each candidate, check the authoritative source contract. A missing `default` annotation
+does not establish a runtime default of null. A different union layout does not by itself
+establish different accepted values. Use the
 [field-handling development checklist](protocol-field-handling.md#development-checklist) to
 collect acceptance, delivery, effect, response, and error evidence.
+
+### From Generated Findings to Reviewed Actions
+
+The tool inventories declarations; the reviewer decides what they mean for a client workflow:
+
+1. Freeze the endpoints, transports, client workflow, revisions, and configuration.
+   Distinguish static exports from captures of a running server.
+2. Reconcile each candidate with earlier reports by location ID, delta, and declaration
+   content. A stable ID does not prove unchanged content; disappearance does not prove a fix.
+3. Assess request acceptance and effects separately from response compatibility.
+   Extra accepted input and extra possible output have different client consequences.
+4. Attach evidence with its original revisions and configuration. Distinguish declaration
+   defects, runtime defects, intentional policy, and unresolved coverage. Do not present
+   historical observations as new runtime results.
+5. Prioritize by client impact, affected workflows, evidence confidence, and the next
+   check's investigation value. Category order is navigation, not severity. Group
+   candidates that share a root cause; keep uncertainty separate from impact.
+6. Assign an owner and a concrete next action. Verify whether a related change is proposed,
+   implemented, tested, approved, or merged, and whether the compared input includes it.
+
+Keep proposed protocol changes separate from approved work. To regenerate only the report,
+use the [saved-evidence renderer](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#re-render-saved-evidence).
 
 ## Maintenance and Validation
 

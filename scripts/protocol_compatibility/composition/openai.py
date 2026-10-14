@@ -22,7 +22,11 @@ PREFIX = "OpenAIBaseline."
 
 
 def corrected(schema: Any, mapping: dict[str, Any], name: str) -> Any:
-    """Apply reviewed JSON Patch, rejecting stale or unrelated guards."""
+    """Return a patched copy; reject missing/wrong guards or a missing rationale.
+
+    `mapping` contains optional `patch` and `rationale`; `name` labels failures.
+    Invalid operations raise ValueError; failed tests propagate JSON Patch errors.
+    """
     operations = mapping.get("patch", [])
     for index, operation in enumerate(operations):
         if operation["op"] not in {"test", "add", "remove", "replace"}:
@@ -54,6 +58,8 @@ def compose(
     Only schema components reachable from explicit slots are imported. All refs
     must be document-local; imports cannot overwrite Dynamo-owned definitions.
     Unmapped markers are errors, never a successful partially composed export.
+    `baseline_bytes` must match the manifest checksum. Bad mappings, references,
+    patch guards, or collisions raise; the input document remains unchanged.
     """
     if hashlib.sha256(baseline_bytes).hexdigest() != manifest["openai"]["sha256"]:
         raise ValueError("OpenAI specification checksum mismatch")
@@ -73,6 +79,11 @@ def compose(
                 mapped_pointers[pointer] = name
 
     def copy_schema(node: Any) -> Any:
+        """Copy schema positions and populate imports, preserving cycles and literal data.
+
+        Reject external/dynamic references and name collisions. A failure may
+        populate the local imports table, but does not mutate caller inputs.
+        """
         if isinstance(node, list):
             return [copy_schema(item) for item in node]
         if not isinstance(node, dict):

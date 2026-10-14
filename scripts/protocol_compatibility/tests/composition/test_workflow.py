@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""Check CLI orchestration, retained evidence, and failure status with a mocked comparator."""
 
+import copy
 import hashlib
 import json
 import tempfile
@@ -16,10 +18,119 @@ from scripts.protocol_compatibility.acquisition.http import load_capture, write_
 from scripts.protocol_compatibility.assessment.openapi_workflow import assess
 from scripts.protocol_compatibility.tests.assessment import test_openapi as fixtures
 from scripts.protocol_compatibility.tests.assessment.test_openapi import document
+from scripts.protocol_compatibility.tests.assessment.test_responses import (
+    stream_selection,
+    streaming_document,
+)
 
 
 class WorkflowTests(unittest.TestCase):
+    @patch(
+        "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
+        return_value=({}, ["mock"]),
+    )
+    def test_missing_sse_declaration_remains_an_evidence_gap(self, compare):
+        """A JSON-only declaration must not be interpreted as proof that streaming is absent."""
+        self.args.dynamo = self.root / "streaming.json"
+        write_json(self.args.dynamo, streaming_document())
+        self.assertEqual(assess(self.args), 1)
+        report = json.loads((self.args.output_dir / "report.json").read_text())
+        event_gaps = [
+            gap for gap in report["coverage_gaps"] if gap.get("layer") == "event"
+        ]
+        self.assertEqual(len(event_gaps), 2)
+        self.assertEqual({gap["side"] for gap in event_gaps}, {"framework"})
+
+    @patch(
+        "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
+        return_value=({}, ["mock"]),
+    )
+    def test_chunk_only_workflow_keeps_event_evidence_and_layer_gaps(self, compare):
+        """Chunk agreement never becomes whole-event agreement; retain hashes and mappings."""
+        native = streaming_document()
+        native["components"]["schemas"]["Response"]["properties"]["choices"] = {
+            "type": "array",
+            "items": {"type": "object"},
+        }
+        chunk = copy.deepcopy(native)
+        chunk["openapi"] = "3.1.0"
+        chunk["paths"] = {
+            key.removeprefix("/v1"): value for key, value in chunk["paths"].items()
+        }
+        for path in chunk["paths"].values():
+            path["post"]["responses"]["200"]["content"]["text/event-stream"] = {
+                "schema": {"$ref": "#/components/schemas/Response"}
+            }
+        settings = {"version": 1, "sources": {}}
+        for side, raw, mode in (
+            ("dynamo", native, "event-item-schema"),
+            ("framework", chunk, "decoded-chunk"),
+        ):
+            path = self.root / f"{side}.json"
+            write_json(path, raw)
+            setattr(self.args, side, path)
+            selection = stream_selection(raw, mode, chunk=side == "dynamo")
+            selection["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            if side == "framework":
+                selection["path_mappings"] = {key: "/v1" + key for key in raw["paths"]}
+            settings["sources"][side] = selection
+        self.args.response_adapters = self.root / "adapters.yaml"
+        self.args.response_adapters.write_text(yaml.safe_dump(settings))
+        self.assertEqual(assess(self.args), 1)
+        report = json.loads((self.args.output_dir / "report.json").read_text())
+        self.assertEqual(compare.call_count, 4)
+        self.assertEqual(
+            report["response_chunk_probes"][0]["status"],
+            "no_detected_chunk_differences",
+        )
+        self.assertEqual(
+            {gap["layer"] for gap in report["coverage_gaps"] if gap.get("layer")},
+            {"envelope", "encoding", "error", "terminator", "extensions"},
+        )
+        self.assertEqual(
+            report["response_sources"]["framework"]["streams"][0]["pointer"],
+            settings["sources"]["framework"]["streams"][0]["pointer"],
+        )
+        full = json.loads((self.args.output_dir / "dynamo.responses.json").read_text())
+        normalized = json.loads(
+            (self.args.output_dir / "dynamo.responses.normalized.json").read_text()
+        )
+        self.assertIn(
+            "properties",
+            full["paths"]["/v1/chat/completions"]["post"]["responses"]["200"][
+                "content"
+            ]["text/event-stream"]["schema"],
+        )
+        self.assertEqual(
+            normalized["paths"]["/v1/chat/completions"]["post"]["responses"]["200"][
+                "content"
+            ]["text/event-stream"]["schema"],
+            {},
+        )
+        self.assertEqual(
+            (self.args.output_dir / "framework/openapi.raw").read_bytes(),
+            self.args.framework.read_bytes(),
+        )
+        self.assertIn(
+            "not event equivalence", (self.args.output_dir / "report.md").read_text()
+        )
+
+    def test_duplicate_adapter_keys_and_unknown_sources_fail_before_output(self):
+        """Configuration typos cannot silently choose a different interpretation."""
+        self.args.response_adapters = self.root / "adapters.yaml"
+        for content in (
+            "",
+            "version: 1\nsources: {framework: null}\n",
+            "version: 1\nversion: 1\nsources: {}\n",
+            "version: 1\nsources: {other: {}}\n",
+        ):
+            self.args.response_adapters.write_text(content)
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                assess(self.args)
+            self.assertFalse(self.args.output_dir.exists())
+
     def setUp(self):
+        """Create checksummed captures and CLI inputs in an automatically removed directory."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -70,6 +181,7 @@ class WorkflowTests(unittest.TestCase):
             manifest=self.manifest,
             oasdiff=self.binary,
             output_dir=self.root / "report",
+            response_adapters=None,
         )
 
     def test_modified_capture_is_rejected(self):
@@ -101,12 +213,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["differences"], [])
         self.assertEqual(report["response_differences"][0]["delta"], delta)
         self.assertEqual(report["comparator"]["response_command"], ["mock-response"])
+        inventory = json.loads((self.args.output_dir / "findings.json").read_text())
+        self.assertEqual(inventory, report["finding_inventory"])
+        self.assertTrue(any(row["status"] == "200" for row in inventory["findings"]))
+        self.assertEqual(inventory["accounting"]["unaccounted"], [])
         self.assertEqual(
             json.loads((self.args.output_dir / "response-oasdiff.json").read_text()),
             response_diff,
         )
         self.assertIn(
-            "Declared response differences",
+            "Categories in review order",
             (self.args.output_dir / "report.md").read_text(),
         )
 
@@ -236,6 +352,29 @@ class WorkflowTests(unittest.TestCase):
             (self.args.output_dir / "framework.requests.normalized.json").exists()
         )
         self.assertEqual(compare.call_count, 2)
+
+    @patch(
+        "scripts.protocol_compatibility.assessment.openapi_workflow.compare",
+        return_value=({}, ["mock"]),
+    )
+    def test_ambiguous_alias_coverage_can_be_rendered(self, compare):
+        """An ambiguous alias must produce a request gap, not crash report generation."""
+        own, native = fixtures.AliasMatchingTests().pair()
+        own["components"]["schemas"]["Request"]["properties"]["alternate"] = {}
+        self.args.dynamo, self.args.framework = (
+            self.root / "own.json",
+            self.root / "native.json",
+        )
+        write_json(self.args.dynamo, own)
+        write_json(self.args.framework, native)
+        self.assertEqual(assess(self.args), 1)
+        report = json.loads((self.args.output_dir / "report.json").read_text())
+        gaps = [
+            gap for gap in report["coverage_gaps"] if "Ambiguous alias" in gap["reason"]
+        ]
+        self.assertEqual(len(gaps), 2)
+        self.assertTrue(all(gap["kind"] == "request" for gap in gaps))
+        self.assertTrue((self.args.output_dir / "report.md").is_file())
 
     @patch(
         "scripts.protocol_compatibility.assessment.openapi_workflow.compare",

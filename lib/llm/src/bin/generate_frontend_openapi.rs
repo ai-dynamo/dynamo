@@ -6,7 +6,7 @@
 //! This allows CI and documentation tooling to obtain the frontend API schemas
 //! without starting the HTTP service and scraping the endpoint. File mode also
 //! lists `/docs` and `/openapi.json`: those documentation routes are registered
-//! after the served document is generated, so the full documents differ there.
+//! after the served document's route list is captured, so the documents differ there.
 //!
 //! Usage (from the repository root):
 //! ```bash
@@ -44,9 +44,10 @@ use dynamo_llm::http::service::{openapi_docs, service_v2::HttpService};
 /// additional stack space due to recursive type expansion.
 const GENERATOR_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-/// Run [`generate_openapi`] on the larger-stack thread required for schema generation.
+/// Run [`generate_openapi`] in file mode or the CLI-selected `--serve IP:PORT` mode.
 ///
-/// Returns its result, or an error if thread creation fails or the thread panics.
+/// Returns its result, or an error for invalid arguments, thread creation failure,
+/// or a generator-thread panic.
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let listen = match args.as_slice() {
@@ -65,17 +66,18 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("generator thread panicked: {:?}", e))?
 }
 
-/// Export the native document to disk without starting a listener or loading a model.
+/// Write the native schema to disk or serve it through a workerless frontend.
 ///
-/// Uses the current directory as the output root; run from the repository root to
-/// update its `docs/frontends/openapi.json`. Creates parent directories and overwrites
-/// that file non-atomically. Returns `Ok(())` after writing it and printing its path.
+/// With `listen = None`, write `docs/frontends/openapi.json` under the current
+/// directory, creating parents and overwriting the file non-atomically.
+/// With `Some(address)`, bind there until server termination; Ctrl-C requests
+/// shutdown. Serving mode writes no file and has no inference workers.
+/// Returns `Ok(())` after the file is written or the server stops successfully.
 ///
 /// # Errors
 ///
-/// Propagates service-construction, schema-invariant, serialization, and I/O errors. A failed write may
-/// leave a truncated file; created directories are not removed on failure.
-///
+/// Propagates service-construction, schema-invariant, serialization, I/O, runtime,
+/// signal, and server errors. A failed write can leave a truncated file or new directories.
 fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document

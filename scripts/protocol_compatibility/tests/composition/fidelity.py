@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate the composed request schemas against the same cases as Rust.
+"""Check composed request acceptance against shared Rust fixtures.
+
+The companion lib/llm/tests/protocols/openapi_request_fidelity.rs checks Rust
+deserialization against `valid`. This suite checks the same requests.json cases
+against `schema_valid` (default: `valid`); `gap` explains known disagreements.
+Run both suites at the same revision. Passing known-gap cases reproduces those
+disagreements; neither suite proves HTTP admission or backend behavior.
 
 Run with --spec pointing to a composed HTTP export. This is an explicit
 integration check, not a silently skipped unit test when an export is missing.
@@ -18,6 +24,11 @@ from referencing.jsonschema import DRAFT202012
 
 
 def check(spec: dict) -> tuple[int, int]:
+    """Return aligned/known-gap case counts for a composed two-endpoint export.
+
+    Invalid schemas, unexplained fixture gaps, or unexpected acceptance raise.
+    Other endpoints are excluded; input is unchanged and no inference is run.
+    """
     # Other endpoints are retained in the composed artifact but are not part of
     # this check. The current raw server export omits path-parameter declarations
     # on unrelated batch routes; do not present scoped validation as a full-API pass.

@@ -17,6 +17,7 @@ from .assessment.openapi_workflow import DEFAULT_MANIFEST, assess
 
 
 def main(argv=None) -> int:
+    """Run acquisition or assessment; return 2 for input/tool failures reported on stderr."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     capture = commands.add_parser(
@@ -62,6 +63,11 @@ def main(argv=None) -> int:
         "--openai", type=Path, required=True, help="pinned async-openai openapi.yaml"
     )
     assessment.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    assessment.add_argument(
+        "--response-adapters",
+        type=Path,
+        help="Optional hash-qualified SSE interpretations and explicit completion path mappings",
+    )
     assessment.add_argument(
         "--oasdiff", type=Path, required=True, help="pinned oasdiff 1.33.0 executable"
     )
