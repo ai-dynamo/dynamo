@@ -443,6 +443,7 @@ async def test_http_is_opt_in_even_with_private_network(target, policy):
         "::a9fe:a9fe",
         "64:ff9b::a00:1",
         "::a00:1",
+        "::127.0.0.1",
         "0.0.0.0",
         "224.0.0.1",
     ],
