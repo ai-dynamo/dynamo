@@ -226,9 +226,9 @@ class ImageLoader:
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
+        # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
+        # (most phone cameras), which report image.format == "MPO".
         image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
-        if image.format not in ("JPEG", "PNG", "WEBP"):
-            raise ValueError(f"Unsupported image format: {image.format}")
         # Image.open() is lazy — convert() forces the actual pixel decode
         return image.convert("RGB")
 
@@ -348,12 +348,6 @@ class ImageLoader:
             )
             raise
         except ValueError as e:
-            if "Unsupported image format" in str(e):
-                logger.error(
-                    "Unsupported image format loading: '%s'",
-                    describe_media_source(image_url),
-                )
-                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
             logger.error(
                 "%s loading image: '%s'",
                 type(e).__name__,
@@ -447,14 +441,6 @@ class ImageLoader:
             except UrlValidationError as e:
                 raise ValueError(f"Failed to decode image: {e}") from e
             except ValueError as e:
-                if "Unsupported image format" in str(e):
-                    logger.error(
-                        "Unsupported image format decoding: '%s'",
-                        describe_media_source(image_url),
-                    )
-                    raise HttpStatusError(
-                        415, "Unsupported Media Type", image_url
-                    ) from e
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
