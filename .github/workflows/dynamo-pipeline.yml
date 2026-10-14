@@ -11,15 +11,15 @@ on:
   workflow_call:
     inputs:
       rust_gpu_runner_labels:
-        description: 'JSON GPU labels for native checks: hardware tier and cluster'
+        description: 'JSON GPU labels for native checks: GPU tier, architecture, generation, and region'
         required: false
         type: string
-        default: '["prod-tester-amd-gpu-v2","aws-ci-prod-east"]'
+        default: '["gpu-1","amd64","v2","us-east-1"]'
       python_gpu_runner_labels:
-        description: 'JSON GPU labels for Python tests: hardware tier and cluster'
+        description: 'JSON GPU labels for Python tests: GPU tier, architecture, generation, and region'
         required: false
         type: string
-        default: '["prod-tester-amd-gpu-v2","aws-ci-prod"]'
+        default: '["gpu-1","amd64","v2","us-west-2"]'
       builder_name:
         description: 'BuildKit builder name'
         required: true
@@ -107,7 +107,7 @@ jobs:
     runs-on: ${{ fromJson(inputs.rust_gpu_runner_labels) }}
     container:
       # Use the registry local to the selected GPU runner, as shared-test does.
-      image: ${{ contains(fromJson(inputs.rust_gpu_runner_labels), 'aws-ci-prod-east') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ contains(fromJson(inputs.rust_gpu_runner_labels), 'us-east-1') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and

@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       amd_runner_labels:
-        description: 'Optional JSON array of hardware-tier and cluster labels for AMD64'
+        description: 'Optional JSON array of GPU tier, architecture, generation, and region labels for AMD64'
         required: false
         type: string
         default: ''
@@ -184,7 +184,7 @@ jobs:
       # Match the AMD64 runner region. ARM and callers without regional labels
       # keep ECR_REGISTRY (west). The build publishes test tags to both regions.
       # ECR_REGISTRY_EAST may override this repository's east registry.
-      image: ${{ matrix.platform == 'amd64' && contains(fromJson(inputs.amd_runner_labels || '[]'), 'aws-ci-prod-east') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ matrix.platform == 'amd64' && contains(fromJson(inputs.amd_runner_labels || '[]'), 'us-east-1') && (vars.ECR_REGISTRY_EAST || '210086341041.dkr.ecr.us-east-1.amazonaws.com') || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
