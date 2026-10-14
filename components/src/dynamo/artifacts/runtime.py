@@ -33,6 +33,10 @@ _SAFE_URL_KEY = re.compile(r"[A-Za-z0-9._~/-]+\Z")
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
+class ArtifactDependencyError(RuntimeError):
+    """An optional artifact-delivery dependency is unavailable."""
+
+
 class ArtifactRuntime:
     """Profiles and verifier registrations come exclusively from trusted config.
 
@@ -46,13 +50,24 @@ class ArtifactRuntime:
         self._admission_lock = asyncio.Lock()
         try:
             self._initialize(config, capability_key)
+        except ArtifactDependencyError:
+            if self._authority_file is not None:
+                self._authority_file.close()
+            raise
         except Exception:  # noqa: BLE001 -- sanitize configuration failures
             if self._authority_file is not None:
                 self._authority_file.close()
             raise ValueError("artifact authority configuration is invalid") from None
 
     def _initialize(self, config, capability_key):
-        import opendal
+        try:
+            import opendal
+        except ModuleNotFoundError as exc:
+            if exc.name == "opendal":
+                raise ArtifactDependencyError(
+                    "artifact delivery requires ai-dynamo[artifact-delivery]"
+                ) from None
+            raise
 
         self._object_id_key = hmac.digest(
             capability_key, b"dynamo-artifact-object-id-v1", "sha256"
@@ -312,6 +327,8 @@ def configured_artifact_runtime():
         config = json.loads(Path(path).read_text())
         key = os.environ["DYNAMO_ARTIFACT_CAPABILITY_KEY"].encode()
         return ArtifactRuntime(config, key)
+    except ArtifactDependencyError:
+        raise
     except Exception:  # noqa: BLE001 -- sanitize authority configuration failures
         raise ValueError("artifact authority configuration is invalid") from None
 

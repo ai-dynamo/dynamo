@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -307,6 +308,20 @@ def test_config_requires_certified_immutable_profile(runtime_config):
     config = {**runtime_config, "profiles": {"bad": {"immutable": False}}}
     with pytest.raises(ValueError, match="configuration is invalid"):
         ArtifactRuntime(config, Fernet.generate_key())
+
+
+def test_missing_opendal_dependency_is_actionable(
+    runtime_config, monkeypatch, tmp_path
+):
+    monkeypatch.setitem(sys.modules, "opendal", None)
+    with pytest.raises(RuntimeError, match=r"ai-dynamo\[artifact-delivery\]"):
+        ArtifactRuntime(runtime_config, Fernet.generate_key())
+    path = tmp_path / "artifact-config.json"
+    path.write_text(json.dumps(runtime_config))
+    monkeypatch.setenv("DYNAMO_ARTIFACT_CONFIG", str(path))
+    monkeypatch.setenv("DYNAMO_ARTIFACT_CAPABILITY_KEY", Fernet.generate_key().decode())
+    with pytest.raises(RuntimeError, match=r"ai-dynamo\[artifact-delivery\]"):
+        configured_artifact_runtime()
 
 
 @pytest.mark.asyncio
