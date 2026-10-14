@@ -2596,6 +2596,7 @@ mod tests {
                     max_output_tokens: 1,
                     hash_ids: vec![1],
                     delay_after_previous_ms: 0.0,
+                    synthetic_session_id: true,
                     ..Default::default()
                 }],
             }],
@@ -2647,6 +2648,30 @@ mod tests {
         assert_eq!(report.per_request.len(), 1);
         assert_eq!(report.per_request[0].session_id, None);
         assert_eq!(report.per_request[0].turn_index, None);
+    }
+
+    #[test]
+    fn loaded_single_turn_trace_keeps_authored_session_identity() {
+        let mut trace = single_turn_dynamo_trace(Some(0.0));
+        trace.sessions[0].session_id = "authored-session".to_owned();
+        trace.sessions[0].turns[0].synthetic_session_id = false;
+        let report = simulate_loaded_trace_with_router_mode_and_options(
+            replay_test_args(),
+            None,
+            None,
+            trace,
+            2,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.per_request[0].session_id.as_deref(),
+            Some("authored-session")
+        );
     }
 
     #[test]
