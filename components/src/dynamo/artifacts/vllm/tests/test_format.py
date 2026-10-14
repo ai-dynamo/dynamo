@@ -13,7 +13,7 @@ msgspec = pytest.importorskip("msgspec")
 np = pytest.importorskip("numpy")
 zstd = pytest.importorskip("zstandard")
 
-from dynamo.artifacts.vllm.format import (
+from dynamo.artifacts.vllm.format import (  # noqa: E402
     CODEC_NONE,
     CODEC_ZSTD,
     GenerationArtifactChoice,
