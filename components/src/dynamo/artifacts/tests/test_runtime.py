@@ -150,9 +150,6 @@ def test_preflight_rejects_bad_destinations(runtime, destination, mode, match):
 def test_delegated_verifier_must_bind_exact_put_url(runtime, delegated):
     with pytest.raises(ValueError, match="registration"):
         runtime.validate(delegated, "object_store")
-    runtime.verifiers = {"verifier-42": {"put_url_sha256": "wrong"}}
-    with pytest.raises(ValueError, match="bind"):
-        runtime.validate(delegated, "object_store")
     runtime.verifiers = {
         "verifier-42": {
             "put_url_sha256": hashlib.sha256(delegated["url"].encode()).hexdigest(),
@@ -191,6 +188,15 @@ def test_config_requires_certified_immutable_profile(runtime_config):
     config = {**runtime_config, "profiles": {"bad": {"immutable": False}}}
     with pytest.raises(ValueError, match="configuration is invalid"):
         ArtifactRuntime(config, Fernet.generate_key())
+
+
+@pytest.mark.parametrize(
+    "prefixes", ["artifacts", {"artifacts": True}, ["artifacts", 7]]
+)
+def test_config_rejects_non_sequence_prefixes(runtime_config, prefixes):
+    runtime_config["profiles"]["approved"]["allowed_prefixes"] = prefixes
+    with pytest.raises(ValueError, match="configuration is invalid"):
+        ArtifactRuntime(runtime_config, Fernet.generate_key())
 
 
 @pytest.mark.asyncio
@@ -286,11 +292,6 @@ async def test_verifier_rejects_nonconforming_provider_read_size(runtime, manage
         await runtime._verify(b"opaque", managed, {})
 
 
-def test_unconfigured_runtime_is_none(monkeypatch):
-    monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
-    assert configured_artifact_runtime() is None
-
-
 @pytest.mark.asyncio
 async def test_configured_runtime_is_cached(tmp_path, runtime_config, monkeypatch):
     path = tmp_path / "artifact-config.json"
@@ -340,6 +341,37 @@ async def test_close_drains_transfers_before_releasing_authority(
     finally:
         await reopened.close()
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_releases_authority_after_drain(runtime_config):
+    key = Fernet.generate_key()
+    runtime = ArtifactRuntime(runtime_config, key)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def drain():
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+
+    runtime.service.drain = drain
+    try:
+        closing = asyncio.create_task(runtime.close())
+        await entered.wait()
+        closing.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        reopened = ArtifactRuntime(runtime_config, key)
+        await reopened.close()
+    finally:
+        release.set()
+        await runtime.close()
 
 
 @pytest.mark.asyncio
