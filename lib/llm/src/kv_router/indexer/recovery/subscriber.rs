@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     IndexerRecoveryTarget, RecoveryTarget, broker_zmq::run_broker_zmq_supervisor,
-    direct_zmq::run_direct_zmq_supervisor, source_health, start_state_agent_router,
+    direct_zmq::run_direct_zmq_supervisor, source_health, start_state_agent_router, wait_for_retry,
     worker_query::WorkerQueryClient,
 };
 use crate::{
@@ -243,18 +243,6 @@ async fn consume_scope<T: RecoveryTarget>(
                 }
             }
         }
-    }
-}
-
-async fn wait_for_retry(
-    delay: Duration,
-    membership_watch: &mut KvSourceMembershipWatch,
-    cancellation_token: &CancellationToken,
-) -> bool {
-    tokio::select! {
-        _ = cancellation_token.cancelled() => false,
-        changed = membership_watch.changed() => changed.is_ok(),
-        _ = tokio::time::sleep(delay) => true,
     }
 }
 
