@@ -12,6 +12,7 @@ from typing import Any, AsyncGenerator, AsyncIterator
 from dynamo._core import Context
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang._compat import resolved_server_args
+from dynamo.sglang.capacity import sglang_dp_layout
 
 _CANCELLATION_POLL_MAX_DELAY_S = 0.05
 _CANCELLATION_ABORT_RETRY_LIMIT = 8
@@ -358,7 +359,7 @@ class CancellationMixin:
             not dispatch_observed
             or getattr(server_args, "pp_size", 1) > 1
             or (
-                getattr(server_args, "enable_dp_attention", False)
+                sglang_dp_layout(server_args)[1]
                 and not getattr(
                     server_args, "enable_dp_attention_local_control_broadcast", False
                 )
