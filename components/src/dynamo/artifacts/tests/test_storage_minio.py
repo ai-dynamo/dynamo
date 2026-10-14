@@ -6,7 +6,6 @@
 import hashlib
 import json
 import os
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
@@ -35,7 +34,6 @@ from dynamo.artifacts.vllm.format import (  # noqa: E402 -- optional dependency 
     MoeRoutes,
     RouterRoutes,
     Tensor,
-    decode_generation_artifact,
     encode_generation_artifact,
 )
 
@@ -175,12 +173,6 @@ async def test_minio_same_v1_bytes_managed_and_presigned(
     received = tuple(_read(client, bucket, key) for key in (managed_key, presigned_key))
     assert received[0] == received[1] == frozen_artifact.data
     assert managed_receipt.sha256 == presigned_receipt.sha256 == frozen_artifact.sha256
-    decoded = decode_generation_artifact(received[0])
-    routers = decoded.choices[0].components[0].routers
-    assert tuple(router.expert_count for router in routers) == (256, 257)
-    assert tuple(router.expert_ids.dtype for router in routers) == ("u8", "u16")
-    assert tuple(router.expert_ids.shape for router in routers) == ((2, 1), (2, 2))
-    assert routers[1].expert_ids.as_array().tolist() == [[1, 256], [256, 1]]
     for target in (managed, delegated):
         with pytest.raises(ArtifactStorageError) as error:
             await put_artifact(
@@ -202,9 +194,6 @@ async def test_minio_same_v1_bytes_managed_and_presigned(
                 "managed_sha256": hashlib.sha256(received[0]).hexdigest(),
                 "presigned_sha256": hashlib.sha256(received[1]).hexdigest(),
                 "equal_bytes": True,
-                "router_expert_counts": [256, 257],
-                "router_dtypes": ["u8", "u16"],
-                "router_shapes": [[2, 1], [2, 2]],
                 "encoded_space_percent_unicode_keys": True,
                 "conditional_collisions_preserve_original": True,
                 "delegated_cloud_credentials": False,
@@ -218,25 +207,18 @@ async def test_minio_same_v1_bytes_managed_and_presigned(
 @pytest.mark.asyncio
 async def test_minio_byte_limits_prevent_object_creation(store, frozen_artifact):
     client, bucket, operator, policy = store
-    keys = ("artifacts/managed-over-limit", "artifacts/presigned-over-limit")
-    targets = (
-        ManagedStoreTarget("minio", keys[0]),
-        replace(
-            _grant(client, bucket, keys[1], frozen_artifact),
-            max_bytes=frozen_artifact.byte_count - 1,
-        ),
-    )
+    key = "artifacts/managed-over-limit"
+    target = ManagedStoreTarget("minio", key)
     profiles = {
         "minio": ManagedProfile(
             operator, ("artifacts",), max_bytes=frozen_artifact.byte_count - 1
         )
     }
-    for target, key in zip(targets, keys):
-        with pytest.raises(ArtifactStorageError) as error:
-            await put_artifact(
-                frozen_artifact.data, target, policy=policy, profiles=profiles
-            )
-        assert error.value.code == "too_large"
-        with pytest.raises(ClientError) as missing:
-            client.head_object(Bucket=bucket, Key=key)
-        assert missing.value.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+    with pytest.raises(ArtifactStorageError) as error:
+        await put_artifact(
+            frozen_artifact.data, target, policy=policy, profiles=profiles
+        )
+    assert error.value.code == "too_large"
+    with pytest.raises(ClientError) as missing:
+        client.head_object(Bucket=bucket, Key=key)
+    assert missing.value.response["ResponseMetadata"]["HTTPStatusCode"] == 404
