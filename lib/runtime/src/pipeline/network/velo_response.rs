@@ -4,12 +4,13 @@
 //! Velo owns response framing, batching, flow control, and stream lifecycle.
 
 use anyhow::{Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     pin::Pin,
     sync::{
@@ -17,13 +18,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use velo::{
-    PeerInfo, Velo,
+    InstanceId, PeerInfo, Velo, WorkerAddress,
     streaming::{
         AutoFlush, FlushPolicy, MuxConfig, StreamAnchor, StreamAnchorHandle, StreamController,
         StreamFrame, StreamSender, control::StreamOpenTicket,
@@ -31,7 +32,8 @@ use velo::{
 };
 
 use super::{
-    ConnectionInfo, RegisteredStream, ResponseStreamPrologue, StreamPrologueError, StreamReceiver,
+    ConnectionInfo, RegisteredResponsePlane, RegisteredStream, ResponseStreamPrologue,
+    StreamPrologueError, StreamReceiver, tombstones::InstanceTombstones,
 };
 use crate::{
     discovery::EndpointInstanceId,
@@ -40,10 +42,14 @@ use crate::{
 };
 
 pub const TRANSPORT_NAME: &str = "velo_response";
-const VERSION: u32 = 3;
-const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
-static PROCESS_SERVICE: tokio::sync::Mutex<Weak<SharedService>> =
-    tokio::sync::Mutex::const_new(Weak::new());
+/// A worker reports a version mismatch over the stream it opens, so later
+/// versions must keep `ResponseAddress`'s `version`, `peer_id`,
+/// `peer_address`, `anchor` and `ticket` decodable.
+const VERSION: u32 = 4;
+/// Process-wide services, keyed by [`service_key`].
+static PROCESS_SERVICES: LazyLock<
+    tokio::sync::Mutex<HashMap<Option<tokio::runtime::Id>, Weak<SharedService>>>,
+> = LazyLock::new(Default::default);
 static PROCESS_METRICS: LazyLock<(crate::MetricsRegistry, Arc<velo::VeloMetrics>)> =
     LazyLock::new(|| {
         let registry = crate::MetricsRegistry::new();
@@ -126,11 +132,16 @@ impl ResponseTransport {
     }
 }
 
+/// The frontend's response endpoint, carried in every request.
 #[derive(Serialize, Deserialize)]
-struct ResponseAddress {
+struct ResponseAddress<'a> {
     version: u32,
     transport: ResponseTransport,
-    peer: PeerInfo,
+    peer_id: InstanceId,
+    /// Base64 of the frontend's `WorkerAddress`. A worker decodes it only for a
+    /// frontend it has not prepared yet. Serialized as `PeerInfo`, JSON would
+    /// write the address bytes as an array of numbers.
+    peer_address: &'a str,
     anchor: StreamAnchorHandle,
     ticket: StreamOpenTicket,
 }
@@ -147,10 +158,45 @@ struct Registration {
     instance: Option<EndpointInstanceId>,
 }
 
+impl Registration {
+    fn cancel(&self) {
+        self.done.cancel();
+        self.controller.cancel();
+    }
+}
+
 #[derive(Default)]
 struct Registrations {
     requests: HashMap<Uuid, Registration>,
-    tombstones: HashMap<EndpointInstanceId, Instant>,
+    /// Lets `cancel_instance_streams` find an instance's requests without a full scan.
+    instance_requests: HashMap<EndpointInstanceId, HashSet<Uuid>>,
+    tombstones: InstanceTombstones,
+}
+
+impl Registrations {
+    fn take(&mut self, id: Uuid) -> Option<Registration> {
+        let registration = self.requests.remove(&id)?;
+        if let Some(instance) = &registration.instance
+            && let Some(ids) = self.instance_requests.get_mut(instance)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.instance_requests.remove(instance);
+            }
+        }
+        Some(registration)
+    }
+}
+
+/// A service built on an owned runtime keeps that runtime alive, so all such
+/// callers share it. A service built on an External runtime holds only a
+/// `Handle`, and its I/O stops when that runtime ends, so only callers on the
+/// same Tokio runtime share it.
+fn service_key(runtime: &crate::runtime::RuntimeType) -> Option<tokio::runtime::Id> {
+    match runtime {
+        crate::runtime::RuntimeType::Shared(_) => None,
+        crate::runtime::RuntimeType::External(handle) => Some(handle.id()),
+    }
 }
 
 /// One owner per Dynamo Runtime, shared by all of that runtime's clones.
@@ -189,8 +235,9 @@ impl RuntimeService {
         }
         // Acquisition and final-owner shutdown use the same lock. A new
         // runtime cannot acquire a service while that service is closing.
-        let mut shared = PROCESS_SERVICE.lock().await;
-        let lease = match shared.upgrade() {
+        let key = service_key(&self.runtime);
+        let mut shared = PROCESS_SERVICES.lock().await;
+        let lease = match shared.get(&key).and_then(Weak::upgrade) {
             Some(lease) => lease,
             None => {
                 let runtime = self.runtime.clone();
@@ -207,7 +254,8 @@ impl RuntimeService {
                         })
                         .await??,
                 );
-                *shared = Arc::downgrade(&lease);
+                shared.retain(|_, service| service.strong_count() > 0);
+                shared.insert(key, Arc::downgrade(&lease));
                 lease
             }
         };
@@ -222,9 +270,9 @@ impl RuntimeService {
         let Some(lease) = owner.take() else {
             return;
         };
-        let mut shared = PROCESS_SERVICE.lock().await;
+        let mut shared = PROCESS_SERVICES.lock().await;
         if let Some(lease) = Arc::into_inner(lease) {
-            *shared = Weak::new();
+            shared.remove(&service_key(&lease.runtime));
             lease.service.shutdown().await;
         }
     }
@@ -234,7 +282,8 @@ impl RuntimeService {
 struct SharedService {
     service: Arc<VeloResponseService>,
     // Retain an owned Tokio runtime without retaining the Dynamo Runtime and
-    // its owner slot. External runtimes remain the caller's responsibility.
+    // its owner slot. An External runtime is the caller's responsibility, so
+    // its service is shared only on that runtime (see `service_key`).
     runtime: crate::runtime::RuntimeType,
 }
 
@@ -257,6 +306,8 @@ impl Drop for SharedService {
 pub struct VeloResponseService {
     velo: Arc<Velo>,
     transport: ResponseTransport,
+    /// This service's `ResponseAddress::peer_address`, encoded once.
+    peer_address: String,
     registrations: Mutex<Registrations>,
     /// Share initial peer registration and the lifecycle handshake across
     /// concurrent requests. A restarted frontend has a new instance ID.
@@ -284,23 +335,25 @@ impl VeloResponseService {
             .metrics(PROCESS_METRICS.1.clone())
             .mux_only()
             .messenger_mux(response_mux_config()?)?;
-        match transport {
-            ResponseTransport::Tcp => {
-                builder = builder.add_transport(Arc::new(tcp_transport(address)?));
+        if transport == ResponseTransport::Ucx {
+            // Added first, so Velo prefers UCX for every peer that has it.
+            #[cfg(all(target_os = "linux", feature = "velo-ucx"))]
+            {
+                builder = builder.add_transport(Arc::new(
+                    velo::transports::ucx::UcxTransportBuilder::new().build()?,
+                ));
             }
-            ResponseTransport::Ucx => {
-                #[cfg(all(target_os = "linux", feature = "velo-ucx"))]
-                {
-                    builder = builder.add_transport(Arc::new(
-                        velo::transports::ucx::UcxTransportBuilder::new().build()?,
-                    ));
-                }
-                #[cfg(not(all(target_os = "linux", feature = "velo-ucx")))]
-                bail!("Velo UCX responses require a Linux build with the velo-ucx feature");
-            }
+            #[cfg(not(all(target_os = "linux", feature = "velo-ucx")))]
+            bail!("Velo UCX responses require a Linux build with the velo-ucx feature");
         }
+        // Every service also has TCP. A frontend and worker configured for
+        // different transports still share it, so the worker can open the
+        // stream and report the mismatch instead of leaving the frontend to wait.
+        builder = builder.add_transport(Arc::new(tcp_transport(address)?));
+        let velo = builder.build().await?;
         Ok(Arc::new(Self {
-            velo: builder.build().await?,
+            peer_address: BASE64.encode(velo.peer_info().worker_address().as_bytes()),
+            velo,
             transport,
             registrations: Mutex::new(Registrations::default()),
             prepared_peers: dashmap::DashMap::new(),
@@ -313,10 +366,13 @@ impl VeloResponseService {
         self.closed
             .get_or_init(|| async {
                 self.closing.store(true, Ordering::Release);
-                let requests = std::mem::take(&mut self.registrations.lock().requests);
+                let requests = {
+                    let mut state = self.registrations.lock();
+                    state.instance_requests.clear();
+                    std::mem::take(&mut state.requests)
+                };
                 for registration in requests.into_values() {
-                    registration.done.cancel();
-                    registration.controller.cancel();
+                    registration.cancel();
                 }
                 // Bound the drain to five seconds, then await transport close.
                 self.velo
@@ -346,7 +402,8 @@ impl VeloResponseService {
             info: serde_json::to_string(&ResponseAddress {
                 version: VERSION,
                 transport: self.transport,
-                peer: self.velo.peer_info(),
+                peer_id: self.velo.instance_id(),
+                peer_address: &self.peer_address,
                 anchor: anchor.handle(),
                 ticket,
             })?,
@@ -415,6 +472,12 @@ impl VeloResponseService {
                         return;
                     }
                 }
+                Some(Err(velo::streaming::StreamError::SenderError(error))) => {
+                    // The worker opened the stream only to report why it cannot serve it.
+                    tracing::debug!(context_id = %context.id(), %error, "Velo response worker reported a setup error");
+                    let _ = tx.send(Err(StreamPrologueError::from_message(error)));
+                    return;
+                }
                 other => {
                     tracing::warn!(context_id = %context.id(), reason = %first_kind(&other), "Velo response ended before its prologue");
                     let _ = tx.send(Err(StreamPrologueError::from_message(format!(
@@ -460,15 +523,14 @@ impl VeloResponseService {
     }
 
     fn remove(&self, id: Uuid) {
-        let registration = self.registrations.lock().requests.remove(&id);
+        let registration = self.registrations.lock().take(id);
         if let Some(registration) = registration {
-            registration.done.cancel();
-            registration.controller.cancel();
+            registration.cancel();
         }
     }
 
     fn complete(&self, id: Uuid) {
-        let registration = self.registrations.lock().requests.remove(&id);
+        let registration = self.registrations.lock().take(id);
         if let Some(registration) = registration {
             registration.done.cancel();
         }
@@ -476,14 +538,22 @@ impl VeloResponseService {
 
     pub async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
         let mut state = self.registrations.lock();
-        state
-            .tombstones
-            .retain(|_, when| when.elapsed() < TOMBSTONE_TTL);
-        if state.tombstones.contains_key(instance) {
+        if state.tombstones.contains(instance) {
+            let registration = state.take(id);
+            drop(state);
+            if let Some(registration) = registration {
+                registration.cancel();
+            }
             return false;
         }
         if let Some(request) = state.requests.get_mut(&id) {
+            debug_assert!(request.instance.is_none(), "registration associated twice");
             request.instance = Some(instance.clone());
+            state
+                .instance_requests
+                .entry(instance.clone())
+                .or_default()
+                .insert(id);
         }
         true
     }
@@ -493,30 +563,27 @@ impl VeloResponseService {
     }
 
     pub async fn cancel_instance_streams(&self, instance: &EndpointInstanceId) -> usize {
-        let ids = {
+        let registrations = {
             let mut state = self.registrations.lock();
-            state
-                .tombstones
-                .retain(|_, when| when.elapsed() < TOMBSTONE_TTL);
-            state.tombstones.insert(instance.clone(), Instant::now());
-            state
-                .requests
-                .iter()
-                .filter_map(|(id, r)| (r.instance.as_ref() == Some(instance)).then_some(*id))
+            state.tombstones.insert(instance);
+            let ids = state.instance_requests.remove(instance).unwrap_or_default();
+            ids.into_iter()
+                .filter_map(|id| state.requests.remove(&id))
                 .collect::<Vec<_>>()
         };
-        for id in &ids {
-            self.remove(*id);
+        for registration in &registrations {
+            registration.cancel();
         }
-        ids.len()
+        registrations.len()
     }
 
     pub async fn clear_instance_tombstone(&self, instance: &EndpointInstanceId) {
         self.registrations.lock().tombstones.remove(instance);
     }
 
-    async fn prepare_peer(&self, peer: PeerInfo) -> Result<()> {
-        let peer_id = peer.instance_id();
+    /// `address` is the peer's base64 `WorkerAddress`, decoded only if the peer
+    /// is not prepared yet.
+    async fn prepare_peer(&self, peer_id: InstanceId, address: &str) -> Result<()> {
         // Steady state: the peer is already prepared, so skip the shard write lock.
         if self
             .prepared_peers
@@ -534,7 +601,8 @@ impl VeloResponseService {
         // leaves the cell empty, so the next caller can retry.
         ready
             .get_or_try_init(|| async {
-                self.velo.register_peer(peer)?;
+                let address = WorkerAddress::from_encoded(BASE64.decode(address)?);
+                self.velo.register_peer(PeerInfo::new(peer_id, address))?;
                 if peer_id != self.velo.instance_id() {
                     // The hello also installs the reverse UCX address.
                     tokio::time::timeout(
@@ -565,20 +633,16 @@ impl VeloResponseService {
         );
         let address: ResponseAddress = serde_json::from_str(&info.info)?;
         ensure!(
-            address.version == VERSION
-                && address.ticket.streaming_transport_key.as_str()
-                    == velo::streaming::MESSENGER_MUX_KEY,
-            "unsupported Velo response lifecycle version"
+            address.ticket.streaming_transport_key.as_str() == velo::streaming::MESSENGER_MUX_KEY,
+            "unsupported Velo response stream transport"
         );
         ensure!(
-            address.transport == self.transport,
-            "Velo response transport mismatch"
-        );
-        ensure!(
-            address.anchor.unpack().0 == address.peer.worker_id(),
+            address.anchor.unpack().0 == address.peer_id.worker_id(),
             "Velo anchor and peer identity differ"
         );
-        self.prepare_peer(address.peer).await.inspect_err(|error| {
+        self.prepare_peer(address.peer_id, address.peer_address)
+            .await
+            .inspect_err(|error| {
             tracing::warn!(context_id = %context.id(), %error, "Failed to prepare Velo response peer");
         })?;
         let sender = if address.anchor.unpack().0 == self.velo.instance_id().worker_id() {
@@ -590,6 +654,27 @@ impl VeloResponseService {
                 .open_anchor_stream::<ResponseFrame>(address.anchor, address.ticket)
                 .await?
         };
+        // Check compatibility only now that the stream is open, so the frontend
+        // gets the mismatch at once instead of waiting for a stream that never
+        // starts. `send_err` does not depend on this protocol's frames.
+        let mismatch = if address.version != VERSION {
+            Some(format!(
+                "Velo response protocol mismatch: frontend version {}, worker version {VERSION}",
+                address.version
+            ))
+        } else if address.transport != self.transport {
+            Some(format!(
+                "Velo response transport mismatch: frontend {:?}, worker {:?}",
+                address.transport, self.transport
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = mismatch {
+            let _ = sender.send_err(&message).await;
+            let _ = sender.finalize();
+            bail!(message);
+        }
         tracing::debug!(context_id = %context.id(), "Opened Velo response sender");
         let stop = sender.stop_token();
         let cancel = sender.cancellation_token();
@@ -630,6 +715,33 @@ impl VeloResponseService {
             finished,
             prologue_sent: false,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl RegisteredResponsePlane for VeloResponseService {
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<RegisteredStream<StreamReceiver>> {
+        VeloResponseService::register_response(&self, context, defer_cancellation_until_prologue)
+    }
+
+    async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
+        VeloResponseService::associate_instance(self, id, instance).await
+    }
+
+    async fn cancel_response(&self, id: Uuid) {
+        VeloResponseService::cancel_response(self, id).await;
+    }
+
+    async fn cancel_instance_streams(&self, instance: &EndpointInstanceId) -> usize {
+        VeloResponseService::cancel_instance_streams(self, instance).await
+    }
+
+    async fn clear_instance_tombstone(&self, instance: &EndpointInstanceId) {
+        VeloResponseService::clear_instance_tombstone(self, instance).await;
     }
 }
 
@@ -802,17 +914,7 @@ mod tests {
                     &service,
                     &second.velo_response_service().service().await.unwrap()
                 ));
-                let entry = service
-                    .velo
-                    .peer_info()
-                    .worker_address()
-                    .get_entry("tcp")
-                    .unwrap()
-                    .unwrap();
-                let address = velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap()
-                    [0]
-                .socket_addr()
-                .unwrap();
+                let address = tcp_address(&service);
 
                 first.shutdown();
                 tokio::time::timeout(Duration::from_secs(10), first.primary_token().cancelled())
@@ -867,6 +969,68 @@ mod tests {
         .await;
     }
 
+    fn tcp_address(service: &VeloResponseService) -> SocketAddr {
+        let entry = service
+            .velo
+            .peer_info()
+            .worker_address()
+            .get_entry("tcp")
+            .unwrap()
+            .unwrap();
+        velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap()[0]
+            .socket_addr()
+            .unwrap()
+    }
+
+    /// A service built on an External runtime holds only a `Handle`, so its
+    /// listeners die with that Tokio runtime. A Runtime on another Tokio
+    /// runtime must get its own service rather than share that one.
+    #[test]
+    fn external_runtimes_get_their_own_service() {
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+            ],
+            || {
+                let tokio_runtime = || {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                };
+                let first_tokio = tokio_runtime();
+                let second_tokio = tokio_runtime();
+                let service_on = |tokio: &tokio::runtime::Runtime| {
+                    tokio.block_on(async {
+                        let runtime = crate::Runtime::from_current().unwrap();
+                        let service = runtime.velo_response_service().service().await.unwrap();
+                        (runtime, service)
+                    })
+                };
+                let (first_owner, first) = service_on(&first_tokio);
+                let (second_owner, second) = service_on(&second_tokio);
+                assert!(!Arc::ptr_eq(&first, &second));
+
+                drop((first_owner, first));
+                drop(first_tokio);
+                second_tokio.block_on(async {
+                    tokio::net::TcpStream::connect(tcp_address(&second))
+                        .await
+                        .unwrap();
+                    second_owner.shutdown();
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        second_owner.primary_token().cancelled(),
+                    )
+                    .await
+                    .unwrap();
+                });
+            },
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_peer_preparation_shares_a_handshake_and_retries_failure() {
         use std::sync::atomic::AtomicUsize;
@@ -910,16 +1074,17 @@ mod tests {
             tracing_subscriber::registry().with(HelloCount(hellos.clone())),
         );
         let (consumer, producer) = pair(ResponseTransport::Tcp).await;
-        let peer = consumer.velo.peer_info();
-        let invalid = PeerInfo::new(peer.instance_id(), velo::WorkerAddress::empty());
-        assert!(producer.prepare_peer(invalid).await.is_err());
+        let peer = consumer.velo.instance_id();
+        let address = consumer.peer_address.as_str();
+        assert!(producer.prepare_peer(peer, "").await.is_err());
         let results =
-            futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer.clone()))).await;
+            futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer, address))).await;
         for result in results {
             result.unwrap();
         }
         assert_eq!(hellos.load(Ordering::Relaxed), 1);
-        producer.prepare_peer(peer).await.unwrap();
+        // A prepared peer's address is not decoded again.
+        producer.prepare_peer(peer, "not base64").await.unwrap();
         assert_eq!(hellos.load(Ordering::Relaxed), 1);
         producer.shutdown().await;
         consumer.shutdown().await;
@@ -933,6 +1098,87 @@ mod tests {
             VeloResponseService::new(transport, address).await.unwrap(),
             VeloResponseService::new(transport, address).await.unwrap(),
         )
+    }
+
+    /// UCX services also listen on TCP. A frontend and worker set to different
+    /// transports reach each other over TCP, and the worker reports the
+    /// mismatch at once. Two UCX services still pick UCX.
+    #[cfg(feature = "velo-ucx")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mismatched_transports_report_over_shared_tcp() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mismatched_transports_report_over_shared_tcp"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let address = "127.0.0.1:0".parse().unwrap();
+        let ucx = VeloResponseService::new(ResponseTransport::Ucx, address)
+            .await
+            .unwrap();
+        let ucx_peer = VeloResponseService::new(ResponseTransport::Ucx, address)
+            .await
+            .unwrap();
+        let tcp = VeloResponseService::new(ResponseTransport::Tcp, address)
+            .await
+            .unwrap();
+        for (frontend, worker) in [(&ucx, &tcp), (&tcp, &ucx)] {
+            let registered = frontend
+                .register_response(EngineContext::new(()).context(), false)
+                .unwrap();
+            let error = worker
+                .sender(
+                    EngineContext::new(()).context(),
+                    registered.connection_info.clone(),
+                    None,
+                )
+                .await
+                .err()
+                .expect("mismatched worker opened a sender");
+            assert!(error.to_string().contains("transport mismatch"), "{error}");
+            match tokio::time::timeout(Duration::from_secs(5), registered.wait())
+                .await
+                .expect("frontend waited for a mismatched worker")
+                .unwrap()
+            {
+                Err(error) => assert!(error.message.contains("transport mismatch")),
+                Ok(_) => panic!("mismatched worker's stream succeeded"),
+            }
+            assert_eq!(
+                worker
+                    .velo
+                    .primary_transport_key(frontend.velo.instance_id())
+                    .as_deref(),
+                Some("tcp")
+            );
+        }
+        let registered = ucx
+            .register_response(EngineContext::new(()).context(), false)
+            .unwrap();
+        let mut sender = ucx_peer
+            .sender(
+                EngineContext::new(()).context(),
+                registered.connection_info.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        sender.send_prologue(None).await.unwrap();
+        registered.wait().await.unwrap().unwrap();
+        assert_eq!(
+            ucx_peer
+                .velo
+                .primary_transport_key(ucx.velo.instance_id())
+                .as_deref(),
+            Some("ucx")
+        );
+        drop(sender);
+        for service in [ucx, ucx_peer, tcp] {
+            service.shutdown().await;
+        }
     }
 
     async fn lifecycle_suite(transport: ResponseTransport) {
@@ -1271,21 +1517,46 @@ mod tests {
             Err(error) => assert!(error.message.contains("Invalid Velo response prologue")),
             Ok(_) => panic!("malformed prologue succeeded"),
         }
-        let registered = consumer
-            .register_response(EngineContext::new(()).context(), false)
-            .unwrap();
-        let mut address: ResponseAddress =
-            serde_json::from_str(&registered.connection_info.info).unwrap();
-        address.version -= 1;
-        let info = ConnectionInfo {
-            transport: TRANSPORT_NAME.into(),
-            info: serde_json::to_string(&address).unwrap(),
-        };
-        assert!(
-            producer
+        // A version or transport mismatch reaches the frontend over the opened
+        // stream at once, rather than as a stream that never starts.
+        type Skew = fn(&mut ResponseAddress);
+        let skews: [(Skew, &str); 2] = [
+            (|address| address.version -= 1, "protocol mismatch"),
+            (
+                |address| {
+                    address.transport = match address.transport {
+                        ResponseTransport::Tcp => ResponseTransport::Ucx,
+                        ResponseTransport::Ucx => ResponseTransport::Tcp,
+                    }
+                },
+                "transport mismatch",
+            ),
+        ];
+        for (skew, expected) in skews {
+            let registered = consumer
+                .register_response(EngineContext::new(()).context(), false)
+                .unwrap();
+            let info = registered.connection_info.info.clone();
+            let mut address: ResponseAddress = serde_json::from_str(&info).unwrap();
+            skew(&mut address);
+            let info = ConnectionInfo {
+                transport: TRANSPORT_NAME.into(),
+                info: serde_json::to_string(&address).unwrap(),
+            };
+            let error = producer
                 .sender(EngineContext::new(()).context(), info, None)
                 .await
-                .is_err()
-        );
+                .err()
+                .expect("mismatched worker opened a sender");
+            assert!(error.to_string().contains(expected), "{error}");
+            match tokio::time::timeout(Duration::from_secs(5), registered.wait())
+                .await
+                .expect("frontend waited for a mismatched worker")
+                .unwrap()
+            {
+                Err(error) => assert!(error.message.contains(expected), "{}", error.message),
+                Ok(_) => panic!("mismatched worker's stream succeeded"),
+            }
+        }
     }
 }
