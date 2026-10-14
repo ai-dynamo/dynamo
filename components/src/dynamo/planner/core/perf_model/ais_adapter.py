@@ -34,6 +34,7 @@ from dynamo.planner.core.perf_model.engine_query import (
     EnginePerfLimits,
     WorkerType,
 )
+from dynamo.planner.core.perf_model.moving_average import NonnegativeMovingAverage
 from dynamo.planner.core.types import EngineCapabilities
 
 logger = logging.getLogger(__name__)
@@ -55,33 +56,6 @@ class PlannerEngineCapacity:
     itl_ms: Optional[float] = None
     e2e_latency_ms: Optional[float] = None
     eligible: bool = True
-
-
-class _MovingAverage:
-    """Fixed-window average for next-request synthesis, skipping leading zeros."""
-
-    def __init__(self, max_len: int) -> None:
-        self._max_len = max(1, max_len)
-        self._values: list[float] = []
-        self._sum = 0.0
-        self._seen_nonzero = False
-
-    def add_after_first_nonzero(self, value: float) -> None:
-        if value > 0.0:
-            self._seen_nonzero = True
-        if not self._seen_nonzero:
-            return
-        value = max(0.0, value)
-        self._values.append(value)
-        self._sum += value
-        if len(self._values) > self._max_len:
-            self._sum -= self._values.pop(0)
-
-    @property
-    def value(self) -> float:
-        if not self._values:
-            return 0.0
-        return self._sum / len(self._values)
 
 
 class PlannerEnginePerfModel:
@@ -106,8 +80,8 @@ class PlannerEnginePerfModel:
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
         self._retained_iterations: list[list[ForwardPassMetrics]] = []
-        self._avg_isl = _MovingAverage(config.max_num_fpm_samples)
-        self._avg_decode_length = _MovingAverage(config.max_num_fpm_samples)
+        self._avg_isl = NonnegativeMovingAverage(config.max_num_fpm_samples)
+        self._avg_decode_length = NonnegativeMovingAverage(config.max_num_fpm_samples)
 
         self._init_engine_model()
 
