@@ -26,12 +26,13 @@ class NonnegativeMovingAverage:
         self._seen_nonzero = False
 
     def add_after_first_nonzero(self, value: float) -> None:
+        """Add ``value`` once a positive sample has been seen, clamped to ``>= 0``."""
         if value > 0:
             self._seen_nonzero = True
         if self._seen_nonzero:
-            self.add(max(0.0, value))
+            self._add(max(0.0, value))
 
-    def add(self, value: float) -> None:
+    def _add(self, value: float) -> None:
         self._values.append(value)
         self._sum += value
         while len(self._values) > self._max_len:
@@ -39,6 +40,7 @@ class NonnegativeMovingAverage:
 
     @property
     def value(self) -> float:
+        """Mean of the samples in the window, or ``0.0`` if it is empty."""
         if not self._values:
             return 0.0
         return self._sum / len(self._values)
