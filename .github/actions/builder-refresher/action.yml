@@ -18,7 +18,7 @@ inputs:
     description: 'Name of the buildx builder to check'
     required: true
   flavor:
-    description: 'Buildkit flavor used to route workers on re-init (vllm, sglang, trtllm, general)'
+    description: 'Buildkit flavor used to route workers on re-init (vllm, sglang, trtllm, triton, general)'
     required: true
   arch:
     description: 'Docker platform string used on re-init (e.g. linux/amd64, linux/arm64, linux/amd64,linux/arm64)'
