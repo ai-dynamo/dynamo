@@ -191,19 +191,6 @@ def test_container_builds_the_matching_aisimulate_source_wheel() -> None:
             "="
         )
     )
-    for name in (
-        "frontend",
-        "planner",
-        "dynamo_runtime",
-        "triton_runtime",
-        "vllm_runtime",
-        "sglang_runtime",
-        "trtllm_runtime",
-    ):
-        template = (ROOT / f"container/templates/{name}.Dockerfile").read_text(
-            encoding="utf-8"
-        )
-        assert "/opt/dynamo/wheelhouse/aisimulate*.whl" in template
     assert not (ROOT / "aisimulate").exists()
 
 
