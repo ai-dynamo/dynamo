@@ -171,14 +171,13 @@ def scheduler_metrics_ipc_name(server_args: Any, port_args: Any) -> str:
     returned unchanged. Can be removed once SGLang copies the address itself.
     """
     name = port_args.metrics_ipc_name
-    instance_id = port_args.instance_id
     dp_size, enable_dp_attention = sglang_dp_layout(server_args)
-    if (
-        dp_size <= 1
-        or enable_dp_attention
-        or not instance_id
-        or not name.startswith("ipc://")
-    ):
+    if dp_size <= 1 or enable_dp_attention or not name.startswith("ipc://"):
+        return name
+    # XPU's SGLang 0.5.11 has no instance_id. Remove this fallback when the XPU
+    # pin provides the shared identity needed to derive a pure-DP address.
+    instance_id = getattr(port_args, "instance_id", "")
+    if not instance_id:
         return name
     path = os.path.join(tempfile.gettempdir(), f"dynamo-sglang-metrics-{instance_id}")
     return f"ipc://{path}"
@@ -197,7 +196,6 @@ def _share_scheduler_metrics_ipc_name(target: Any, args: tuple, kwargs: dict) ->
 def run_scheduler_process_with_rank_fixups(*args: Any, **kwargs: Any) -> Any:
     """SGLang scheduler entry point that first applies Dynamo's per-rank fix-ups.
 
-    Claims this rank's NIXL exporter port and shares the KV metrics address.
     Must stay a module-level function: ``spawn`` pickles the process target by
     module and qualified name.
     """

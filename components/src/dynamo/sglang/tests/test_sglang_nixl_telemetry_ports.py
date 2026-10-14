@@ -375,6 +375,15 @@ class TestInstall:
 
 
 class TestSchedulerMetricsIpcName:
+    @pytest.mark.parametrize("dp_size", [1, 2])
+    def test_legacy_port_args_keep_the_original_address(self, dp_size):
+        """XPU's SGLang 0.5.11 has no shared identity for the pure-DP rewrite."""
+        port_args = SimpleNamespace(metrics_ipc_name="ipc:///tmp/m")
+        assert (
+            scheduler_metrics_ipc_name(_server_args(dp_size=dp_size), port_args)
+            == port_args.metrics_ipc_name
+        )
+
     @pytest.mark.parametrize(
         "server_args",
         [
