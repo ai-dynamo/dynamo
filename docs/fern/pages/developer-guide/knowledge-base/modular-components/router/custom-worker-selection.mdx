@@ -444,6 +444,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
+| `LOAD` | `active_sequence_blocks()` | Sum over active requests of their own KV blocks (prompt plus tracked output); a shared prompt block counts once per request, so this follows attention-time context rather than KV memory |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 

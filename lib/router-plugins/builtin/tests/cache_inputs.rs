@@ -50,6 +50,19 @@ impl InputProbe {
         }
         if let Some(load) = candidate.load() {
             assert!(load.is_available());
+            assert_eq!(
+                load.active_decode_blocks(),
+                candidate.worker().worker_id as usize % 11
+            );
+            assert_eq!(load.additional_decode_blocks(), 3);
+            assert_eq!(
+                load.active_sequence_blocks(),
+                candidate.worker().worker_id as usize % 11
+            );
+            assert_eq!(
+                load.decode_cost_blocks(),
+                (load.active_decode_blocks() + load.additional_decode_blocks()) as f64
+            );
         }
     }
 

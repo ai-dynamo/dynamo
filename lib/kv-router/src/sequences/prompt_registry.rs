@@ -29,6 +29,10 @@ use crate::protocols::WorkerWithDpRank;
 pub struct WorkerLoadProjection {
     pub active_prefill_tokens: usize,
     pub active_decode_blocks: usize,
+    /// Σ over active requests of their own KV blocks (prompt + tracked output). Unlike
+    /// `active_decode_blocks`, a prompt block shared by N requests counts N times, so this
+    /// tracks the attention-time footprint rather than the KV-memory footprint.
+    pub active_sequence_blocks: usize,
     pub active_requests: usize,
     /// Request blocks not already shared with active sequences on this worker.
     ///
@@ -58,6 +62,8 @@ pub type PotentialLoadMaps = (
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
+    /// Σ per-request block chains; shared prompt blocks count once per request.
+    pub(super) active_sequence_blocks: usize,
     pub(super) active_requests: usize,
     /// Requests not yet marked prefill-complete; the rest are decoding.
     pub(super) prefill_requests: usize,
@@ -315,6 +321,7 @@ impl PromptRegistry {
             WorkerLoadProjection {
                 active_prefill_tokens: load.active_tokens(decay_now),
                 active_decode_blocks: load.active_blocks,
+                active_sequence_blocks: load.active_sequence_blocks,
                 active_requests: load.active_requests,
                 additional_active_blocks: query_len.saturating_sub(overlap_depth),
             }
@@ -443,6 +450,7 @@ mod tests {
     fn worker_load_snapshot(active_blocks: usize) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            active_sequence_blocks: active_blocks,
             active_requests: 0,
             prefill_requests: 0,
             prefill: PrefillLoadSnapshot::default(),
@@ -458,6 +466,7 @@ mod tests {
     ) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            active_sequence_blocks: active_blocks,
             active_requests: 0,
             prefill_requests: 0,
             prefill: PrefillLoadSnapshot {

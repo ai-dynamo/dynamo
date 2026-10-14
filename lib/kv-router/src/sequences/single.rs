@@ -126,6 +126,9 @@ pub struct ActiveSequences {
     prefill: PrefillLoadTracker,
     /// Requests not yet marked prefill-complete, whether or not they hold prompt load.
     prefill_requests: usize,
+    /// Σ over active requests of their own block chains (shared prompt blocks counted per
+    /// request), the attention-time footprint as opposed to the deduplicated `blocks`.
+    sequence_blocks: usize,
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
     expiry_duration: Option<Duration>,
@@ -150,6 +153,7 @@ impl ActiveSequences {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             prefill_requests: 0,
+            sequence_blocks: 0,
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
             expiry_duration,
@@ -243,6 +247,7 @@ impl ActiveSequences {
             self.prefill.insert(&request_id, prefill, decay_now);
         }
 
+        self.sequence_blocks += blocks.len();
         self.requests.insert(
             request_id,
             RequestState {
@@ -298,6 +303,7 @@ impl ActiveSequences {
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
+        self.sequence_blocks -= blocks.len();
         let mut membership_delta = PromptMembershipDelta::default();
         membership_delta.push_remove(self.blocks.release(blocks));
 
@@ -329,6 +335,7 @@ impl ActiveSequences {
             let hash = fastrand::u64(..);
             self.blocks.append_output(&mut request_state.blocks, hash);
         }
+        self.sequence_blocks += num_blocks;
 
         if let Some(frac) = decay_fraction {
             self.blocks
@@ -381,6 +388,7 @@ impl ActiveSequences {
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
+            active_sequence_blocks: self.sequence_blocks,
             active_requests: self.requests.len(),
             prefill_requests: self.prefill_requests,
             prefill: self.prefill.snapshot(),

@@ -17,8 +17,8 @@ use dynamo_kv_router::indexer::{
     query_lower_tiers_with_options,
 };
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -363,6 +363,7 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    affinity_target: Option<WorkerAffinityTarget>,
 }
 
 impl PendingRequest {
@@ -397,7 +398,7 @@ impl PendingRequest {
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
-            affinity_target: None,
+            affinity_target: self.affinity_target,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -426,6 +427,10 @@ pub(crate) struct OfflineReplayRouter {
     kv_event_lag_ms: f64,
     /// Lagged KV event batches in arrival order, keyed by the replay time they become visible.
     lagged_kv_events: VecDeque<(f64, Vec<RouterEvent>)>,
+    /// Worker/rank that last served each session, mirroring the production
+    /// router's session affinity. The default selector treats it as exclusive;
+    /// custom policies receive it as advisory context and rebind on dispatch.
+    session_bindings: HashMap<String, WorkerWithDpRank>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -670,6 +675,7 @@ impl OfflineReplayRouter {
             tracking_hash,
             kv_event_lag_ms: 0.0,
             lagged_kv_events: VecDeque::new(),
+            session_bindings: HashMap::new(),
         })
     }
 
@@ -1044,6 +1050,10 @@ impl OfflineReplayRouter {
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
+            affinity_target: session_id
+                .as_deref()
+                .and_then(|session_id| self.session_bindings.get(session_id))
+                .map(|worker| WorkerAffinityTarget::from(*worker)),
             session_id,
         })
     }
@@ -1088,6 +1098,10 @@ impl OfflineReplayRouter {
                 eligibility,
                 self.block_size,
             ))?;
+        if let Some(session_id) = &request.session_id {
+            self.session_bindings
+                .insert(session_id.clone(), selection.worker);
+        }
         let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let dp_rank = usize::try_from(selection.worker.dp_rank)

@@ -228,7 +228,9 @@ impl<'a> WorkerCacheInputs<'a> {
 pub struct WorkerLoadInput {
     pub(crate) available: bool,
     pub(crate) active_prefill_tokens: usize,
-    pub(crate) decode_cost_blocks: f64,
+    pub(crate) active_decode_blocks: usize,
+    pub(crate) additional_decode_blocks: usize,
+    pub(crate) active_sequence_blocks: usize,
     pub(crate) active_requests: usize,
 }
 
@@ -345,7 +347,37 @@ impl WorkerLoadInput {
 
     /// Return the projected active decode footprint in KV blocks.
     pub fn decode_cost_blocks(&self) -> f64 {
-        self.decode_cost_blocks
+        (self.active_decode_blocks + self.additional_decode_blocks) as f64
+    }
+
+    /// Return the decode footprint already active on this worker, in KV blocks.
+    ///
+    /// This is router bookkeeping sampled for the current selection. It excludes the incoming
+    /// request, may lag engine state, and stays zero when [`Self::is_available`] is false.
+    pub fn active_decode_blocks(&self) -> usize {
+        self.active_decode_blocks
+    }
+
+    /// Return the incoming request's projected decode footprint on this worker, in KV blocks.
+    ///
+    /// The projection is the request's unmatched KV-block suffix for this worker. It is computed
+    /// from the same router cache snapshot as worker selection, excludes expected output tokens,
+    /// and stays zero when [`Self::is_available`] is false.
+    pub fn additional_decode_blocks(&self) -> usize {
+        self.additional_decode_blocks
+    }
+
+    /// Return the sum over this worker's active requests of their own KV blocks (prompt plus
+    /// tracked output blocks).
+    ///
+    /// Unlike [`Self::active_decode_blocks`], a prompt block shared by N active requests counts
+    /// N times, so this tracks the per-request context the attention kernels read rather than
+    /// the deduplicated KV-memory footprint. It is router bookkeeping sampled for the current
+    /// selection, excludes the incoming request (add [`WorkerSelectionContext::request_blocks`]
+    /// for its projected context), grows only with output tracking enabled, may lag engine
+    /// state, and stays zero when [`Self::is_available`] is false.
+    pub fn active_sequence_blocks(&self) -> usize {
+        self.active_sequence_blocks
     }
 
     /// Return this worker's active request count.

@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-sglang-ep-balance` | For SGLang attention-DP workers, where one `worker_id` is one expert-parallel group and its DP ranks sync before every MoE phase. Keeps a request on a rank that already holds at least half of its prompt in device cache; otherwise picks the least-loaded EP group by mean active requests (within a tolerance), then the DP rank in that group that leaves per-rank context (`active_sequence_blocks`) and request counts most even. Ignores cross-group KV balance by default. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -245,6 +246,16 @@ for that scope, which makes it a quick way to A/B a policy against the default.
 
 To write your own policy instead of using a built-in one, see
 [Write Custom Routing Strategies](custom-worker-selection.mdx).
+
+`dynamo-sglang-ep-balance` accepts `request_imbalance_weight` (1.0) and `token_imbalance_weight`
+(1.0) for the within-group spread, `group_request_weight` (1.0) and `group_token_weight` (0.0) for
+the EP-group load, `group_load_tolerance` (0.1, relative) for how close a group must be to the
+least-loaded one to stay a candidate, `incomplete_group_weight` (1.0) to penalize groups whose
+ranks were partly filtered out, and `cache_affinity_min_fraction` (0.5) for the device-cache
+share that keeps a request on its rank; a value above 1.0 disables that sticky step. The
+within-group token term uses each rank's per-request context (`active_sequence_blocks`) rather
+than its deduplicated KV footprint, because attention time scales with the context every
+request reads, not with the blocks that are physically resident.
 
 ### Policy-Class Queues
 

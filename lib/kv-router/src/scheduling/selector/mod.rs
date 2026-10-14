@@ -253,7 +253,9 @@ impl<'a> MaterializedSelectionInput<'a> {
             WorkerLoadInput {
                 available,
                 active_prefill_tokens: worker_load.active_prefill_tokens,
-                decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
+                active_decode_blocks: worker_load.active_decode_blocks,
+                additional_decode_blocks: worker_load.additional_active_blocks,
+                active_sequence_blocks: worker_load.active_sequence_blocks,
                 active_requests: worker_load.active_requests,
             }
         } else {

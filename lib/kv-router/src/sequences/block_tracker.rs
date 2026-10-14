@@ -52,6 +52,11 @@ impl RequestBlockChain {
             output_hashes: Vec::new(),
         }
     }
+
+    /// Blocks this request holds, counting shared prompt blocks once per request.
+    pub(super) fn len(&self) -> usize {
+        self.prompt_depth + self.output_hashes.len()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

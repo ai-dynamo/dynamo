@@ -122,7 +122,21 @@ pub(super) fn replay_selector_with_seed(
         .selected_worker_selection_policy_instance()
         .map_err(anyhow::Error::from)?
     {
-        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
+        dynamo_custom_policy_builtin::register(&mut registry)?;
+        let factory = registry
+            .resolve(config)
+            .map_err(anyhow::Error::from)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "custom worker-selection policy {instance:?} is not supported by replay"
+                )
+            })?;
+        return Ok(DefaultWorkerSelector::from_custom_factory(
+            config.clone(),
+            "replay",
+            factory,
+        ));
     }
 
     Ok(match selector_seed {
@@ -191,10 +205,27 @@ worker_selection:
             Err(error) => error,
             Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
         };
-        assert!(
-            error
-                .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
-        );
+        assert!(error.to_string().contains("test"), "{error:#}");
+    }
+
+    #[test]
+    fn replay_selector_accepts_shipped_custom_worker_selection() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: ep
+  instances:
+    - name: ep
+      type: dynamo-sglang-ep-balance
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        replay_selector(&config).unwrap();
     }
 }
