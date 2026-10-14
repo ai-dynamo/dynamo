@@ -3,9 +3,10 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use super::node::Node;
+use super::worker_set::WorkerSet;
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Node.
@@ -29,7 +30,7 @@ impl WorkerRemovalTarget {
 pub(super) struct MatchWalkResult {
     // NOTE(perf): Replacing this set with a Vec did not improve throughput. Keep
     // uniqueness by construction unless a new profile justifies changing it.
-    pub(super) active: FxHashSet<WorkerWithDpRank>,
+    pub(super) active: WorkerSet,
     pub(super) matched_depth: u32,
     pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
 }
@@ -104,8 +105,7 @@ pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) first_node: bool,
     pub(super) prev_depth: u32,
     pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
-    pub(super) active: &'a mut FxHashSet<WorkerWithDpRank>,
-    pub(super) active_count: usize,
+    pub(super) active: &'a mut WorkerSet,
     pub(super) scores: &'a mut OverlapScores,
     pub(super) last_matched_hashes:
         Option<&'a mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,

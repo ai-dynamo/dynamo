@@ -2289,6 +2289,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health 0.13.1",
  "tonic-reflection",
+ "tower",
  "tower-http",
  "tracing",
  "url",
@@ -2403,6 +2404,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
@@ -9570,6 +9572,8 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.118",
+ "url",
+ "uuid",
 ]
 
 [[package]]

@@ -28,9 +28,11 @@ mod lane_lookup;
 mod node;
 mod state;
 mod types;
+mod worker_set;
 use lane_lookup::LaneLookup;
 use node::*;
 use types::*;
+use worker_set::WorkerSet;
 
 mod dump;
 mod matches;
