@@ -125,6 +125,7 @@ impl TcpRequestConfig {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
+    /// Read TCP settings, retaining defaults for missing or invalid values.
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
         let mut config = Self::default();
 
