@@ -58,11 +58,8 @@ def _gpu0_compute_capability() -> Optional[tuple[int, int]]:
         pynvml.nvmlShutdown()
 
 
-# MODEL_NAME's MoE gating (n_group/topk_group) makes SGLang's
-# biased_grouped_topk_gpu call flashinfer's fused_topk_deepseek, which raises
-# BackendSupportedError below sm89 (e.g. A10G sm86, A100 sm80). The prefill
-# worker then dies during warmup and /health stays 503. Unknown capability
-# (no NVML) does not skip.
+# MODEL_NAME's MoE gating needs flashinfer fused_topk_deepseek, which fails below
+# sm89 and kills the prefill worker in warmup. Unknown capability does not skip.
 _GPU0_CC = _gpu0_compute_capability()
 _GPU0_SM = f"sm{_GPU0_CC[0]}{_GPU0_CC[1]}" if _GPU0_CC else "unknown"
 _FUSED_TOPK_DEEPSEEK_UNSUPPORTED = _GPU0_CC is not None and _GPU0_CC < (8, 9)
