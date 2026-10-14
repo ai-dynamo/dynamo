@@ -377,11 +377,6 @@ def update_engine_config_with_dynamo(
         ensure_side_channel_host()
 
     defaults: Dict[str, Any] = {
-        # As of vLLM >=0.10.0 the engine unconditionally calls
-        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
-        # skip tokenizer initialisation.  Setting this to **False** avoids
-        # a NoneType error when the processor accesses the tokenizer.
-        "skip_tokenizer_init": False,
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
