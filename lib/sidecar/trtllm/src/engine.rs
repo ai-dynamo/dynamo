@@ -55,6 +55,7 @@ pub struct TrtllmSidecarEngine {
     /// Disaggregation role this worker plays. Selects the `context_only` /
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
+    subagent_affinity_auth_key: Option<String>,
     client: OnceCell<TrtllmClient>,
     /// Engine limits resolved at `start` from `--context-length` and
     /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
@@ -77,6 +78,7 @@ impl TrtllmSidecarEngine {
             transport,
             model,
             mode,
+            subagent_affinity_auth_key: None,
             client: OnceCell::new(),
             limits: OnceCell::new(),
             routing: OnceCell::new(),
@@ -106,6 +108,11 @@ impl TrtllmSidecarEngine {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));
         }
+        if args.subagent_affinity_auth_key.as_deref() == Some("") {
+            return Err(client::invalid_argument(
+                "subagent-affinity-auth-key must not be empty",
+            ));
+        }
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() {
             return Err(client::invalid_argument(
@@ -132,7 +139,8 @@ impl TrtllmSidecarEngine {
             data_parallel_size: None,
             data_parallel_start_rank: None,
         };
-        let engine = Self::new(endpoint, transport, model.clone(), mode);
+        let mut engine = Self::new(endpoint, transport, model.clone(), mode);
+        engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
             // Every disaggregated role registers under its own component so
@@ -178,6 +186,12 @@ impl LLMEngine for TrtllmSidecarEngine {
             "connecting to TensorRT-LLM gRPC"
         );
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
+        if self.subagent_affinity_auth_key.is_some() && !client.supports_subagent_affinity().await?
+        {
+            return Err(client::invalid_argument(
+                "OpenEngine does not advertise signed subagent affinity; upgrade or configure the server",
+            ));
+        }
         let connection_count = client.connection_count();
 
         // `--context-length` wins over what the engine reports, and is the
@@ -386,6 +400,28 @@ impl LLMEngine for TrtllmSidecarEngine {
                 )));
             }
         }
+        let parent_affinity = if self.mode.is_prefill() && self.subagent_affinity_auth_key.is_some()
+        {
+            request.agent_context.as_ref().and_then(|agent| {
+                agent
+                    .parent_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|parent| !parent.is_empty() && *parent != agent.session_id.trim())
+            })
+        } else {
+            None
+        };
+        if parent_affinity.is_some()
+            && request
+                .agent_context
+                .as_ref()
+                .is_none_or(|agent| agent.session_id.trim().is_empty())
+        {
+            return Err(client::invalid_argument(
+                "subagent affinity requires a stable child session ID",
+            ));
+        }
         let mut state = ResponseState::new(&request, self.mode);
         let cancel = self.cancel.clone();
         // A decode request that took a handoff has KV transferred into it, and
@@ -416,7 +452,11 @@ impl LLMEngine for TrtllmSidecarEngine {
             biased;
             _ = &mut request_cancellation, if !defer_request_cancellation => None,
             _ = &mut shutdown_cancellation => None,
-            result = client.generate(proto_request, target_dp_rank) => Some(result?),
+            result = client.generate(
+                proto_request,
+                target_dp_rank,
+                parent_affinity.zip(self.subagent_affinity_auth_key.as_deref()),
+            ) => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);

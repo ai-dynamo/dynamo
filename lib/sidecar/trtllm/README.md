@@ -33,6 +33,7 @@ The integration does **not** support multimodal input, LoRA, encode workers,
 beam search, or `n > 1`.
 
 KV events and KV occupancy are discovered independently from the existing `GetKvEventSources` and `GetLoad` responses. There is no sidecar enable switch or OpenEngine schema change. Optional TensorRT-LLM metadata in `ServerInfo.extra` enables DP-rank hints and heartbeat expiry; absent metadata leaves these optimizations off, and the server always validates rank hints.
+Signed subagent hints preserve the child's conversation ID while directing its first context turn toward the parent's rank. An established conversation binding takes precedence over a later rank hint.
 
 > [!NOTE]
 > `Control.GetModelInfo` supplies the registered context length (and the default
@@ -195,6 +196,26 @@ this:
 The handoff JSON mirrors `KvSessionRef` field-for-field (`session_id`,
 `transfer_backend`, `endpoints`, `dp_rank`, `attributes`) and is never
 interpreted between the two workers. See `src/disagg.rs`.
+
+### Subagent context affinity
+
+To place child-agent context requests with their parent, enable Dynamo session
+affinity on the prefill router and TensorRT-LLM's
+`attention_dp_config.kv_cache_routing_conversation_affinity`. Set the same
+private `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` in the prefill sidecar and
+TensorRT-LLM OpenEngine server environments. When this key is set,
+the sidecar verifies `ServerInfo.extra.trtllm_supports_subagent_affinity` at
+startup and sends signed parent hints. Without it, existing requests retain
+their previous OpenEngine behavior. Keep each prefill worker pool on the same
+sidecar configuration during rollout so a request cannot land on a worker that
+omits the parent hint.
+
+The frontend pins a child's context request using its parent session ID. The
+sidecar signs that parent ID for the OpenEngine context request while retaining
+the child's own ID in `extra.conversation_id`. Generation requests keep the
+child's affinity. The gateway must authorize parent-session headers from
+untrusted clients; the sidecar signature only protects the engine hop. Rank
+affinity is best effort under saturation or eviction.
 
 ## Deploy on Kubernetes (quick start)
 

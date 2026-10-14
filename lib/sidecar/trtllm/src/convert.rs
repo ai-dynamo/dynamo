@@ -62,23 +62,20 @@ pub(crate) fn build_generate_request_with_routing(
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
-    let (kv, extra) = match mode {
-        DisaggregationMode::Prefill => (None, Some(disagg::context_only_extra())),
+    let kv = match mode {
+        DisaggregationMode::Prefill => None,
         // A handoff is the normal case, but conditional disaggregation
         // dispatches straight to a decode worker with none, expecting it to run
         // the context phase itself. Requiring one would fail every bypassed
         // request.
         DisaggregationMode::Decode => match request.prefill_result.as_ref() {
-            Some(handoff) => (
-                Some(pb::KvOptions {
-                    session: Some(disagg::session_from_json(&handoff.disaggregated_params)?),
-                    ..Default::default()
-                }),
-                None,
-            ),
-            None => (None, None),
+            Some(handoff) => Some(pb::KvOptions {
+                session: Some(disagg::session_from_json(&handoff.disaggregated_params)?),
+                ..Default::default()
+            }),
+            None => None,
         },
-        DisaggregationMode::Aggregated | DisaggregationMode::Encode => (None, None),
+        DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
 
     Ok(pb::GenerateRequest {
@@ -136,7 +133,14 @@ pub(crate) fn build_generate_request_with_routing(
         media: Vec::new(),
         lora_name: String::new(),
         kv,
-        extra,
+        extra: disagg::request_extra(
+            mode.is_prefill(),
+            request
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.trim())
+                .filter(|session_id| !session_id.is_empty()),
+        ),
     })
 }
 

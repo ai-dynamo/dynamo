@@ -6,6 +6,104 @@
 use super::*;
 
 #[tokio::test]
+async fn sidecar_signs_parent_context_affinity_without_replacing_child() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let client = TrtllmClient::connect(
+        &GrpcEndpoint::parse(&server.endpoint, "test endpoint").unwrap(),
+        transport(1),
+    )
+    .await
+    .expect("connect");
+    let mut req = request();
+    req.agent_context = Some(
+        serde_json::from_value(json!({"session_id": "child-a", "parent_session_id": "parent-1"}))
+            .unwrap(),
+    );
+    let proto = build_generate_request(
+        &req,
+        "child-request",
+        "test-model",
+        None,
+        DisaggregationMode::Prefill,
+    )
+    .expect("context request");
+    assert_eq!(
+        proto.extra.as_ref().unwrap().fields["conversation_id"].kind,
+        Some(prost_types::value::Kind::StringValue("child-a".to_string()))
+    );
+    client
+        .generate(proto, Some(2), Some(("parent-1", "shared-secret")))
+        .await
+        .expect("send context request");
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        &[Some("2".to_string())]
+    );
+    assert_eq!(
+        server.service.affinity_headers.lock().await.as_slice(),
+        &[(
+            "parent-1".to_string(),
+            "sha256=e98db0ec0d6c724ac9426801469a0c9fdce4149553a0d8b52a3adf8506f4d617".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn configured_prefill_sidecar_requires_capability_and_sends_parent_hint() {
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service.clone()).await;
+    let args = || {
+        vec![
+            "dynamo-trtllm-sidecar".to_string(),
+            "--grpc-endpoint".to_string(),
+            server.endpoint.clone(),
+            "--model-path".to_string(),
+            "model-source".to_string(),
+            "--disaggregation-mode".to_string(),
+            "prefill".to_string(),
+            "--subagent-affinity-auth-key".to_string(),
+            "shared-secret".to_string(),
+        ]
+    };
+    let (unsupported, _) = TrtllmSidecarEngine::from_args(args()).expect("valid sidecar args");
+    let error = unsupported
+        .start(0)
+        .await
+        .expect_err("server lacks signed affinity");
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise signed subagent affinity")
+    );
+
+    service.subagent_affinity.store(true, Ordering::SeqCst);
+    let (engine, _) = TrtllmSidecarEngine::from_args(args()).expect("valid sidecar args");
+    engine
+        .start(0)
+        .await
+        .expect("server supports signed affinity");
+    let mut req = request();
+    req.agent_context = Some(
+        serde_json::from_value(json!({"session_id": "child-a", "parent_session_id": "parent-1"}))
+            .expect("valid agent context"),
+    );
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        prefill_dp_rank: Some(0),
+        ..Default::default()
+    });
+    collect(&engine, req).await;
+    let requests = service.requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].extra.as_ref().unwrap().fields["conversation_id"].kind,
+        Some(prost_types::value::Kind::StringValue("child-a".to_string()))
+    );
+    assert_eq!(service.affinity_headers.lock().await.len(), 1);
+    assert_eq!(service.affinity_headers.lock().await[0].0, "parent-1");
+}
+
+#[tokio::test]
 async fn aggregated_generation_streams_delta_then_terminal() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let engine = engine(&server.endpoint, 2);
@@ -77,11 +175,7 @@ async fn cancellation_yields_a_cancelled_terminal() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
-/// The server answers `openengine-target-dp-rank` with UNIMPLEMENTED, so a
-/// rank hint has to be refused before dispatch: sending it anyway fails the
-/// whole request with a non-migratable 5xx. `nvext.dp_rank` and the
-/// `x-dynamo-dp-rank` header both land in these fields, so this is reachable
-/// without a KV router.
+/// Nonzero logical ranks are not advertised and must be rejected before dispatch.
 #[tokio::test]
 async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
@@ -351,6 +445,7 @@ async fn pool_uses_each_configured_connection() {
                     })),
                     ..Default::default()
                 },
+                None,
                 None,
             )
             .await
