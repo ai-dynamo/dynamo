@@ -526,7 +526,7 @@ impl SelectionCore {
         };
         match entry
             .scheduler
-            .add_output_block_if_booking_sync(&booking, decay_fraction)?
+            .add_output_blocks_if_booking_sync(&booking, 1, decay_fraction)?
         {
             LifecycleMutationOutcome::Applied => Ok(()),
             LifecycleMutationOutcome::NoChange => {

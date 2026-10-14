@@ -1,6 +1,18 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  * Recipe & Feature Benchmark component styles.
  *
@@ -190,6 +202,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-google:checked ~ .dynamo-recipe-browser label[for="provider-google"],
 #provider-qwen:checked ~ .dynamo-recipe-browser label[for="provider-qwen"],
 #provider-deepseek:checked ~ .dynamo-recipe-browser label[for="provider-deepseek"],
+#provider-minimax:checked ~ .dynamo-recipe-browser label[for="provider-minimax"],
 #provider-moonshot:checked ~ .dynamo-recipe-browser label[for="provider-moonshot"],
 #provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
 #provider-openai:checked ~ .dynamo-recipe-browser label[for="provider-openai"],
@@ -197,6 +210,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-zai:checked ~ .dynamo-recipe-browser label[for="provider-zai"],
 #provider-thinkingmachines:checked ~ .dynamo-recipe-browser label[for="provider-thinkingmachines"],
 #provider-lg:checked ~ .dynamo-recipe-browser label[for="provider-lg"],
+#provider-motif:checked ~ .dynamo-recipe-browser label[for="provider-motif"],
 #runtime-all:checked ~ .dynamo-recipe-browser label[for="runtime-all"],
 #runtime-vllm:checked ~ .dynamo-recipe-browser label[for="runtime-vllm"],
 #runtime-trtllm:checked ~ .dynamo-recipe-browser label[for="runtime-trtllm"],
@@ -540,8 +554,12 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     align-items: start;
 }
 
-.dynamo-model-card-top > div:nth-child(2) {
+.dynamo-model-card-top > div:last-child {
     min-width: 0;
+}
+
+.dynamo-model-card-top > div:only-child {
+    grid-column: 1 / -1;
 }
 
 .dynamo-model-card-top h3 {
@@ -666,6 +684,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-google:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="google"]),
 #provider-qwen:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="qwen"]),
 #provider-deepseek:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="deepseek"]),
+#provider-minimax:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="minimax"]),
 #provider-moonshot:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="moonshot"]),
 #provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
 #provider-openai:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="openai"]),
@@ -673,6 +692,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-zai:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="zai"]),
 #provider-thinkingmachines:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="thinkingmachines"]),
 #provider-lg:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="lg"]),
+#provider-motif:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="motif"]),
 #runtime-vllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="vllm"]),
 #runtime-trtllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="trtllm"]),
 #runtime-sglang:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="sglang"]),

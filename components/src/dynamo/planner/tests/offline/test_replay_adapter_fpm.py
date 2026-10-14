@@ -16,7 +16,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -60,7 +60,9 @@ def _agg_config_sla() -> PlannerConfig:
 
 
 def test_bootstrap_metadata_rejects_a_different_worker_role():
-    args = MockEngineArgs(worker_type="aggregated", num_gpu_blocks=1024)
+    args = normalize_mocker_config(
+        {"engine": {"worker_type": "aggregated", "num_gpu_blocks": 1024}}
+    )
     metadata = {
         "model": "Qwen/Qwen3-32B",
         "system": "h200_sxm",
@@ -68,9 +70,7 @@ def test_bootstrap_metadata_rejects_a_different_worker_role():
         "worker_type": "decode",
         "estimation_mode": "op_level",
     }
-    with pytest.raises(
-        ValueError, match="metadata worker_type must match the aggregated"
-    ):
+    with pytest.raises(ValueError, match="worker_type does not match replay role"):
         replay_planner._ais_session_kwargs(metadata, args)
 
 
@@ -366,13 +366,22 @@ def test_build_tick_input_keeps_only_latest_fpm_until_fpm_tick():
 
 def test_replay_engine_caps_exposes_canonical_nextn():
     caps = _engine_caps(
-        MockEngineArgs(
-            ais_perf_config={
-                "model": "example/model",
-                "system": "h200_sxm",
-                "backend": "vllm",
-                "worker_type": "aggregated",
-                "nextn": 2,
+        normalize_mocker_config(
+            {
+                "engine": {
+                    "num_gpu_blocks": 128,
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "ais",
+                        "config": {
+                            "model": "example/model",
+                            "system": "h200_sxm",
+                            "backend": "vllm",
+                            "worker_type": "aggregated",
+                            "nextn": 2,
+                        },
+                    },
+                }
             }
         )
     )
@@ -382,18 +391,26 @@ def test_replay_engine_caps_exposes_canonical_nextn():
 
 def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
     caps = _engine_caps(
-        MockEngineArgs(
-            num_gpu_blocks=100,
-            block_size=16,
-            dp_size=4,
-            ais_perf_config={
-                "model": "example/model",
-                "system": "h200_sxm",
-                "backend": "vllm",
-                "worker_type": "aggregated",
-                "tp": 2,
-                "attention_dp": 4,
-            },
+        normalize_mocker_config(
+            {
+                "dp_size": 4,
+                "engine": {
+                    "num_gpu_blocks": 100,
+                    "block_size": 16,
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "ais",
+                        "config": {
+                            "model": "example/model",
+                            "system": "h200_sxm",
+                            "backend": "vllm",
+                            "worker_type": "aggregated",
+                            "tp": 2,
+                            "attention_dp": 4,
+                        },
+                    },
+                },
+            }
         )
     )
 
@@ -402,7 +419,9 @@ def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
 
 
 def test_replay_engine_caps_keeps_single_rank_defaults():
-    caps = _engine_caps(MockEngineArgs(num_gpu_blocks=100, block_size=16))
+    caps = _engine_caps(
+        normalize_mocker_config({"engine": {"num_gpu_blocks": 100, "block_size": 16}})
+    )
 
     assert caps.max_kv_tokens == 100 * 16
     assert caps.num_gpu == 1
@@ -459,19 +478,27 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
         "dynamo.planner.offline.replay_adapter.create_replay_planner_adapter",
         lambda **kwargs: adapter,
     )
-    prefill_args = MockEngineArgs(
-        worker_type="prefill",
-        max_num_batched_tokens=128,
-        max_num_seqs=1,
-        num_gpu_blocks=64,
-        block_size=16,
+    prefill_args = normalize_mocker_config(
+        {
+            "engine": {
+                "worker_type": "prefill",
+                "max_num_batched_tokens": 128,
+                "max_num_seqs": 1,
+                "num_gpu_blocks": 64,
+                "block_size": 16,
+            }
+        }
     )
-    decode_args = MockEngineArgs(
-        worker_type="decode",
-        max_num_batched_tokens=128,
-        max_num_seqs=2,
-        num_gpu_blocks=64,
-        block_size=16,
+    decode_args = normalize_mocker_config(
+        {
+            "engine": {
+                "worker_type": "decode",
+                "max_num_batched_tokens": 128,
+                "max_num_seqs": 2,
+                "num_gpu_blocks": 64,
+                "block_size": 16,
+            }
+        }
     )
     metadata = {
         "prefill": {
@@ -510,22 +537,30 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
         if identity_source == "engine_config":
 
             def role_args(role, seqs):
-                return MockEngineArgs.from_json(
-                    json.dumps(
-                        {
+                return normalize_mocker_config(
+                    {
+                        "engine": {
                             "worker_type": role,
-                            "ais_perf_config": metadata[role]["config"],
                             "max_num_batched_tokens": 128,
                             "max_num_seqs": seqs,
                             "num_gpu_blocks": 64,
                             "block_size": 16,
+                            "timing_model": {
+                                "type": "external",
+                                "provider": "ais",
+                                "config": metadata[role]["config"],
+                            },
                         }
-                    )
+                    }
                 )
 
             prefill_args = role_args("prefill", 1)
             decode_args = role_args("decode", 2)
             metadata = None
+
+    if metadata is not None:
+        for raw in metadata.values():
+            raw["config"]["nextn"] = None
 
     result = replay_planner.prepare_planner_replay(
         extra_engine_args=None,

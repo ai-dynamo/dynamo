@@ -8,7 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
-use crate::protocols::ActiveSequenceEventData;
+use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
 use crate::services::indexer::backend::test_util::store_event;
@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
     crate::config::KvRouterConfig {

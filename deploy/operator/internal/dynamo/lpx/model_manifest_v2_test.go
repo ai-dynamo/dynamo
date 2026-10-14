@@ -214,10 +214,6 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 			wantErr: "artifacts.runtimeAssets.tokenEmbeddingsPath",
 		},
 		{name: "missing numChips", geometry: &geometryFixture{devicesPerNode: 8, numNodes: 1}, wantErr: "numChips must be >= 1"},
-		{
-			name: "topology and numChips mismatch", geometry: &geometryFixture{numChips: 16, devicesPerNode: 8, numNodes: 2},
-			wantErr: "topology chip count 8 does not match numChips 16",
-		},
 		{name: "missing devicesPerNode", geometry: &geometryFixture{numChips: 8, numNodes: 1}, wantErr: "devicesPerNode must be >= 1"},
 		{
 			name: "deployment node count mismatch", geometry: &geometryFixture{numChips: 8, devicesPerNode: 8, numNodes: 2},

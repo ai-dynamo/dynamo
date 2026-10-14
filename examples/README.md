@@ -46,6 +46,10 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 - **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
 - **[TokenSpeed](backends/tokenspeed/README.md)** – LongCat-Flash prefill/decode disaggregation with KV-aware routing
 
+## Use Case Examples
+
+- **[Nemotron Speech Cascaded Pipeline](nemotron_speech_cascaded_pipeline/README.md)** - OpenAI-compatible realtime ASR and streaming TTS adapters for NVIDIA Speech NIMs serving Nemotron models
+
 ## Deployment Examples
 
 Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.

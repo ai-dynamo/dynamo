@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: motif-3
+title: Motif-3 NVFP4
+page: pages/recipes/model-recipes/motif-3.mdx
+provider: motif
+model:
+  name: Motif-3-NVFP4
+  hf_id: Motif-Technologies/Motif-3-NVFP4
+  precision: NVFP4 weights with FP8 KV cache
+status: experimental
+targets:
+- id: agg-b200-chat
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 2
+  runtime:
+    framework: vLLM
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+  topology: aggregated
+  techniques:
+  - tp2
+  - mtp2
+  - expert-parallel
+  - speculative-decoding
+  - shared-model-cache
+  workload:
+    type: chat-trace-replay
+    traffic: 8K/1K chat Mooncake trace at concurrency 11
+  deploy:
+    asset: recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/motif-3/perf/perf.yaml
+  expected_performance:
+    available: false
+    summary: 'Benchmark-only synthetic proxy, not reproducible from the shipped manifests: 587.92 output tok/s, 293.96 output tok/s/GPU, 66.27 output tok/s/user P50, TTFT P50 388.18 ms at concurrency 11 with Dynamo MTP2 and TP2 using synthetic acceptance length 2.13 from SPEED-Bench coding. The deployment uses real MTP verification; a real-MTP chat-trace run is not yet attached. 35 trace requests exceeded the 262,144-token context limit.'
+related_benchmarks: []
+maintainer: null
+gaps:
+- maintainer unknown
+- public image vllm-runtime:1.5.0-motif-3-dev.1 is pending NGC publication and is referenced by tag, not digest
+- published performance is a synthetic-acceptance proxy; no real-MTP chat-trace result yet

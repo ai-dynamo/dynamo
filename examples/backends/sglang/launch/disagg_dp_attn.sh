@@ -110,7 +110,6 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --disaggregation-transfer-backend nixl \
-  --prefill-round-robin-balance \
   --nccl-port "${DYN_SYSTEM_PORT4:-8084}" \
   --context-length 1024 \
   --disable-cuda-graph \
