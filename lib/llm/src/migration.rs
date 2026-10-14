@@ -1118,7 +1118,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(manager.retries_left, 1);
+        assert_eq!(manager.retries_left, 0);
         assert!(manager.request.migration_state.is_none());
 
         let mut legacy = create_mock_request(1);
