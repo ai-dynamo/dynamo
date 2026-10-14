@@ -15,6 +15,13 @@ from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
+# KV-cache reuse salt for the health canary. TensorRT-LLM's attention-DP dummy
+# requests (KVCacheManagerV2.add_dummy_requests) use prompt [1] with no salt
+# and assert that nothing matches in the reuse tree. An unsalted canary that
+# starts with token 1 commits that prefix and crashes the rank, so the canary
+# gets its own reuse namespace.
+HEALTH_CHECK_CACHE_SALT = "dynamo-health-check"
+
 
 def _get_bos_token_id_from_tokenizer(tokenizer) -> int:
     """

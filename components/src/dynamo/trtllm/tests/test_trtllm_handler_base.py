@@ -29,7 +29,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from dynamo.common.backend.logprobs import extract_from_completion_output
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT, TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
@@ -1308,6 +1308,69 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
+
+    async def _generate_async_cache_salt(self, request):
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        return kwargs["cache_salt"]
+
+    @pytest.mark.asyncio
+    async def test_health_check_gets_dedicated_cache_salt(self):
+        # An unsalted canary of [1] collides with TRT-LLM's attention-DP dummy
+        # request prefix (DYN-4908), so the canary must use its own salt.
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+        assert request["token_ids"] == [1]
+
+        assert await self._generate_async_cache_salt(request) == (
+            HEALTH_CHECK_CACHE_SALT
+        )
+
+    @pytest.mark.asyncio
+    async def test_health_check_env_override_gets_dedicated_cache_salt(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "DYN_HEALTH_CHECK_PAYLOAD",
+            '{"token_ids": [1], "stop_conditions": {"max_tokens": 1}, '
+            '"sampling_options": {}}',
+        )
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+
+        assert await self._generate_async_cache_salt(request) == (
+            HEALTH_CHECK_CACHE_SALT
+        )
+
+    @pytest.mark.asyncio
+    async def test_regular_request_without_salt_stays_unsalted(self):
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        assert await self._generate_async_cache_salt(request) is None
+
+    @pytest.mark.asyncio
+    async def test_health_check_keeps_caller_cache_salt(self):
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+        request["routing"] = {"cache_salt": "tenant-a"}
+
+        assert await self._generate_async_cache_salt(request) == "tenant-a"
 
     @pytest.mark.asyncio
     async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
