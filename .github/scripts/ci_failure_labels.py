@@ -13,10 +13,11 @@ import re
 import sys
 import urllib.request
 from datetime import datetime, timezone
+from functools import lru_cache
 
 CLASSES = {"code", "infra", "unclear"}
 CONFIDENCE = {"high", "medium", "low"}
-MAX_VERDICTS = 300
+MAX_VERDICTS = 100
 BATCH = 100
 SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
@@ -31,6 +32,11 @@ def github(path):
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
+
+
+@lru_cache(maxsize=None)
+def get_run(run_id):
+    return github(f"actions/runs/{run_id}")
 
 
 def validate(raw):
@@ -57,7 +63,7 @@ def enrich(v, decided_by):
     job = github(f"actions/jobs/{v['job_id']}")
     if job.get("conclusion") != "failure" or job.get("head_branch") != "main":
         raise ValueError(f"{v['job_id']}: not a failed job on main")
-    run = github(f"actions/runs/{job['run_id']}")
+    run = get_run(job["run_id"])
     return {
         "ddsource": "dynamo-ci-classifier",
         "service": "dynamo-ci-failure-labels",
