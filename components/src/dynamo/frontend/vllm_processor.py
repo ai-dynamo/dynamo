@@ -67,7 +67,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
     "length": FinishReason.LENGTH,
-    "error": FinishReason.ERROR,
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
@@ -391,11 +390,27 @@ class _ReasoningUsageAnnotator:
         return annotated
 
 
-def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
+def map_finish_reason(
+    raw_reason: str | dict[str, Any] | None,
+) -> FinishReason | None:
     if raw_reason is None:
         return None
-    if raw_reason.startswith("error"):
-        return FinishReason.ERROR
+    if isinstance(raw_reason, dict):
+        logger.warning("Malformed error finish_reason from router")
+        return None
     if raw_reason.startswith("abort"):
         return FinishReason.ABORT
     if raw_reason.startswith("content_filter"):
@@ -718,14 +733,20 @@ class VllmProcessor:
         self._sender: MmKwargsSender | None = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
         # Set DYNAMO_MM_TRANSFER to choose transfer mode:
-        #   shm (default): shared memory. Same-node only (~2ms). If the
-        #     backend can't read the segment (cross-node), it falls back to
-        #     normal processing (backend runs HF processor).
+        #   shm (default): shared memory. The frontend and worker must share an
+        #     IPC namespace. A failed read uses raw-media fallback only when the
+        #     request already carries it; otherwise the worker fails closed.
         #   nixl: NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
         transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "shm").lower()
         self.use_shm_transfer = transfer_mode == "shm"
         logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
+        if self.nixl_mm_enabled and self.use_shm_transfer:
+            logger.info(
+                "[mm-routing] SHM transfer requires the frontend and worker to "
+                "share /dev/shm; use DYNAMO_MM_TRANSFER=nixl for separate "
+                "pods or nodes"
+            )
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -841,8 +862,8 @@ class VllmProcessor:
             # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
             #   - shm (default): shared memory, same-node only (~2ms).
-            #     Cross-node backends fail gracefully and fall back to
-            #     normal processing.
+            #     The worker fails closed if it cannot read the segment and
+            #     the request does not carry raw media.
             #   - nixl: NIXL RDMA (works cross-node via IB).
             if not self.nixl_mm_enabled:
                 logger.debug(
@@ -1287,6 +1308,19 @@ class VllmProcessor:
                     )
                     break
 
+                raw_finish_reason = engine_response.get("finish_reason")
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
+                    yield as_error_envelope(
+                        make_internal_error(request_id, error_message)
+                    )
+                    break
+
                 # Count before any choice gate — tool/reasoning parsers may
                 # consume tokens without emitting a visible delta.
                 chunk_tokens = len(engine_response.get("token_ids") or [])
@@ -1315,7 +1349,6 @@ class VllmProcessor:
                     engine_response.get("top_logprobs"),
                 )
 
-                raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
 

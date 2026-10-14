@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded producer and strict reader for generation_artifact_v1.
+"""Bounded producer and strict reader for generation_artifact_v1 (wire version 1.0).
 
 Logprob tensors allow finite values and -Inf (zero probability), but not NaN or +Inf.
+Only minor version 0 is defined here. A later additive minor revision needs an
+explicit schema and capability update before this reader accepts it.
 """
 
 from __future__ import annotations
@@ -99,7 +101,11 @@ class Tensor:
                 ),
                 None,
             )
-        if dtype is None or dtype == "bf16":
+        if dtype is None:
+            raise GenerationArtifactFormatError(
+                f"unsupported source dtype {value.dtype}"
+            )
+        if dtype == "bf16":
             raise GenerationArtifactFormatError("use raw Tensor bytes for bf16")
         _tensor_size(dtype, tuple(value.shape))
         target = _DTYPES[dtype]
@@ -116,18 +122,20 @@ class Tensor:
             _require(
                 value.dtype.kind == "f", "floating tensor requires floating source"
             )
-            _require(
-                bool(np.all(np.isfinite(value) | np.isneginf(value))),
-                "floating source contains unsupported nonfinite value",
-            )
-            finite = value[np.isfinite(value)]
-            _require(
-                bool(
-                    not finite.size
-                    or float(np.abs(finite).max()) <= np.finfo(target).max
-                ),
-                "floating conversion out of range",
-            )
+            if value.size:
+                low, high = float(value.min()), float(value.max())
+                _require(
+                    not (np.isnan(low) or np.isnan(high) or high == np.inf),
+                    "floating source contains unsupported nonfinite value",
+                )
+                if low == -np.inf:
+                    finite = value[value != -np.inf]
+                    low = float(finite.min()) if finite.size else 0.0
+                bound = float(np.finfo(target).max)
+                _require(
+                    low >= -bound and high <= bound,
+                    "floating conversion out of range",
+                )
         return cls(
             dtype,
             tuple(value.shape),
@@ -593,15 +601,28 @@ def _parse_manifest(manifest: Any, payload: bytes) -> GenerationArtifactView:
 
 
 def decode_generation_artifact(
-    data: bytes,
+    data: bytes | bytearray | memoryview,
     *,
     expected_router_profile: tuple[tuple[int, int], ...] | None = None,
 ) -> GenerationArtifactView:
     """Validate the object, optionally binding ordered router IDs and expert counts."""
-    _require(
-        type(data) is bytes and _PRELUDE.size <= len(data) <= MAX_OBJECT_BYTES,
-        "invalid object size",
-    )
+    try:
+        source = memoryview(data)
+    except (TypeError, ValueError):
+        raise GenerationArtifactFormatError("invalid object buffer") from None
+    try:
+        _require(
+            source.ndim == 1 and source.itemsize == 1 and source.c_contiguous,
+            "invalid object buffer",
+        )
+        _require(
+            _PRELUDE.size <= source.nbytes <= MAX_OBJECT_BYTES,
+            "invalid object size",
+        )
+        if type(data) is not bytes:
+            data = source.tobytes()
+    finally:
+        source.release()
     magic, major, minor, codec, manifest_bytes, payload_bytes = _PRELUDE.unpack_from(
         data
     )
