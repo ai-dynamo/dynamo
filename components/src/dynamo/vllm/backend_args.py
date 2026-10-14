@@ -116,6 +116,14 @@ class DynamoVllmArgGroup(ArgGroup):
             + [m.value for m in DisaggregationMode],
         )
 
+        add_argument(
+            g,
+            flag_name="--artifact-router-profile",
+            env_var="DYNAMO_ARTIFACT_ROUTER_PROFILE",
+            default=None,
+            help="JSON array of [router_id, expert_count, top_k] entries for generation-artifact route capture.",
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--use-vllm-tokenizer",
@@ -564,6 +572,7 @@ class DynamoVllmConfig(ConfigBase):
     disaggregation_mode: Union[
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
+    artifact_router_profile: Optional[str] = None
     use_vllm_tokenizer: bool
 
     # Multimodal
