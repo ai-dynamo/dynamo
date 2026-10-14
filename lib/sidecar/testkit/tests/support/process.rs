@@ -247,11 +247,21 @@ impl Process {
                 "backend",
                 "--disaggregation-mode",
                 role,
+                "--discovery-backend",
+                "file",
+                "--request-plane",
+                "tcp",
+                "--response-plane",
+                "tcp",
+                "--event-plane",
+                "zmq",
             ])
-            .env("DYN_DISCOVERY_BACKEND", "file")
+            // CLI overrides must reach the runtime before discovery or connection setup.
+            .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
             .env("DYN_FILE_KV", env.root.path().join("discovery"))
-            .env("DYN_REQUEST_PLANE", "tcp")
-            .env("DYN_EVENT_PLANE", "zmq")
+            .env("DYN_REQUEST_PLANE", "invalid-transport")
+            .env("DYN_RESPONSE_PLANE", "invalid-transport")
+            .env("DYN_EVENT_PLANE", "invalid-transport")
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
             .env("DYN_SYSTEM_PORT", "0")
             .env("DYN_HEALTH_CHECK_ENABLED", "false")

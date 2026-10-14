@@ -63,8 +63,15 @@ Each node contains:
 
 - `edge`: the compressed sequence of local and external block hashes.
 - `edge_index`: reverse lookup from `ExternalSequenceBlockHash` to position in
-  the edge. Removal uses this to find an evicted block in O(1) once it has the
-  node.
+  the edge. Removal uses this to find an evicted block once it has the node.
+  A position never moves: edges grow only at the tail, and a split truncates
+  them. Edges of at most 16 blocks keep no index and scan from the tail. Longer
+  edges keep an open-addressing table of `u32` positions that reads keys back
+  through `edge`, so it costs 5 to 11 bytes per block. Since the split prefix
+  never grows again, a split keeps its table in O(1) and lookups skip the
+  positions that moved to the suffix. The prefix rebuilds only when a table
+  half the size would fit, so its table is at most twice the size it needs
+  and the rebuilds cost O(blocks split off) over the node's lifetime.
 - `full_edge_workers`: workers that cover the full compressed edge.
 - `worker_cutoffs`: workers that cover only a prefix of the edge. A cutoff `k`
   means the worker has cached `edge[0..k]`, with `0 < k < edge.len()`.
@@ -75,10 +82,17 @@ Each node contains:
 - `internal`: a sticky marker that becomes true once the node has had children.
   It remains true even if cleanup later removes every physical child, so the
   node is not reopened for leaf extension.
+- `anchor`: set only on synthetic branch anchors. They stay registered for the
+  tree's lifetime and never change their one-block edge, so the flag identifies a
+  store parent as an anchor without probing the anchor map.
 
-Worker lookup tables are not stored on nodes. Each event worker owns its own
-`WorkerLookup`, mapping external block hashes to the node that should contain
-that hash.
+Worker lookup tables are not stored on nodes. Each event lane owns a
+`LaneLookup` that maps, for each of its workers, external block hashes to the
+node that should contain that hash. Entries name nodes by lane-local ids: the
+lane holds one `Arc` per distinct node its entries name and counts those entries
+locally, so storing or removing a block does not touch the node's shared
+reference count. Stale-leaf cleanup still sees every lane that names a node:
+such a node carries one extra strong reference per lane that names it.
 
 ## Store Paths
 
@@ -145,6 +159,17 @@ When a remove event arrives for worker `w` at edge position `i`:
 - Otherwise the worker moves to `worker_cutoffs[w] = new_cutoff`.
 - Worker lookup entries for the newly uncovered suffix are scrubbed eagerly.
 
+A remove event is applied in runs, each under one exclusive shape gate. A run
+starts at the node its first hash's lookup entry names, or the node
+[lookup repair](#lookup-repair) resolves that hash to, and takes the following
+hashes whose entries name that node. A hash whose entry names another node starts
+its own run, because that node may hold the worker's coverage of it: once cleanup
+unlinks a subtree the worker's lookup still names, a partial restore can store
+some of its hashes on a new live node, and consuming them on the unlinked node
+would leave the live coverage behind. The run is scanned under an upgradable
+state read, which upgrades to the write lock only when the removal changes the
+worker's coverage.
+
 After the coverage update, removal may clear children only when no full-edge
 workers remain. Because `internal` is sticky, clearing those children does not
 make the node eligible for future leaf extension.
@@ -153,14 +178,27 @@ make the node eligible for future leaf extension.
 
 Cross-thread splits can make a worker lookup entry stale: the lookup still points
 at the old prefix node even though the requested external hash moved to the new
-suffix child. `resolve_lookup` handles this lazily:
+suffix child. Writers handle this lazily:
 
 ```text
 worker lookup says hash -> old node
 old node no longer contains hash
 scan descendants for a node containing hash
-rewrite the useful covered range in the resolved node
+repoint entries in the useful covered range that still name the old node
 ```
+
+Remove and store-parent resolution do not probe the node before using a lookup
+entry. The locked operation they already run detects the miss: grouped removal
+returns nothing when the run's first hash is not in the edge, and the store's
+parent-coverage check reports the parent as missing. Because grouped removal
+upgrades its state read only on a coverage change, a miss on a read-hot split
+prefix never blocks readers. Only then does `repair_stale` scan descendants, and
+the operation retries on the resolved node, not on the lookup entry: remove
+repair never rewrites the removed hash's own entry, and store repair leaves it
+untouched when the worker no longer covers the parent there. Re-reading the
+entry after repair would loop between the stale and resolved nodes. The
+stale-parent path inside child insertion still validates through
+`resolve_lookup`, because its entry may already point past the split.
 
 Store repair rewrites from the requested parent hash toward the worker's covered
 tail. Remove repair rewrites from the head toward the removed hash, excluding the
@@ -168,6 +206,11 @@ suffix that removal is about to scrub. This matters for tail-to-head removes:
 once one hash in a moved compressed edge repairs the useful head range, later
 hashes in that same edge should hit the resolved node directly instead of paying
 another subtree scan.
+
+Repair and split lookup updates move only entries that still name the old node,
+and never insert missing ones. An entry naming any other node either holds that
+worker's coverage there or is stale from an older split; the latter is repaired
+on its own next access.
 
 If the scan fails in a store path, the store is rejected with
 `ParentBlockNotFound` and logged as a warning. If it fails in a remove path, the
@@ -181,7 +224,7 @@ shared CRTC nodes concurrently.
 
 Node internals use separate protection for edge state and child maps:
 
-- `NodeState` is protected by a `parking_lot::RwLock`.
+- `CrtcNodeState` is protected by a `parking_lot::RwLock`.
 - `children` publishes compact snapshots through `ArcSwap`, promoting to a
   `DashMap` when fanout exceeds four children.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
@@ -195,23 +238,24 @@ exclusive shape gate.
 `find_matches` is best-effort during concurrent shape changes. It reads node
 state and child pointers without taking `shape_gate` on the hot step, so it may
 observe adjacent tree shapes during a split and undercount. It must not panic,
-and apart from the equal-size skip below it must not return a match past a
-valid reachable prefix.
+and apart from a fingerprint collision in the equal-set skip below it must not
+return a match past a valid reachable prefix.
 
-### Equal-size skip
+### Equal-set skip
 
 After the first node, the walk intersects its active workers with each node's
-full-edge coverage. When the two sets have the same size, it skips that
-intersection and treats them as equal. This is an accepted approximation.
-Removal does not cascade to children, so after a worker's head blocks are
-evicted a child can still list it, and an equal-sized coverage set can then hold
-a different worker than the walk carries. The walk credits the carried worker
-with the child's depth, past its cached prefix.
+full-edge coverage. When the two sets are equal it skips that intersection,
+which saves a pass over up to all workers at most hops: on the Mooncake replay
+with 128 workers, always intersecting raised lookup service p50 by 34%.
 
-The skip saves a pass over up to all workers at most hops. On the Mooncake
-replay with 128 workers it fired about 4.3M times and was wrong in 0 of them at a
-keep-up load and 2 of about 741K when overloaded, while always intersecting
-raised lookup service p50 by 34%.
+Size alone does not prove the sets equal. Removal does not cascade to
+children, so after a worker's head blocks are evicted a child can still list
+it, and an equal-sized coverage set can then hold a different worker than the
+walk carries. Both sets are therefore `WorkerSet`s, which keep the XOR of a
+64-bit mix of each member, and the walk skips only when the sizes and these
+fingerprints match. The check is probabilistic: unequal sets collide with
+probability about 2^-64 per comparison, and a collision overcounts exactly as
+the size-only check did. That is the one remaining overcount path.
 
 ## Wire Compatibility
 

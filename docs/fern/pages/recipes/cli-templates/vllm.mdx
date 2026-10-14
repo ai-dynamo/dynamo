@@ -397,25 +397,6 @@ The default model is `Qwen/Qwen3-0.6B`.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_tracing.sh)
 </Accordion>
-<Accordion title="Data-Parallel Attention and Expert Parallelism">
-
-Starts multiple data-parallel workers for a Mixture-of-Experts model and lets Dynamo route among the
-data-parallel ranks. The default Qwen configuration uses four GPUs.
-
-The default model is `Qwen/Qwen3-30B-A3B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/dep.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dep.sh)
-</Accordion>
 <Accordion title="Multi-Node DeepSeek-R1 Expert Parallelism">
 
 Runs DeepSeek-R1 with data-parallel attention and expert parallelism across multiple nodes. Each

@@ -872,7 +872,7 @@ def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
     )
 
 
-def sidecar_compatibility_payloads() -> list[BasePayload]:
+def chat_logprobs_and_structured_output_payloads() -> list[BasePayload]:
     logprobs = streaming_chat_payload_with_logprobs(
         content="Count from one to ten.",
         expected_response=[],

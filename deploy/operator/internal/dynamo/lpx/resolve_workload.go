@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -142,7 +144,7 @@ func ResolveWorkload(
 
 	// The conductor component owns explicit capacity or the initial native seed.
 	conductor := components[len(components)-1]
-	scalingGroupReplicas := ptr.Deref(conductor.Replicas, ptr.Deref(conductor.MinAvailable, 1))
+	scalingGroupReplicas := ptr.Deref(conductor.Replicas, provideroverride.EffectiveGroveMinAvailable(conductor))
 
 	// Canonical roles expand into default or draft0..draft7 followed by target.
 	digest, err := workloadSetDigest(projections)

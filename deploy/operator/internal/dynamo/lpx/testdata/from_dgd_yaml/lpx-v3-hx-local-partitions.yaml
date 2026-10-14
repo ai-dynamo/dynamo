@@ -2,6 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
+  lpu_servers: lpx-${GROVE_PCSG_INDEX}-agt-0
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpx-v3-hx-local-partitions-48b8-decode-734ce683f6b7ea5f
+  namespace: test
+---
+data:
   nodes_per_partition: "1"
   partition_ids: "1"
   partition_indices: "0"
@@ -192,6 +203,7 @@ spec:
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
+        nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1750efbc54e1345379cf7f298294ff47828ec6acb0057e92d7046bd2a0b0ff65
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -302,6 +314,8 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
+            - mountPath: /configs
+              name: config
             - mountPath: /dev/shm
               name: shared-memory
           resourceClaims:
@@ -321,6 +335,9 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
+          - configMap:
+              name: lpx-v3-hx-local-partitions-48b8-decode-734ce683f6b7ea5f
+            name: config
         replicas: 1
         roleName: cond
         startsAfter:
