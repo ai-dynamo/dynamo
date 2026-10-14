@@ -59,9 +59,8 @@ deny_globs:
   - "**/libsw*_dynamo-*.so*"
   - "**/libpostproc_dynamo.so*"
   - "**/libpostproc_dynamo-*.so*"
-  # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own copies
-  # at /usr/local/bin/ffmpeg and /usr/local/bin/ffprobe are re-permitted by
-  # allow_paths below.
+  # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own
+  # /usr/local/bin/ffmpeg and ffprobe are re-permitted by allow_paths below.
   - "**/bin/ffmpeg"
   - "**/bin/ffprobe"
   # GPL prebuilt ffmpeg binary that imageio-ffmpeg bundles under site-packages.

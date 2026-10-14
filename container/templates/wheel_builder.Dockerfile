@@ -332,12 +332,8 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
 # decode does not use ffmpeg (it goes through the Rust `image` crate), so no
 # still-image decoders are enabled here.
-# A third path: vLLM's native gRPC server (`vllm-rs`, run by the vLLM sidecar)
-# decodes video by running `ffprobe`, then
-# `ffmpeg ... -f image2pipe -vcodec ppm pipe:1` (with a `-f rawvideo` fallback).
-# That needs the ffprobe CLI, the image2pipe/rawvideo muxers, and the ppm/rawvideo
-# encoders. These write uncompressed frames and carry no royalty-bearing codec.
-# ffprobe is built by default; do not add --disable-ffprobe.
+# A third path: vLLM's `vllm-rs` video decode runs `ffprobe`, then image2pipe/ppm (or
+# rawvideo) output: uncompressed, no royalty-bearing codec. Do not add --disable-ffprobe.
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x and 9.x (not `pipe:`), so omitting it breaks
 # the imageio encode path with "Protocol not found. Did you mean file:fd:?".

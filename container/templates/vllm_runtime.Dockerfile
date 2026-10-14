@@ -360,9 +360,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE, plus the LGPL ffprobe that vLLM's native gRPC server
-# (`vllm-rs`) runs before it decodes video. The codec purge above removed the
-# base image's distro ffprobe. This remains ungated by enable_media_ffmpeg so the
+# IMAGEIO_FFMPEG_EXE, plus the LGPL ffprobe that `vllm-rs` video decode needs (the
+# codec purge removed the distro one). This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
 # required shared libraries and CLI available.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
