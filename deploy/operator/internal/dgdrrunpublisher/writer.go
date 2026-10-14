@@ -24,6 +24,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher/placeholderapi"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,12 +33,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// StoredCandidate is the API server's view of a candidate right after it was applied.
+type StoredCandidate struct {
+	// ResourceVersion is the version a status write for this candidate is constrained to.
+	ResourceVersion string
+	// Populated reports that the candidate already has its evaluation status, for example
+	// when a stale cache led the reconciler to apply a candidate that exists.
+	Populated bool
+}
+
 // writer is every write the reconciler makes to the API server. It is a seam so the
 // reconciler's behavior can be tested without server-side apply support in a fake client.
 type writer interface {
-	// CreateCandidate creates the candidate and returns its resourceVersion as the API
-	// server has it. It must be idempotent.
-	CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (resourceVersion string, err error)
+	// CreateCandidate applies the candidate and returns the API server's own copy of it,
+	// read after the apply. It must be idempotent: applying a candidate that already
+	// exists changes nothing.
+	CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error)
 	// PopulateStatus records the candidate's evaluation facts and marks it Evaluated. The
 	// write is constrained to resourceVersion, so a stale view of the candidate fails
 	// with a conflict instead of rewriting status that was already populated.
@@ -72,22 +83,27 @@ func (w *clientWriter) apply(ctx context.Context, object *unstructured.Unstructu
 	return w.Client.Apply(ctx, configuration, client.FieldOwner(fieldOwner), client.ForceOwnership)
 }
 
-// CreateCandidate applies the candidate. It is only called for a candidate missing from
-// the cache, and re-applying the same content after a stale read is a no-op, so no spec
-// comparison is needed.
-func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (string, error) {
+// CreateCandidate applies the candidate and reads it back from the API server. It is
+// only called for a candidate missing from the cache, and re-applying the same content
+// to a candidate that exists is a no-op, so no spec comparison is needed. The read-back
+// tells the caller whether the status is populated already: the cache cannot, because it
+// is exactly what may be stale.
+func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
 	object, err := buildCandidateApply(w.Client.Scheme(), w.Namespace, w.RunUID, run, name, candidate)
 	if err != nil {
-		return "", err
+		return StoredCandidate{}, err
 	}
 	if err := w.apply(ctx, object, false); err != nil {
-		return "", err
+		return StoredCandidate{}, err
 	}
 	var stored v1beta2.DynamoGraphDeploymentCandidate
 	if err := w.Reader.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &stored); err != nil {
-		return "", err
+		return StoredCandidate{}, err
 	}
-	return stored.ResourceVersion, nil
+	return StoredCandidate{
+		ResourceVersion: stored.ResourceVersion,
+		Populated:       meta.IsStatusConditionTrue(stored.Status.Conditions, evaluatedCondition),
+	}, nil
 }
 
 func (w *clientWriter) PopulateStatus(ctx context.Context, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate) error {

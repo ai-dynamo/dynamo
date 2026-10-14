@@ -50,8 +50,8 @@ const (
 // memWriter is the reconciler's writer for tests. It logs every write attempt (a failed
 // attempt is logged with a trailing "!") and, unless lag is set, applies the write to
 // the fake client the reconciler reads from, which stands in for the informer cache.
-// With lag set, writes are logged but never become visible, like a cache that has not
-// caught up.
+// With lag set, writes are logged but never become visible to the reconciler, like a
+// cache that has not caught up; the server map still records them.
 type memWriter struct {
 	t      *testing.T
 	c      client.Client
@@ -62,6 +62,9 @@ type memWriter struct {
 	statusVersions   []string
 	populateVersions map[string]string
 	lag              bool
+	// server is what the API server holds, whatever the cache shows: the candidates that
+	// exist, and whether each has its status.
+	server map[string]bool
 	// failOn makes the named operation ("create", "populate", "status", "delete") fail;
 	// once, unless sticky.
 	failOn map[string]error
@@ -87,13 +90,16 @@ func (w *memWriter) record(op string, err error) error {
 	return err
 }
 
-func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (string, error) {
+func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
 	if err := w.record("create:"+name, w.fail("create")); err != nil {
-		return "", err
+		return StoredCandidate{}, err
 	}
-	version := createdVersion(name)
+	// The apply is idempotent; the read-back reports what the server holds.
+	populated := w.server[name]
+	w.server[name] = populated
+	stored := StoredCandidate{ResourceVersion: createdVersion(name), Populated: populated}
 	if w.lag {
-		return version, nil
+		return stored, nil
 	}
 	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
 		Namespace: testNamespace,
@@ -101,7 +107,7 @@ func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphD
 		UID:       types.UID("uid-" + name),
 		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
 	}}
-	return version, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
+	return stored, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
 }
 
 // createdVersion is the resourceVersion the fake API server "returns" for a new candidate.
@@ -112,6 +118,7 @@ func (w *memWriter) PopulateStatus(ctx context.Context, name, resourceVersion st
 		return err
 	}
 	w.populateVersions[name] = resourceVersion
+	w.server[name] = true
 	if w.lag {
 		return nil
 	}
@@ -182,7 +189,7 @@ func newFixture(t *testing.T) *fixture {
 		MinInterval: time.Millisecond,
 		MaxInterval: time.Millisecond,
 	}
-	w := &memWriter{t: t, c: c, failOn: map[string]error{}, populateVersions: map[string]string{}}
+	w := &memWriter{t: t, c: c, failOn: map[string]error{}, populateVersions: map[string]string{}, server: map[string]bool{}}
 	return &fixture{t: t, c: c, w: w, r: &Reconciler{
 		Client:           c,
 		Writer:           w,
@@ -226,6 +233,17 @@ func (f *fixture) exitSweeper(code int32) {
 	}
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "sweeper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: code}}}}
 	if err := f.c.Status().Update(context.Background(), &pod); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// deleteCandidate removes a candidate behind the publisher's back, from the API server
+// and from the cache.
+func (f *fixture) deleteCandidate(name string) {
+	f.t.Helper()
+	delete(f.w.server, name)
+	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name}}
+	if err := f.c.Delete(context.Background(), object); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -299,25 +317,60 @@ func TestReconcilingUnchangedStateWritesNothing(t *testing.T) {
 	}
 }
 
-func TestCacheLagDoesNotRepeatWrites(t *testing.T) {
+func TestCacheLagRepeatsOnlyIdempotentWrites(t *testing.T) {
 	f := newFixture(t)
 	f.w.lag = true // the cache never shows what was written
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.mustReconcile()
-	first := f.takeOps()
-	if len(first) != 3 {
-		t.Fatalf("first reconcile ops = %v", first)
+	if got, want := f.takeOps(), []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("first reconcile ops = %v, want %v", got, want)
 	}
 	f.mustReconcile()
+	// The candidate apply repeats harmlessly and the server reports the candidate populated,
+	// so its status is not written a second time. The run status is written again, still
+	// constrained to the cached version: against a real API server the first write has
+	// moved the run on, so this one is rejected as stale and retried through the workqueue.
+	if got, want := f.takeOps(), []string{"create:" + cn("a"), "status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("second reconcile ops = %v, want %v", got, want)
+	}
+	if len(f.w.statusVersions) != 2 || f.w.statusVersions[0] != f.w.statusVersions[1] {
+		t.Fatalf("both status writes must carry the cached run version, got %v", f.w.statusVersions)
+	}
+}
+
+func TestExternallyDeletedCandidateIsRecreated(t *testing.T) {
+	f := newFixture(t)
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.mustReconcile()
-	if got := f.takeOps(); len(got) != 0 {
-		t.Fatalf("an echo-triggered reconcile must not redo writes the cache has not shown yet, got %v", got)
+	f.takeOps()
+	f.deleteCandidate(cn("a"))
+	f.mustReconcile()
+	if got, want := f.takeOps(), []string{"create:" + cn("a"), "populate:" + cn("a")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("a candidate deleted behind the publisher's back must be repaired, ops = %v, want %v", got, want)
+	}
+}
+
+func TestExternallyModifiedRunStatusIsRepaired(t *testing.T) {
+	f := newFixture(t)
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	f.takeOps()
+	var run v1beta2.DynamoGraphDeploymentRun
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testRunName}, &run); err != nil {
+		t.Fatal(err)
+	}
+	run.Status.Message = "changed by someone else"
+	if err := f.c.Update(context.Background(), &run); err != nil {
+		t.Fatal(err)
+	}
+	f.mustReconcile()
+	if got, want := f.takeOps(), []string{"status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("a run status modified behind the publisher's back must be repaired, ops = %v, want %v", got, want)
 	}
 }
 
 func TestPartialSuccessRetryRepeatsOnlyTheUnfinishedWrites(t *testing.T) {
 	f := newFixture(t)
-	f.w.lag = true
 	f.w.failOn["status"] = errors.New("api unavailable")
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	if err := f.reconcile(); err == nil {
@@ -393,22 +446,19 @@ func TestCandidateWithoutStatusIsCompletedNotRecreated(t *testing.T) {
 }
 
 func TestProgressTimeSurvivesASnapshotWithoutATimestamp(t *testing.T) {
-	for name, lag := range map[string]bool{"cache current": false, "cache lagging": true} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			f.w.lag = lag
-			first := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
-			f.publish(withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:35:12Z"))
-			f.mustReconcile()
-			f.publish(withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"}), ""))
-			f.mustReconcile()
-			if len(f.w.status) != 2 {
-				t.Fatalf("want two status writes, got %d", len(f.w.status))
-			}
-			if got := f.lastStatus().LastProgress; !got.Equal(first) {
-				t.Fatalf("the second write must repeat the known progress time %v, got %v", first, got)
-			}
-		})
+	f := newFixture(t)
+	first := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
+	f.publish(withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:35:12Z"))
+	f.mustReconcile()
+	f.publish(withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"}), ""))
+	f.mustReconcile()
+	if len(f.w.status) != 2 {
+		t.Fatalf("want two status writes, got %d", len(f.w.status))
+	}
+	// The preserved time comes from the cached run, the current observed state; a stale
+	// cache would lose the version check instead of the timestamp.
+	if got := f.lastStatus().LastProgress; !got.Equal(first) {
+		t.Fatalf("the second write must repeat the observed progress time %v, got %v", first, got)
 	}
 }
 
