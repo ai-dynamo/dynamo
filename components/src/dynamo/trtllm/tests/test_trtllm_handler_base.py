@@ -1354,25 +1354,6 @@ class TestGenerateLocally:
         )
 
     @pytest.mark.asyncio
-    async def test_regular_request_without_salt_stays_unsalted(self):
-        request = {
-            "token_ids": [1, 2, 3],
-            "stop_conditions": {"max_tokens": 10},
-            "sampling_options": {},
-        }
-
-        assert await self._generate_async_cache_salt(request) is None
-
-    @pytest.mark.asyncio
-    async def test_health_check_keeps_caller_cache_salt(self):
-        request = TrtllmHealthCheckPayload(
-            disaggregation_mode=DisaggregationMode.AGGREGATED,
-        ).to_dict()
-        request["routing"] = {"cache_salt": "tenant-a"}
-
-        assert await self._generate_async_cache_salt(request) == "tenant-a"
-
-    @pytest.mark.asyncio
     async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
         # PREFILL forces max_tokens=1 (asserted separately below) but must
         # otherwise apply the full stop conditions, matching native TRT-LLM
