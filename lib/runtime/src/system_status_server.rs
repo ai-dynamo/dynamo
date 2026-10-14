@@ -530,10 +530,23 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     //
     // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
     // so /metrics traverses registered child registries and produces a single combined output.
-    let response = match state.drt().metrics().prometheus_expfmt() {
-        Ok(r) => r,
-        Err(e) => {
+    //
+    // The render runs engine exposition callbacks that cross into Python and
+    // wait for the GIL, for seconds on a loaded worker, so it goes to the
+    // blocking pool rather than parking a runtime worker per scrape.
+    let drt = state.drt().clone();
+    let rendered = tokio::task::spawn_blocking(move || drt.metrics().prometheus_expfmt()).await;
+    let response = match rendered {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             tracing::error!("Failed to get metrics from registry: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get metrics".to_string(),
+            );
+        }
+        Err(e) => {
+            tracing::error!("Metrics render task failed: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get metrics".to_string(),
