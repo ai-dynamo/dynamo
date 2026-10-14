@@ -29,18 +29,16 @@ attributed per kernel.
 import argparse
 import gzip
 import json
-import re
+import os
 import shutil
-import sqlite3
 import tarfile
+import tempfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import closing
 from pathlib import Path
 
-import ijson
-
-from .inspection import inspect_target, sha256_file
+from .inspection import inspect_rank, inspect_target, kineto_result, sha256_file
+from .native import NATIVE_READERS, draw_shard
 
 
 def attrs(span: dict) -> dict:
@@ -65,15 +63,39 @@ def load_traces(paths: list[Path]) -> dict[str, dict[str, dict]]:
     return traces
 
 
+def pool(tasks: int) -> ProcessPoolExecutor:
+    # Size by the CPUs this job may use (Slurm affinity), not the whole node.
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else 1
+    return ProcessPoolExecutor(max_workers=max(1, min(cpus, tasks)))
+
+
 def verify_native(manifest: dict) -> dict[str, dict]:
-    """Inspect every target in parallel processes; the capture only checked presence."""
+    """Inspect every native file in parallel; the capture only checked presence."""
     profiles = {p["target_id"]: p for p in manifest["profiles"]}
     items = manifest["artifact_validation"]
-    with ProcessPoolExecutor(max_workers=max(1, len(items))) as pool:
-        results = pool.map(
-            inspect_target, items, [profiles.get(i["target_id"], {}) for i in items]
+    kineto = {
+        i["target_id"]
+        for i in items
+        if profiles.get(i["target_id"], {}).get("collector") == "torch_profiler"
+        and i.get("artifacts")
+    }
+    ranks = [(i, a) for i in items if i["target_id"] in kineto for a in i["artifacts"]]
+    others = [i for i in items if i["target_id"] not in kineto]
+    with pool(len(ranks) + len(others)) as executor:
+        rank_results = executor.map(inspect_rank, [a for _, a in ranks])
+        other_results = executor.map(
+            inspect_target, others, [profiles.get(i["target_id"], {}) for i in others]
         )
-        return {item["target_id"]: result for item, result in zip(items, results)}
+        results = {i["target_id"]: r for i, r in zip(others, other_results)}
+        per_target = defaultdict(list)
+        for (item, _), result in zip(ranks, rank_results):
+            per_target[item["target_id"]].append(result)
+    for item in items:
+        if item["target_id"] in kineto:
+            results[item["target_id"]] = kineto_result(
+                item, per_target[item["target_id"]]
+            )
+    return results
 
 
 def recording_intervals(items: list[dict]) -> dict[str, tuple[int, int]]:
@@ -177,139 +199,15 @@ def index_requests(manifest, traces, workers, intervals) -> list[dict]:
     )
 
 
-def kineto_events(path: Path):
-    """Yield Kineto events with raw worker-clock nanosecond start/end."""
-    with gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb") as stream:
-        header = stream.read(1 << 20).decode(errors="replace")
-        match = re.search(r'"baseTimeNanoseconds"\s*:\s*(\d+)', header)
-        if not match or not 0 <= match.start() < header.find('"traceEvents"'):
-            raise ValueError(f"{path}: baseTimeNanoseconds must precede traceEvents")
-        base = int(match.group(1))
-        stream.seek(0)
-        for event in ijson.items(stream, "traceEvents.item"):
-            if "ts" in event:
-                event["start_ns"] = base + round(event["ts"] * 1000)
-                event["end_ns"] = event["start_ns"] + round(event.get("dur", 0) * 1000)
-            yield event
-
-
-def nsys_events(path: Path):
-    """Yield Nsight SQLite export events as Chrome events with raw host-clock ns.
-
-    The native `.nsys-rep` is kept as is; its automatic SQLite export is read.
-    Python function ranges arrive as NVTX ranges in the PyTorch domain.
-    """
-    if path.suffix != ".sqlite":
-        return
-    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
-        # Event timestamps are relative to the session start anchored here.
-        (epoch,) = db.execute(
-            "SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"
-        ).fetchone()
-        strings = dict(db.execute("SELECT id, value FROM StringIds"))
-        domains = (
-            dict(
-                db.execute(
-                    "SELECT domainId, text FROM NVTX_EVENTS WHERE eventType = 75"
-                )
-            )
-            if "NVTX_EVENTS" in tables
-            else {}
-        )
-        for pid, name in db.execute("SELECT pid, name FROM PROCESSES"):
-            yield {
-                "ph": "M",
-                "name": "process_name",
-                "pid": pid,
-                "args": {"name": name},
-            }
-            yield {
-                "ph": "M",
-                "name": "process_labels",
-                "pid": pid,
-                "args": {"labels": "CPU"},
-            }
-        if "ThreadNames" in tables:
-            for name_id, tid in db.execute("SELECT nameId, globalTid FROM ThreadNames"):
-                yield {
-                    "ph": "M",
-                    "name": "thread_name",
-                    "pid": (tid >> 24) & 0xFFFFFF,
-                    "tid": tid & 0xFFFFFF,
-                    "args": {"name": strings.get(name_id, "")},
-                }
-        devices = set()
-        queries = {
-            "nvtx": "SELECT start, end, COALESCE(text, textId), globalTid, domainId FROM NVTX_EVENTS "
-            "WHERE eventType IN (59, 60) AND end IS NOT NULL",
-            "osrt": "SELECT start, end, nameId, globalTid, NULL FROM OSRT_API",
-            "cuda_runtime": "SELECT start, end, nameId, globalTid, NULL FROM CUPTI_ACTIVITY_KIND_RUNTIME",
-            "cuda_driver": "SELECT start, end, nameId, globalTid, NULL FROM CUPTI_ACTIVITY_KIND_DRIVER",
-            "kernel": "SELECT start, end, demangledName, deviceId, streamId FROM CUPTI_ACTIVITY_KIND_KERNEL",
-            "gpu_memcpy": "SELECT start, end, NULL, deviceId, streamId FROM CUPTI_ACTIVITY_KIND_MEMCPY",
-            "gpu_memset": "SELECT start, end, NULL, deviceId, streamId FROM CUPTI_ACTIVITY_KIND_MEMSET",
-        }
-        for cat, query in queries.items():
-            if query.split(" FROM ")[1].split()[0] not in tables:
-                continue
-            gpu = cat in ("kernel", "gpu_memcpy", "gpu_memset")
-            for start, end, name, lane, extra in db.execute(query):
-                if gpu:
-                    pid, tid = f"GPU {lane}", extra
-                    if lane not in devices:
-                        devices.add(lane)
-                        yield {
-                            "ph": "M",
-                            "name": "process_name",
-                            "pid": pid,
-                            "args": {"name": f"CUDA device {lane}"},
-                        }
-                        yield {
-                            "ph": "M",
-                            "name": "process_labels",
-                            "pid": pid,
-                            "args": {"labels": pid},
-                        }
-                else:
-                    pid, tid = (lane >> 24) & 0xFFFFFF, lane & 0xFFFFFF
-                kind = (
-                    {"PyTorch": "pytorch", "vLLM": "vllm"}.get(domains.get(extra), cat)
-                    if cat == "nvtx"
-                    else cat
-                )
-                yield {
-                    "ph": "X",
-                    "cat": kind,
-                    "name": strings.get(name, name) if name is not None else cat,
-                    "pid": pid,
-                    "tid": tid,
-                    "dur": (end - start) / 1000,
-                    "start_ns": epoch + start,
-                    "end_ns": epoch + end,
-                }
-
-
-# Native readers by collector.
-NATIVE_READERS = {"torch_profiler": kineto_events, "nsys": nsys_events}
-
-
 class Timeline:
     """Streaming Chrome/Perfetto JSON writer on the coordinator clock."""
 
     def __init__(self, path: Path, origin_ns: int):
         self.stream = gzip.open(path, "wt", compresslevel=1)
         self.stream.write('{"displayTimeUnit":"ms","traceEvents":[')
-        self.origin, self.first, self.pids, self.tids, self.count = (
-            origin_ns,
-            True,
-            {},
-            {},
-            0,
-        )
-        self.groups: dict[
-            str, int
-        ] = {}  # lane -> flow order (frontend, prefill, decode)
+        self.origin, self.first, self.count = origin_ns, True, 0
+        self.pids: dict = {}
+        self.tids: dict = {}
 
     def emit(self, event: dict) -> None:
         self.stream.write(
@@ -363,6 +261,14 @@ class Timeline:
                 "args": args or {},
             }
         )
+
+    def extend(self, shard: str, count: int) -> None:
+        """Append a pool-drawn shard of comma-joined events."""
+        if count:
+            self.stream.write("" if self.first else ",\n")
+            with open(shard) as source:
+                shutil.copyfileobj(source, self.stream, 1 << 20)
+            self.first, self.count = False, self.count + count
 
     def close(self) -> int:
         self.stream.write("]}\n")
@@ -456,7 +362,7 @@ def draw_window(timeline, recorded: dict, offsets: dict, controls: list) -> None
                 "s": "p",
                 "cat": "control",
                 "name": f"{event['target_id']} {event['event']}",
-                "pid": timeline.pid(("control",), "Control"),
+                "pid": timeline.pid(("control",), "Control", sort=10**9),
                 "tid": 1,
                 "ts": (event["unix_ns"] - timeline.origin) / 1000,
             }
@@ -546,7 +452,8 @@ def build(
     # The window timeline (default) shows every request and every captured
     # worker for its whole recording; per-request timelines are optional.
     window = Timeline(output / "timeline.json.gz", origin)
-    views, windows = [], defaultdict(list)
+    groups: dict[str, int] = {}  # lane -> flow order (frontend, prefill, decode)
+    requests = []  # per-request views: (entry, label, recorded, windows by target)
     for entry in index:
         spans, request = traces[entry["trace_id"]], lanes[entry["trace_id"]]
         route = " → ".join(
@@ -554,16 +461,11 @@ def build(
         )
         label = f"req {(entry['request_id'] or entry['trace_id'])[:8]} · {route}"
         label += " (trigger)" if entry["trigger"] else ""
-        window.groups.update(dict(set(request.values())))
+        groups.update(dict(set(request.values())))
         draw_request(window, spans, request, offsets, label)
         if not per_request:
             continue
-        name = entry["request_id"] or entry["trace_id"]
-        entry["timeline"] = f"timelines/{name}.json.gz"
-        timeline = Timeline(output / entry["timeline"], origin)
-        timeline.groups = dict(set(request.values()))
-        draw_request(timeline, spans, request, offsets, label)
-        recorded = {}
+        recorded, spans_windows = {}, defaultdict(list)
         roots = [s for s in spans.values() if s["name"] == "http-request"]
         if "frontend" in intervals and roots:
             start, end = start_end(roots[0])
@@ -572,30 +474,19 @@ def build(
         for phase in entry["phases"]:
             target = phase["target_id"]
             if phase["recording_overlap_ns"]:
-                low, high = intervals[target]
-                recorded[target] = (low, high)
-                windows[target].append(
-                    (
-                        max(phase["start_unix_ns"], low),
-                        min(phase["end_unix_ns"], high),
-                        timeline,
-                    )
+                low, high = recorded[target] = intervals[target]
+                spans_windows[target].append(
+                    (max(phase["start_unix_ns"], low), min(phase["end_unix_ns"], high))
                 )
-        draw_window(timeline, recorded, offsets, controls)
-        views.append((entry, timeline))
-    for target, (low, high) in intervals.items():
-        windows[target].append((low, high, window))
+        requests.append((entry, label, recorded, spans_windows))
     draw_window(window, intervals, offsets, controls)
 
-    # Read each native trace once; route events to every overlapping view.
-    native = {}
+    # Native files to draw: one pool task per Kineto rank trace or Nsight export.
+    native, files = {}, []
+    collectors = {p["target_id"]: p["collector"] for p in manifest["profiles"]}
     for item in checked:
         target = item["target_id"]
-        collector = next(
-            (p["collector"] for p in manifest["profiles"] if p["target_id"] == target),
-            None,
-        )
-        reader = NATIVE_READERS.get(collector)
+        collector = collectors.get(target)
         if target == "frontend":
             # The detailed frontend host trace is captured and listed but not
             # drawn until it carries CPU samples or per-request ranges.
@@ -603,78 +494,80 @@ def build(
                 "status": "excluded",
                 "reason": "frontend host trace detail",
             }
-            continue
-        if reader is None or item["status"] != "verified":
+        elif collector not in NATIVE_READERS:
             native[target] = {
-                "status": "pending" if reader is None else "omitted",
-                "reason": f"no timeline reader for {collector}"
-                if reader is None
-                else f"artifacts {item['status']}",
+                "status": "pending",
+                "reason": f"no timeline reader for {collector}",
             }
-            continue
-        if target not in intervals:
+        elif item["status"] != "verified":
+            native[target] = {
+                "status": "omitted",
+                "reason": f"artifacts {item['status']}",
+            }
+        elif target not in intervals:
             native[target] = {"status": "omitted", "reason": "recording bounds unknown"}
-            continue
-        recorded_low, recorded_high = intervals[target]
-        shift, routed, read = offsets.get(target, 0), 0, 0
-        for artifact in item.get("artifacts", []):
-            names, labels, threads = {}, {}, defaultdict(list)
-            for event in reader(Path(artifact["location"])):
-                read += 1
-                key = (target, artifact.get("rank_id"), event.get("pid"))
-                if event.get("ph") == "M":
-                    if event.get("name") == "process_name":
-                        names[key] = event["args"].get("name")
-                    elif event.get("name") == "process_labels":
-                        labels[key] = event["args"].get("labels")
-                    elif event.get("name", "").startswith("thread_"):
-                        threads[key].append(event)
-                    continue
-                if "start_ns" not in event:
-                    continue
-                start, end = event.pop("start_ns"), event.pop("end_ns")
-                if end < recorded_low or start > recorded_high:
-                    continue
-                # Native data exists only inside recording; clip events that
-                # began before or ended after it and keep their original bounds.
-                if start < recorded_low or end > recorded_high:
-                    event["args"] = {
-                        **event.get("args", {}),
-                        "original_start_unix_ns": start,
-                        "original_end_unix_ns": end,
-                    }
-                    start, end = max(start, recorded_low), min(end, recorded_high)
-                    event["dur"] = max(0, end - start) / 1000
-                for low, high, timeline in windows[target]:
-                    if start < high and max(end, start + 1) > low:
-                        # Kineto keeps profiler bookkeeping in unnamed pseudo-processes.
-                        label = (
-                            f"{target} · {names[key]} ({labels.get(key, event.get('pid'))})"
-                            if key in names
-                            else f"{target} · Kineto profiler ({event.get('pid')})"
-                        )
-                        group = (
-                            timeline.groups.get(target, 3) * 1000
-                            + 100
-                            + len(timeline.pids)
-                        )
-                        timeline.emit(
-                            {
-                                **event,
-                                "pid": timeline.pid(key, label, threads[key], group),
-                                "ts": (start - shift - origin) / 1000,
-                            }
-                        )
-                        routed += 1
-        native[target] = {
-            "status": "included",
-            "events_read": read,
-            "events_written": routed,
-            "clock_offset_ns": shift,
-        }
+        else:
+            native[target] = {
+                "status": "included",
+                "events_read": 0,
+                "events_written": 0,
+                "clock_offset_ns": offsets.get(target, 0),
+            }
+            files += [(target, collector, a["location"]) for a in item["artifacts"]]
+
+    # Per-request views go in batches so open timelines stay bounded; the
+    # window view is drawn with the first batch.
+    numbered = list(enumerate(requests, 1))
+    batches = [numbered[i : i + 200] for i in range(0, len(numbered), 200)] or [[]]
+    with tempfile.TemporaryDirectory(prefix="dynamo-bundle-") as scratch, pool(
+        len(files)
+    ) as executor:
+        for number, batch in enumerate(batches):
+            timelines = {0: window} if number == 0 else {}
+            for view, (entry, label, recorded, _) in batch:
+                name = entry["request_id"] or entry["trace_id"]
+                entry["timeline"] = f"timelines/{name}.json.gz"
+                timelines[view] = Timeline(output / entry["timeline"], origin)
+                spans = traces[entry["trace_id"]]
+                draw_request(
+                    timelines[view], spans, lanes[entry["trace_id"]], offsets, label
+                )
+                draw_window(timelines[view], recorded, offsets, controls)
+            tasks = []
+            for shard, (target, collector, location) in enumerate(files):
+                views = [(*intervals[target], 0)] if number == 0 else []
+                views += [
+                    (low, high, view)
+                    for view, (*_, spans_windows) in batch
+                    for low, high in spans_windows.get(target, [])
+                ]
+                if views:
+                    tasks.append(
+                        {
+                            "collector": collector,
+                            "location": location,
+                            "target": target,
+                            "recorded": intervals[target],
+                            "shift": offsets.get(target, 0),
+                            "origin": origin,
+                            "views": views,
+                            "pid_base": 10_000 + 1000 * shard,
+                            "sort": groups.get(target, 3) * 10**6
+                            + 1000 * (shard + 1),
+                            "directory": scratch,
+                            "prefix": f"{number}-{shard}",
+                        }
+                    )
+            for task, result in zip(tasks, executor.map(draw_shard, tasks)):
+                stats = native[task["target"]]
+                stats["events_read"] += result["read"] if number == 0 else 0
+                stats["events_written"] += result["written"]
+                for view, (shard, count) in result["shards"].items():
+                    timelines[view].extend(shard, count)
+                    os.remove(shard)
+            for view, (entry, *_) in batch:
+                entry["timeline_events"] = timelines[view].close()
     window_events = window.close()
-    for entry, timeline in views:
-        entry["timeline_events"] = timeline.close()
     (output / "lifecycle/trace-index.json").write_text(
         json.dumps(
             {
@@ -743,7 +636,7 @@ def build(
     return summary
 
 
-def archive(output: Path, summary: dict) -> Path:
+def archive(output: Path, summary: dict) -> tuple[Path, str]:
     """Package the bundle with the raw native Kineto/Nsight traces as one tar.gz."""
     path = output.parent / f"{output.name}.tar.gz"
     with tarfile.open(path, "w:gz", compresslevel=1) as tar:
@@ -754,10 +647,9 @@ def archive(output: Path, summary: dict) -> Path:
                 source,
                 arcname=f"{output.name}/profiles/{profile['target_id']}/{source.name}",
             )
-    path.with_name(path.name + ".sha256").write_text(
-        f"{sha256_file(path)}  {path.name}\n"
-    )
-    return path
+    digest = sha256_file(path)
+    path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n")
+    return path, digest
 
 
 def main() -> None:
@@ -790,9 +682,9 @@ def main() -> None:
         )
     output = args.output or args.session / "bundle"
     summary = build(args.session, otel, output, args.per_request)
-    path = archive(output, summary)
+    path, digest = archive(output, summary)
     print(json.dumps(summary["coverage"], indent=2))
-    print(f"archive: {path} ({path.stat().st_size} bytes, sha256 {sha256_file(path)})")
+    print(f"archive: {path} ({path.stat().st_size} bytes, sha256 {digest})")
 
 
 if __name__ == "__main__":
