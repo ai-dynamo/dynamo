@@ -116,10 +116,32 @@ rows. Selecting the already-active platform or backend must not reset the select
 Mark experimental deployments explicitly. Presence in this catalog is not proof of runtime
 validation or benchmarking.
 
+Kubernetes YAML embeds render through `DeploymentCustomizer`, which lets readers change the model,
+image, scale, environment variables, model cache, and token Secret, then copy the result with
+generated prerequisites and deploy steps. It works from the manifest itself, so write manifests it
+can read:
+
+- Use `my-registry/<repository>:my-tag` or `nvcr.io/nvidia/ai-dynamo/<repository>:my-tag` for
+  Dynamo images. Pin a digest only when the example requires that exact build; digests stay as
+  written.
+- Pass the model with `--model`, `--model-path`, or `--served-model-name`, in `args` or in the
+  container command.
+- Request GPUs with `nvidia.com/gpu` in the main container's resources. When a tensor-parallel flag
+  equals the GPU count, the customizer keeps the two in step.
+- Reference the Hugging Face token through `envFrom.secretRef` or `valueFrom.secretKeyRef`.
+- Mount an existing model cache through a PVC volume, with `HF_HOME` or `HF_HUB_CACHE` pointing
+  into it; the generated download Job reproduces that layout.
+
+The customizer changes nothing until a reader does, except that placeholder image tags resolve to
+the current release. Its output is a starting point, not a validated configuration.
+
 Validate with:
 
 ```bash
-python3 -m pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider --noconftest docs/tests/test_examples_catalog.py
+python3 -m pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider --noconftest docs/tests/test_examples_catalog.py docs/tests/test_deployment_customizer.py
 python3 docs/fern/scripts/docs_lint.py --scan docs
 cd docs/fern && fern check && fern docs broken-links
 ```
+
+`test_deployment_customizer.py` needs Node 22.6 or later for TypeScript type stripping and skips
+without it.

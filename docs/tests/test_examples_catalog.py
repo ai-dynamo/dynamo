@@ -467,6 +467,25 @@ def test_single_options_keep_the_selected_button_style() -> None:
     assert "if (next === backend) return;" in component
 
 
+def test_yaml_sources_render_through_the_deployment_customizer() -> None:
+    selector = (FERN / "components/ExampleSelector.tsx").read_text()
+    assert "<DeploymentCustomizerProvider>" in selector
+    assert "withDeploymentCustomizer(children)" in selector
+    customizer = (FERN / "components/DeploymentCustomizer.tsx").read_text()
+    # The manifest comes from Fern's rendered embed, so pages keep native Code
+    # sources and fall back to them when a manifest cannot be customized.
+    assert 'typeof props.code !== "string"' in customizer
+    assert "<FallbackBoundary fallback={native}>" in customizer
+    assert "dangerouslySetInnerHTML" in customizer
+    styles = (FERN / "components/DeploymentCustomizerStyles.tsx").read_text()
+    assert ".dark .dc {" in styles
+    assert ":focus-visible" in styles
+    assert "prefers-reduced-motion" in styles
+    assert "@media (max-width:" in styles
+    data = (FERN / "components/deployment-customizer-data.ts").read_text()
+    assert 'from "./releases.data"' in data
+
+
 def test_multimodal_topology_mapping_uses_semantics_not_filenames() -> None:
     epd = embeds(EXAMPLES / "encode-prefill-decode.mdx")
     e_pd = embeds(EXAMPLES / "encode-pd.mdx")

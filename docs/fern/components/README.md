@@ -257,3 +257,41 @@ bundle in place. Unavailable backend/platform combinations cannot be selected.
 Only deployment manifests and launch scripts belong in the picker. Supporting files stay out of the
 selector and its code blocks for now. Singleton rows use the selected button style, not plain text;
 clicking an already-selected axis does not reset the example choice.
+
+Every embedded YAML manifest renders through `DeploymentCustomizer` (below), so example pages need
+no extra markup for it.
+
+### DeploymentCustomizer
+
+Tailors a Kubernetes manifest in the browser. Readers choose the model (any Hugging Face ID, or a
+suggestion), the image registry and tag, replicas, GPUs, and nodes per component, environment
+variables, a shared model-cache PVC with a download Job, and how the Hugging Face token Secret is
+created. The viewer highlights YAML and shell, marks changed lines, shows a diff, and copies or
+downloads each output: the edited manifest, any generated Secret or `model-cache.yaml`, and deploy
+steps. Edits rewrite only the lines they touch, so comments, key order, and quoting survive.
+
+The customizer reads the manifest from the `CodeBlock` element Fern renders for a `<Code src>`
+embed. The source therefore stays a native embed: Fern resolves the file for each docs version, and
+the page's Markdown twin keeps the original file. If a manifest cannot be read or customized, the
+native code block renders instead.
+
+`ExampleSelector` wraps its bundles in `DeploymentCustomizerProvider`, so model, image, storage,
+and Secret choices carry across the bundles on a page; replicas, environment variables, and names
+stay per manifest. Outside `ExampleSelector`, wrap a YAML embed directly:
+
+```mdx
+import { DeploymentCustomizer } from "@/components/DeploymentCustomizer";
+
+<DeploymentCustomizer>
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</DeploymentCustomizer>
+```
+
+`deployment-customizer.ts` holds the manifest engine: the YAML line model, analysis, the
+transform, generated files, highlighting, and the line diff. Keep it import-free:
+`docs/tests/test_deployment_customizer.py` runs it with Node against every embedded manifest and
+checks the results with PyYAML. `deployment-customizer-data.ts` holds the model suggestions and
+derives image tags and published repositories from `releases.data.ts`. Styles live in
+`DeploymentCustomizerStyles.tsx`.
