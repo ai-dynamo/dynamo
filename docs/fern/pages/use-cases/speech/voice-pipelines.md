@@ -14,11 +14,10 @@ out.
 
 | Stage | Endpoint | Output | Guide |
 | --- | --- | --- | --- |
-| Streaming ASR | `/v1/realtime` WebSocket, `session.type="transcription"` | Transcript events | [Speech Recognition](speech-recognition.md) |
+| Streaming ASR | `/v1/realtime` WebSocket, `session.type="transcription"` | Transcript events | [Speech to Text](speech-to-text.md) |
 | LLM | `/v1/chat/completions` with `stream: true` | Text deltas | [Local Guide](../../cli/getting-started/quickstart.mdx) |
 | TTS | `/v1/audio/speech` | Audio, streamed for `wav` and `pcm` | [Text-to-Speech](text-to-speech.md) |
 | Audio-in, audio-out model | `/v1/realtime` WebSocket, `session.type="realtime"` | Text and audio events | [Speech-to-Speech](speech-to-speech.md) |
-| Audio understanding | `audio_url` in `/v1/chat/completions` | Text | [Audio Understanding](audio-understanding.md) |
 
 For a cascaded voice agent, connect an application such as Pipecat to the three
 stage endpoints. The application owns conversation history, turn detection,
@@ -29,10 +28,10 @@ interruptions, and orchestration; Dynamo serves and routes each stage.
 <Tabs>
 <Tab title="vLLM and vLLM-Omni">
 
-The speech pages in this section run on vLLM (ASR and audio understanding) and
-vLLM-Omni (TTS and speech-to-speech).
+The speech pages in this section run on vLLM (speech to text) and vLLM-Omni (TTS
+and speech-to-speech).
 
-- Speech recognition and audio understanding need a working
+- Speech to text needs a working
   [vLLM backend setup](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md#installation)
   plus vLLM's audio dependencies:
 
@@ -69,7 +68,7 @@ for client integration.
 Bring up and test each stage on its own before you connect them:
 
 1. Start an ASR worker and stream an audio file to it:
-   [Speech Recognition](speech-recognition.md).
+   [Speech to Text](speech-to-text.md).
 2. Start an LLM with any vLLM, SGLang, or TensorRT-LLM launcher, for example
    `bash examples/backends/vllm/launch/agg.sh`.
 3. Start a TTS worker and synthesize a reply:
