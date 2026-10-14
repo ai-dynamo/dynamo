@@ -13,7 +13,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,
 };
 use dynamo_runtime::config::environment_names::llm::{
-    DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -95,6 +95,98 @@ async fn unary_text_baseline() {
         assert_eq!(requests[0].inner.stream, Some(true));
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
+    })
+    .await;
+}
+
+#[rstest::rstest]
+#[case(false, false)]
+#[case(true, false)]
+#[case(true, true)]
+#[tokio::test]
+#[serial]
+async fn matched_stop_sequence_reaches_messages_without_client_opt_in(
+    #[case] client_extensions: bool,
+    #[case] disable_nvext: bool,
+) {
+    let mut env = ENV.to_vec();
+    env.push((
+        DYN_DISABLE_FRONTEND_NVEXT,
+        Some(if disable_nvext { "1" } else { "0" }),
+    ));
+    temp_env::async_with_vars(env, async {
+        for streaming in [false, true] {
+            let mut script = load_agent_fixture("text.sse").await.unwrap();
+            let terminal = script
+                .iter_mut()
+                .filter_map(|chunk| chunk.data.as_mut())
+                .find(|chunk| {
+                    chunk
+                        .inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason.is_some())
+                })
+                .expect("fixture must include a finish chunk");
+            terminal.nvext = Some(json!({"stop_reason": "</answer>"}));
+            let svc = HarnessService::start([script]).await;
+            let mut body = json!({
+                "model": MODEL, "max_tokens": 64, "stream": streaming,
+                "stop_sequences": ["</answer>", "\n\nHuman:"],
+                "messages": [{"role": "user", "content": "ping"}]
+            });
+            if client_extensions {
+                body["nvext"] = json!({"cache_salt": "test-cache", "extra_fields": ["timing"]});
+            }
+            let response = post_messages(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let stop_fields = if streaming {
+                let raw = response.text().await.unwrap();
+                let events = parse_json_sse(&raw).await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event.event == "message_stop")
+                        .count(),
+                    1
+                );
+                let terminal = events
+                    .iter()
+                    .find(|event| event.event == "message_delta")
+                    .unwrap();
+                terminal.data["delta"].clone()
+            } else {
+                let body: Value = response.json().await.unwrap();
+                assert!(body.get("nvext").is_none());
+                body
+            };
+            assert_eq!(stop_fields["stop_reason"], "stop_sequence");
+            assert_eq!(stop_fields["stop_sequence"], "</answer>");
+            let requests = svc.engine.take_requests().await;
+            let nvext = requests[0].nvext.as_ref().unwrap();
+            assert_eq!(
+                nvext.cache_salt.as_deref(),
+                client_extensions.then_some("test-cache")
+            );
+            let fields = nvext.extra_fields.as_ref().unwrap();
+            assert_eq!(
+                fields
+                    .iter()
+                    .filter(|field| field.as_str() == "stop_reason")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                fields.iter().any(|field| field == "timing"),
+                client_extensions && !disable_nvext
+            );
+            assert_eq!(requests[0].inner.max_completion_tokens, Some(64));
+            assert_eq!(
+                serde_json::to_value(&requests[0].inner.stop).unwrap(),
+                json!(["</answer>", "\n\nHuman:"])
+            );
+            svc.shutdown().await;
+        }
     })
     .await;
 }
