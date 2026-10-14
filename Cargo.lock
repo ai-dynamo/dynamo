@@ -2771,6 +2771,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.18.2",
+ "rustls",
  "serde",
  "serde_json",
  "serial_test",
@@ -2783,6 +2784,7 @@ dependencies = [
  "tokenizers 0.21.4",
  "tokio",
  "tokio-rayon",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tokio-util",
@@ -2790,6 +2792,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health 0.13.1",
  "tonic-reflection",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2930,6 +2933,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
@@ -11067,6 +11071,8 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.117",
+ "url",
+ "uuid",
 ]
 
 [[package]]

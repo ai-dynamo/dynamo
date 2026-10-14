@@ -571,6 +571,16 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
+    // Native Anthropic stop reporting needs this internal metadata even when
+    // client extensions are disabled. The converters consume it, never emit nvext.
+    let fields = chat_request
+        .nvext
+        .get_or_insert_with(Default::default)
+        .extra_fields
+        .get_or_insert_with(Vec::new);
+    if !fields.iter().any(|field| field == "stop_reason") {
+        fields.push("stop_reason".to_string());
+    }
     if let Err(error) = chat_request.validate() {
         let error = invalid_argument(error.to_string());
         return Err(AnthropicHandlerError::validation(error.message())
@@ -903,8 +913,18 @@ async fn anthropic_messages(
             );
         });
 
+        // Anthropic limits valid tool blocks after input validation. Keep the
+        // original constraint on the backend request and parsing context.
+        let aggregation_options = if anthropic_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
+        {
+            parsing_options.clone().with_parallel_tool_calls(None)
+        } else {
+            parsing_options.clone()
+        };
         let chat_response =
-            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, aggregation_options)
                 .await
                 .map_err(|error| {
                     let error_type = if super::metrics::request_was_cancelled(&error) {

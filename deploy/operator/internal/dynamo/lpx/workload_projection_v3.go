@@ -112,6 +112,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		dst = append(dst, &ModelProjection{
 			digest:                 transcript.sum(),
 			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
+			contractFormat:         intent.BuildSnapshot.format,
 			runtimeBuildRef:        intent.RuntimeBuildRef,
 			model:                  intent.Models[index],
 			pipeline:               intent.Pipeline,
