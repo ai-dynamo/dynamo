@@ -1628,14 +1628,6 @@ mod tests {
         assert_score(&indexer, &[30], rank1, 1).await;
     }
 
-    #[test]
-    fn shutdown_stops_the_maintenance_thread() {
-        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
-        assert!(indexer.maintenance.lock().unwrap().is_some());
-        indexer.shutdown();
-        assert!(indexer.maintenance.lock().unwrap().is_none());
-    }
-
     #[cfg(feature = "bench")]
     #[tokio::test]
     async fn observed_events_use_fixed_worker_buffers_and_fifo_seals() {

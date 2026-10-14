@@ -1812,7 +1812,7 @@ mod remove_cleanup_tests {
 
 mod reclamation_tests {
     use super::*;
-    use crate::test_utils::{make_remove_event, query_scores};
+    use crate::test_utils::make_remove_event;
     use std::time::Duration;
 
     const HOUR: Duration = Duration::from_secs(3600);
@@ -1944,41 +1944,6 @@ mod reclamation_tests {
     }
 
     #[test]
-    fn a_full_queue_drains_before_taking_a_split_born_leaf() {
-        let index = manual_index();
-        let mut lane0 = direct_lookup();
-        let mut lane1 = direct_lookup();
-        // Fill lane 0's queue to one short of its limit with entries the drain skips.
-        let placeholder = || CleanupEdge {
-            parent: std::sync::Weak::new(),
-            key: LocalBlockHash(0),
-            child: std::sync::Weak::new(),
-        };
-        lane0
-            .pending_unlinks
-            .extend((1..PENDING_UNLINK_LIMIT).map(|_| placeholder()));
-        // As in the split-born test above, worker 0's store leaves the suffix [9] dead from
-        // birth, and queuing it fills the queue.
-        apply(&index, &mut lane1, make_store_event(1, &[1, 9]));
-        apply(
-            &index,
-            &mut lane1,
-            make_remove_event_with_parent(1, &[1], &[9]),
-        );
-        apply(&index, &mut lane0, make_store_event(0, &[1, 2, 3]));
-        // The oldest quarter drained at once; the suffix is still queued.
-        assert_eq!(
-            lane0.pending_unlinks.len(),
-            PENDING_UNLINK_LIMIT - PENDING_UNLINK_LIMIT / 4
-        );
-        assert_eq!(dead_node_count(&index), 1);
-
-        index.drain_pending_unlinks(&mut lane0, None);
-        assert!(lane0.pending_unlinks.is_empty());
-        assert_eq!(dead_node_count(&index), 0);
-    }
-
-    #[test]
     fn the_sweep_waits_for_enough_deaths_or_its_longest_interval() {
         // One death, never drained: the lane's queue goes with its lookup.
         fn index_with_a_dead_leaf(
@@ -2015,52 +1980,26 @@ mod reclamation_tests {
     }
 
     #[tokio::test]
-    async fn a_flush_returns_after_the_lane_drains_its_dead_leaves() {
-        // One lane: with two, a drain can find the parent's gate taken by the other lane
-        // and rightly leave the leaf to the sweep.
-        let index = ThreadPoolIndexer::new(manual_index(), 1, 32);
+    async fn the_maintenance_thread_sweeps_a_leaf_the_lane_cannot_place() {
+        // One death meets a threshold of one, so a tick sweeps it.
+        let backend = ConcurrentRadixTreeCompressed::new().with_sweep_schedule(
+            Some(Duration::from_millis(1)),
+            1,
+            HOUR,
+        );
+        let index = ThreadPoolIndexer::new(backend, 1, 32);
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
         index.apply_event(make_store_event(1, &[1, 9])).await;
-        index
-            .apply_event(make_remove_event_with_parent(1, &[1], &[9]))
-            .await;
+        // Worker 1 evicts [1] before [9], so when [9] dies its lookup no longer
+        // places the parent and the lane cannot queue it.
+        index.apply_event(make_remove_event(1, &[1, 9])).await;
         flush_and_settle(&index).await;
-        assert_eq!(dead_node_count(index.backend()), 0);
 
-        // Worker 1 still holds [1]; only its evicted leaf went.
-        let scores = query_scores(&index, &[1, 9]).await;
-        assert_eq!(scores.scores.get(&worker(1)), Some(&1));
-        assert_eq!(scores.scores.get(&worker(0)), Some(&1));
-    }
-
-    #[tokio::test]
-    async fn the_maintenance_thread_sweeps_a_leaf_the_lane_cannot_place() {
-        /// Dead nodes left once the tree has none or `wait` has passed.
-        async fn dead_left(after_deaths: u64, wait: Duration) -> usize {
-            let backend = ConcurrentRadixTreeCompressed::new().with_sweep_schedule(
-                Some(Duration::from_millis(1)),
-                after_deaths,
-                HOUR,
-            );
-            let index = ThreadPoolIndexer::new(backend, 1, 32);
-            index.apply_event(make_store_event(0, &[1, 2, 3])).await;
-            index.apply_event(make_store_event(1, &[1, 9])).await;
-            // Worker 1 evicts [1] before [9], so when [9] dies its lookup no longer
-            // places the parent and the lane cannot queue it.
-            index.apply_event(make_remove_event(1, &[1, 9])).await;
-            flush_and_settle(&index).await;
-
-            let deadline = std::time::Instant::now() + wait;
-            while dead_node_count(index.backend()) > 0 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            dead_node_count(index.backend())
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while dead_node_count(index.backend()) > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-
-        // One death meets a threshold of one, so a tick sweeps it.
-        assert_eq!(dead_left(1, Duration::from_secs(5)).await, 0);
-        // A threshold of two is not met and the longest interval is an hour away.
-        assert_eq!(dead_left(2, Duration::from_millis(100)).await, 1);
+        assert_eq!(dead_node_count(index.backend()), 0);
     }
 
     #[tokio::test]

@@ -163,9 +163,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     break;
                 }
             }
-            // Dead leaves this lane queued are unlinked once it has nothing else to do, in
+            // Dead leaves this lane queued are unlinked while it has nothing else to do, in
             // bounded drains, so a drain never holds up the next event for long.
-            if !lookup.pending_unlinks.is_empty() && event_receiver.is_empty() {
+            while !lookup.pending_unlinks.is_empty() && event_receiver.is_empty() {
                 self.drain_pending_unlinks(&mut lookup, Some(IDLE_UNLINK_LIMIT));
             }
         }
