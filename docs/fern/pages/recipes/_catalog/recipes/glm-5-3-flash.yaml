@@ -112,7 +112,7 @@ targets:
     count: 4
   runtime:
     framework: sglang
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
@@ -138,7 +138,7 @@ targets:
     count: 4
   runtime:
     framework: sglang
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
@@ -165,7 +165,7 @@ targets:
     count: 12
   runtime:
     framework: sglang
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-bbe92b787cb066458c914bf8f5dcd4764dc0c85a-sglang-runtime
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
