@@ -142,6 +142,10 @@ impl MockerConfig {
             self.runtime.handoff_session_timeout_ms > 0,
             "handoff_session_timeout_ms must be positive"
         );
+        ensure!(
+            !self.runtime.kv_state_agent || self.runtime.zmq_kv_events_port.is_some(),
+            "kv_state_agent requires zmq_kv_events_port"
+        );
         if let Some(reasoning) = &self.runtime.reasoning {
             reasoning.validate()?;
         }

@@ -251,36 +251,36 @@ def build_runtime_config(
 def build_kv_state_agent_descriptors(
     engine_args: Mapping[str, Any],
     *,
-    worker_id: int,
     kv_state_endpoint: str,
     zmq_kv_events_port: int,
     router_hint_worker_type: str | None = None,
 ) -> list[dict]:
     """KV state-agent attachment descriptors for one mocker worker, one per DP rank.
 
-    The worker ID makes each CacheOwner unique across mocker processes. With
+    Each CacheOwner slot is its rank's ZMQ port: unique on the state agent's
+    host (raw endpoints are loopback) and stable across mocker restarts, so a
+    restarted worker reattaches to its durable slot. With
     ``router_hint_worker_type``, each owner advertises a placeholder source
     control endpoint: the router builds hints for it, and the mocker ignores them.
     """
     descriptors = []
     for rank in range(engine_args["dp_size"]):
+        port = zmq_kv_events_port + rank
         descriptors.append(
             {
                 "cache_owner_id": (
                     f"{_KV_STATE_AGENT_INDEXER_DOMAIN}/{_KV_STATE_AGENT_POOL}/"
-                    f"{worker_id:016x}{rank:016x}"
+                    f"{port:032x}"
                 ),
                 "global_dp_rank": rank,
                 "kv_state_endpoint": kv_state_endpoint,
                 "indexer_domain_id": _KV_STATE_AGENT_INDEXER_DOMAIN,
                 "kv_block_size": engine_args["engine"]["block_size"],
-                "raw_zmq_endpoint": f"tcp://127.0.0.1:{zmq_kv_events_port + rank}",
+                "raw_zmq_endpoint": f"tcp://127.0.0.1:{port}",
                 "raw_topic": "",
                 "router_hint_source": (
                     {
-                        "source_control_endpoint": (
-                            f"tcp://mocker-{worker_id:x}-{rank}.invalid:1"
-                        ),
+                        "source_control_endpoint": f"tcp://mocker-{port}.invalid:1",
                         "worker_type": router_hint_worker_type,
                     }
                     if router_hint_worker_type is not None

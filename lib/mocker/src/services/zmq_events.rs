@@ -65,6 +65,14 @@ enum ZmqRawKvEvent {
     },
 }
 
+/// Released blocks whose token IDs stay recoverable, oldest dropped first.
+///
+/// A G1 slot can be reacquired while its block's D2H copy is still in flight
+/// (only the new owner's compute waits for it), so a block's G1 `Removed` can
+/// precede its G2 `Stored`. That fence stalls the rank's compute until the copy
+/// lands, so only about one scheduling pass of evictions can race it.
+const RELEASED_BLOCK_TOKENS: usize = 16_384;
+
 /// Token IDs of resident blocks, keyed by sequence hash, with a bitmask of the
 /// tiers (G1, lower) holding each block.
 ///
@@ -72,44 +80,59 @@ enum ZmqRawKvEvent {
 /// requires. Every G2 block is written through from a G1 block whose Stored
 /// event carried them, so the encoder recovers them here.
 #[derive(Default)]
-pub(crate) struct ResidentBlockTokens(FxHashMap<u64, (Vec<u32>, u8)>);
+pub(crate) struct ResidentBlockTokens {
+    blocks: FxHashMap<u64, (Vec<u32>, u8)>,
+    /// Blocks no longer resident in any tier, kept for in-flight G2 stores.
+    released: VecDeque<u64>,
+}
 
 impl ResidentBlockTokens {
     /// Track `event`'s residency and return a store's flattened token IDs.
-    /// `None` is a store whose token IDs are unknown.
+    /// `None` is a store whose token IDs are unknown; it changes no state.
     fn observe(&mut self, event: &RawKvEvent) -> Option<Vec<u32>> {
         let tier = if event.storage_tier.is_gpu() { 1 } else { 2 };
         match &event.event.data {
             KvCacheEventData::Stored(store) => {
-                let mut token_ids = Vec::new();
+                let event_ids = event.block_token_ids.as_deref().unwrap_or_default();
+                let token_ids = store
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| {
+                        event_ids
+                            .get(index)
+                            .or_else(|| self.blocks.get(&block.block_hash.0).map(|(ids, _)| ids))
+                            .map(Vec::as_slice)
+                    })
+                    .collect::<Option<Vec<_>>>()?
+                    .concat();
                 for (index, block) in store.blocks.iter().enumerate() {
-                    let hash = block.block_hash.0;
-                    let entry = match event
-                        .block_token_ids
-                        .as_ref()
-                        .and_then(|ids| ids.get(index))
-                    {
-                        Some(ids) => self.0.entry(hash).or_insert_with(|| (ids.clone(), 0)),
-                        None => self.0.get_mut(&hash)?,
-                    };
-                    entry.1 |= tier;
-                    token_ids.extend_from_slice(&entry.0);
+                    self.blocks
+                        .entry(block.block_hash.0)
+                        .or_insert_with(|| (event_ids[index].clone(), 0))
+                        .1 |= tier;
                 }
                 Some(token_ids)
             }
             KvCacheEventData::Removed(remove) => {
                 for hash in &remove.block_hashes {
-                    if let Some((_, tiers)) = self.0.get_mut(&hash.0) {
+                    if let Some((_, tiers)) = self.blocks.get_mut(&hash.0) {
                         *tiers &= !tier;
                         if *tiers == 0 {
-                            self.0.remove(&hash.0);
+                            self.released.push_back(hash.0);
                         }
+                    }
+                }
+                while self.released.len() > RELEASED_BLOCK_TOKENS {
+                    let hash = self.released.pop_front().unwrap();
+                    if self.blocks.get(&hash).is_some_and(|(_, tiers)| *tiers == 0) {
+                        self.blocks.remove(&hash);
                     }
                 }
                 Some(Vec::new())
             }
             KvCacheEventData::Cleared => {
-                self.0.retain(|_, (_, tiers)| {
+                self.blocks.retain(|_, (_, tiers)| {
                     *tiers &= !tier;
                     *tiers != 0
                 });
@@ -832,7 +855,7 @@ mod tests {
         // A G2 store whose block never reached G1 has no token IDs to send.
         assert!(
             encode_event_batch(
-                &[stored_pinned],
+                std::slice::from_ref(&stored_pinned),
                 &mut ResidentBlockTokens::default(),
                 4,
                 0,
@@ -841,5 +864,54 @@ mod tests {
             .unwrap()
             .is_none()
         );
+
+        // G1 can evict a block before its in-flight G2 store lands.
+        let removed_device = RawKvEvent {
+            storage_tier: StorageTier::Device,
+            ..events[2].clone()
+        };
+        let mut block_tokens = ResidentBlockTokens::default();
+        let payload = encode_event_batch(
+            &[events[0].clone(), removed_device, stored_pinned],
+            &mut block_tokens,
+            4,
+            0,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let batch: KvEventBatch = rmp_serde::from_slice(&payload).unwrap();
+        let [_, _, Wire::BlockStored { token_ids, .. }] = batch.events.as_slice() else {
+            panic!(
+                "expected the late host-pinned store, got {:?}",
+                batch.events
+            );
+        };
+        assert_eq!(token_ids, &vec![1, 2, 3, 4]);
+
+        // A G2 store with one unknown block is dropped without touching the
+        // known block's residency.
+        let mut block_tokens = ResidentBlockTokens::default();
+        encode_event_batch(&events[..1], &mut block_tokens, 4, 0, true).unwrap();
+        let mut mixed = stored_event();
+        let KvCacheEventData::Stored(store) = &mut mixed.data else {
+            unreachable!();
+        };
+        store.blocks.push(KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash(11),
+            tokens_hash: LocalBlockHash(101),
+            mm_extra_info: None,
+        });
+        let mixed = RawKvEvent {
+            event: mixed,
+            block_token_ids: None,
+            storage_tier: StorageTier::HostPinned,
+        };
+        assert!(
+            encode_event_batch(&[mixed], &mut block_tokens, 4, 0, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(block_tokens.blocks[&10].1, 1);
     }
 }

@@ -159,13 +159,11 @@ async def start_kv_state_agent_owner(
             KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
         )
     endpoint = runtime.endpoint(args.endpoint)
-    worker_id = endpoint.connection_id()
     owner = KvStateAttachmentOwner(
         endpoint,
-        worker_id,
+        endpoint.connection_id(),
         build_kv_state_agent_descriptors(
             engine_args,
-            worker_id=worker_id,
             kv_state_endpoint=args.endpoint,
             zmq_kv_events_port=engine_args["dynamo"]["zmq_kv_events_port"],
             router_hint_worker_type=hint_worker_type,
@@ -301,7 +299,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
         if args.sglang_generate:
             runtime_config.set_engine_specific("sglang_generate", "true")
-        if args.kv_state_agent:
+        if worker_engine_args["dynamo"]["kv_state_agent"]:
             attachment_owners.append(
                 await start_kv_state_agent_owner(
                     args, runtime, worker_engine_args, runtime_config

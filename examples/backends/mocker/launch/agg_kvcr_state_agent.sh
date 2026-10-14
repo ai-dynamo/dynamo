@@ -34,10 +34,7 @@ DYN_HEALTH_CHECK_ENABLED=false \
 DYN_SYSTEM_PORT="$STATE_AGENT_SYSTEM_PORT" \
 python3 -m dynamo.kv_state_agent --max-slots $((NUM_WORKERS * DP_SIZE)) &
 
-for _ in $(seq 1 60); do
-    curl -sf "http://127.0.0.1:${STATE_AGENT_SYSTEM_PORT}/live" >/dev/null && break
-    sleep 1
-done
+wait_for_ready "http://127.0.0.1:${STATE_AGENT_SYSTEM_PORT}/live" 60
 
 # 2. Mocker workers. Each worker's DP ranks publish on base_port + dp_rank.
 ZMQ_PORTS=$(seq -s, "$ZMQ_BASE_PORT" "$DP_SIZE" $((ZMQ_BASE_PORT + (NUM_WORKERS - 1) * DP_SIZE)))

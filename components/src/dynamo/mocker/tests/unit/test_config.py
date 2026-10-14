@@ -181,6 +181,7 @@ def test_profile_is_an_explicit_timing_provider(tmp_path):
         {"engine": {"max_model_len": 0}},
         {"gpu_memory_utilization": 1.1},
         {"gpu_memory_utilization": float("nan")},
+        {"dynamo": {"kv_state_agent": True}},
     ],
 )
 def test_canonical_validation_rejects_bad_input(bad):
@@ -466,7 +467,6 @@ def test_kv_state_agent_descriptors_cover_each_dp_rank():
 
     descriptors = CONFIG.build_kv_state_agent_descriptors(
         config,
-        worker_id=0xABC,
         kv_state_endpoint=args.endpoint,
         zmq_kv_events_port=5557,
         router_hint_worker_type="aggregated",
@@ -476,7 +476,11 @@ def test_kv_state_agent_descriptors_cover_each_dp_rank():
         "tcp://127.0.0.1:5557",
         "tcp://127.0.0.1:5558",
     ]
-    assert len({d["cache_owner_id"] for d in descriptors}) == 2
+    # Slots come from the rank's ZMQ port, so they survive worker restarts.
+    assert [d["cache_owner_id"].rsplit("/", 1)[1] for d in descriptors] == [
+        f"{5557:032x}",
+        f"{5558:032x}",
+    ]
     for descriptor in descriptors:
         assert descriptor["cache_owner_id"].startswith(
             descriptor["indexer_domain_id"] + "/"
