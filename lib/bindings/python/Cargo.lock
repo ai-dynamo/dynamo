@@ -2500,6 +2500,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bincode 1.3.3",
  "blake3",
  "bytes",

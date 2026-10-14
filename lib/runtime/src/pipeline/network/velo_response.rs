@@ -4,6 +4,7 @@
 //! Velo owns response framing, batching, flow control, and stream lifecycle.
 
 use anyhow::{Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
@@ -23,7 +24,7 @@ use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use velo::{
-    PeerInfo, Velo,
+    InstanceId, PeerInfo, Velo, WorkerAddress,
     streaming::{
         AutoFlush, FlushPolicy, MuxConfig, StreamAnchor, StreamAnchorHandle, StreamController,
         StreamFrame, StreamSender, control::StreamOpenTicket,
@@ -41,7 +42,7 @@ use crate::{
 };
 
 pub const TRANSPORT_NAME: &str = "velo_response";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// Process-wide services, keyed by [`service_key`].
 static PROCESS_SERVICES: LazyLock<
     tokio::sync::Mutex<HashMap<Option<tokio::runtime::Id>, Weak<SharedService>>>,
@@ -128,11 +129,16 @@ impl ResponseTransport {
     }
 }
 
+/// The frontend's response endpoint, carried in every request.
 #[derive(Serialize, Deserialize)]
-struct ResponseAddress {
+struct ResponseAddress<'a> {
     version: u32,
     transport: ResponseTransport,
-    peer: PeerInfo,
+    peer_id: InstanceId,
+    /// Base64 of the frontend's `WorkerAddress`. A worker decodes it only for a
+    /// frontend it has not prepared yet. Serialized as `PeerInfo`, JSON would
+    /// write the address bytes as an array of numbers.
+    peer_address: &'a str,
     anchor: StreamAnchorHandle,
     ticket: StreamOpenTicket,
 }
@@ -297,6 +303,8 @@ impl Drop for SharedService {
 pub struct VeloResponseService {
     velo: Arc<Velo>,
     transport: ResponseTransport,
+    /// This service's `ResponseAddress::peer_address`, encoded once.
+    peer_address: String,
     registrations: Mutex<Registrations>,
     /// Share initial peer registration and the lifecycle handshake across
     /// concurrent requests. A restarted frontend has a new instance ID.
@@ -339,8 +347,10 @@ impl VeloResponseService {
                 bail!("Velo UCX responses require a Linux build with the velo-ucx feature");
             }
         }
+        let velo = builder.build().await?;
         Ok(Arc::new(Self {
-            velo: builder.build().await?,
+            peer_address: BASE64.encode(velo.peer_info().worker_address().as_bytes()),
+            velo,
             transport,
             registrations: Mutex::new(Registrations::default()),
             prepared_peers: dashmap::DashMap::new(),
@@ -389,7 +399,8 @@ impl VeloResponseService {
             info: serde_json::to_string(&ResponseAddress {
                 version: VERSION,
                 transport: self.transport,
-                peer: self.velo.peer_info(),
+                peer_id: self.velo.instance_id(),
+                peer_address: &self.peer_address,
                 anchor: anchor.handle(),
                 ticket,
             })?,
@@ -561,8 +572,9 @@ impl VeloResponseService {
         self.registrations.lock().tombstones.remove(instance);
     }
 
-    async fn prepare_peer(&self, peer: PeerInfo) -> Result<()> {
-        let peer_id = peer.instance_id();
+    /// `address` is the peer's base64 `WorkerAddress`, decoded only if the peer
+    /// is not prepared yet.
+    async fn prepare_peer(&self, peer_id: InstanceId, address: &str) -> Result<()> {
         // Steady state: the peer is already prepared, so skip the shard write lock.
         if self
             .prepared_peers
@@ -580,7 +592,8 @@ impl VeloResponseService {
         // leaves the cell empty, so the next caller can retry.
         ready
             .get_or_try_init(|| async {
-                self.velo.register_peer(peer)?;
+                let address = WorkerAddress::from_encoded(BASE64.decode(address)?);
+                self.velo.register_peer(PeerInfo::new(peer_id, address))?;
                 if peer_id != self.velo.instance_id() {
                     // The hello also installs the reverse UCX address.
                     tokio::time::timeout(
@@ -621,10 +634,12 @@ impl VeloResponseService {
             "Velo response transport mismatch"
         );
         ensure!(
-            address.anchor.unpack().0 == address.peer.worker_id(),
+            address.anchor.unpack().0 == address.peer_id.worker_id(),
             "Velo anchor and peer identity differ"
         );
-        self.prepare_peer(address.peer).await.inspect_err(|error| {
+        self.prepare_peer(address.peer_id, address.peer_address)
+            .await
+            .inspect_err(|error| {
             tracing::warn!(context_id = %context.id(), %error, "Failed to prepare Velo response peer");
         })?;
         let sender = if address.anchor.unpack().0 == self.velo.instance_id().worker_id() {
@@ -1035,16 +1050,17 @@ mod tests {
             tracing_subscriber::registry().with(HelloCount(hellos.clone())),
         );
         let (consumer, producer) = pair(ResponseTransport::Tcp).await;
-        let peer = consumer.velo.peer_info();
-        let invalid = PeerInfo::new(peer.instance_id(), velo::WorkerAddress::empty());
-        assert!(producer.prepare_peer(invalid).await.is_err());
+        let peer = consumer.velo.instance_id();
+        let address = consumer.peer_address.as_str();
+        assert!(producer.prepare_peer(peer, "").await.is_err());
         let results =
-            futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer.clone()))).await;
+            futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer, address))).await;
         for result in results {
             result.unwrap();
         }
         assert_eq!(hellos.load(Ordering::Relaxed), 1);
-        producer.prepare_peer(peer).await.unwrap();
+        // A prepared peer's address is not decoded again.
+        producer.prepare_peer(peer, "not base64").await.unwrap();
         assert_eq!(hellos.load(Ordering::Relaxed), 1);
         producer.shutdown().await;
         consumer.shutdown().await;

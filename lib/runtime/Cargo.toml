@@ -43,6 +43,7 @@ async-trait = { workspace = true }
 tmq = { workspace = true }
 lru = { version = "0.16" }
 axum = { workspace = true }
+base64 = { version = "0.22" }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
