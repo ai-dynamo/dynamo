@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
+use crate::plugins::worker_selection::{WorkerCandidates, WorkerInputRows, WorkerInputs};
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::{SessionContext, policy_queue::QueueSnapshot};
 
@@ -43,6 +44,7 @@ pub struct ClassifyRequest {
     pub(crate) progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
+    worker_inputs: Option<WorkerInputRows>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -76,6 +78,7 @@ impl ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
+            worker_inputs: None,
         }
     }
 
@@ -102,6 +105,11 @@ impl ClassifyRequest {
     /// Copy tracking hashes into storage owned by this classification attempt.
     pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
+        self
+    }
+
+    pub(crate) fn with_worker_inputs(mut self, worker_inputs: WorkerInputRows) -> Self {
+        self.worker_inputs = Some(worker_inputs);
         self
     }
 
@@ -199,6 +207,22 @@ impl ClassifyRequest {
         self.pinned_worker
     }
 
+    /// Read the worker inputs declared by [`RequestClassifier::required_worker_inputs`].
+    /// Returns `None` when the classifier declared [`WorkerInputs::NONE`].
+    ///
+    /// Rows cover every worker rank eligible for this request under its pin, allowed
+    /// workers, availability, and routing constraints, in unspecified order. Overloaded
+    /// workers are included. Values come from the row builder worker selection uses, so
+    /// each declared group means the same thing here as in a filter or scorer.
+    ///
+    /// The rows are a snapshot taken before `classify` and are not refreshed while the
+    /// classification future is pending. Worker selection takes its own snapshot when it
+    /// later picks a worker, so it can see different values and pick a different worker.
+    /// The view may not be retained after `read` returns.
+    pub fn read_worker_inputs<R>(&self, read: impl FnOnce(WorkerCandidates<'_>) -> R) -> Option<R> {
+        self.worker_inputs.as_ref().map(|rows| rows.read(read))
+    }
+
     /// Only the explicit overrides feed the queue: cache eligibility is
     /// recomputed from the current workers at enqueue, because worker state
     /// may have changed while the classification was pending.
@@ -293,6 +317,13 @@ pub type ClassifyFuture =
 /// the request ends; events still queued at router shutdown are dropped.
 #[async_trait]
 pub trait RequestClassifier: Send + 'static {
+    /// Declare the worker-signal groups that [`ClassifyRequest::read_worker_inputs`]
+    /// exposes. The host reads this once at install and builds rows only when it is
+    /// not [`WorkerInputs::NONE`].
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
     fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })
     }

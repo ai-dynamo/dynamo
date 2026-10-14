@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::types::KvSchedulerError;
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::WorkerWithDpRank;
 
 static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -81,6 +82,8 @@ pub(crate) struct RequestClassifierRuntime {
     // keeps serving: one request's failure must not disable classification
     // router-wide, and the plugin owns its own state across an unwind.
     classifier: Arc<AsyncMutex<Box<dyn RequestClassifier>>>,
+    // Read once at install so classification never takes the classifier lock to ask.
+    worker_inputs: WorkerInputs,
     live_requests: Mutex<HashMap<String, LiveRequest>>,
     // Shared with the delivery task, which releases each terminal event once
     // `on_event` has returned for it.
@@ -105,6 +108,7 @@ impl RequestClassifierRuntime {
         shutdown: CancellationToken,
     ) -> Arc<Self> {
         let (events, mut receiver) = mpsc::unbounded_channel();
+        let worker_inputs = classifier.required_worker_inputs();
         let classifier = Arc::new(AsyncMutex::new(classifier));
         let pending_terminals = Arc::new(PendingTerminals::default());
         let delivery_classifier = Arc::clone(&classifier);
@@ -151,12 +155,17 @@ impl RequestClassifierRuntime {
         });
         Arc::new(Self {
             classifier,
+            worker_inputs,
             live_requests: Mutex::new(HashMap::new()),
             pending_terminals,
             events,
             shutdown,
             delivery,
         })
+    }
+
+    pub(crate) fn worker_inputs(&self) -> WorkerInputs {
+        self.worker_inputs
     }
 
     pub(crate) async fn classify_with(
