@@ -308,7 +308,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         // streamed chunk costs a boxed future and a waker registration on every
         // token.
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
-        let shutdown = self.cancel.clone();
+        let shutdown = self.cancel.child_token();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
         // The same deferral applies here, not just to the streaming loop below.

@@ -63,6 +63,7 @@ pub struct LocalScheduler<
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
     worker_configs: watch::Receiver<HashMap<WorkerId, C>>,
     applied_worker_configs: Arc<Mutex<Option<HashMap<WorkerId, C>>>>,
+    monitor_worker_configs: bool,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -202,11 +203,8 @@ where
                 tracing::trace!("LocalScheduler workers monitoring task started");
                 {
                     let mut applied = applied_configs_monitor.lock();
-                    Self::reconcile_worker_configs(
-                        &slots_monitor,
-                        monitor_rx.borrow_and_update().clone(),
-                        &mut applied,
-                    );
+                    let current_workers = monitor_rx.borrow_and_update().clone();
+                    Self::reconcile_worker_configs(&slots_monitor, current_workers, &mut applied);
                 }
 
                 loop {
@@ -226,9 +224,10 @@ where
                     {
                         // Read the watch while holding the same lock as synchronous publishers.
                         let mut applied = applied_configs_monitor.lock();
+                        let current_workers = monitor_rx.borrow_and_update().clone();
                         Self::reconcile_worker_configs(
                             &slots_monitor,
-                            monitor_rx.borrow_and_update().clone(),
+                            current_workers,
                             &mut applied,
                         );
                     }
@@ -291,6 +290,7 @@ where
             request_classifier: OnceLock::new(),
             worker_configs: workers_with_configs,
             applied_worker_configs,
+            monitor_worker_configs,
             track_prefill_tokens_default,
             worker_type,
         };
@@ -302,12 +302,12 @@ where
 
     /// Apply published topology before a subsequent catalog mutation can replace it.
     pub(crate) fn apply_published_worker_configs(&self) {
+        if !self.monitor_worker_configs {
+            return;
+        }
         let mut applied = self.applied_worker_configs.lock();
-        Self::reconcile_worker_configs(
-            &self.slots,
-            self.worker_configs.borrow().clone(),
-            &mut applied,
-        );
+        let current_workers = self.worker_configs.borrow().clone();
+        Self::reconcile_worker_configs(&self.slots, current_workers, &mut applied);
     }
 
     pub async fn schedule_request(
@@ -2123,6 +2123,7 @@ mod tests {
         updated_workers.insert(0, SimpleWorkerConfig::default());
         updated_workers.insert(1, SimpleWorkerConfig::default());
         cfg_tx.send(updated_workers).unwrap();
+        scheduler.apply_published_worker_configs();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
