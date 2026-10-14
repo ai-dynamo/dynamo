@@ -35,6 +35,8 @@ frozen_artifact = test_artifact_storage_minio.frozen_artifact
 store = test_artifact_storage_minio.store
 
 pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.vllm,
     pytest.mark.post_merge,
     pytest.mark.integration,
     pytest.mark.gpu_0,
