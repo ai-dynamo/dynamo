@@ -534,10 +534,12 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
 def test_effective_max_running_requests_parses_internal_state(
     internal_states, expected
 ):
+    """Parse the smallest positive per-rank cap; reject malformed values."""
     assert effective_max_running_requests(internal_states) == expected
 
 
 def _effective_cap_server_args(max_running_requests):
+    """Minimal SGLang server args for the resolved-cap tests."""
     return SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -551,6 +553,7 @@ def _effective_cap_server_args(max_running_requests):
 
 
 def _effective_cap_engine(get_internal_state):
+    """Fake engine whose tokenizer manager serves ``get_internal_state``."""
     tokenizer_manager = SimpleNamespace(
         context_len=4096,
         validate_total_tokens=True,
@@ -567,6 +570,7 @@ def _effective_cap_engine(get_internal_state):
 
 
 def _patch_runtime_config_dependencies(register, monkeypatch, cli_max_num_seqs):
+    """Stub the registration helpers unrelated to the resolved cap."""
     capacity = SimpleNamespace(
         max_num_seqs=cli_max_num_seqs,
         max_num_batched_tokens=1024,
@@ -599,6 +603,7 @@ def _patch_runtime_config_dependencies(register, monkeypatch, cli_max_num_seqs):
 async def test_runtime_config_publishes_resolved_max_running_requests(
     register, monkeypatch, cli_value, resolved_value, expected
 ):
+    """Publish SGLang's resolved cap, falling back to the CLI value."""
     _patch_runtime_config_dependencies(register, monkeypatch, cli_value)
 
     async def get_internal_state():
@@ -619,23 +624,21 @@ async def test_runtime_config_publishes_resolved_max_running_requests(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["raises", "times_out", "missing"])
+@pytest.mark.parametrize("failure", ["times_out", "missing"])
 async def test_resolved_max_running_requests_read_failure_keeps_cli_value(
     register, monkeypatch, caplog, failure
 ):
+    """A timeout or missing method keeps the CLI value."""
     _patch_runtime_config_dependencies(register, monkeypatch, 256)
     monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
 
     release = asyncio.Event()
 
-    async def raises():
-        raise RuntimeError("scheduler unavailable")
-
     async def times_out():
         await release.wait()
         return [{}]
 
-    get_internal_state = {"raises": raises, "times_out": times_out}.get(failure)
+    get_internal_state = {"times_out": times_out}.get(failure)
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
     runtime_config = await register.get_runtime_config(
@@ -646,14 +649,35 @@ async def test_resolved_max_running_requests_read_failure_keeps_cli_value(
 
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.total_kv_blocks == 64
-    if failure != "missing":
-        assert "Could not read SGLang's resolved max_running_requests" in caplog.text
+    if failure == "times_out":
+        assert "Timed out after" in caplog.text
     # Finish the abandoned read so no task outlives the test.
     release.set()
     for _ in range(10):
         if not register._pending_internal_state_reads:
             break
         await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads
+
+
+@pytest.mark.asyncio
+async def test_resolved_max_running_requests_read_error_propagates(
+    register, monkeypatch
+):
+    """An error from SGLang fails registration instead of being hidden."""
+    _patch_runtime_config_dependencies(register, monkeypatch, 256)
+
+    async def raises():
+        raise RuntimeError("scheduler unavailable")
+
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        await register.get_runtime_config(
+            _effective_cap_engine(raises),
+            _effective_cap_server_args(256),
+            dynamo_args,
+        )
     assert not register._pending_internal_state_reads
 
 
@@ -665,12 +689,14 @@ class _QueueingControlChannel:
     """
 
     def __init__(self):
+        """Start with no pending replies."""
         self._lock = asyncio.Lock()
         self.replies: asyncio.Queue = asyncio.Queue()
         self.sent = 0
         self.cancelled = 0
 
     async def get_internal_state(self):
+        """Send one request and wait for the next reply."""
         async with self._lock:
             self.sent += 1
             try:
@@ -684,6 +710,7 @@ class _QueueingControlChannel:
 async def test_timed_out_read_is_not_cancelled_and_does_not_leak_into_next_caller(
     register, monkeypatch
 ):
+    """A timed-out read finishes later and its reply reaches no other caller."""
     monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
     channel = _QueueingControlChannel()
     engine = SimpleNamespace(
@@ -712,6 +739,7 @@ async def test_timed_out_read_is_not_cancelled_and_does_not_leak_into_next_calle
 
 @pytest.mark.asyncio
 async def test_cancelled_registration_does_not_cancel_sglang_read(register):
+    """Cancelling registration does not cancel SGLang's in-flight read."""
     channel = _QueueingControlChannel()
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(get_internal_state=channel.get_internal_state)

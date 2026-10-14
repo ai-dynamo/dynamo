@@ -489,9 +489,8 @@ def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudge
 
 
 # Bounds the startup read of SGLang's resolved request cap. The scheduler
-# answers a control request between batches, and no traffic reaches this worker
-# before registration, so the reply normally arrives at once. The bound only keeps
-# a stuck scheduler from blocking registration.
+# answers a control request between batches, so the reply normally arrives
+# quickly. The bound only keeps a stuck scheduler from blocking registration.
 #
 # The read is shielded, so a timeout abandons the wait but never cancels SGLang's
 # call. SGLang's control communicator does not clean up when its caller is
@@ -508,6 +507,7 @@ _pending_internal_state_reads: set[asyncio.Task] = set()
 
 
 def _finish_abandoned_internal_state_read(task: asyncio.Task) -> None:
+    """Release an abandoned read and retrieve its outcome so none is lost."""
     _pending_internal_state_reads.discard(task)
     if not task.cancelled() and task.exception() is not None:
         logging.debug(
@@ -519,8 +519,9 @@ async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
     """Read SGLang's resolved per-rank request cap, or ``None``.
 
     SGLang does not put this value in ``scheduler_info``; it is only available
-    from ``get_internal_state``. A failure is logged and leaves the CLI value in
-    place, so registration never depends on this read.
+    from ``get_internal_state``. A timeout is logged and leaves the CLI value in
+    place, so a stuck scheduler cannot block registration. Any other error from
+    SGLang propagates.
     """
     tokenizer_manager = getattr(engine, "tokenizer_manager", None)
     get_internal_state = getattr(tokenizer_manager, "get_internal_state", None)
@@ -532,12 +533,11 @@ async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
         internal_states = await asyncio.wait_for(
             asyncio.shield(read), _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S
         )
-    except Exception as e:
+    except asyncio.TimeoutError:
         logging.warning(
-            "Could not read SGLang's resolved max_running_requests (%s: %s); "
+            "Timed out after %ss reading SGLang's resolved max_running_requests; "
             "publishing the configured value instead.",
-            type(e).__name__,
-            e,
+            _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S,
         )
         return None
     finally:
