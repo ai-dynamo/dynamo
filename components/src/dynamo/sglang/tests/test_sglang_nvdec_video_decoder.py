@@ -11,6 +11,7 @@ against ``VideoDecoderWrapper``, then ``len()``, ``avg_fps`` and
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 from types import SimpleNamespace
@@ -62,6 +63,20 @@ def fake_nvc(monkeypatch):
     nvc = MagicMock()
     nvc.SimpleDecoder = _FakeSimpleDecoder
     nvc.OutputColorType.RGB = "RGB"
+    nvc.cudaVideoCodec.H264 = "h264"
+    nvc.cudaVideoCodec.HEVC = "hevc"
+
+    class Demuxer:
+        def __init__(self):
+            self._data = ctypes.create_string_buffer(b"\x00\x00\x01\x42\x01\x80")
+
+        def GetNvCodecId(self):
+            return "hevc"
+
+        def __iter__(self):
+            yield SimpleNamespace(bsl_data=ctypes.addressof(self._data), bsl=6)
+
+    nvc.CreateDemuxer.side_effect = lambda filename: Demuxer()
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", nvc)
     # The real converter expects a CUDA DecodedFrame; our fake yields numpy already.
     monkeypatch.setattr(mod, "_frame_to_rgb_hwc", lambda frame: frame)
@@ -156,6 +171,27 @@ def test_rejects_a_video_with_no_frames(fake_nvc) -> None:
     fake_nvc.SimpleDecoder = _Empty
     with pytest.raises(RuntimeError, match="no frames"):
         NvdecVideoDecoder(b"fake-mp4-bytes")
+
+
+def test_rejects_changed_sps_before_simple_decoder(fake_nvc) -> None:
+    buffers = [
+        ctypes.create_string_buffer(b"\x00\x00\x01\x42\x01\x80"),
+        ctypes.create_string_buffer(b"\x00\x00\x01\x42\x01\x81"),
+    ]
+
+    class ChangedSpsDemuxer:
+        def GetNvCodecId(self):
+            return "hevc"
+
+        def __iter__(self):
+            for buffer in buffers:
+                yield SimpleNamespace(bsl_data=ctypes.addressof(buffer), bsl=6)
+
+    fake_nvc.CreateDemuxer.side_effect = lambda filename: ChangedSpsDemuxer()
+    fake_nvc.SimpleDecoder = MagicMock()
+    with pytest.raises(ValueError, match="changes sequence"):
+        NvdecVideoDecoder(b"fake-mp4-bytes")
+    fake_nvc.SimpleDecoder.assert_not_called()
 
 
 @pytest.mark.skipif(

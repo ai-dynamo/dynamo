@@ -39,6 +39,7 @@ from dynamo.common.multimodal.media_source import (
     read_local_media_bytes,
 )
 from dynamo.common.multimodal.nvdec_decoder import (
+    UnsafeNvdecVideoError,
     decode_video_nvdec,
     probe_video_codec,
     should_use_nvdec,
@@ -220,6 +221,8 @@ class VideoLoader:
                     content,
                     **self._extract_nvdec_args(media_io),
                 )
+            except UnsafeNvdecVideoError:
+                raise
             except Exception as exc:  # noqa: BLE001 - fall back to software decode
                 logger.warning(
                     "NVDEC decode failed for a %s clip (%s); using software decode",

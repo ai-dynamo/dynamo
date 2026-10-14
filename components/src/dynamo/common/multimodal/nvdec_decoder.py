@@ -30,6 +30,7 @@ raises the actionable unsupported-codec error built by
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import importlib.util
 import logging
@@ -37,6 +38,7 @@ import math
 import os
 import tempfile
 import warnings
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -55,6 +57,102 @@ FALLBACK_FPS = 30.0
 
 # Codecs routed to NVDEC. VP8/VP9/AV1 stay on the existing royalty-free path.
 HW_ROUTED_CODECS = frozenset({"h264", "hevc"})
+
+
+class UnsafeNvdecVideoError(ValueError):
+    """The compressed stream cannot safely enter NVDEC host-output mode."""
+
+
+def _annexb_nal_ranges(packet: bytes) -> Iterator[tuple[int, int]]:
+    """Yield Annex B NAL offsets without copying compressed picture data.
+
+    PyNvVideoCodec's demuxer converts length-prefixed H.264/HEVC packets to
+    Annex B before decoding. Reject other framing (and NALs split across
+    packets) rather than guessing where parameter sets are.
+    """
+    marker = b"\x00\x00\x01"
+    start = packet.find(marker)
+    if start < 0 or any(packet[:start]):
+        raise UnsafeNvdecVideoError("Video packet is not complete Annex B data")
+    while start >= 0:
+        nal_start = start + len(marker)
+        next_start = packet.find(marker, nal_start)
+        nal_end = next_start if next_start >= 0 else len(packet)
+        while nal_end > nal_start and packet[nal_end - 1] == 0:
+            nal_end -= 1
+        if nal_end == nal_start:
+            raise UnsafeNvdecVideoError("Video contains an empty NAL unit")
+        yield nal_start, nal_end
+        start = next_start
+
+
+def _validate_nvdec_parameter_sets(path: str, nvc: Any) -> None:
+    """Reject H.264/HEVC streams whose SPS changes before host-output decode.
+
+    Use PyNvVideoCodec's own demuxer so the preflight sees the packets that its
+    SimpleDecoder will feed to NVDEC. A changed SPS can alter either coded or
+    display geometry, including when no frame is displayed for that SPS. This
+    deliberately rejects even same-geometry SPS revisions until a fixed native
+    host-frame allocator is shipped.
+    """
+    demuxer = nvc.CreateDemuxer(filename=path)
+    codec = demuxer.GetNvCodecId()
+    if codec == nvc.cudaVideoCodec.H264:
+        sps_type = 7
+    elif codec == nvc.cudaVideoCodec.HEVC:
+        sps_type = 33
+    else:
+        # Other codecs are not routed to this host-output path by Dynamo.
+        return
+
+    initial_sps: bytes | None = None
+    max_packet_bytes = max(2 * os.path.getsize(path), 1 << 20)
+    for packet in demuxer:
+        size = packet.bsl
+        if size == 0:  # PyNvVideoCodec yields one empty packet at end of stream.
+            continue
+        if size < 0 or size > max_packet_bytes or not packet.bsl_data:
+            raise UnsafeNvdecVideoError("Invalid video packet")
+        # The demuxer owns this pointer until its next Demux() call. Copy it
+        # while the current packet is alive; no decoder or output frame exists.
+        payload = ctypes.string_at(packet.bsl_data, size)
+        for start, end in _annexb_nal_ranges(payload):
+            if codec == nvc.cudaVideoCodec.HEVC:
+                if (
+                    end - start < 2
+                    or payload[start] & 0x80
+                    or not payload[start + 1] & 0x07
+                ):
+                    raise UnsafeNvdecVideoError("Invalid HEVC NAL header")
+                nal_type = (payload[start] >> 1) & 0x3F
+            else:
+                if payload[start] & 0x80 or not payload[start] & 0x1F:
+                    raise UnsafeNvdecVideoError("Invalid H.264 NAL header")
+                nal_type = payload[start] & 0x1F
+            if nal_type != sps_type:
+                continue
+            nal = payload[start:end]
+            if initial_sps is None:
+                initial_sps = nal
+            elif nal != initial_sps:
+                raise UnsafeNvdecVideoError(
+                    "Video changes sequence parameters within the stream"
+                )
+    if initial_sps is None:
+        raise UnsafeNvdecVideoError("Video contains no sequence parameter set")
+
+
+def validate_nvdec_parameter_sets(path: str, nvc: Any) -> None:
+    """Fail closed on malformed or uninspectable H.264/HEVC input."""
+    try:
+        _validate_nvdec_parameter_sets(path, nvc)
+    except UnsafeNvdecVideoError:
+        raise
+    except Exception as exc:
+        raise UnsafeNvdecVideoError(
+            "Cannot validate video sequence parameters"
+        ) from exc
+
 
 # Container byte markers -> codec id. A video file carries exactly one video
 # codec, so the first match wins. Covers ISO-BMFF (mp4/mov) sample-entry fourccs
@@ -269,6 +367,7 @@ def decode_video_nvdec(
     with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
         tmp.write(data)
         tmp.flush()
+        validate_nvdec_parameter_sets(tmp.name, nvc)
         decoder = nvc.SimpleDecoder(
             tmp.name,
             gpu_id=gpu_id,

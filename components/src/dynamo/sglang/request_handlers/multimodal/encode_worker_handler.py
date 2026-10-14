@@ -50,6 +50,7 @@ from dynamo.common.multimodal.media_source import (
 )
 from dynamo.common.multimodal.nvdec_decoder import (
     DISABLE_ENV,
+    UnsafeNvdecVideoError,
     nvdec_available,
     probe_video_codec,
     should_use_nvdec,
@@ -662,11 +663,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # Constructing the decoder opens the container and reads its frame
             # index, so keep it off the event loop.
             return await asyncio.to_thread(NvdecVideoDecoder, content)
-        except MissingMediaDecoderError:
-            # The preflight above is the actionable error this path exists to
-            # raise. Letting the broad handler below catch it would return the
-            # bytes anyway and reproduce exactly the deep-SGLang failure it
-            # replaces.
+        except (MissingMediaDecoderError, UnsafeNvdecVideoError):
+            # Missing software support and unsafe native input are terminal.
+            # Neither may be passed through the broad decoder fallback below.
             raise
         except Exception as exc:  # noqa: BLE001 - decoder fallback is intentional
             # The decoder failed but the validated bytes are here, so hand

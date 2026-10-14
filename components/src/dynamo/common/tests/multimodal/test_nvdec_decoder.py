@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import sys
 import types
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -31,6 +33,22 @@ def _fake_pynv(num_frames: int = 10, h: int = 4, w: int = 6):
     class OutputColorType:
         RGB = "RGB"
 
+    class cudaVideoCodec:
+        H264 = "h264"
+        HEVC = "hevc"
+
+    class Demuxer:
+        def __init__(self):
+            self._data = ctypes.create_string_buffer(b"\x00\x00\x01\x42\x01\x80")
+
+        def GetNvCodecId(self):
+            return cudaVideoCodec.HEVC
+
+        def __iter__(self):
+            yield types.SimpleNamespace(
+                bsl_data=ctypes.addressof(self._data), bsl=6
+            )
+
     class SimpleDecoder:
         def __init__(
             self, src, gpu_id=0, output_color_type=None, use_device_memory=False
@@ -47,6 +65,8 @@ def _fake_pynv(num_frames: int = 10, h: int = 4, w: int = 6):
             return 30.0
 
     mod.OutputColorType = OutputColorType
+    mod.cudaVideoCodec = cudaVideoCodec
+    mod.CreateDemuxer = lambda filename: Demuxer()
     mod.SimpleDecoder = SimpleDecoder
     return mod
 
@@ -161,6 +181,91 @@ def test_should_use_nvdec_routes_only_h264_hevc(monkeypatch):
 def test_should_use_nvdec_false_when_unavailable(monkeypatch):
     monkeypatch.setenv(nd.DISABLE_ENV, "1")
     assert nd.should_use_nvdec("h264") is False
+
+
+def _demuxer_for_packets(codec, payloads):
+    class Demuxer:
+        def __init__(self):
+            self._buffers = [ctypes.create_string_buffer(p) for p in payloads]
+
+        def GetNvCodecId(self):
+            return codec
+
+        def __iter__(self):
+            for payload, buffer in zip(payloads, self._buffers):
+                yield types.SimpleNamespace(
+                    bsl_data=ctypes.addressof(buffer), bsl=len(payload)
+                )
+
+    return Demuxer()
+
+
+@pytest.mark.parametrize(
+    "codec,sps_a,sps_b",
+    [
+        ("hevc", b"\x42\x01\x80", b"\x42\x01\x81"),
+        ("h264", b"\x67\x64\x80", b"\x67\x64\x81"),
+    ],
+)
+def test_preflight_rejects_changed_sps_even_without_an_output_frame(
+    tmp_path, codec, sps_a, sps_b
+):
+    nvc = _fake_pynv()
+    nvc.CreateDemuxer = lambda filename: _demuxer_for_packets(
+        codec,
+        [b"\x00\x00\x01" + sps_a, b"\x00\x00\x01" + sps_b],
+    )
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"container")
+    with pytest.raises(nd.UnsafeNvdecVideoError, match="changes sequence"):
+        nd.validate_nvdec_parameter_sets(str(path), nvc)
+
+
+@pytest.mark.parametrize(
+    "codec,sps", [("hevc", b"\x42\x01\x80"), ("h264", b"\x67\x64\x80")]
+)
+def test_preflight_keeps_repeated_sps_video(tmp_path, codec, sps):
+    nvc = _fake_pynv()
+    nvc.CreateDemuxer = lambda filename: _demuxer_for_packets(
+        codec, [b"\x00\x00\x00\x01" + sps, b"\x00\x00\x01" + sps]
+    )
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"container")
+    nd.validate_nvdec_parameter_sets(str(path), nvc)
+
+
+@pytest.mark.parametrize("payload", [b"\x00\x00\x01\x26\x01\x80", b"not Annex B"])
+def test_preflight_fails_closed_when_sps_cannot_be_found(tmp_path, payload):
+    nvc = _fake_pynv()
+    nvc.CreateDemuxer = lambda filename: _demuxer_for_packets("hevc", [payload])
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"container")
+    with pytest.raises(nd.UnsafeNvdecVideoError):
+        nd.validate_nvdec_parameter_sets(str(path), nvc)
+
+
+def test_preflight_rejects_before_simple_decoder_construction(monkeypatch):
+    nvc = _fake_pynv()
+    nvc.CreateDemuxer = lambda filename: _demuxer_for_packets(
+        "hevc", [b"\x00\x00\x01\x42\x01\x80", b"\x00\x00\x01\x42\x01\x81"]
+    )
+    nvc.SimpleDecoder = Mock()
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", nvc)
+    with pytest.raises(nd.UnsafeNvdecVideoError):
+        nd.decode_video_nvdec(b"container", num_frames=1)
+    nvc.SimpleDecoder.assert_not_called()
+
+
+def test_preflight_fails_closed_when_demuxer_cannot_inspect_stream(
+    monkeypatch,
+):
+    nvc = _fake_pynv()
+    nvc.CreateDemuxer = Mock(side_effect=RuntimeError("cannot demux"))
+    nvc.SimpleDecoder = Mock()
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", nvc)
+    with pytest.raises(nd.UnsafeNvdecVideoError, match="Cannot validate"):
+        nd.decode_video_nvdec(b"container", num_frames=1)
+    nvc.SimpleDecoder.assert_not_called()
 
 
 def test_decode_matches_frame_contract(monkeypatch):

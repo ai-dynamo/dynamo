@@ -736,6 +736,29 @@ async def test_maybe_nvdec_decoder_wraps_h264_only(nvdec_handler, monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_unsafe_nvdec_video_does_not_enter_decoder_fallback(
+    nvdec_handler, monkeypatch
+) -> None:
+    from dynamo.common.multimodal.nvdec_decoder import UnsafeNvdecVideoError
+
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "hevc")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.NvdecVideoDecoder",
+        Mock(side_effect=UnsafeNvdecVideoError("changed SPS")),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
+
+    with pytest.raises(UnsafeNvdecVideoError, match="changed SPS"):
+        await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4")
+
+
+@pytest.mark.asyncio
 async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
     nvdec_handler, monkeypatch
 ) -> None:

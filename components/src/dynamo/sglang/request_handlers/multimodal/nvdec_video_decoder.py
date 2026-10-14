@@ -50,6 +50,7 @@ from dynamo.common.multimodal.nvdec_decoder import (
     _frame_to_rgb_hwc,
     _gpu_id,
     _source_fps,
+    validate_nvdec_parameter_sets,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
         self._tc_kwargs: dict[str, Any] = {}
 
         try:
+            validate_nvdec_parameter_sets(tmp_path, nvc)
             self._decoder = nvc.SimpleDecoder(
                 tmp_path,
                 gpu_id=gpu_id,
