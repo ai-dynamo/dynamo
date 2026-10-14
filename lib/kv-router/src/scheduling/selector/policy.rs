@@ -141,15 +141,18 @@ impl WorkerSelectionPolicy {
         self
     }
 
-    /// Attach fixed per-rank resident block counts, for benchmarking the read path.
+    /// Attach fixed per-rank resident block counts for benchmarking the read path, with a writer
+    /// that stores to them the way event threads do.
     #[cfg(feature = "bench")]
     pub fn with_fixed_resident_block_counts(
         self,
-        counts: impl IntoIterator<Item = (crate::protocols::WorkerWithDpRank, usize)>,
-    ) -> Self {
-        let handle = ResidentBlockCountsHandle::default();
-        handle.publish(counts.into_iter().collect());
-        self.with_resident_block_counts(handle)
+        counts: impl IntoIterator<Item = (crate::protocols::WorkerWithDpRank, u64)>,
+    ) -> (Self, ResidentBlockCountsWriter) {
+        let counts = ResidentBlockCountsHandle::fixed(counts);
+        (
+            self.with_resident_block_counts(counts.clone()),
+            ResidentBlockCountsWriter(counts),
+        )
     }
 
     pub(crate) fn declared_inputs(&self) -> WorkerInputs {
@@ -403,10 +406,21 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             request,
             eligibility,
             block_size,
-            resident_blocks
-                .as_ref()
-                .and_then(|counts| counts.as_deref()),
+            resident_blocks.as_deref().map(|counts| &**counts),
         )
+    }
+}
+
+/// Stores to the counters from [`WorkerSelectionPolicy::with_fixed_resident_block_counts`], for
+/// benchmarking reads while event threads write.
+#[cfg(feature = "bench")]
+pub struct ResidentBlockCountsWriter(ResidentBlockCountsHandle);
+
+#[cfg(feature = "bench")]
+impl ResidentBlockCountsWriter {
+    /// Sets every counter to `blocks`.
+    pub fn store_all(&self, blocks: u64) {
+        self.0.store_all(blocks);
     }
 }
 
@@ -695,7 +709,7 @@ mod tests {
     fn resident_blocks_reach_only_declaring_components() {
         use crate::indexer::ResidentBlockCountsHandle;
 
-        // Worker 8 holds no tracked blocks, which reads as 0 rather than None. Worker ids differ
+        // Worker 8 is tracked with no blocks, which reads as 0 rather than None. Worker ids differ
         // from row indices, so a row-for-worker mix-up fails.
         fn held(worker: WorkerWithDpRank) -> u64 {
             if worker.worker_id == 3 { 12 } else { 0 }
@@ -778,8 +792,10 @@ mod tests {
             (8, TaintedWorkerConfig::default()),
         ]);
         let request = base_request(16);
-        let counts = ResidentBlockCountsHandle::default();
-        counts.publish([(WorkerWithDpRank::new(3, 0), 12)].into_iter().collect());
+        let counts = ResidentBlockCountsHandle::fixed([
+            (WorkerWithDpRank::new(3, 0), 12),
+            (WorkerWithDpRank::new(8, 0), 0),
+        ]);
         let probes = || -> Vec<Box<ResidencyProbe>> {
             vec![
                 Box::new(ResidencyProbe(WorkerInputs::RESIDENT_BLOCKS)),
@@ -847,7 +863,7 @@ mod tests {
                 Box::new(ExpectNoCounts),
             )
         };
-        // No host handle, then a handle whose poller has not published yet.
+        // No host handle, then a handle with no tracked ranks yet.
         for policy in [
             policy(),
             policy().with_resident_block_counts(ResidentBlockCountsHandle::default()),

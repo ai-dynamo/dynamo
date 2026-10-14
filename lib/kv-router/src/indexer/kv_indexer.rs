@@ -15,8 +15,8 @@ use super::{
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
     ContainsWorkerBlockRequest, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
-    MatchRequest, PreBoundEventCounters, RadixTree, ResidentBlockCounts,
-    ResidentBlockCountsRequest, RoutingDecisionRequest, panic_payload_message,
+    MatchRequest, PreBoundEventCounters, RadixTree, ResidentBlockCountsHandle,
+    RoutingDecisionRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -337,9 +337,12 @@ pub struct KvIndexer {
     remove_worker_dp_rank_tx: mpsc::Sender<(WorkerId, DpRank)>,
     /// A sender for get workers requests.
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
-    /// A sender for per-rank block count requests.
+    /// Starts live per-rank block counts in the actor.
     #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
-    resident_block_counts_tx: mpsc::Sender<ResidentBlockCountsRequest>,
+    track_resident_blocks_tx: mpsc::Sender<ResidentBlockCountsHandle>,
+    /// The live counts, once a policy reads them. Shared so every clone tracks into one handle.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    resident_blocks: Arc<std::sync::OnceLock<ResidentBlockCountsHandle>>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
     /// A sender for flush requests.
@@ -434,8 +437,8 @@ impl KvIndexer {
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
-        let (resident_block_counts_tx, resident_block_counts_rx) =
-            mpsc::channel::<ResidentBlockCountsRequest>(16);
+        let (track_resident_blocks_tx, track_resident_blocks_rx) =
+            mpsc::channel::<ResidentBlockCountsHandle>(1);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
@@ -466,7 +469,7 @@ impl KvIndexer {
                     let mut remove_worker_rx = remove_worker_rx;
                     let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                     let mut get_workers_rx = get_workers_rx;
-                    let mut resident_block_counts_rx = resident_block_counts_rx;
+                    let mut track_resident_blocks_rx = track_resident_blocks_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
                     let mut trie = delegate.map_or_else(RadixTree::new, RadixTree::new_with_delegate);
@@ -505,9 +508,8 @@ impl KvIndexer {
                                 }
                             }
 
-                            // Ahead of mutations and matches: under steady traffic, later arms may never run.
-                            Some(req) = resident_block_counts_rx.recv() => {
-                                let _ = req.resp.send(trie.resident_block_counts());
+                            Some(counts) = track_resident_blocks_rx.recv() => {
+                                trie.track_resident_blocks(counts);
                             }
 
                             Some(mutation) = mutation_rx.recv() => {
@@ -668,7 +670,8 @@ impl KvIndexer {
             remove_worker_tx,
             remove_worker_dp_rank_tx,
             get_workers_tx,
-            resident_block_counts_tx,
+            track_resident_blocks_tx,
+            resident_blocks: Arc::default(),
             dump_tx,
             flush_tx,
             routing_tx,
@@ -788,19 +791,17 @@ impl KvIndexer {
         self.get_workers_tx.clone()
     }
 
-    /// Distinct blocks the tree holds for each worker rank.
+    /// Live per-rank block counts, which the actor starts keeping on the first call.
     #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
-    pub(crate) async fn resident_block_counts(&self) -> Result<ResidentBlockCounts, KvRouterError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.resident_block_counts_tx
-            .send(ResidentBlockCountsRequest { resp: resp_tx })
-            .await
-            .map_err(|_| KvRouterError::IndexerOffline)?;
-        // A request sent while the actor drops its receiver stays queued with resp_tx alive.
-        tokio::select! {
-            resp = resp_rx => resp.map_err(|_| KvRouterError::IndexerDroppedRequest),
-            _ = self.resident_block_counts_tx.closed() => Err(KvRouterError::IndexerOffline),
-        }
+    pub(crate) fn track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.resident_blocks
+            .get_or_init(|| {
+                let counts = ResidentBlockCountsHandle::default();
+                // A stopped actor never sees this, and every rank reads None.
+                let _ = self.track_resident_blocks_tx.try_send(counts.clone());
+                counts
+            })
+            .clone()
     }
 }
 

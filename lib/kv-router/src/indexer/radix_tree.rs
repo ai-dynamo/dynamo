@@ -13,7 +13,10 @@ use std::{
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::compressed_radix::{NodeState, append_dump_events};
-use super::{EventWarningKind, MatchDetails, PreBoundEventCounters, ResidentBlockCounts};
+use super::{
+    EventWarningKind, MatchDetails, PreBoundEventCounters, ResidentBlockCountsHandle,
+    ResidentBlockTracker,
+};
 use crate::protocols::*;
 
 pub(crate) type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
@@ -85,6 +88,8 @@ pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
     lifecycle: super::HashLifecycle,
+    /// Live per-rank block counts, once a policy reads them.
+    resident_blocks: Option<ResidentBlockTracker>,
 }
 
 impl Default for RadixTree {
@@ -126,6 +131,7 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
             lifecycle: super::HashLifecycle::default(),
+            resident_blocks: None,
         }
     }
 
@@ -292,14 +298,18 @@ impl RadixTree {
         let event_id = event.event.event_id;
         self.lookup.entry(worker).or_default();
 
-        match event.event.data {
+        let result = match event.event.data {
             KvCacheEventData::Stored(store) => self.apply_stored(worker, store, event_id, counters),
             KvCacheEventData::Removed(remove) => self.apply_removed(worker, remove, event_id),
             KvCacheEventData::Cleared => {
-                self.remove_worker_dp_rank(worker.worker_id, worker.dp_rank);
+                self.drop_rank(worker);
                 Ok(())
             }
+        };
+        if let Some(tracker) = &mut self.resident_blocks {
+            tracker.update(worker, self.lookup.get(&worker).map(WorkerLookup::len));
         }
+        result
     }
 
     fn apply_stored(
@@ -736,10 +746,21 @@ impl RadixTree {
 
     pub fn remove_worker(&mut self, worker_id: WorkerId) {
         self.remove_or_clear_worker_blocks(worker_id, false);
+        if let Some(tracker) = &mut self.resident_blocks {
+            tracker.remove(|worker| worker.worker_id == worker_id);
+        }
     }
 
     pub fn remove_worker_dp_rank(&mut self, worker_id: WorkerId, dp_rank: DpRank) {
-        let worker = WorkerWithDpRank { worker_id, dp_rank };
+        let rank = WorkerWithDpRank { worker_id, dp_rank };
+        self.drop_rank(rank);
+        if let Some(tracker) = &mut self.resident_blocks {
+            tracker.remove(|worker| worker == rank);
+        }
+    }
+
+    /// Drops `worker`'s blocks without forgetting the rank, as a clear does.
+    fn drop_rank(&mut self, worker: WorkerWithDpRank) {
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
@@ -760,6 +781,13 @@ impl RadixTree {
 
     pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
         self.remove_or_clear_worker_blocks(worker_id, true);
+        if let Some(tracker) = &mut self.resident_blocks {
+            for (worker, blocks) in &self.lookup {
+                if worker.worker_id == worker_id {
+                    tracker.update(*worker, Some(blocks.len()));
+                }
+            }
+        }
     }
 
     pub fn get_workers(&self) -> Vec<WorkerId> {
@@ -860,12 +888,14 @@ impl RadixTree {
         self.lookup.values().map(FxHashMap::len).sum()
     }
 
-    /// Distinct blocks held by each worker rank.
-    pub(crate) fn resident_block_counts(&self) -> ResidentBlockCounts {
-        self.lookup
-            .iter()
-            .map(|(worker, worker_lookup)| (*worker, worker_lookup.len()))
-            .collect()
+    /// Keeps live per-rank block counts in `counts` from now on, starting with the ranks held now.
+    pub(crate) fn track_resident_blocks(&mut self, counts: ResidentBlockCountsHandle) {
+        self.resident_blocks = Some(ResidentBlockTracker::new(
+            counts,
+            self.lookup
+                .iter()
+                .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
+        ));
     }
 
     #[cfg(test)]

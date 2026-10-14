@@ -570,12 +570,6 @@ pub struct GetWorkersRequest {
     pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
-/// A request for the number of blocks tracked for each worker rank
-pub(crate) struct ResidentBlockCountsRequest {
-    /// Channel to send the per-rank block counts
-    pub resp: oneshot::Sender<super::ResidentBlockCounts>,
-}
-
 #[derive(Debug, Default)]
 pub struct WorkerLookupStats {
     pub worker_blocks: Vec<(WorkerWithDpRank, usize)>,
@@ -661,6 +655,8 @@ pub enum WorkerTask {
         resp: oneshot::Sender<bool>,
     },
     Flush(oneshot::Sender<()>),
+    /// Keep live per-rank block counts in these counters from now on.
+    TrackResidentBlocks(super::ResidentBlockCountsHandle),
     Terminate,
 }
 

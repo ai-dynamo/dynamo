@@ -6,11 +6,18 @@
 //! Run with: `cargo bench -p dynamo-kv-router --bench worker_selection`
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use dynamo_kv_router::indexer::{
+    KvIndexerInterface, ThreadPoolIndexer,
+    concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed,
+};
 use dynamo_kv_router::protocols::{
-    RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, RoutingConstraints, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank, compute_seq_hash_for_block,
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
@@ -426,7 +433,7 @@ fn resident_blocks_read(c: &mut Criterion) {
             vec![Box::new(IgnoringPreferenceScorer)],
             Box::new(LowestCostPicker),
         );
-        let with = WorkerSelectionPolicy::new(
+        let (with, writer) = WorkerSelectionPolicy::new(
             config.clone(),
             "prefill",
             vec![Box::new(ResidentBlocksScorer)],
@@ -437,26 +444,119 @@ fn resident_blocks_read(c: &mut Criterion) {
                 .keys()
                 .map(|&worker_id| (WorkerWithDpRank::from_worker_id(worker_id), 4_096)),
         );
-        for (name, policy) in [("without", &without), ("with", &with)] {
-            group.bench_with_input(
-                BenchmarkId::new(name, worker_count),
-                &worker_count,
-                |b, _| {
-                    b.iter(|| {
-                        black_box(
-                            policy
-                                .select_worker(WorkerSelectionInput::configured(
-                                    black_box(&workers),
-                                    black_box(&request),
-                                    request.eligibility(),
-                                    black_box(16),
-                                ))
-                                .unwrap(),
-                        )
-                    })
-                },
-            );
+        for (name, policy, writing) in [
+            ("without", &without, false),
+            ("with", &with, false),
+            // Another thread storing to every counter in a loop: the worst case for the
+            // cross-core misses event-thread writes cause readers.
+            ("with_writer", &with, true),
+        ] {
+            let stop = AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                if writing {
+                    scope.spawn(|| {
+                        let mut blocks = 0;
+                        while !stop.load(Ordering::Relaxed) {
+                            writer.store_all(blocks);
+                            blocks += 1;
+                        }
+                    });
+                }
+                group.bench_with_input(
+                    BenchmarkId::new(name, worker_count),
+                    &worker_count,
+                    |b, _| {
+                        b.iter(|| {
+                            black_box(
+                                policy
+                                    .select_worker(WorkerSelectionInput::configured(
+                                        black_box(&workers),
+                                        black_box(&request),
+                                        request.eligibility(),
+                                        black_box(16),
+                                    ))
+                                    .unwrap(),
+                            )
+                        })
+                    },
+                );
+                stop.store(true, Ordering::Relaxed);
+            });
         }
+    }
+    group.finish();
+}
+
+fn kv_event(worker: WorkerId, event_id: u64, data: KvCacheEventData) -> RouterEvent {
+    RouterEvent::new(
+        worker,
+        KvCacheEvent {
+            event_id,
+            dp_rank: 0,
+            data,
+        },
+    )
+}
+
+/// Event-thread cost of keeping resident block counts: stores then clears for 128 workers on
+/// 8 event threads, untracked and tracked. A concurrent reader belongs in the pinned Mooncake
+/// replay (`--resident-blocks-reader-cpu`): unpinned, any busy thread skews this bench.
+fn resident_blocks_write(c: &mut Criterion) {
+    const WORKERS: u64 = 128;
+    const BLOCKS: u64 = 64;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let stores: Vec<_> = (0..WORKERS)
+        .map(|worker| {
+            let local: Vec<_> = (0..BLOCKS)
+                .map(|i| LocalBlockHash(worker * BLOCKS + i))
+                .collect();
+            let blocks = local
+                .iter()
+                .zip(compute_seq_hash_for_block(&local))
+                .map(|(&tokens_hash, hash)| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(hash),
+                    tokens_hash,
+                    mm_extra_info: None,
+                })
+                .collect();
+            let store = KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks,
+            };
+            kv_event(worker, 0, KvCacheEventData::Stored(store))
+        })
+        .collect();
+    let mut group = c.benchmark_group("resident_blocks_write");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Elements(WORKERS * 2));
+    for (name, tracked) in [("untracked", false), ("tracked", true)] {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 8, 32);
+        if tracked {
+            indexer.bench_track_resident_blocks();
+        }
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                runtime.block_on(async {
+                    for store in &stores {
+                        indexer.apply_event(store.clone()).await;
+                    }
+                    indexer.flush().await;
+                    for worker in 0..WORKERS {
+                        indexer
+                            .apply_event(kv_event(worker, 1, KvCacheEventData::Cleared))
+                            .await;
+                    }
+                    indexer.flush().await;
+                })
+            })
+        });
+        indexer.shutdown();
     }
     group.finish();
 }
@@ -560,6 +660,7 @@ criterion_group!(
     custom_worker_selection,
     unused_preferred_taint_metadata,
     resident_blocks_read,
+    resident_blocks_write,
     default_policy_wrapper,
     worker_projection
 );

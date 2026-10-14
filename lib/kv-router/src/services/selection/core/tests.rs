@@ -782,7 +782,7 @@ fn resident_blocks_core(
 }
 
 #[tokio::test]
-async fn declaring_policy_reads_polled_resident_blocks() {
+async fn declaring_policy_reads_live_resident_blocks() {
     let (core, observed) = resident_blocks_core(
         crate::scheduling::selector::WorkerInputs::CACHE
             | crate::scheduling::selector::WorkerInputs::RESIDENT_BLOCKS,
@@ -804,7 +804,7 @@ async fn declaring_policy_reads_polled_resident_blocks() {
         .await
         .unwrap();
 
-    // The partition's poller publishes in the background, so select until the count arrives.
+    // The store applies on the indexer's own thread, so select until the count arrives.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             core.select(select_request()).await.expect("select");
@@ -815,19 +815,17 @@ async fn declaring_policy_reads_polled_resident_blocks() {
         }
     })
     .await
-    .expect("a declaring policy should read the polled count");
+    .expect("a declaring policy should read the live count");
 }
 
 #[tokio::test]
-async fn only_a_declaring_policy_polls_resident_blocks() {
+async fn only_a_declaring_policy_tracks_resident_blocks() {
     use crate::scheduling::selector::WorkerInputs;
     let indexer = crate::services::indexer::backend::create_indexer(16, 1);
     let key = default_key();
-    let poll = |inputs| {
-        super::workers::poll_resident_block_counts(&key, inputs, &indexer, CancellationToken::new())
-    };
-    assert!(poll(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
-    assert!(poll(WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS).is_some());
+    let track = |inputs| super::workers::track_resident_blocks(&key, inputs, &indexer);
+    assert!(track(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
+    assert!(track(WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS).is_some());
 }
 
 #[tokio::test]

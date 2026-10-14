@@ -19,8 +19,8 @@ use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ResidentBlockCounts, ShardSizeSnapshot,
-    SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ResidentBlockCountsHandle,
+    ShardSizeSnapshot, SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 #[cfg(feature = "bench")]
 use super::{
@@ -85,6 +85,9 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Cancelled when the matching worker thread exits, including by panic.
     thread_exited: Vec<tokio_util::sync::CancellationToken>,
+
+    /// Live per-rank block counts, once a policy reads them.
+    resident_blocks: std::sync::OnceLock<ResidentBlockCountsHandle>,
 
     /// Approximate-mode TTL pruning manager. None for normal event-driven mode.
     prune_manager: Option<WorkerPruneManager>,
@@ -335,6 +338,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             kv_block_size,
             thread_handles: Mutex::new(thread_handles),
             thread_exited,
+            resident_blocks: std::sync::OnceLock::new(),
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
@@ -613,19 +617,26 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         WorkerLookupStats::from_worker_block_counts(worker_blocks)
     }
 
-    /// Per-rank block counts. Fails if a worker thread has exited, so a caller never mistakes a
-    /// dead thread's ranks for empty ones.
+    /// [`Self::track_resident_blocks`], for benchmarking the event threads' cost of tracking.
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.track_resident_blocks()
+    }
+
+    /// Live per-rank block counts, which every worker thread starts keeping on the first call.
     #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
-    pub(crate) async fn resident_block_counts(&self) -> Result<ResidentBlockCounts, KvRouterError> {
-        let lanes = self.lane_lookup_stats().await;
-        if lanes.iter().any(Option::is_none) {
-            return Err(KvRouterError::IndexerOffline);
-        }
-        Ok(lanes
-            .into_iter()
-            .flatten()
-            .flat_map(|stats| stats.worker_blocks)
-            .collect())
+    pub(crate) fn track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.resident_blocks
+            .get_or_init(|| {
+                let counts = ResidentBlockCountsHandle::default();
+                for channel in &self.worker_event_channels {
+                    // An exited thread never sees this, and its ranks read None.
+                    let _ = channel.send(WorkerTask::TrackResidentBlocks(counts.clone()));
+                }
+                counts
+            })
+            .clone()
     }
 
     pub async fn get_workers(&self) -> Vec<WorkerId> {
@@ -1630,24 +1641,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stats_reads_fail_when_a_thread_exits_with_them_queued() {
+    async fn stats_read_skips_a_thread_that_exits_with_it_queued() {
         let (open_gate, gate) = flume::bounded::<()>(1);
         let indexer = ThreadPoolIndexer::new(GatedBackend(gate), 1, 16);
         indexer.worker_event_channels[0]
             .send(WorkerTask::Terminate)
             .unwrap();
-        // Both requests queue behind Terminate before the gate opens, so neither is answered.
-        let timeout = std::time::Duration::from_secs(5);
-        let (strict, lenient, ()) = tokio::join!(
-            tokio::time::timeout(timeout, indexer.resident_block_counts()),
-            tokio::time::timeout(timeout, indexer.worker_lookup_stats()),
+        // The request queues behind Terminate before the gate opens, so it is never answered.
+        let (read, ()) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                indexer.worker_lookup_stats()
+            ),
             async {
                 tokio::task::yield_now().await;
                 drop(open_gate);
             },
         );
-        assert!(strict.expect("strict read hung").is_err());
-        assert_eq!(lenient.expect("lenient read hung").worker_count(), 0);
+        assert_eq!(read.expect("stats read hung").worker_count(), 0);
     }
 
     #[tokio::test]

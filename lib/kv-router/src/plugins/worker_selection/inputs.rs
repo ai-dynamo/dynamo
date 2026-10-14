@@ -69,17 +69,18 @@ impl<'a> WorkerCandidate<'a> {
         }
     }
 
-    /// Blocks the router's indexer tracks for this worker rank, only when this component declared
-    /// RESIDENT_BLOCKS: device blocks from KV events, or the router's prediction in approximate
-    /// modes. Refreshed off the request path, unweighted, and not clamped to capacity; 0 also covers
-    /// ranks with no data yet. None means access was not requested or the host has no fresh counts.
+    /// Blocks the router's indexer holds for this worker rank as of the last event it applied, only
+    /// when this component declared RESIDENT_BLOCKS: device blocks from KV events, or the router's
+    /// prediction in approximate modes. Unweighted and not clamped to capacity. None means access
+    /// was not requested, the host has no local indexer, or the indexer has not seen the rank or
+    /// has removed it.
     pub fn resident_blocks(self) -> Option<u64> {
         if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
             return None;
         }
         self.cache_snapshot
             .resident_blocks
-            .map(|counts| counts.get(self.data.worker))
+            .and_then(|counts| counts.get(self.data.worker))
     }
 }
 
@@ -396,6 +397,6 @@ impl<'a> WorkerInputView<'a> {
         let counts = self.resident_blocks?;
         self.candidates
             .get(row)
-            .map(|candidate| counts.get(candidate.worker))
+            .and_then(|candidate| counts.get(candidate.worker))
     }
 }

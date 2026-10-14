@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
-use crate::indexer::{RESIDENT_BLOCK_COUNTS_POLL_INTERVAL, ResidentBlockCountsHandle};
+use crate::indexer::ResidentBlockCountsHandle;
 use crate::plugins::worker_selection::WorkerInputs;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
@@ -346,12 +346,7 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                if let Some(counts) = poll_resident_block_counts(
-                    &key,
-                    inputs,
-                    &indexer,
-                    self.cancel_token.child_token(),
-                ) {
+                if let Some(counts) = track_resident_blocks(&key, inputs, &indexer) {
                     selector = selector.with_resident_block_counts(counts);
                 }
                 let scheduler = LocalScheduler::new(
@@ -438,19 +433,17 @@ impl SelectionCore {
     }
 }
 
-/// Polls `indexer` for a policy that reads resident block counts. Warns when the partition has
+/// Starts live resident block counts for a policy that reads them. Warns when the partition has
 /// no local indexer, since those components can only ever read `None`.
-pub(super) fn poll_resident_block_counts(
+pub(super) fn track_resident_blocks(
     key: &RoutingPartitionId,
     inputs: WorkerInputs,
     indexer: &Indexer,
-    cancel: CancellationToken,
 ) -> Option<ResidentBlockCountsHandle> {
     if !inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
         return None;
     }
-    let counts =
-        indexer.spawn_resident_block_counts_poller(RESIDENT_BLOCK_COUNTS_POLL_INTERVAL, cancel);
+    let counts = indexer.track_resident_blocks();
     if counts.is_none() {
         tracing::warn!(
             partition = %key,

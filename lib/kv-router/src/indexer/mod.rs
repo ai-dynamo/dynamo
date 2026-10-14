@@ -96,7 +96,8 @@ pub use lower_tier_indexers::*;
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;
-pub(crate) use resident_blocks::*;
+pub use resident_blocks::ResidentBlockCountsHandle;
+pub(crate) use resident_blocks::{ResidentBlockCounts, ResidentBlockTracker};
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;
