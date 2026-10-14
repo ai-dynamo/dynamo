@@ -1126,6 +1126,15 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
         );
     }
 
+    if let Ok(timings) = source.get::<Arc<crate::protocols::common::ttft::TtftTimings>>(
+        crate::protocols::common::ttft::TTFT_CONTEXT_KEY,
+    ) {
+        target.insert(
+            crate::protocols::common::ttft::TTFT_CONTEXT_KEY,
+            Arc::clone(timings.as_ref()),
+        );
+    }
+
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
     }
@@ -1308,6 +1317,7 @@ async fn completions_single(
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
+    response_collector.attach_ttft_timeline(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1602,6 +1612,7 @@ async fn completions_batch(
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
+    response_collector.attach_ttft_timeline(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -3590,6 +3601,7 @@ async fn chat_completions(
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
+    response_collector.attach_ttft_timeline(&mut request);
 
     let annotations = request.annotations();
 
@@ -6527,6 +6539,18 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn completion_batch_child_shares_parent_ttft_timeline() {
+        use crate::protocols::common::ttft::{TTFT_CONTEXT_KEY, TtftTimings};
+        let timeline = Arc::new(TtftTimings::new(std::time::Instant::now()));
+        let mut source = Context::new(());
+        source.insert(TTFT_CONTEXT_KEY, timeline.clone());
+        let mut child = Context::new(());
+        copy_context_metadata(&source, &mut child);
+        let copied = child.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY).unwrap();
+        assert!(Arc::ptr_eq(copied.as_ref(), &timeline));
     }
 
     #[test]

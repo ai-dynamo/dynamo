@@ -579,6 +579,8 @@ pub mod llm {
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_TTFT_STAGE: &str = "DYN_METRICS_TTFT_STAGE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
         /// Comma-separated inter-token latency histogram bucket boundaries.
         pub const DYN_METRICS_ITL_BUCKETS: &str = "DYN_METRICS_ITL_BUCKETS";
@@ -1189,6 +1191,7 @@ mod tests {
             llm::metrics::DYN_METRICS_INPUT_SEQUENCE,
             llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
             llm::metrics::DYN_METRICS_TTFT,
+            llm::metrics::DYN_METRICS_TTFT_STAGE,
             llm::metrics::DYN_METRICS_ITL,
             llm::metrics::DYN_METRICS_ITL_BUCKETS,
             llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,

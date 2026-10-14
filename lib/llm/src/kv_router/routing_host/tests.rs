@@ -164,6 +164,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         Some(selection.reservation),
         None,
         &request(),
+        RequestPhase::Aggregated,
     );
     assert_eq!(guard.retarget_worker(1), Some(1));
     guard.abort().await;
@@ -686,6 +687,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
             selected_router_tokens: 0,
         }),
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -747,6 +749,7 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
             selected_router_tokens: 60,
         }),
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -844,6 +847,7 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
             selected_router_tokens: 1,
         }),
         None,
+        RequestPhase::Prefill,
     );
     drop(permit);
     let _permit = tracker.set_phase(RequestPhase::Decode).await;
@@ -944,6 +948,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         &request(),
         None,
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -994,6 +999,7 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         &request(),
         None,
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -1036,6 +1042,7 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         &request(),
         None,
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -1095,6 +1102,7 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
         &request(),
         None,
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -1145,6 +1153,7 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         &request(),
         None,
         None,
+        RequestPhase::Aggregated,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -1754,7 +1763,7 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
     .await;
 
     let error = router
-        .dispatch_selection(request, selection, guard, &CleanupBudget::default())
+        .dispatch_selection(request, selection, guard, &CleanupBudget::default(), None)
         .await
         .expect_err("aggregated dispatch must still be cancelled before it is issued");
     assert!(match_error_chain(
@@ -2629,7 +2638,8 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
                 failed_request,
                 failed_selection,
                 failed_dispatch_guard,
-                &CleanupBudget::default()
+                &CleanupBudget::default(),
+                None,
             )
             .await
             .is_err()
@@ -2646,8 +2656,14 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     assert_eq!(metrics.requests_started_total.get(), 3);
     assert_eq!(metrics.requests_total.get(), 1);
 
-    let mut builtin_guard =
-        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
+    let mut builtin_guard = RequestGuard::new_builtin(
+        Arc::clone(&metrics),
+        7,
+        None,
+        None,
+        &request(),
+        RequestPhase::Aggregated,
+    );
     assert_eq!(metrics.requests_started_total.get(), 4);
     builtin_guard.abort().await;
     drop(builtin_guard);

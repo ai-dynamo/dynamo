@@ -63,6 +63,41 @@ For example, keep the default at `info` and enable trace output for the system-s
 export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 ```
 
+## Per-Request First-Token Log
+
+For HTTP chat and text completion requests, the frontend emits one INFO event when it first observes a
+nonzero output token count. The target is `dynamo_frontend::ttft` and the message is
+`frontend first token`. Requests that end, fail, or are canceled before that observation do not
+emit the event. Later tokens do not emit additional TTFT events.
+
+The event contains the canonical HTTP context `request_id`, `model`, `ttft_ms`, and 17 numeric stage
+durations in milliseconds. Field names use `<stage>_ms` for an empty phase and
+`<stage>_<phase>_ms` otherwise, such as `template_tokenize_ms`, `multimodal_prepare_ms`,
+`kv_route_prefill_ms`, `backend_first_response_decode_ms`, and
+`backend_overlap_prefill_decode_ms`. All stage/phase combinations are present, including zeros for
+unused stages. These frozen values match the
+[TTFT stage histogram](metrics-catalog.mdx#ttft-stage-durations), and their sum equals `ttft_ms`,
+subject to floating-point rounding.
+
+The default INFO level includes these events. To disable them while retaining metrics and other
+INFO logs, set:
+
+```bash
+export DYN_LOG='info,dynamo_frontend::ttft=off'
+```
+
+To retain these events with a WARN default, set:
+
+```bash
+export DYN_LOG='warn,dynamo_frontend::ttft=info'
+```
+
+Set `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for machine-readable records; duration fields remain JSON
+numbers. Readable and JSONL formats use the same filters. TOML `log_filters` entries are applied
+after `DYN_LOG`, so an entry for the same target overrides the environment directive. The file
+selected by `DYN_LOGGING_CONFIG_PATH` overrides matching entries in `/opt/dynamo/etc/logging.toml`.
+More specific target filters take precedence over broader prefixes.
+
 ## OTLP Export
 
 `OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Configure a

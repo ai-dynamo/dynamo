@@ -73,6 +73,7 @@ use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
+use crate::protocols::common::ttft::{TTFT_CONTEXT_KEY, TtftStage, TtftTimings};
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{
@@ -1565,6 +1566,16 @@ fn attach_image_cache_scope_from_context(
     }
 }
 
+/// Retain the response generator's tracker while sharing the HTTP first-token timeline.
+fn attach_ttft_tracker<T: Send + Sync + 'static>(
+    tracker: &RequestTracker,
+    context: &PipelineContext<T>,
+) {
+    if let Ok(timings) = context.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY) {
+        tracker.set_ttft(Arc::clone(timings.as_ref()));
+    }
+}
+
 fn attach_request_context_metadata(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
@@ -3041,6 +3052,9 @@ impl OpenAIPreprocessor {
 
         let template_start = Instant::now();
         let formatted_prompt = {
+            let _ttft_stage = tracker
+                .and_then(RequestTracker::ttft)
+                .map(|timings| timings.start_span(TtftStage::TemplateTokenize));
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
             off_runtime(|| self.apply_template(request))
                 .with_context(|| "Failed to apply prompt template")?
@@ -3071,6 +3085,7 @@ impl OpenAIPreprocessor {
                 &mut builder,
                 formatted_prompt.as_ref().map(RenderedPrompt::as_str),
                 &token_ids,
+                tracker,
             )
             .await
             .with_context(|| "Failed to gather multimodal data")?;
@@ -3580,6 +3595,7 @@ impl OpenAIPreprocessor {
                 builder,
                 formatted_prompt,
                 token_ids,
+                None,
             )
             .await?;
         Ok(entries
@@ -3607,6 +3623,7 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
         token_ids: &[crate::protocols::TokenIdType],
+        tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<MmRoutingEntry>, Option<usize>)> {
         // `token_ids` is only consumed by exact MM-routing construction below.
         #[cfg(not(feature = "mm-routing"))]
@@ -3659,6 +3676,7 @@ impl OpenAIPreprocessor {
             return Ok((Vec::new(), None));
         };
         let has_media_loader = self.media_loader.is_some();
+        let mut ttft_multimodal = None;
 
         let message_order = self.formatter.media_message_order(request);
         for index in 0..messages.len() {
@@ -3670,6 +3688,11 @@ impl OpenAIPreprocessor {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
                     continue;
                 };
+                if ttft_multimodal.is_none() {
+                    ttft_multimodal = tracker
+                        .and_then(RequestTracker::ttft)
+                        .map(|timings| timings.start_span(TtftStage::MultimodalPrepare));
+                }
 
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
@@ -4018,6 +4041,11 @@ impl OpenAIPreprocessor {
                     .expect("multimodal extra_args must be an object");
                 extra_args_obj.extend(backend_extra_args);
             }
+
+            #[cfg(feature = "mm-routing")]
+            let _ttft_routing = tracker
+                .and_then(RequestTracker::ttft)
+                .map(|timings| timings.start_span(TtftStage::MmRoutingBuild));
 
             // Build and install routing info + worker hashes atomically. If any
             // mixed-media precondition misses, neither side receives exact keys
@@ -4704,6 +4732,9 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&RenderedPrompt>,
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
+        let _ttft_stage = tracker
+            .and_then(RequestTracker::ttft)
+            .map(|timings| timings.start_span(TtftStage::TemplateTokenize));
         let mut annotations = HashMap::new();
         let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
         // match request type before any conversion/processing
@@ -7671,7 +7702,9 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
-        let tracker = Some(response_generator.tracker());
+        let request_tracker = response_generator.tracker();
+        attach_ttft_tracker(&request_tracker, &context);
+        let tracker = Some(request_tracker);
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
@@ -7885,7 +7918,9 @@ impl
         // create a response generator
         let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
-        let tracker = Some(response_generator.tracker());
+        let request_tracker = response_generator.tracker();
+        attach_ttft_tracker(&request_tracker, &context);
+        let tracker = Some(request_tracker);
         // convert the chat completion request to a common completion request
         let mut builder = self.builder_with_lora(
             &request,
@@ -8523,7 +8558,7 @@ mod extra_args_media_copy_tests {
             .sampling_options(Default::default())
             .output_options(Default::default());
         preprocessor
-            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[], None)
             .await
             .unwrap();
         let result = builder.build().unwrap();
@@ -12021,7 +12056,7 @@ mod tests {
             .output_options(Default::default());
 
         let (routing_entries, _) = preprocessor
-            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[], None)
             .await
             .unwrap();
         let preprocessed = builder.build().unwrap();
@@ -15960,5 +15995,89 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+}
+
+#[cfg(test)]
+mod ttft_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct RecordingBackend(Mutex<Vec<Arc<RequestTracker>>>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for RecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let wire = serde_json::to_value(request.content()).unwrap();
+            assert!(wire.get("tracker").is_none());
+            assert!(wire.get("ttft").is_none());
+            self.0
+                .lock()
+                .unwrap()
+                .push(request.tracker.clone().unwrap());
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                request.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn native_chat_and_completion_share_http_ttft_with_the_router() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let backend = Arc::new(RecordingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = backend.clone();
+
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let chat_timeline = Arc::new(TtftTimings::new(Instant::now()));
+        let mut chat_context = PipelineContext::new(chat);
+        chat_context.insert(TTFT_CONTEXT_KEY, chat_timeline.clone());
+        let chat_stream = Operator::generate(preprocessor.as_ref(), chat_context, next.clone())
+            .await
+            .unwrap();
+        drop(chat_stream);
+
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "prompt": "Hello", "max_tokens": 1
+        }))
+        .unwrap();
+        let completion_timeline = Arc::new(TtftTimings::new(Instant::now()));
+        let mut completion_context = PipelineContext::new(completion);
+        completion_context.insert(TTFT_CONTEXT_KEY, completion_timeline.clone());
+        let completion_stream = Operator::generate(preprocessor.as_ref(), completion_context, next)
+            .await
+            .unwrap();
+        drop(completion_stream);
+
+        let trackers = backend.0.lock().unwrap();
+        assert_eq!(trackers.len(), 2);
+        for (tracker, timeline) in trackers.iter().zip([chat_timeline, completion_timeline]) {
+            assert!(Arc::ptr_eq(tracker.ttft().unwrap(), &timeline));
+            let stages = timeline.finish(Instant::now());
+            assert!(stages[TtftStage::TemplateTokenize as usize] > Duration::ZERO);
+            assert_eq!(
+                stages[TtftStage::MultimodalPrepare as usize],
+                Duration::ZERO
+            );
+            assert_eq!(stages[TtftStage::MmRoutingBuild as usize], Duration::ZERO);
+        }
     }
 }

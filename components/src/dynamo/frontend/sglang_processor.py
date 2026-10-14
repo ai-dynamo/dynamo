@@ -14,6 +14,7 @@ import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -42,6 +43,7 @@ from .sglang_prepost import (
 )
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
+from .ttft import ttft_stage
 from .utils import (
     PreprocessError,
     as_error_envelope,
@@ -316,6 +318,25 @@ class SglangPreprocessWorkerResult:
     # a reasoning parser in that case so the pool path matches the inline
     # path byte-for-byte.
     effective_reasoning_parser_name: str | None = None
+    # Same-host monotonic timestamps cross the process boundary without
+    # serializing the native request context.
+    template_tokenize_intervals_ns: list[tuple[int, int]] | None = None
+
+
+class _WorkerPreprocessTiming:
+    """Collect template boundaries in the preprocessing process pool."""
+
+    def __init__(self) -> None:
+        self.intervals_ns: list[tuple[int, int]] = []
+
+    @contextmanager
+    def start_ttft_stage(self, stage: str):
+        assert stage == "template_tokenize"
+        start_ns = time.monotonic_ns()
+        try:
+            yield
+        finally:
+            self.intervals_ns.append((start_ns, time.monotonic_ns()))
 
 
 def _init_worker(
@@ -353,8 +374,10 @@ def _preprocess_worker(
     request: dict[str, Any],
     model_name: str,
     eos_token_ids: list[int] | None,
+    record_ttft_timing: bool = False,
 ) -> SglangPreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
+    timing = _WorkerPreprocessTiming() if record_ttft_timing else None
     pre = preprocess_chat_request(
         request,
         tokenizer=_w_tokenizer,
@@ -366,6 +389,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
+        context=timing,
     )
 
     n = request.get("n", 1)
@@ -397,6 +421,7 @@ def _preprocess_worker(
         force_reasoning=pre.force_reasoning,
         effective_reasoning_parser_name=effective_reasoning_parser_name,
         named_zero_arg_tool=pre.named_zero_arg_tool,
+        template_tokenize_intervals_ns=timing.intervals_ns if timing else None,
     )
 
 
@@ -618,18 +643,20 @@ class SglangProcessor:
             if self.debug_perf:
                 t0 = time.monotonic()
 
-            pre = preprocess_chat_request(
-                request,
-                tokenizer=self.tokenizer,
-                tool_call_parser_name=self.tool_call_parser_name,
-                reasoning_parser_name=self.reasoning_parser_name,
-                exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
-                template_force_reasoning=self.template_force_reasoning,
-                default_thinking_mode=self.default_thinking_mode,
-                structural_tag_mode=self.structural_tag_mode,
-                structural_tag_scope=self.structural_tag_scope,
-                structural_tag_schema=self.structural_tag_schema,
-            )
+            with ttft_stage(context, "python_preprocess"):
+                pre = preprocess_chat_request(
+                    request,
+                    tokenizer=self.tokenizer,
+                    tool_call_parser_name=self.tool_call_parser_name,
+                    reasoning_parser_name=self.reasoning_parser_name,
+                    exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+                    template_force_reasoning=self.template_force_reasoning,
+                    default_thinking_mode=self.default_thinking_mode,
+                    structural_tag_mode=self.structural_tag_mode,
+                    structural_tag_scope=self.structural_tag_scope,
+                    structural_tag_schema=self.structural_tag_schema,
+                    context=context,
+                )
 
             if self.debug_perf:
                 t1 = time.monotonic()
@@ -702,17 +729,36 @@ class SglangProcessor:
         # --- Phase 1: Preprocess (semaphore held) ---
         assert self._worker_semaphore is not None
         assert self.preprocess_pool is not None
+        record_stage = getattr(context, "record_ttft_stage_ago", None)
         try:
-            async with self._worker_semaphore:
-                future = self.preprocess_pool.submit(
-                    _preprocess_worker,
-                    request,
-                    request["model"],
-                    self.eos_token_ids,
-                )
-                preproc_result: SglangPreprocessWorkerResult = (
-                    await asyncio.wrap_future(future)
-                )
+            with ttft_stage(context, "python_preprocess"):
+                with ttft_stage(context, "preprocess_queue"):
+                    await self._worker_semaphore.acquire()
+                try:
+                    future = self.preprocess_pool.submit(
+                        _preprocess_worker,
+                        request,
+                        request["model"],
+                        self.eos_token_ids,
+                        record_stage is not None,
+                    )
+                    preproc_result: SglangPreprocessWorkerResult = (
+                        await asyncio.wrap_future(future)
+                    )
+                finally:
+                    self._worker_semaphore.release()
+                if record_stage is not None:
+                    for start_ns, end_ns in (
+                        preproc_result.template_tokenize_intervals_ns or ()
+                    ):
+                        # monotonic_ns is shared across processes on this host.
+                        # Re-anchor immediately before crossing into Rust.
+                        now_ns = time.monotonic_ns()
+                        record_stage(
+                            "template_tokenize",
+                            (now_ns - start_ns) / 1_000_000_000,
+                            (now_ns - end_ns) / 1_000_000_000,
+                        )
         except InvalidArgument:
             raise
         except PreprocessError as exc:
