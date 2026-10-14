@@ -27,6 +27,8 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     use clap::Parser;
     use dynamo_sidecar_common::SidecarStartupError;
     let args = args::Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
+    let (engine, config) =
+        TrtllmSidecarEngine::from_parsed(args.clone()).map_err(SidecarStartupError::from)?;
     let bootstrap = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -44,8 +46,6 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     if let Some(node) = metadata.filter(|node| !node.leader) {
         headless::run(args, node)
     } else {
-        let (engine, config) =
-            TrtllmSidecarEngine::from_parsed(args).map_err(SidecarStartupError::from)?;
         dynamo_sidecar_common::run((
             config.runtime.clone(),
             std::future::ready(Ok((engine, config))),
