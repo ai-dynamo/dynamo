@@ -1694,6 +1694,13 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 @dataclass
 class _DecodeWorkerLifecycle:
+    """Owns the engine and handler of a decode or prefill worker.
+
+    On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
+    non-daemon child, so leaving it to interpreter exit can block the main
+    process forever in multiprocessing's exit-time join.
+    """
+
     engine_client: Optional[AsyncLLM] = None
     vllm_config: Optional[VllmConfig] = None
     handler: Optional[BaseWorkerHandler] = None
@@ -2595,17 +2602,18 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        try:
-            await self._run_prefill_worker(
-                runtime,
-                config,
-                shutdown_event,
-                shutdown_endpoints,
-                snapshot_engine,
-            )
-        except BaseException:
-            await self.state_agent_lifecycle.close()
-            raise
+        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            try:
+                await self._run_prefill_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine=snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
 
     async def _run_prefill_worker(
         self,
@@ -2613,11 +2621,10 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult],
+        lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
-        """
-        Instantiate and serve
-        """
+        """Initialize and serve a prefill worker."""
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -2672,6 +2679,10 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        # Owned only after the snapshot sync, which shuts the engine down itself
+        # on failure; from here on any exit shuts it down through the lifecycle.
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         _, dp_size = get_dp_range_for_worker(vllm_config)
@@ -2700,6 +2711,7 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -2863,10 +2875,6 @@ class WorkerFactory:
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
-        finally:
-            logger.debug("Cleaning up prefill worker")
-            await self.state_agent_lifecycle.close()
-            handler.cleanup()
 
     async def _maybe_get_encode_worker_client(
         self, runtime: DistributedRuntime, config: Config

@@ -1711,6 +1711,71 @@ async def test_failed_sync_fails_the_restore_before_registration_and_shuts_down_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["serve_returns", "register_raises"])
+async def test_prefill_exit_shuts_down_the_engine_after_withdrawing_state_agent(
+    outcome: str, restore_path_stubs, monkeypatch
+):
+    """Every prefill exit shuts EngineCore down explicitly.
+
+    ``serve_returns`` is the SIGINT/SIGTERM path: ``runtime.shutdown()`` makes
+    the serve tasks return. EngineCore is a non-daemon child, so without the
+    explicit shutdown the process blocks at interpreter exit joining it.
+    """
+    calls: list[str] = []
+    state_agent_lifecycle = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
+    )
+    (engine_setup, _stat_logger), engine_client = _restore_snapshot_engine()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    handler = Mock(embedding_cache_manager=None)
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler", Mock(return_value=handler)
+    )
+    startup_error = RuntimeError("prefill registration failed")
+    register = AsyncMock(
+        side_effect=startup_error if outcome == "register_raises" else None
+    )
+    factory = _make_factory(
+        state_agent_lifecycle=state_agent_lifecycle,
+        setup_vllm_engine_fn=Mock(return_value=engine_setup),
+        register_vllm_model_fn=register,
+    )
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    endpoint = _restored_endpoint()
+    endpoint.serve_endpoint = AsyncMock(return_value=None)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        model="m",
+        served_model_name="m",
+        enable_rl=False,
+        enable_multimodal=False,
+        frontend_decoding=False,
+        use_vllm_tokenizer=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    shutdown_event = asyncio.Event()
+
+    if outcome == "register_raises":
+        with pytest.raises(RuntimeError) as exc_info:
+            await factory._create_prefill_worker(runtime, config, shutdown_event, [])
+        assert exc_info.value is startup_error
+        endpoint.serve_endpoint.assert_not_called()
+    else:
+        await factory._create_prefill_worker(runtime, config, shutdown_event, [])
+        endpoint.serve_endpoint.assert_awaited()
+
+    assert calls == ["state-agent", "handler", "engine"]
+    assert shutdown_event.is_set()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
 async def test_sync_or_shutdown_keeps_the_sync_error_when_shutdown_also_fails(
     caplog,
 ):
