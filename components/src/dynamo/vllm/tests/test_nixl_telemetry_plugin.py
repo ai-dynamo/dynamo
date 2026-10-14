@@ -26,6 +26,7 @@ _PLUGIN_NAME = "dynamo_nixl_telemetry"
 
 
 def test_installed_general_plugin_resolves_to_telemetry_helper():
+    """The installed wheel exposes the helper through vLLM's plugin group."""
     plugins = entry_points(group="vllm.general_plugins", name=_PLUGIN_NAME)
     assert len(plugins) == 1
     (plugin,) = plugins
@@ -39,6 +40,7 @@ def test_installed_general_plugin_resolves_to_telemetry_helper():
 def test_plugin_normalizes_inherited_worker_environment(
     monkeypatch, enable, expected_enable, expected_exporter
 ):
+    """Workers normalize inherited defaults while preserving explicit opt-in."""
     for name in (
         "NIXL_TELEMETRY_ENABLE",
         "NIXL_TELEMETRY_EXPORTER",
