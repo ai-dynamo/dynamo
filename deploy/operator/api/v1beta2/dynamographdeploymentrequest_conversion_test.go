@@ -26,6 +26,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 )
 
 func TestV1Beta1RoundTripUsesEnvelope(t *testing.T) {
@@ -87,12 +89,33 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "replay-search", Namespace: "default"},
 		Spec: DynamoGraphDeploymentRequestSpec{
-			ModelRef:  &ModelReference{Name: "Qwen/Qwen3-32B"},
-			Backends:  []Backend{BackendVLLM},
-			Hardware:  &HardwareSpec{},
-			Workload:  &WorkloadSpec{},
-			Objective: &ObjectiveSpec{},
-			Search:    &SearchSpec{},
+			Model:    &ModelSpec{Name: "Qwen/Qwen3-32B"},
+			Backends: []Backend{BackendVLLM, BackendSGLang},
+			Hardware: &HardwareSpec{
+				GPU: &GPUHardwareSpec{
+					SKU:    ptr.To("H100-SXM5-80GB"),
+					Budget: ptr.To(int32(8)),
+				},
+			},
+			Workload: &WorkloadSpec{
+				Static: &StaticWorkloadSpec{
+					ISL:             ptr.To(int32(4096)),
+					OSL:             ptr.To(int32(1024)),
+					NumRequestRatio: ptr.To(2.0),
+					RequestRate:     ptr.To(12.5),
+				},
+			},
+			Objective: &ObjectiveSpec{
+				Mode:    ObjectiveModePareto,
+				Metrics: []ObjectiveMetric{"ThroughputPerGPU", "TTFT"},
+				SLA:     &ObjectiveSLASpec{TTFTMs: ptr.To(2000.0), ITLMs: ptr.To(30.0)},
+			},
+			AISimulate: &AISimulateSpec{
+				Image:           "nvcr.io/nvidia/aisimulate:latest",
+				VersionOverride: "1.0.0",
+				Parameters:      &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
+			},
+			Recommendation: &RecommendationSpec{MaxCandidates: 3},
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
 			ObservedGeneration: 3,
@@ -172,8 +195,8 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 			name: "v1beta2 spec",
 			spoke: &DynamoGraphDeploymentRequest{
 				Spec: DynamoGraphDeploymentRequestSpec{
-					ModelRef: &ModelReference{Name: "Qwen/Qwen3-32B"},
-					V1Beta1:  &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
+					Model:   &ModelSpec{Name: "Qwen/Qwen3-32B"},
+					V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
 				},
 			},
 		},
@@ -219,6 +242,56 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 				t.Fatal("conversion accepted mixed native and envelope representations")
 			}
 		})
+	}
+}
+
+func TestNativeV1Beta2SpecFields(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Verify the request spec contains exactly the AISimulate-native fields plus the conversion envelope.")
+	specType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
+	got := make([]string, specType.NumField())
+	for i := range specType.NumField() {
+		got[i] = specType.Field(i).Name
+	}
+	want := []string{
+		"Model",
+		"Backends",
+		"Hardware",
+		"Workload",
+		"Objective",
+		"AISimulate",
+		"Recommendation",
+		"V1Beta1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("request spec fields = %v, want %v", got, want)
+	}
+
+	t.Log("Verify every native field is recognized and the envelope itself is not.")
+	tests := map[string]DynamoGraphDeploymentRequestSpec{
+		"model":          {Model: &ModelSpec{}},
+		"backends":       {Backends: []Backend{BackendVLLM}},
+		"hardware":       {Hardware: &HardwareSpec{}},
+		"workload":       {Workload: &WorkloadSpec{}},
+		"objective":      {Objective: &ObjectiveSpec{}},
+		"aisimulate":     {AISimulate: &AISimulateSpec{}},
+		"recommendation": {Recommendation: &RecommendationSpec{}},
+	}
+	for name, spec := range tests {
+		t.Run(name, func(t *testing.T) {
+			if !hasNativeV1Beta2Spec(spec) {
+				t.Fatalf("%s field was not recognized as native v1beta2 data", name)
+			}
+		})
+	}
+	if hasNativeV1Beta2Spec(DynamoGraphDeploymentRequestSpec{}) {
+		t.Fatal("empty spec was recognized as native v1beta2 data")
+	}
+	if hasNativeV1Beta2Spec(DynamoGraphDeploymentRequestSpec{
+		V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{}`)},
+	}) {
+		t.Fatal("v1beta1 envelope was recognized as native v1beta2 data")
 	}
 }
 
