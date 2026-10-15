@@ -50,6 +50,7 @@ from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.health_check import is_probe
+from dynamo.common.backend.push_egress import push_egress_capable
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -3694,6 +3695,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             ExternalEncoderHandoffConsumer
         ] = None
 
+    # Must stay outermost -- see dynamo.common.backend.push_egress.
+    @push_egress_capable
     async def generate(self, request, context):
         normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation
@@ -4282,6 +4285,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         self._multimodal_request_processor.initialize_prefill_handoff()
 
+    # Must stay outermost -- see dynamo.common.backend.push_egress.
+    @push_egress_capable
     async def generate(self, request, context):
         normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation with decode phase
