@@ -94,7 +94,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        # The engine is main; the Dynamo runtime below is a native sidecar.
         containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112

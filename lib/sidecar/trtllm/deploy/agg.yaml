@@ -44,7 +44,6 @@ spec:
     runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
-        # The engine is main; the Dynamo runtime below is a native sidecar.
         containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc0.dev202610090112
