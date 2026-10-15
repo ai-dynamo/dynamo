@@ -86,7 +86,7 @@ func selectRemotePartitions(
 // and sets it when the projection has local partitions. Without local partitions,
 // it sets an empty value only when envFrom sources could otherwise supply one;
 // Cyborg treats an empty value as no selection.
-func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
+func applyLocalPartitionIDs(container *corev1.Container, projection *Model) {
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)

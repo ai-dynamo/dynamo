@@ -58,7 +58,7 @@ func RenderNodeLocal(
 	plan *MaterializationPlan,
 	input RenderInput,
 ) (*WorkloadTemplates, error) {
-	projections := workload.modelProjections
+	projections := workload.models
 
 	// Keep the hybrid GPU clique before the workload's LPU roles.
 	hybrid := projections[0].pipeline == PipelineHybrid
@@ -141,9 +141,9 @@ func RenderNodeLocal(
 	// Canonical projections keep each component together; consume its last Agent instance.
 	var template corev1.PodTemplateSpec
 	for index, projection := range projections {
-		stage := projection.stage
+		stage := projection.componentName
 		agent := plan.Agents[index]
-		if index == 0 || stage != projections[index-1].stage {
+		if index == 0 || stage != projections[index-1].componentName {
 			template = input.Stages[stage]
 			var conductorSpec *corev1.PodSpec
 			if stage == conductorStage && conductor != nil {
@@ -181,13 +181,13 @@ func RenderNodeLocal(
 			continue
 		}
 		podSpec := template.Spec
-		if index+1 < len(projections) && stage == projections[index+1].stage {
+		if index+1 < len(projections) && stage == projections[index+1].componentName {
 			podSpec = *podSpec.DeepCopy()
 		}
 
 		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
+		annotations[lpxv1alpha1.PodModelAnnotation] = projection.name
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
 		replicas := int32(agent.Replicas)
@@ -258,8 +258,8 @@ func RenderNodeLocal(
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
 // specs. Agent and projection are nonnil, and projection has validated partitions;
 // nil conductor means no emitted launcher.
-func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) {
-	family := projection.configuredBuild.family
+func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *Model, configMapName, allocation string) {
+	family := projection.configuredBuild.topology
 	ensureLPUConfigVolume(agentPodSpec, configMapName)
 	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
 	if conductorPodSpec != nil {

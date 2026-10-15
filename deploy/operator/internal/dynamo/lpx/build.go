@@ -12,16 +12,6 @@ import (
 	"strings"
 )
 
-// BuildFamily identifies the physical LPU target family of a normalized build.
-type BuildFamily string
-
-const (
-	// BuildFamilyXT identifies the XT8888 LPU target family.
-	BuildFamilyXT BuildFamily = "xt8888"
-	// BuildFamilyHX identifies the HX16x8x2x3 LPU target family.
-	BuildFamilyHX BuildFamily = "hx16x8x2x3"
-)
-
 // Build is the registry's source-independent view of an LPU build.
 //
 // The validated compiler contract populates this shape before deployment code
@@ -32,8 +22,8 @@ type Build struct {
 	contractFormat buildContractFormat
 	// path is the absolute file or GCS reference of the build payload.
 	path string
-	// family is the physical LPU target family.
-	family BuildFamily
+	// topology owns the manifest-selected hardware behavior.
+	topology buildTopology
 	// hasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
 	hasCUDAPartitions bool
 	// partitions contains the normalized physical compiler partitions.

@@ -31,7 +31,7 @@ func TestPlanMaterializationBounds(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		models     int
-		projection *ModelProjection
+		projection *Model
 	}{
 		{name: "hybrid", models: 1, projection: hybridProjection},
 		{name: "LPU-only", models: 1, projection: lpuOnlyProjection},
@@ -40,17 +40,17 @@ func TestPlanMaterializationBounds(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Build independent projections without using component names in identities")
-			projections := make([]*ModelProjection, test.models)
+			projections := make([]*Model, test.models)
 			for index := range projections {
 				projection := *test.projection
-				projection.stage = strings.Repeat("component", 7)
+				projection.componentName = strings.Repeat("component", 7)
 				if test.models > 1 {
 					projection.pipeline = PipelineSpecDecode
 				}
 				projections[index] = &projection
 			}
 			workload := &Workload{
-				modelProjections:     projections,
+				models:               projections,
 				scalingGroupReplicas: 2496,
 			}
 			pcsName := strings.Repeat("a", MaxPodCliqueSetNameLength)
@@ -82,7 +82,7 @@ func TestPlanMaterializationBounds(t *testing.T) {
 
 			t.Log("Renaming authored components leaves every materialized identity unchanged")
 			for _, projection := range projections {
-				projection.stage = "short"
+				projection.componentName = "short"
 			}
 			renamed, err := workload.PlanNodeLocalMaterialization(pcsName)
 			require.NoError(t, err)
@@ -105,7 +105,7 @@ func TestPlanMaterializationBounds(t *testing.T) {
 func TestWorkloadNames(t *testing.T) {
 	t.Log("Project a real workload at the maximum scaling-group replica count")
 	projection := projectRenderFixture(t, PipelineSingle, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-	workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: maxWorkloadReplicas}
+	workload := &Workload{models: []*Model{projection}, scalingGroupReplicas: maxWorkloadReplicas}
 	for _, pcsName := range []string{"model", strings.Repeat("p", 26)} {
 		t.Run(pcsName, func(t *testing.T) {
 			t.Log("Keep shared-runtime resource names and the PCS identity")

@@ -93,7 +93,7 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	require.Len(t, spec.Partitions, 2)
 	require.Equal(t, int64(0), spec.Partitions[0].CompilerPartitionID)
 	require.Equal(t, 4, projection.agentReplicas)
-	data := resolvedPartitionData([]*ModelProjection{projection})
+	data := resolvedPartitionData([]*Model{projection})
 	require.Equal(t, "0\n1", data["partition_ids"])
 	require.Equal(t, "0\n2", data["partition_node_offsets"])
 }
@@ -126,7 +126,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 
 	t.Log("Forward the selected stages' opaque names unchanged")
 
-	require.NotContains(t, resolvedPartitionData([]*ModelProjection{projection}), "topologies")
+	require.NotContains(t, resolvedPartitionData([]*Model{projection}), "topologies")
 }
 
 func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T) {
@@ -156,7 +156,7 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	require.Equal(t, spec.Partitions[1].ID, spec.PropSyncConnectors[0].ToPartitionID)
 
 	t.Log("Collapse only the Agent runtime projection of the selected chain")
-	data := resolvedPartitionData([]*ModelProjection{projection})
+	data := resolvedPartitionData([]*Model{projection})
 	require.Equal(t, "7\n11", data["partition_ids"])
 	require.Equal(t, "9\n8", data["nodes_per_partition"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
@@ -212,7 +212,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	}
 	require.Len(t, spec.PropSyncConnectors, 2)
 	require.Equal(t, 3, projection.agentReplicas)
-	data := resolvedPartitionData([]*ModelProjection{projection})
+	data := resolvedPartitionData([]*Model{projection})
 	require.Equal(t, "0", data["partition_ids"])
 	require.Equal(t, "3", data["nodes_per_partition"])
 	require.Equal(t, "part-0", data["partition_paths"])
@@ -241,7 +241,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	require.Equal(t, 2, projection.agentReplicas)
 
 	t.Log("Keep both physical Agent endpoints and the original root topology")
-	data := resolvedPartitionData([]*ModelProjection{projection})
+	data := resolvedPartitionData([]*Model{projection})
 	require.Equal(t, "2", data["nodes_per_partition"])
 	require.Equal(t, "0", data["partition_node_offsets"])
 	require.Equal(t, 2, projection.configuredBuild.partitions[0].effectiveNodeCount())

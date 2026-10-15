@@ -93,7 +93,7 @@ func resolveWorkload(
 		snapshot *Build
 		pipeline Pipeline
 
-		projections = make([]*ModelProjection, 0, len(components))
+		projections = make([]*Model, 0, len(components))
 	)
 
 	for _, stage := range components {
@@ -137,7 +137,7 @@ func resolveWorkload(
 		// Project the component once into the resolver-owned aggregate destination.
 		hasConductor := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil
 		modelNames := expandedModelNames(len(components), hasConductor, int(ptr.Deref(stage.Replicas, 1)))
-		intent := ModelProjectionInput{
+		intent := modelProjectionInput{
 			Pipeline:        pipeline,
 			Models:          modelNames,
 			RuntimeBuildRef: model.BuildID,
@@ -157,7 +157,7 @@ func resolveWorkload(
 
 		// Retain the authored stage association before acquiring the next component.
 		for _, projection := range componentProjections {
-			projection.stage = stage.ComponentName
+			projection.componentName = stage.ComponentName
 		}
 		projections = projected
 	}
@@ -173,7 +173,7 @@ func resolveWorkload(
 	}
 	workload := &Workload{
 		conductorReplicas:    1,
-		modelProjections:     projections,
+		models:               projections,
 		digest:               digest,
 		scalingGroupReplicas: scalingGroupReplicas,
 	}

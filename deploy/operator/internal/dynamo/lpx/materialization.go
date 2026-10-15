@@ -81,10 +81,10 @@ func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*Materializatio
 	if w.Pipeline() == PipelineHybrid {
 		conductorTemplate, cyborgTemplate = "", conductorTemplateName
 	}
-	agents := make([]ExpectedAgent, 0, len(w.modelProjections))
-	for index, projection := range w.modelProjections {
+	agents := make([]ExpectedAgent, 0, len(w.models))
+	for index, projection := range w.models {
 		name := "agt"
-		if len(w.modelProjections) > 1 {
+		if len(w.models) > 1 {
 			name = fmt.Sprintf("agt%d", index)
 		}
 		agents = append(agents, ExpectedAgent{TemplateName: name, Replicas: projection.agentReplicas})

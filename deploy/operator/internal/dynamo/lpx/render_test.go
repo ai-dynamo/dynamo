@@ -29,17 +29,17 @@ const (
 	testTargetStageName     = "target"
 )
 
-func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*ModelProjection, input RenderInput) (*grovev1alpha1.PodCliqueSet, error) {
+func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model, input RenderInput) (*grovev1alpha1.PodCliqueSet, error) {
 	// Attach test projections to their authored stage without inventing templates.
 	for _, projection := range projections {
-		projection.stage = testRenderComponentName
+		projection.componentName = testRenderComponentName
 	}
 	digest, err := workloadSetDigest(projections)
 	if err != nil {
 		return nil, err
 	}
 	workload := &Workload{
-		modelProjections:     projections,
+		models:               projections,
 		digest:               digest,
 		scalingGroupReplicas: 1,
 	}
@@ -137,7 +137,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			}
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
-			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
+			rendered, err := renderSelectedForTest(pcs, []*Model{projection}, RenderInput{
 				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
 				Conductor: template.DeepCopy(),
 			})
@@ -154,7 +154,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				}
 			}
 			agent := namedClique(t, rendered, testAgentTemplateName)
-			require.Equal(t, projection.Model(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
+			require.Equal(t, projection.Name(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
 			require.Equal(t, projection.Digest().String(), agent.Annotations[WorkloadDigestAnnotation])
 			require.Equal(t, projection.CompilerSnapshotDigest(), agent.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 
@@ -205,7 +205,7 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	conductorPodSpec.Containers[0].Env = []corev1.EnvVar{{Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource}}
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
-	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
+	rendered, err := renderSelectedForTest(renderTestPCS(false), []*Model{projection}, RenderInput{
 		Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
 		Conductor: &corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()},
 	})
@@ -232,7 +232,7 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	require.Contains(t, agent.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
 		Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource,
 	})
-	require.Equal(t, projection.Model(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
+	require.Equal(t, projection.Name(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
 }
 
 func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
@@ -392,9 +392,9 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 }
 
-func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *ModelProjection {
+func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *Model {
 	t.Helper()
-	intent := ModelProjectionInput{
+	intent := modelProjectionInput{
 		Pipeline: pipeline,
 		Models:   []string{"default"}, RuntimeBuildRef: "model-build", Build: snapshot,
 	}

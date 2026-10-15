@@ -9,5 +9,7 @@
 // Builds target XT (XT8888) or HX (HX16x8x2x3). The scheduler API's V2 and
 // V3 workload modes denote these hardware families, respectively. Manifest v2
 // and deployment v1 are independent compiler schema revisions, both of which
-// can describe either hardware family.
+// can describe either hardware family. Both formats select hardware behavior from
+// explicit chip architecture; numeric fields define geometry, and topology names
+// are opaque identifiers used to constrain PropSync packing.
 package lpx

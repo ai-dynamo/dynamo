@@ -86,11 +86,11 @@ func acquireTestSnapshot(t *testing.T, buildDir string) *Build {
 	return snapshot
 }
 
-func projectTestBuild(t *testing.T, snapshot *Build, pipeline Pipeline) *ModelProjection {
+func projectTestBuild(t *testing.T, snapshot *Build, pipeline Pipeline) *Model {
 	t.Helper()
 
 	t.Log("Project the caller-owned normalized build for the selected pipeline")
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
+	projectionBatch, err := appendModelProjections(nil, modelProjectionInput{
 		Pipeline: pipeline, Models: []string{"default"}, Build: snapshot,
 	})
 	require.NoError(t, err)

@@ -21,14 +21,14 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 
 	for _, role := range []struct {
 		name           string
-		family         BuildFamily
+		family         buildTopology
 		devicesPerNode int
 		conductor      bool
 	}{
-		{name: "XT conductor", family: BuildFamilyXT, conductor: true},
-		{name: "HX conductor", family: BuildFamilyHX, conductor: true},
-		{name: "XT worker", family: BuildFamilyXT, devicesPerNode: 8},
-		{name: "HX worker", family: BuildFamilyHX, devicesPerNode: 16},
+		{name: "XT conductor", family: xtBuildTopology, conductor: true},
+		{name: "HX conductor", family: hxBuildTopology, conductor: true},
+		{name: "XT worker", family: xtBuildTopology, devicesPerNode: 8},
+		{name: "HX worker", family: hxBuildTopology, devicesPerNode: 16},
 	} {
 		for _, startup := range []struct {
 			name    string
@@ -173,16 +173,16 @@ func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
 func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 	for _, test := range []struct {
 		name     string
-		family   BuildFamily
+		family   buildTopology
 		pipeline Pipeline
 		local    bool
 	}{
-		{name: "XT Single GCS", family: BuildFamilyXT, pipeline: PipelineSingle},
-		{name: "HX Single local", family: BuildFamilyHX, pipeline: PipelineSingle, local: true},
-		{name: "XT hybrid local", family: BuildFamilyXT, pipeline: PipelineHybrid, local: true},
-		{name: "HX hybrid GCS", family: BuildFamilyHX, pipeline: PipelineHybrid},
-		{name: "XT multiple drafts local", family: BuildFamilyXT, pipeline: PipelineSpecDecode, local: true},
-		{name: "HX multiple drafts GCS", family: BuildFamilyHX, pipeline: PipelineSpecDecode},
+		{name: "XT Single GCS", family: xtBuildTopology, pipeline: PipelineSingle},
+		{name: "HX Single local", family: hxBuildTopology, pipeline: PipelineSingle, local: true},
+		{name: "XT hybrid local", family: xtBuildTopology, pipeline: PipelineHybrid, local: true},
+		{name: "HX hybrid GCS", family: hxBuildTopology, pipeline: PipelineHybrid},
+		{name: "XT multiple drafts local", family: xtBuildTopology, pipeline: PipelineSpecDecode, local: true},
+		{name: "HX multiple drafts GCS", family: hxBuildTopology, pipeline: PipelineSpecDecode},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Resolve each model from the registry reference and the runtime's custom mount")
@@ -192,16 +192,16 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 				count = 3
 				names = []string{"LPX_DRAFT_MODEL_PATH", "LPX_TARGET_MODEL_PATH"}
 			}
-			projections := make([]*ModelProjection, count)
+			projections := make([]*Model, count)
 			for index := range projections {
 				buildID := fmt.Sprintf("model-%d", index)
 				path := "gs://registry/" + buildID
 				if test.local {
 					path = "file:///operator-cache/" + buildID
 				}
-				projections[index] = &ModelProjection{
+				projections[index] = &Model{
 					pipeline: test.pipeline, runtimeBuildRef: buildID,
-					configuredBuild: Build{family: test.family, path: path},
+					configuredBuild: Build{topology: test.family, path: path},
 				}
 			}
 			want := []corev1.EnvVar{}
@@ -251,9 +251,9 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 	} {
 		t.Run(string(test.pipeline)+"/"+test.name, func(t *testing.T) {
 			t.Log("Keep the target reference invalid after a valid speculative draft")
-			projections := []*ModelProjection{{pipeline: test.pipeline, configuredBuild: Build{path: "gs://registry/model"}}}
+			projections := []*Model{{pipeline: test.pipeline, configuredBuild: Build{path: "gs://registry/model"}}}
 			if test.pipeline == PipelineSpecDecode {
-				projections = append(projections, &ModelProjection{pipeline: test.pipeline})
+				projections = append(projections, &Model{pipeline: test.pipeline})
 			}
 			projections[len(projections)-1].configuredBuild.path = "gs://registry/../outside"
 			container := corev1.Container{Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}

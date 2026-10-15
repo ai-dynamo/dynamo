@@ -64,7 +64,7 @@ func resolveNamedPipelineRequests(
 	dgdOwner := metav1.GetControllerOf(deployment)
 
 	// Model projections are already ordered (default, or draft0..draft7 then target).
-	projections := workload.ModelProjections()
+	projections := workload.Models()
 	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(projections)*int(replicas))
 	var missing []*lpxv1alpha1.LPUPipelineRequest
 
@@ -73,14 +73,14 @@ func resolveNamedPipelineRequests(
 			if projection.AgentReplicas() == 0 {
 				continue
 			}
-			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, workload.GroupName(), projection.Model(), replica)
+			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, workload.GroupName(), projection.Name(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
 					Annotations: map[string]string{
 						lpx.DeploymentNameAnnotation:                 deployment.Name,
-						pipelineRequestModelAnnotation:               projection.Model(),
+						pipelineRequestModelAnnotation:               projection.Name(),
 						lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
 						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 					},

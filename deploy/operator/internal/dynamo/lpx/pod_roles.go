@@ -23,14 +23,10 @@ const (
 // devicesPerNode is the positive device count from the manifest.
 func configureAgentScheduling(
 	agent *corev1.PodSpec,
-	targetFamily BuildFamily,
+	targetFamily buildTopology,
 	devicesPerNode int,
 ) {
-	// Model projection has already restricted the target family to XT or HX.
-	name := v2LPUResourceName
-	if targetFamily == BuildFamilyHX {
-		name = v3LPUResourceName
-	}
+	name := targetFamily.lpuResource()
 
 	// Bind the manifest's device count on main while preserving all other authored resources.
 	container := common.FindContainerByName(agent.Containers, commonconsts.MainContainerName)

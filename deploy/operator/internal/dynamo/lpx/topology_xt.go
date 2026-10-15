@@ -9,14 +9,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const xtProjectionVersion = "xt-node-local/v1"
 
 //nolint:gocyclo // XT projection validates one complete transformation.
-func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
+func (xtTopology) project(intent modelProjectionInput, transcript digestTranscript) (Model, error) {
 	configured := *intent.Build
 	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
 		intent.Pipeline == PipelineSpecDecode
@@ -26,7 +28,7 @@ func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
 	if usesResolvedRuntime {
 		if err := configured.selectXTRuntimePartitions(); err != nil {
-			return ModelProjection{}, fmt.Errorf("resolving configured XT build: %w", err)
+			return Model{}, fmt.Errorf("resolving configured XT build: %w", err)
 		}
 	}
 
@@ -43,7 +45,7 @@ func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript
 
 	partitions, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, &configured, partitions)
 	if err != nil {
-		return ModelProjection{}, err
+		return Model{}, err
 	}
 	if len(localPartitionIDs) > 0 {
 		encoded, _ := json.Marshal(localPartitionIDs)
@@ -57,7 +59,7 @@ func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript
 		compilerID := uint32(partition.sourcePartitionID)
 		shape, shapeErr := xtShape(partition)
 		if shapeErr != nil {
-			return ModelProjection{}, shapeErr
+			return Model{}, shapeErr
 		}
 		endpoints := int64(partition.effectiveNodeCount())
 		agentReplicas += int(endpoints)
@@ -69,7 +71,7 @@ func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript
 
 	connectors, err := xtConnectors(connectorBuild, partitions)
 	if err != nil {
-		return ModelProjection{}, err
+		return Model{}, err
 	}
 
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
@@ -105,7 +107,7 @@ func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript
 	}
 
 	transcript.field("allocation-metadata", allocationMetadata)
-	return ModelProjection{
+	return Model{
 		configuredBuild:    configured,
 		allocationMetadata: allocationMetadata,
 		partitions:         partitions,
@@ -174,4 +176,44 @@ func xtConnectors(
 		})
 	}
 	return connectors, nil
+}
+
+func (xtTopology) decodePartition(subject, topology string, raw topologyGeometry) (buildPartition, error) {
+	// Derive XT geometry from numeric manifest fields, never the topology name.
+	numChips, err := positiveManifestUInt32ToInt(subject+" numChips", raw.NumChips())
+	if err != nil {
+		return buildPartition{}, err
+	}
+	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", raw.DevicesPerNode())
+	if err != nil {
+		return buildPartition{}, err
+	}
+	if numChips > devicesPerNode && numChips%devicesPerNode != 0 {
+		return buildPartition{}, fmt.Errorf("%s has %d chips, not divisible by %d LPU devices per node", subject, numChips, devicesPerNode)
+	}
+	return buildPartition{topology: topology, numChips: numChips, devicesPerNode: devicesPerNode}, nil
+}
+
+// xtTopology describes XT8888 devices, called V2 by the scheduler wire API.
+type xtTopology struct{}
+
+func (xtTopology) String() string                   { return string(lpxv1alpha1.TargetFamilyXt8888) }
+func (xtTopology) target() lpxv1alpha1.TargetFamily { return lpxv1alpha1.TargetFamilyXt8888 }
+func (xtTopology) lpuResource() corev1.ResourceName { return v2LPUResourceName }
+func (xtTopology) projectionVersion() string        { return xtProjectionVersion }
+func (xtTopology) workloadMode(pipeline Pipeline) lpxv1alpha1.WorkloadMode {
+	if pipeline == PipelineHybrid {
+		return lpxv1alpha1.WorkloadModeV2StrictHybrid
+	}
+	return lpxv1alpha1.WorkloadModeV2LPUOnly
+}
+func (xtTopology) normalizePartitions(_ string, partitions []buildPartition, _ bool) error {
+	sort.Slice(partitions, func(i, j int) bool { return partitions[i].sourcePartitionID < partitions[j].sourcePartitionID })
+	return nil
+}
+func (xtTopology) partitionRequest(index int, partition buildPartition) lpxv1alpha1.PartitionRequest {
+	request := newPartitionRequest(index, partition)
+	shape, _ := xtShape(partition)
+	request.XtShape = &shape
+	return request
 }

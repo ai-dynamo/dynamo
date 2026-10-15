@@ -25,7 +25,7 @@ func TestApplyCyborgManifestPathPrecedesAuthoredReferences(t *testing.T) {
 	} {
 		t.Run(format.name, func(t *testing.T) {
 			t.Log("Define authored bindings that depend on the generated manifest location")
-			projection := &ModelProjection{contractFormat: format.kind, configuredBuild: Build{path: "file:///models/build"}}
+			projection := &Model{contractFormat: format.kind, configuredBuild: Build{path: "file:///models/build"}}
 			authored := []corev1.EnvVar{
 				{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},
 				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},

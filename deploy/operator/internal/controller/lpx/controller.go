@@ -369,9 +369,9 @@ func (r *graphReconciler) reconcileWorkloads(
 // The non-nil workload was resolved from the complete, non-nil DGD.
 func pipelineRequestDeadlineSeconds(dgd *v1beta1.DynamoGraphDeployment, workload *lpx.Workload) map[string]*int64 {
 	secondsByModel := make(map[string]*int64)
-	for _, projection := range workload.ModelProjections() {
-		if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
-			secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
+	for _, projection := range workload.Models() {
+		if scheduling := dgd.GetComponentByName(projection.Component()).LPX.Scheduling; scheduling != nil {
+			secondsByModel[projection.Name()] = scheduling.AttemptDeadlineSeconds
 		}
 	}
 	return secondsByModel

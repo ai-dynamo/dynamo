@@ -27,7 +27,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	buildDir := writeCompilerFixture(t, fixture)
 
 	t.Log("Project hybrid while keeping manifest-selected links independent of global prop sync")
-	intent := ModelProjectionInput{
+	intent := modelProjectionInput{
 		Pipeline: PipelineHybrid,
 		Models:   []string{"default"},
 		Build:    acquireTestSnapshot(t, buildDir),
@@ -35,7 +35,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection := projectionBatch[0]
-	digest, err := workloadSetDigest([]*ModelProjection{projection})
+	digest, err := workloadSetDigest([]*Model{projection})
 	require.NoError(t, err)
 	require.Equal(t, projection.Digest(), digest, "one model is the aggregate digest base case")
 
@@ -139,7 +139,7 @@ func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 			t.Log("Reject the selected chain at the projector boundary")
-			_, err := appendModelProjections(nil, ModelProjectionInput{
+			_, err := appendModelProjections(nil, modelProjectionInput{
 				Pipeline: PipelineSingle, Models: []string{"default"}, Build: normalized,
 			})
 			require.ErrorContains(t, err, test.wantErr)
@@ -156,7 +156,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
-	intent := ModelProjectionInput{
+	intent := modelProjectionInput{
 		Pipeline: PipelineSingle, Models: []string{"default"}, Build: snapshot,
 	}
 
@@ -259,7 +259,7 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	fixture.partitions[0].partitionShape = []uint32{16, 1, 1, 1}
 	buildDir := writeCompilerFixture(t, fixture)
 	firstSnapshot := acquireTestSnapshot(t, buildDir)
-	intent := ModelProjectionInput{
+	intent := modelProjectionInput{
 		Pipeline: PipelineSingle, Models: []string{"default"}, Build: firstSnapshot,
 	}
 	firstBatch, err := appendModelProjections(nil, intent)
@@ -299,7 +299,7 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	t.Log("Project each manifest extent and the updated runtime partition data")
 	require.Equal(t, []int64{16, 1, 1, 1}, *firstSpec.Partitions[0].Extent)
 	require.Equal(t, []int64{16, 2, 1, 1}, *secondSpec.Partitions[0].Extent)
-	data := resolvedPartitionData([]*ModelProjection{second})
+	data := resolvedPartitionData([]*Model{second})
 	require.Equal(t, "part-1", data["partition_paths"])
 
 	require.NotContains(t, data, "topologies")

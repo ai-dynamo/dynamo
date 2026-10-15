@@ -88,9 +88,9 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Construct one projection per configured model")
-			projections := make([]*ModelProjection, len(test.models))
+			projections := make([]*Model, len(test.models))
 			for index, model := range test.models {
-				projection := &ModelProjection{model: model}
+				projection := &Model{name: model}
 				if !test.allLocal {
 					projection.configuredBuild.partitions = []buildPartition{
 						{sourcePartitionID: 7, partPath: "part-7", numChips: 16, topology: "topology-7", devicesPerNode: 8},

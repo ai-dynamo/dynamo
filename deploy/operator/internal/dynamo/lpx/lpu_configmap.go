@@ -80,7 +80,7 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 	return mount.MountPath, nil
 }
 
-func resolvedPartitionData(projections []*ModelProjection) map[string]string {
+func resolvedPartitionData(projections []*Model) map[string]string {
 	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
 		"partition_node_offsets", "partition_paths"}
 
@@ -93,7 +93,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 		for index, partition := range projection.configuredBuild.partitions {
 			endpointCount := int64(partition.effectiveNodeCount())
 			row := [len(keys)]string{strconv.FormatInt(endpointCount, 10), strconv.Itoa(index),
-				strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10), projection.model,
+				strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10), projection.name,
 				strconv.FormatInt(offset, 10), partition.partPath}
 
 			// Preserve compiler order across the parallel runtime columns.

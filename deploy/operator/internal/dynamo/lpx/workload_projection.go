@@ -27,24 +27,10 @@ const (
 // intent.Build contains a normalized, non-nil build; Models is nonempty
 // and Pipeline is selected by the validated resolver. Source inputs are not mutated;
 // discard error results.
-func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
+func appendModelProjections(dst []*Model, intent modelProjectionInput) ([]*Model, error) {
 	// Family projections record their model-independent digest fields once.
-	var (
-		fields            bytes.Buffer
-		component         ModelProjection
-		projectionVersion string
-		err               error
-	)
-	switch intent.Build.family {
-	case BuildFamilyXT:
-		projectionVersion = xtProjectionVersion
-		component, err = projectXTComponent(intent, digestTranscript{&fields})
-	case BuildFamilyHX:
-		projectionVersion = hxProjectionVersion
-		component, err = projectHXComponent(intent, digestTranscript{&fields})
-	default:
-		return nil, fmt.Errorf("unsupported LPX target family %q", intent.Build.family)
-	}
+	var fields bytes.Buffer
+	component, err := intent.Build.topology.project(intent, digestTranscript{&fields})
 	if err != nil {
 		return nil, err
 	}
@@ -66,14 +52,14 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	component.pipeline = intent.Pipeline
 	for _, model := range intent.Models {
 		projection := component
-		projection.model = model
-		projection.digest = modelProjectionDigest(intent, projectionVersion, model, fields.Bytes())
+		projection.name = model
+		projection.digest = modelProjectionDigest(intent, intent.Build.topology.projectionVersion(), model, fields.Bytes())
 		dst = append(dst, &projection)
 	}
 	return dst, nil
 }
 
-func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
+func workloadSetDigest(projections []*Model) (WorkloadDigest, error) {
 	first := projections[0]
 	if len(projections) == 1 {
 		return first.digest, nil
@@ -82,14 +68,14 @@ func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
 	transcript := digestTranscript{hash}
 	transcript.field("schema", []byte(workloadSetDigestVersion))
 	for _, projection := range projections {
-		if projection.configuredBuild.family != first.configuredBuild.family {
+		if projection.configuredBuild.topology != first.configuredBuild.topology {
 			return WorkloadDigest{}, fmt.Errorf(
 				"LPX model projections have mixed target families %q and %q",
-				first.configuredBuild.family,
-				projection.configuredBuild.family,
+				first.configuredBuild.topology,
+				projection.configuredBuild.topology,
 			)
 		}
-		transcript.field("model", []byte(projection.model))
+		transcript.field("model", []byte(projection.name))
 		transcript.field("model-projection-digest", projection.digest[:])
 	}
 	return sumDigest(hash), nil
@@ -97,7 +83,7 @@ func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
 
 // modelProjectionDigest hashes one logical model's identity header followed by
 // its component's model-independent fields.
-func modelProjectionDigest(intent ModelProjectionInput, projectionVersion, model string, fields []byte) WorkloadDigest {
+func modelProjectionDigest(intent modelProjectionInput, projectionVersion, model string, fields []byte) WorkloadDigest {
 	hash := sha256.New()
 	transcript := digestTranscript{hash}
 	transcript.field("schema", []byte(modelProjectionDigestVersion))
@@ -106,7 +92,7 @@ func modelProjectionDigest(intent ModelProjectionInput, projectionVersion, model
 	// file-backed snapshot's ref contains its absolute checkout path.
 	transcript.field("build-content-id", []byte(intent.Build.contentID))
 	// Bind the family and pipeline directly; the pipeline already determines runtime mode.
-	transcript.field("family", []byte(intent.Build.family))
+	transcript.field("family", []byte(intent.Build.topology.String()))
 	transcript.field("pipeline", []byte(intent.Pipeline))
 	transcript.field("model", []byte(model))
 	_, _ = hash.Write(fields)
