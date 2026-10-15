@@ -350,7 +350,7 @@ class OmniHandler(BaseOmniHandler):
                 )
             except (ValueError, PIL.Image.DecompressionBombError) as e:
                 # Keep URLs and inline image data out of the client error.
-                raise ValueError("Failed to load input_reference") from e
+                raise InvalidArgument("Failed to load input_reference") from e
 
         try:
             inputs = await self.build_engine_inputs(

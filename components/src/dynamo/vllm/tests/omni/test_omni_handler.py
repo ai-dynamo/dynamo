@@ -568,7 +568,7 @@ class TestI2VEngineInputs:
             "input_reference": reference,
         }
 
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pytest.fail("Invalid reference must not yield a video response")
 
@@ -593,7 +593,7 @@ class TestI2VEngineInputs:
             "input_reference": f"data:image/png;base64,{encoded}",
         }
 
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pytest.fail("Invalid reference must not yield a video response")
 
