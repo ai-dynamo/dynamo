@@ -204,14 +204,67 @@ fn route_for_pool(
     fallback_idx.map(|idx| (idx / dp_size, idx % dp_size))
 }
 
+#[derive(Clone, Copy)]
+struct TurnPlacement {
+    rank: (usize, usize),
+    input_length: usize,
+    output_length: usize,
+}
+
+/// Prompt KV tokens the prefill worker must send to the decode rank, modeling a decode-side
+/// radix cache: a turn that stays on the rank holding the previous turn only needs the new
+/// tokens; a turn that moved (or a first turn) needs its whole context.
+#[derive(Debug, Default, serde::Serialize)]
+struct KvTransfer {
+    first_turn_tokens: u64,
+    stayed_turn_tokens: u64,
+    moved_turn_tokens: u64,
+    follow_up_turns: usize,
+    moved_turns: usize,
+}
+
+impl KvTransfer {
+    fn total_tokens(&self) -> u64 {
+        self.first_turn_tokens + self.stayed_turn_tokens + self.moved_turn_tokens
+    }
+
+    fn from_sessions(sessions: &BTreeMap<String, BTreeMap<usize, TurnPlacement>>) -> Self {
+        let mut transfer = Self::default();
+        for turns in sessions.values() {
+            let mut previous: Option<TurnPlacement> = None;
+            for turn in turns.values() {
+                match previous {
+                    None => transfer.first_turn_tokens += turn.input_length as u64,
+                    Some(prev) if prev.rank == turn.rank => {
+                        transfer.follow_up_turns += 1;
+                        transfer.stayed_turn_tokens += turn
+                            .input_length
+                            .saturating_sub(prev.input_length + prev.output_length)
+                            as u64;
+                    }
+                    Some(_) => {
+                        transfer.follow_up_turns += 1;
+                        transfer.moved_turns += 1;
+                        transfer.moved_turn_tokens += turn.input_length as u64;
+                    }
+                }
+                previous = Some(*turn);
+            }
+        }
+        transfer
+    }
+}
+
 struct Timeline {
     decode: Lanes,
     prefill: Lanes,
     steps: usize,
     placed: usize,
     unplaced: usize,
-    /// Decode (worker, rank) per turn index per session, to count turns that moved rank.
-    session_turn_ranks: BTreeMap<String, BTreeMap<usize, (usize, usize)>>,
+    /// Decode placement per turn index per session, to count turns that moved rank and the
+    /// prompt KV a decode radix cache would have to receive again.
+    session_turn_ranks: BTreeMap<String, BTreeMap<usize, TurnPlacement>>,
+    horizon_ms: f64,
     prefill_queue_wait_ms: Vec<f64>,
     /// Arrival → first token (ms) for every placed request; end-to-end TTFT incl. queueing.
     ttft_ms: Vec<f64>,
@@ -235,6 +288,7 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
         placed: 0,
         unplaced: 0,
         session_turn_ranks: BTreeMap::new(),
+        horizon_ms,
         prefill_queue_wait_ms: Vec::new(),
         ttft_ms: Vec::new(),
     };
@@ -275,7 +329,14 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
                 .session_turn_ranks
                 .entry(session_id.clone())
                 .or_default()
-                .insert(turn_index, decode_rank);
+                .insert(
+                    turn_index,
+                    TurnPlacement {
+                        rank: decode_rank,
+                        input_length: record.input_length,
+                        output_length: record.output_length,
+                    },
+                );
         }
         if let Some(first_token) = record.first_token_ms {
             timeline
@@ -573,6 +634,14 @@ struct Summary {
     /// Follow-up turns (turn_index > 0) and the fraction placed on a different decode rank than the previous turn.
     decode_follow_up_turns: usize,
     decode_turn_moved_fraction: f64,
+    /// Modeled decode-side radix cache and prefill→decode KV transfer (0 bytes/token = untimed).
+    decode_radix_cache: bool,
+    kv_bytes_per_token: usize,
+    kv_transfer_gbps: f64,
+    kv_transfer: KvTransfer,
+    kv_transfer_gb_total: f64,
+    kv_transfer_gb_per_follow_up_turn: f64,
+    kv_transfer_aggregate_gb_per_s: f64,
     /// Engine-sampled view (unique KV blocks, running requests); secondary.
     attention_wait_fraction_of_gpu_time_sampled: f64,
     mean_request_span_per_group: f64,
@@ -609,6 +678,17 @@ struct Args {
     decode_active_request_weight: f64,
     /// Session affinity per replay role; `--prefill-session-affinity off` / `--decode-session-affinity off`.
     session_affinity: ReplaySessionAffinity,
+    /// Decode engines keep a prefix cache and only receive the prompt KV they miss
+    /// (SGLang `--disaggregation-decode-enable-radix-cache`); off = whole prompt every turn.
+    decode_radix_cache: bool,
+    /// KV bytes per token and prefill→decode bandwidth (GB/s) for the modeled transfer delay;
+    /// 0 bytes/token leaves the handoff untimed.
+    kv_bytes_per_token: usize,
+    kv_transfer_gbps: f64,
+    /// `mooncake-delta` (default): each row after a session's first is that turn's new tokens,
+    /// accumulated onto the session's context by replay (AIPerf multi-turn exports);
+    /// `mooncake`: every row is a complete, independent prompt.
+    trace_format: TraceFileFormat,
     timing: Timing,
 }
 
@@ -670,6 +750,10 @@ fn parse_args() -> Result<Args> {
         sample_interval_ms: 50.0,
         decode_active_request_weight: 0.0,
         session_affinity: ReplaySessionAffinity::default(),
+        decode_radix_cache: true,
+        kv_bytes_per_token: 0,
+        kv_transfer_gbps: 50.0,
+        trace_format: TraceFileFormat::MooncakeDelta,
         timing: Timing {
             attention_fixed_ms: 1.5,
             attention_ms_per_kv_token: 1.25e-5,
@@ -722,6 +806,16 @@ fn parse_args() -> Result<Args> {
             "--decode-session-affinity" => {
                 args.session_affinity.decode = parse_on_off(&flag, &value()?)?
             }
+            "--decode-radix-cache" => args.decode_radix_cache = parse_on_off(&flag, &value()?)?,
+            "--kv-bytes-per-token" => args.kv_bytes_per_token = value()?.parse()?,
+            "--kv-transfer-gbps" => args.kv_transfer_gbps = value()?.parse()?,
+            "--trace-format" => {
+                args.trace_format = match value()?.as_str() {
+                    "mooncake" => TraceFileFormat::Mooncake,
+                    "mooncake-delta" => TraceFileFormat::MooncakeDelta,
+                    other => bail!("--trace-format expects mooncake|mooncake-delta, got {other}"),
+                }
+            }
             "--attention-fixed-ms" => args.timing.attention_fixed_ms = value()?.parse()?,
             "--attention-ms-per-kv-token" => {
                 args.timing.attention_ms_per_kv_token = value()?.parse()?
@@ -740,7 +834,10 @@ fn parse_args() -> Result<Args> {
                      [--disagg --prefill-dp-size N --decode-dp-size N --num-prefill-workers N --num-decode-workers N] \
                      [--num-gpu-blocks N] [--block-size N] [--trace-block-size N] [--max-num-seqs N] \
                      [--max-num-batched-tokens N] [--max-sim-time-ms MS] [--speedup X] \
-                     [--sample-interval-ms MS] [--decode-active-request-weight W] [timing flags]"
+                     [--sample-interval-ms MS] [--decode-active-request-weight W] \
+                     [--session-affinity on|off] [--prefill-session-affinity on|off] [--decode-session-affinity on|off] \
+                     [--decode-radix-cache on|off] [--kv-bytes-per-token N] [--kv-transfer-gbps X] \
+                     [--trace-format mooncake|mooncake-delta] [timing flags]"
                 );
                 std::process::exit(0);
             }
@@ -755,17 +852,28 @@ fn parse_args() -> Result<Args> {
 fn main() -> Result<()> {
     let args = parse_args()?;
     let engine_config = |dp_size: usize, worker_type: &str| -> Result<MockerConfig> {
+        let mut engine = serde_json::json!({
+            "backend": "vllm",
+            "worker_type": worker_type,
+            "block_size": args.block_size,
+            "num_gpu_blocks": args.num_gpu_blocks,
+            "max_num_seqs": args.max_num_seqs,
+            "max_num_batched_tokens": args.max_num_batched_tokens,
+            "enable_prefix_caching": worker_type != "decode" || args.decode_radix_cache,
+            "enable_chunked_prefill": true,
+        });
+        if args.kv_bytes_per_token > 0 {
+            engine["kv_transfer_bytes_per_token"] = args.kv_bytes_per_token.into();
+            engine["kv_transfer_bandwidth"] = args.kv_transfer_gbps.into();
+            engine["kv_transfer_timing_mode"] = if args.decode_radix_cache {
+                "destination_missing"
+            } else {
+                "full_prompt"
+            }
+            .into();
+        }
         let mut mocker = MockerConfig::from_value(serde_json::json!({
-            "engine": {
-                "backend": "vllm",
-                "worker_type": worker_type,
-                "block_size": args.block_size,
-                "num_gpu_blocks": args.num_gpu_blocks,
-                "max_num_seqs": args.max_num_seqs,
-                "max_num_batched_tokens": args.max_num_batched_tokens,
-                "enable_prefix_caching": true,
-                "enable_chunked_prefill": true,
-            },
+            "engine": engine,
             "dp_size": dp_size,
         }))?;
         mocker.perf_model = Arc::new(PerfModel::Ais {
@@ -824,7 +932,7 @@ fn main() -> Result<()> {
                 args.trace_block_size,
                 args.speedup,
                 ReplayRouterMode::KvRouter,
-                TraceFileFormat::Mooncake,
+                args.trace_format,
                 0.0,
                 0,
                 true,
@@ -843,7 +951,7 @@ fn main() -> Result<()> {
                 args.num_workers,
                 args.speedup,
                 ReplayRouterMode::KvRouter,
-                TraceFileFormat::Mooncake,
+                args.trace_format,
                 0.0,
                 0,
                 true,
@@ -868,17 +976,21 @@ fn main() -> Result<()> {
     let samples: u64 = groups.values().map(|g| g.samples).sum();
     let n = samples.max(1) as f64;
     let timeline = build_timeline(&report.per_request, &args);
-    let (mut follow_up_turns, mut moved) = (0usize, 0usize);
-    for turns in timeline.session_turn_ranks.values() {
-        for (prev, cur) in turns.values().zip(turns.values().skip(1)) {
-            follow_up_turns += 1;
-            moved += usize::from(prev != cur);
-        }
-    }
+    let kv_transfer = KvTransfer::from_sessions(&timeline.session_turn_ranks);
+    let (follow_up_turns, moved) = (kv_transfer.follow_up_turns, kv_transfer.moved_turns);
+    let kv_transfer_gb_total =
+        kv_transfer.total_tokens() as f64 * args.kv_bytes_per_token as f64 / 1e9;
+    let kv_transfer_gb_per_follow_up_turn = (kv_transfer.stayed_turn_tokens
+        + kv_transfer.moved_turn_tokens) as f64
+        * args.kv_bytes_per_token as f64
+        / 1e9
+        / follow_up_turns.max(1) as f64;
+    let kv_transfer_aggregate_gb_per_s =
+        kv_transfer_gb_total / (timeline.horizon_ms / 1000.0).max(1e-9);
     let dump_path = |pool: &str| {
         args.dump_steps
             .as_ref()
-            .map(|p| p.with_extension(format!("{pool}.csv")))
+            .map(|p| PathBuf::from(format!("{}.{pool}.csv", p.display())))
     };
     let mut waste = summarize_waste(
         &timeline.decode,
@@ -938,6 +1050,13 @@ fn main() -> Result<()> {
         decode_session_affinity: args.session_affinity.decode,
         decode_follow_up_turns: follow_up_turns,
         decode_turn_moved_fraction: moved as f64 / follow_up_turns.max(1) as f64,
+        decode_radix_cache: args.decode_radix_cache,
+        kv_bytes_per_token: args.kv_bytes_per_token,
+        kv_transfer_gbps: args.kv_transfer_gbps,
+        kv_transfer,
+        kv_transfer_gb_total,
+        kv_transfer_gb_per_follow_up_turn,
+        kv_transfer_aggregate_gb_per_s,
         num_prefill_workers,
         num_decode_workers,
         attention_wait_fraction_of_gpu_time_sampled: if total_pass > 0.0 {
@@ -994,6 +1113,17 @@ fn main() -> Result<()> {
         summary.decode_session_affinity,
         summary.decode_follow_up_turns,
         summary.decode_turn_moved_fraction * 100.0
+    );
+    println!(
+        "{} kv_transfer: radix_cache={} {:.2} TB total ({:.0} GB/s aggregate), {:.2} GB per follow-up turn, moved_turn_tokens={} stayed_turn_tokens={} first_turn_tokens={}",
+        summary.label,
+        summary.decode_radix_cache,
+        summary.kv_transfer_gb_total / 1e3,
+        summary.kv_transfer_aggregate_gb_per_s,
+        summary.kv_transfer_gb_per_follow_up_turn,
+        summary.kv_transfer.moved_turn_tokens,
+        summary.kv_transfer.stayed_turn_tokens,
+        summary.kv_transfer.first_turn_tokens
     );
     if let Some(prefill) = &summary.prefill_pool {
         println!(

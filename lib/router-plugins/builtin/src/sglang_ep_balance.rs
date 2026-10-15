@@ -19,6 +19,7 @@ use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
+use dynamo_kv_router::protocols::WorkerAffinityTarget;
 
 pub const POLICY_TYPE: &str = "dynamo-sglang-ep-balance";
 
@@ -29,6 +30,7 @@ const DEFAULT_GROUP_TOKEN_WEIGHT: f64 = 0.0;
 const DEFAULT_GROUP_LOAD_TOLERANCE: f64 = 0.1;
 const DEFAULT_INCOMPLETE_GROUP_WEIGHT: f64 = 1.0;
 const DEFAULT_CACHE_AFFINITY_MIN_FRACTION: f64 = 0.5;
+const DEFAULT_AFFINITY_MAX_CONTEXT_EXCESS: f64 = 0.1;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -47,6 +49,12 @@ struct Parameters {
     /// Ranks holding at least this fraction of the prompt in device cache keep the request
     /// (sticky sessions); balancing only decides among them. Values above 1.0 disable the gate.
     cache_affinity_min_fraction: f64,
+    /// A session bound to a rank (the host's advisory affinity target) stays there while that
+    /// rank's projected context exceeds its EP group's mean by at most this fraction; above it
+    /// the turn is re-placed like a fresh request. Sticking saves the KV re-transfer a decode
+    /// rank with a radix cache would otherwise need; moving evens the attention barrier. Use a
+    /// large value (e.g. 1e9) for hard stickiness, 0 to move whenever the rank is above mean.
+    affinity_max_context_excess: f64,
 }
 
 impl Default for Parameters {
@@ -59,6 +67,7 @@ impl Default for Parameters {
             group_load_tolerance: DEFAULT_GROUP_LOAD_TOLERANCE,
             incomplete_group_weight: DEFAULT_INCOMPLETE_GROUP_WEIGHT,
             cache_affinity_min_fraction: DEFAULT_CACHE_AFFINITY_MIN_FRACTION,
+            affinity_max_context_excess: DEFAULT_AFFINITY_MAX_CONTEXT_EXCESS,
         }
     }
 }
@@ -75,6 +84,10 @@ impl Parameters {
             (
                 "cache_affinity_min_fraction",
                 self.cache_affinity_min_fraction,
+            ),
+            (
+                "affinity_max_context_excess",
+                self.affinity_max_context_excess,
             ),
         ] {
             if !value.is_finite() || value < 0.0 {
@@ -165,14 +178,16 @@ fn group_load(
         + parameters.incomplete_group_weight * max_group_size.saturating_sub(group.size) as f64
 }
 
-/// Sticky cached prefixes first, then the least-loaded EP group (within tolerance), then the
-/// rank that leaves that group's DP ranks most even.
+/// Bound session rank while it is not too far above its group's mean, then sticky cached
+/// prefixes, then the least-loaded EP group (within tolerance), then the rank that leaves that
+/// group's DP ranks most even.
 fn pick_row(
     parameters: &Parameters,
     candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
     load: &[WorkerLoadInput],
     overlap_blocks: &[f64],
     request_blocks: u64,
+    affinity_target: Option<WorkerAffinityTarget>,
 ) -> Option<usize> {
     if candidates.is_empty()
         || candidates.len() != load.len()
@@ -213,6 +228,22 @@ fn pick_row(
         group.sum_blocks += blocks;
         group.has_allowed_row |= allowed(row);
     }
+    if let Some(target) = affinity_target
+        && let Some(row) = candidates.iter().position(|candidate| {
+            let worker = candidate.worker();
+            worker.worker_id == target.worker_id
+                && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank)
+        })
+        && let Some(group) = groups.iter().find(|g| g.worker_id == target.worker_id)
+    {
+        let (_, projected_blocks) = projected_load(&load[row], row, row, request_blocks as usize);
+        let group_mean = (group.sum_blocks + request_blocks as usize) as f64 / group.size as f64;
+        let excess = (projected_blocks as f64 - group_mean) / (group_mean + 1.0);
+        if excess <= parameters.affinity_max_context_excess {
+            return Some(row);
+        }
+    }
+
     let global_mean_requests = sum_requests as f64 / candidates.len() as f64;
     let global_mean_blocks = sum_blocks as f64 / candidates.len() as f64;
     let max_group_size = groups.iter().map(|g| g.size).max()?;
@@ -296,6 +327,7 @@ impl WorkerPicker for SglangEpBalancePicker {
             load,
             &overlap_blocks,
             context.request_blocks(),
+            context.affinity_target(),
         )
         .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker with load data"))
     }
@@ -366,13 +398,23 @@ mod tests {
         device_overlap: &[(u64, u32, usize)],
         parameters: Parameters,
     ) -> WorkerWithDpRank {
+        select_with_affinity(groups, device_overlap, None, parameters)
+    }
+
+    fn select_with_affinity(
+        groups: &[[(usize, usize, usize); 2]],
+        device_overlap: &[(u64, u32, usize)],
+        affinity_target: Option<(u64, u32)>,
+        parameters: Parameters,
+    ) -> WorkerWithDpRank {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: BLOCK_SIZE as usize,
             lora_name: None,
             expected_output_tokens: None,
-            affinity_target: None,
+            affinity_target: affinity_target
+                .map(|(worker_id, dp_rank)| WorkerAffinityTarget::new(worker_id, Some(dp_rank))),
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -485,6 +527,35 @@ mod tests {
             },
         );
         assert_ne!(below_threshold, WorkerWithDpRank::new(0, 0));
+    }
+
+    #[test]
+    fn bound_session_stays_while_its_rank_is_near_the_group_mean() {
+        // Equal loads: free placement would take row 0; the binding keeps rank 1.
+        let groups = [[(4, 40, 1), (4, 40, 1)], [(4, 40, 1), (4, 40, 1)]];
+        assert_eq!(
+            select_with_affinity(&groups, &[], Some((0, 1)), Parameters::default()),
+            WorkerWithDpRank::new(0, 1)
+        );
+        // Bound rank 50% above its group mean: beyond the 10% default, so the turn moves.
+        let skewed = [[(4, 40, 1), (4, 120, 1)], [(4, 40, 1), (4, 40, 1)]];
+        assert_ne!(
+            select_with_affinity(&skewed, &[], Some((0, 1)), Parameters::default()),
+            WorkerWithDpRank::new(0, 1)
+        );
+        // A large allowance restores hard stickiness.
+        assert_eq!(
+            select_with_affinity(
+                &skewed,
+                &[],
+                Some((0, 1)),
+                Parameters {
+                    affinity_max_context_excess: 1e9,
+                    ..Parameters::default()
+                }
+            ),
+            WorkerWithDpRank::new(0, 1)
+        );
     }
 
     #[test]

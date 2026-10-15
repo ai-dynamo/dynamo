@@ -253,7 +253,13 @@ not its request count, so the default balances context only), `group_request_wei
 the EP-group load, `group_load_tolerance` (0.1, relative) for how close a group must be to the
 least-loaded one to stay a candidate, `incomplete_group_weight` (1.0) to penalize groups whose
 ranks were partly filtered out, and `cache_affinity_min_fraction` (0.5) for the device-cache
-share that keeps a request on its rank; a value above 1.0 disables that sticky step. The
+share that keeps a request on its rank; a value above 1.0 disables that sticky step. When the
+host supplies a session-affinity target (a previous turn's worker and DP rank), the policy keeps
+the session there while that rank's projected context is at most `affinity_max_context_excess`
+(0.1, relative) above its EP group's mean, and re-places the turn otherwise. Staying avoids
+re-sending the session's KV to a decode rank that already caches it (SGLang
+`--disaggregation-decode-enable-radix-cache`); moving evens the attention barrier. A large value
+(for example `1e9`) gives hard stickiness, `0` moves whenever the rank is above the mean. The
 within-group token term uses each rank's per-request context (`active_sequence_blocks`) rather
 than its deduplicated KV footprint, because attention time scales with the context every
 request reads, not with the blocks that are physically resident.
