@@ -350,14 +350,7 @@ class ArtifactService:
         except asyncio.CancelledError:
             await self._finish(operation_id, "failed", error_code="source_lost")
             raise
-        except (
-            ArtifactStorageError,
-            ValueError,
-            RuntimeError,
-            TypeError,
-            OSError,
-            asyncio.TimeoutError,
-        ) as exc:
+        except Exception as exc:
             code = (
                 "commit_unknown"
                 if isinstance(exc, ArtifactStorageError) and exc.outcome == "ambiguous"
@@ -366,6 +359,18 @@ class ArtifactService:
                 else "delivery_failed"
             )
             await self._finish(operation_id, "failed", error_code=code)
+            if not isinstance(
+                exc,
+                (
+                    ArtifactStorageError,
+                    ValueError,
+                    RuntimeError,
+                    TypeError,
+                    OSError,
+                    asyncio.TimeoutError,
+                ),
+            ):
+                raise
         finally:
             self._release_source(len(data))
 
@@ -413,7 +418,7 @@ class ArtifactService:
                     or not verified.get("object_id")
                 ):
                     raise ValueError("verification failed")
-            except (ValueError, RuntimeError, TypeError, OSError, asyncio.TimeoutError):
+            except Exception:
                 if ambiguous:
                     raise ArtifactStorageError(
                         "commit_unknown",
