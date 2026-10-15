@@ -282,12 +282,9 @@ async def worker(argv: list[str] | None = None) -> None:
         shutdown_event,
         prefill=config.disaggregation_mode == DisaggregationMode.PREFILL,
         pre_shutdown=close_worker_resources,
-        post_shutdown=(
-            close_configured_artifact_runtime
-            if os.environ.get("DYNAMO_ARTIFACT_CONFIG")
-            else None
-        ),
     )
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        shutdown.post_shutdown = close_configured_artifact_runtime
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     factory = WorkerFactory(

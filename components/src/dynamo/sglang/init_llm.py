@@ -273,13 +273,18 @@ async def init_decode(
         else:
             body_failed = False
         finally:
+
+            def cleanup_engine() -> None:
+                nonlocal engine_closed
+                handler.cleanup()
+                engine_closed = True
+
             await finish_worker_teardown(
                 metrics_task,
-                handler.cleanup,
+                cleanup_engine,
                 run_deferred_handlers,
                 body_failed=body_failed,
             )
-            engine_closed = True
     finally:
         if not engine_closed:
             engine.shutdown()
@@ -456,13 +461,18 @@ async def init_prefill(
         else:
             body_failed = False
         finally:
+
+            def cleanup_engine() -> None:
+                nonlocal engine_closed
+                handler.cleanup()
+                engine_closed = True
+
             await finish_worker_teardown(
                 metrics_task,
-                handler.cleanup,
+                cleanup_engine,
                 run_deferred_handlers,
                 body_failed=body_failed,
             )
-            engine_closed = True
     finally:
         if not engine_closed:
             engine.shutdown()
