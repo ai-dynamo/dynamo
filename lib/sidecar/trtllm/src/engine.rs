@@ -18,7 +18,7 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelLimits, TrtllmClient};
+use crate::client::{self, ModelMetadata, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
@@ -41,7 +41,7 @@ pub struct TrtllmSidecarEngine {
     /// Engine limits resolved at `start` from `--context-length` and
     /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
     /// for requests that omit one.
-    limits: OnceCell<ModelLimits>,
+    limits: OnceCell<ModelMetadata>,
     cancel: CancellationToken,
 }
 
@@ -220,7 +220,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                              ships no Control service or was started without \
                              --grpc-protocol openengine"
                         );
-                        ModelLimits::default()
+                        ModelMetadata::default()
                     }
                 };
                 if let Some(engine_context_length) = reported.context_length
@@ -233,7 +233,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                          reported; using the configured --context-length"
                     );
                 }
-                ModelLimits {
+                ModelMetadata {
                     context_length: Some(configured),
                     ..reported
                 }

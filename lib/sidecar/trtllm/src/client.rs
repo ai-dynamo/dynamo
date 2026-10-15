@@ -27,10 +27,10 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The engine's limits, resolved at startup from `--context-length` and
-/// `Control.GetModelInfo`.
+/// Metadata resolved at startup from `--context-length` and
+/// `Control.GetModelInfo`, including limits and media capabilities.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ModelLimits {
+pub(crate) struct ModelMetadata {
     /// Maximum input + output tokens; backs both the registered context window
     /// and the default `max_tokens`. Absent when neither source supplied one,
     /// which leaves requests that omit `max_tokens` to be rejected.
@@ -99,7 +99,7 @@ impl TrtllmClient {
     /// unset rather than substituting its `max_input_len` default (measured
     /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
     /// server did not say", and `--context-length` supplies it instead.
-    async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
+    async fn get_model_info(&self, model: &str) -> Result<ModelMetadata, tonic::Status> {
         let info = self
             .control()
             .get_model_info(pb::GetModelInfoRequest {
@@ -126,7 +126,7 @@ impl TrtllmClient {
                         _ => false,
                     })
             });
-        Ok(ModelLimits {
+        Ok(ModelMetadata {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
             supports_image,
@@ -136,7 +136,7 @@ impl TrtllmClient {
     /// One `GetModelInfo` call, for when `--context-length` already supplies the
     /// window and the engine is consulted only to cross-check it and to learn
     /// its output cap.
-    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelLimits, DynamoError> {
+    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelMetadata, DynamoError> {
         tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model))
             .await
             .map_err(|_| {
@@ -164,7 +164,7 @@ impl TrtllmClient {
         model: &str,
         deadline: Instant,
         retry_interval: Duration,
-    ) -> Result<ModelLimits, DynamoError> {
+    ) -> Result<ModelMetadata, DynamoError> {
         let mut last = "it never answered".to_string();
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {
