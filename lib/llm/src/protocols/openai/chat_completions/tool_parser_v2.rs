@@ -71,6 +71,16 @@ fn parser_version_value(value: Option<&str>) -> anyhow::Result<ParserVersion> {
     ParserVersion::try_from(value)
 }
 
+/// Map engine-facing parser aliases onto the family keys used by
+/// `dynamo-parsers-v2`.
+pub(crate) fn canonical_family(family: &str) -> &str {
+    match family {
+        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+        family => family,
+    }
+}
+
+/// Whether the deployment explicitly selects parsers v2.
 pub(crate) fn enabled() -> bool {
     match selected_version() {
         Ok(ParserVersion::V2) => true,
@@ -171,7 +181,7 @@ pub(crate) fn parse_complete(
     family: &str,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, String)> {
     let v2_tools = to_v2_tools(tools);
-    let mut parser = create_tool_parser_for_family(family, &v2_tools)?;
+    let mut parser = create_tool_parser_for_family(canonical_family(family), &v2_tools)?;
     let result = parser.parse_complete(content)?;
 
     let tool_calls = result
@@ -452,12 +462,11 @@ fn response_with_choice(
     template: &NvCreateChatCompletionStreamResponse,
     choice: dynamo_protocols::types::ChatChoiceStream,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
-    let mut data = template.clone();
+    let mut response = Annotated::from_data(template.clone());
+    super::scrub_synthetic_chunk_metadata(&mut response);
+    let data = response.data.as_mut().expect("template has response data");
     data.inner.choices = vec![choice];
-    data.inner.usage = None;
-    data.nvext = None;
-    data.llm_metrics = None;
-    Annotated::from_data(data)
+    response
 }
 
 /// Streaming path: replace the jail with the `family` v2 parser. Each upstream text
@@ -473,6 +482,7 @@ pub(crate) fn apply_stream<S>(
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
+    let family = canonical_family(&family).to_string();
     let v2_tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         // The caller only routes supported families here, but if a parser cannot be
@@ -826,6 +836,14 @@ mod tests {
     const MUSE_TOOL: &str = "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>";
     const MUSE_ANSWER: &str = "<|start|>assistant to=user<|message|>It's 18C.<|eot|>";
 
+    #[test]
+    fn deepseek_v4_engine_aliases_select_the_v2_family() {
+        for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            assert!(supports_family(alias), "unsupported alias: {alias}");
+            assert_eq!(canonical_family(alias), "deepseek_v4");
+        }
+    }
+
     fn muse_turn() -> String {
         format!("{MUSE_REASONING}{MUSE_TOOL}{MUSE_ANSWER}")
     }
@@ -858,6 +876,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         Annotated {
             data: Some(response),
@@ -1456,16 +1475,19 @@ mod tests {
         for parser in ["muse_glimmer", "muse"] {
             assert_eq!(
                 unified_family(Some(parser), None).as_deref(),
-                None,
-                "Muse's default streaming exception is selected by request mode"
+                enabled().then_some("muse_glimmer"),
+                "explicit V2 selects Muse; its auto exception is request-mode dependent"
             );
             assert_eq!(
                 unified_family(None, Some(parser)).as_deref(),
-                None,
-                "Muse's default streaming exception is selected by request mode"
+                enabled().then_some("muse_glimmer"),
+                "explicit V2 selects Muse; its auto exception is request-mode dependent"
             );
         }
-        assert_eq!(unified_family(Some("qwen3_coder"), None).as_deref(), None);
+        assert_eq!(
+            unified_family(Some("qwen3_coder"), None).as_deref(),
+            enabled().then_some("qwen3")
+        );
         assert_eq!(unified_family(Some("muse"), Some("qwen3")), None);
         assert_eq!(unified_family(None, None), None);
     }

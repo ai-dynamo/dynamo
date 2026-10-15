@@ -37,6 +37,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to the SGLang engine."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON           Python with SGLang installed (default: python3)"
             echo "  CUDA_VISIBLE_DEVICES    GPU assignment (default: 0)"
@@ -55,12 +56,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar sglang SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
-SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
-SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-30001}"
+SGLANG_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_HTTP_PORT:-30000}")
+SGLANG_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_GRPC_PORT:-30001}")
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -89,7 +92,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit

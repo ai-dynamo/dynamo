@@ -21,7 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
+func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")
 	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}))
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -53,6 +53,35 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 		require.Equal(t, replicas, scaled.scalingGroupReplicas)
 	}
 	dgd.Spec.Components[0].Replicas = nil
+
+	t.Log("Run LPX-ingested LP20 and LP30 builds with CPU preparation without a GPU")
+	for _, fixture := range []testV3CapnpFixture{newV2CompilerFixture(), newV3CompilerFixture()} {
+		fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+		fixture.selectedPropSyncChains = nil
+		fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 0, deviceType: manifestcapnp.DeviceType_cpu})
+		snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+		source := staticBuildSnapshotSource{"build": snapshot}
+		workload, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+		require.NoError(t, err)
+		require.Equal(t, PipelineSingle, workload.Pipeline())
+		require.False(t, workload.modelProjections[0].configuredBuild.HasCUDAPartitions)
+
+		t.Log("Authored GPU resources do not make an LPU-only build hybrid")
+		candidate := dgd.DeepCopy()
+		candidate.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+		}
+		workload, err = ResolveWorkload(t.Context(), candidate, singleGroupComponents(t, candidate), source)
+		require.NoError(t, err)
+		require.Equal(t, PipelineSingle, workload.Pipeline())
+
+		t.Log("Reject GPU-local partition execution for LPU-only builds")
+		candidate.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{
+			LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
+		}
+		_, err = ResolveWorkload(t.Context(), candidate, singleGroupComponents(t, candidate), source)
+		require.ErrorContains(t, err, "localPartitions requires a hybrid build with a Cyborg conductor")
+	}
 
 	t.Log("Require resources on the independently authored hybrid conductor")
 	fixture := newV2CompilerFixture()
@@ -134,6 +163,16 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	replica := plan.ForReplica(1)
 	require.NotEqual(t, plan.ForReplica(0).Agents[0].CliqueName, replica.Agents[0].CliqueName)
 
+	t.Log("CUDA-containing hybrid builds retain GPU-local partition execution")
+	local := dgd.DeepCopy()
+	local.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{
+		LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
+	}
+	localWorkload, err := ResolveWorkload(t.Context(), local, singleGroupComponents(t, local), source)
+	require.NoError(t, err)
+	require.Equal(t, PipelineLPX, localWorkload.Pipeline())
+	require.Zero(t, localWorkload.modelProjections[0].AgentReplicas())
+
 	t.Log("A scheduling deadline does not change hybrid launch")
 	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
 	scheduled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
@@ -178,7 +217,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					fixture.partitions = []testV3CapnpPartition{fixture.partitions[0], fixture.partitions[0]}
 					fixture.partitions[1].id++
 					fixture.selectedPropSyncChains = [][]uint32{{fixture.partitions[0].id, fixture.partitions[1].id}}
-					fixture.numLPUNodes, agentCounts[index], requestCounts[index] = 1, 1, 1
+					agentCounts[index], requestCounts[index] = 1, 1
 				}
 				snapshots[index] = acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			}
