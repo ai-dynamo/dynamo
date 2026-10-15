@@ -54,32 +54,39 @@ _APACHE = {"license": {"id": "Apache-2.0"}}
     ],
 )
 def test_normalize_cyclonedx_licenses(licenses_field, expected):
+    """Check license precedence, custom names, missing data, and combinations."""
     assert normalize_cyclonedx_licenses(licenses_field) == expected
 
 
 def _go_entry(**extra) -> dict:
+    """Build a Go SBOM entry with the fields required by the generator."""
     return {"name": "github.com/acme/mod", "version": "v1.0.0", **extra}
 
 
 @pytest.mark.parametrize("top_level", [{}, {"licenses": []}])
 def test_go_falls_back_to_evidence_licenses(top_level):
+    """Use evidence licenses when top-level licenses are absent or empty."""
     entry = _go_entry(**top_level, evidence={"licenses": [_APACHE]})
     assert go_gen._component_from_sbom_entry(entry).spdx == "Apache-2.0"
 
 
 def test_go_prefers_top_level_licenses_over_evidence():
+    """Keep the top-level license when evidence declares a different license."""
     entry = _go_entry(licenses=[_MIT], evidence={"licenses": [_APACHE]})
     assert go_gen._component_from_sbom_entry(entry).spdx == "MIT"
 
 
 def _rust_entry(**extra) -> dict:
+    """Build a Rust SBOM entry with the fields required by the generator."""
     return {"name": "acme-crate", "version": "1.0.0", **extra}
 
 
 def test_rust_override_applies_only_when_sbom_is_unknown(monkeypatch):
+    """Look up a Rust license override when the SBOM has no license."""
     calls: list[tuple] = []
 
     def fake_lookup(ecosystem, name, version=""):
+        """Record the requested package and return its license override."""
         calls.append((ecosystem, name, version))
         return "BSD-2-Clause"
 
@@ -90,6 +97,7 @@ def test_rust_override_applies_only_when_sbom_is_unknown(monkeypatch):
 
 
 def test_rust_sbom_license_wins_over_override(monkeypatch):
+    """Preserve a known SBOM license even when an override would differ."""
     monkeypatch.setattr(
         rust_gen.license_overrides, "lookup", lambda *a, **k: "BSD-2-Clause"
     )
