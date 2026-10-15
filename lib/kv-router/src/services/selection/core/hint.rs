@@ -23,7 +23,8 @@ pub(super) fn hint_capable_partition(configs: &HashMap<WorkerId, SelectionWorker
 ///
 /// When the target sets a `kv_transfer_domain`, the source must also be in the
 /// target's island: its `topology_domains` value for that domain equals the
-/// target's. A source without that value is in no island. With `preferred`
+/// target's. A source without that value is in no island, and a cache owner
+/// that publishes no topology uses its attached worker's. With `preferred`
 /// enforcement, a cross-island source is used only when no same-island source
 /// qualifies.
 pub(super) fn transfer_hint_for_selection(
@@ -76,27 +77,25 @@ pub(super) fn transfer_hint_for_selection(
                         .routing_snapshot
                         .as_ref()?
                         .router_hint_source(owner)?;
-                    // An owner that publishes no island takes its attached worker's.
-                    source.metadata.topology_domains.get(domain).or_else(|| {
-                        configs
+                    let topology = if source.metadata.topology_domains.is_empty() {
+                        &configs
                             .get(&source.attached_worker?.worker_id)?
                             .topology_domains
-                            .get(domain)
-                    })
+                    } else {
+                        &source.metadata.topology_domains
+                    };
+                    topology.get(domain)
                 }
             };
-            candidates
-                .best_source(prefix_blocks_to_beat, |source| {
-                    target_island.is_some()
-                        && is_eligible(source)
-                        && source_island(source) == target_island
-                })
-                .or_else(|| {
-                    (target_config.kv_transfer_enforcement
-                        == Some(KvTransferEnforcement::Preferred))
-                    .then(|| candidates.best_source(prefix_blocks_to_beat, is_eligible))
-                    .flatten()
-                })
+            let preferred =
+                target_config.kv_transfer_enforcement == Some(KvTransferEnforcement::Preferred);
+            candidates.best_ranked_source(prefix_blocks_to_beat, |source| {
+                if !is_eligible(source) {
+                    return None;
+                }
+                let same_island = target_island.is_some() && source_island(source) == target_island;
+                (same_island || preferred).then_some(same_island)
+            })
         }
     };
     let (source, block_hashes) = selected?;

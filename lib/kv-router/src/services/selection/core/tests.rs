@@ -3686,7 +3686,12 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
         (7, island_config("tcp://target:23280", "a")),
         (8, island_config("tcp://attached-worker:23280", "a")),
     ]);
-    let (other_island, unlabeled, published, inherited) = (owner(4), owner(5), owner(6), owner(7));
+    let (other_island, unlabeled, published, inherited, partial) =
+        (owner(4), owner(5), owner(6), owner(7), owner(8));
+    let mut partial_metadata = metadata("tcp://partial:23280", None);
+    partial_metadata
+        .topology_domains
+        .insert("zone".to_string(), "z1".to_string());
     let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
         ResidencyProjection::default(),
         [
@@ -3706,6 +3711,7 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
                 metadata("tcp://inherited:23280", None),
                 Some(WorkerWithDpRank::new(8, 0)),
             ),
+            (partial, partial_metadata, Some(WorkerWithDpRank::new(8, 0))),
         ],
     ));
     let hint = |owners: &[(CacheOwnerId, usize)]| {
@@ -3721,10 +3727,13 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
     };
 
     // Owners in another island, or in none, are skipped despite longer prefixes.
+    // An owner that publishes topology without the domain is in none, even
+    // when attached to a same-island worker.
     assert_eq!(
         hint(&[
             (other_island, 4),
             (unlabeled, 4),
+            (partial, 4),
             (published, 2),
             (inherited, 3)
         ])
