@@ -104,6 +104,54 @@ def test_trace_closed_loop(tmp_path):
     assert report.summary["completed_requests"] == 2
 
 
+@pytest.mark.planner
+def test_active_planner_honors_closed_loop_concurrency(tmp_path):
+    planner_config = {
+        "mode": "agg",
+        "optimization_target": "load",
+        "enable_load_scaling": True,
+        "enable_throughput_scaling": False,
+        "decode_scale_up_kv_rate": 90.0,
+        "decode_scale_down_kv_rate": 10.0,
+        "min_endpoint": 2,
+        "min_gpu_budget": 2,
+        "max_gpu_budget": 2,
+        "load_adjustment_interval_seconds": 1,
+        "scheduling": {"scale_interval_seconds": 0.01},
+        "metric_reporting_prometheus_port": 0,
+        "live_dashboard_port": 0,
+        "report_interval_hours": None,
+        "report_output_dir": str(tmp_path),
+    }
+    engine_args = normalize_mocker_config({"engine": {"block_size": 128}})
+    durations = []
+    for concurrency in (1, 2, 5, None):
+        workload = {
+            "extra_engine_args": engine_args,
+            "num_workers": 2,
+            "replay_mode": "offline",
+            "replay_concurrency": concurrency,
+            "arrival_interval_ms": 0.0 if concurrency is None else None,
+            "turns_per_session": 1,
+            "shared_prefix_ratio": 0.0,
+            "num_prefix_groups": 0,
+            "inter_turn_delay_ms": 0.0,
+        }
+        report = run_synthetic_trace_replay(
+            512, 128, 20, planner_config=planner_config, **workload
+        )
+        control = run_synthetic_trace_replay(512, 128, 20, **workload)
+
+        assert report.summary["completed_requests"] == 20
+        assert report.planner.total_ticks > 0
+        assert report.summary["duration_ms"] == pytest.approx(
+            control.summary["duration_ms"]
+        )
+        durations.append(report.summary["duration_ms"])
+
+    assert all(left > right for left, right in zip(durations, durations[1:]))
+
+
 @pytest.mark.parametrize("callback_method", ["initial_tick_ms", "on_tick"])
 def test_planner_callback_error_preserves_python_exception_type(callback_method):
     # A raising planner callback must propagate its original Python exception

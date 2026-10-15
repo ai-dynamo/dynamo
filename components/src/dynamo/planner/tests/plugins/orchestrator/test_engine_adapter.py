@@ -1050,24 +1050,33 @@ async def test_observation_prefetch_and_dispatch_share_tick_timestamp():
     assert first.at_monotonic_s == pytest.approx(5.0)
     assert first.need_worker_fpm is True
 
-    clock.set_monotonic(first.at_monotonic_s)
-    effects = await adapter.tick(
-        first,
-        TickInput(
-            now_s=first.at_s,
-            worker_counts=WorkerCounts(
-                ready_num_decode=1,
-                expected_num_decode=1,
-            ),
-            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
-        ),
-    )
-
     load_plugin = adapter._orchestrator.registry.get_plugin("builtin_load_propose")
     assert load_plugin is not None
-    assert load_plugin.last_call_at == pytest.approx(first.at_monotonic_s)
-    assert effects.next_tick is not None
-    assert effects.next_tick.need_worker_fpm is True
+    scheduled = first
+    for has_fpm in (True, True, False, True):
+        assert scheduled.need_worker_fpm is True
+        clock.set_monotonic(scheduled.at_monotonic_s)
+        effects = await adapter.tick(
+            scheduled,
+            TickInput(
+                now_s=scheduled.at_s,
+                worker_counts=WorkerCounts(
+                    ready_num_decode=1,
+                    expected_num_decode=1,
+                ),
+                fpm_observations=FpmObservations(
+                    decode={("w1", 0): _make_fpm("w1")} if has_fpm else None
+                ),
+            ),
+        )
+        assert load_plugin.last_call_at == pytest.approx(scheduled.at_monotonic_s)
+        if has_fpm:
+            assert effects.diagnostics.load_decision_reason != "no_fpm_data"
+        else:
+            assert effects.scale_to is None
+            assert effects.diagnostics.load_decision_reason == "no_fpm_data"
+        assert effects.next_tick is not None
+        scheduled = effects.next_tick
 
 
 def test_throughput_only_sla_still_pulls_fpm_for_live_regression():

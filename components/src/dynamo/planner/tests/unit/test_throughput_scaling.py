@@ -43,16 +43,21 @@ class _ThroughputScalingHarness(ThroughputScalingMixin):
         self._diag_engine_rps_prefill = None
 
 
-def test_unreachable_prefill_ttft_does_not_create_replica_floor():
+@pytest.mark.parametrize(
+    ("demand_rps", "expected_replicas"), [(0.0, 1), (0.21, 1), (1.17, 2)]
+)
+def test_unreachable_prefill_ttft_does_not_create_replica_floor(
+    demand_rps, expected_replicas
+):
     scaling = _ThroughputScalingHarness()
 
     replicas = scaling._compute_prefill_replicas(
-        demand_rps=0.01,
-        isl=1000,
+        demand_rps=demand_rps,
+        isl=22_044.5,
         osl=150,
     )
 
-    assert replicas == 1
+    assert replicas == expected_replicas
 
 
 def test_prefill_throughput_uses_component_minimum_override():
