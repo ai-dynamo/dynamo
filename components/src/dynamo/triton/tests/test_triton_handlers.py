@@ -365,7 +365,7 @@ def test_generate_passes_fp16_input_as_numpy():
     np.testing.assert_array_equal(triton_input, np.array(values, dtype=np.float16))
 
 
-# Values and little-endian BF16 bytes from the DYN-4948 reproduction.
+# Values and their little-endian BF16 bytes, used to check the exact input bytes.
 _BF16_ROW = [1.5, -2.25, 3.125, -4.0]
 _BF16_ROW_BYTES = bytes.fromhex("c03f10c0484080c0")
 
