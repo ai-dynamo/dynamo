@@ -28,6 +28,8 @@ const MaxRenderedPodCliqueSetBytes = 1 << 20
 type RenderInput struct {
 	// MinAvailable is the minimum number of complete workload replicas in the gang.
 	MinAvailable *int32
+	// MaxUnavailable is the optional disruption budget for this workload's scaling group.
+	MaxUnavailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
 	Stages map[string]corev1.PodTemplateSpec
 	// Conductor supplies a fresh, independently merged template for the shared LPU
@@ -239,6 +241,9 @@ func RenderNodeLocal(
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
 		Replicas:     ptr.To(ptr.Deref(input.MinAvailable, 1)),
 		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
+	}
+	if input.MaxUnavailable != nil {
+		rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(*input.MaxUnavailable)}
 	}
 
 	// Keep every LPX role in one backend gang, including the KAI fallback roles.

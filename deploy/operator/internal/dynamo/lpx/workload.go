@@ -7,21 +7,21 @@ package lpx
 
 import (
 	"fmt"
-	"slices"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Workload is the immutable result of resolving one LPX component group
+// Workload is the immutable result of resolving and naming one LPX component group
 // for scheduling and runtime materialization.
-// Its methods require a successfully resolved, non-nil workload with projections.
+// Its methods require a non-nil workload returned by ResolveWorkloads.
 type Workload struct {
 	modelProjections     []*ModelProjection
 	digest               WorkloadDigest
 	scalingGroupReplicas int32
 	conductorReplicas    int32
+	groupName            string
 	plan                 *MaterializationPlan
 }
 
@@ -53,7 +53,7 @@ func (w *Workload) ComponentNames() []string {
 	return names
 }
 
-// ServingComponentName returns the conductor owner, placed last by ResolveWorkload.
+// ServingComponentName returns the conductor owner, placed last during resolution.
 func (w *Workload) ServingComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
 }
@@ -73,11 +73,16 @@ func (w *Workload) WithNames(pcsName, group string) (*Workload, error) {
 	}
 	named := *w
 	named.plan = plan
+	named.groupName = group
 	if err := named.ValidateReplicas(plan.Replicas); err != nil {
 		return nil, err
 	}
 	return &named, nil
 }
+
+// GroupName returns the serving component used to scope a multi-workload identity,
+// or an empty string for a sole workload.
+func (w *Workload) GroupName() string { return w.groupName }
 
 // ScalingGroup returns this named workload's materialized Grove group.
 func (w *Workload) ScalingGroup() string { return w.plan.LPXScalingGroup }
@@ -95,6 +100,9 @@ func (w *Workload) ConductorTemplate() string {
 
 // Replicas returns the authored scaling-group capacity or its initial seed.
 func (w *Workload) Replicas() int32 { return w.scalingGroupReplicas }
+
+// ConductorReplicas returns the resolved Nova or Cyborg clique width.
+func (w *Workload) ConductorReplicas() int32 { return w.conductorReplicas }
 
 // ConductorCliqueName returns the serving clique in one scaling-group replica.
 func (w *Workload) ConductorCliqueName(replica int32) string {
@@ -114,11 +122,11 @@ func (w *Workload) ValidateReplicas(replicas int32) error {
 	return nil
 }
 
-// RequestSpec returns a fresh request for a model belonging to this workload.
-func (w *Workload) RequestSpec(model *ModelProjection, replica int32) lpxv1alpha1.LPUPipelineRequestSpec {
-	index := slices.Index(w.modelProjections, model)
+// RequestSpec returns a fresh request for a model index and workload replica.
+// index must be in ModelProjections; replica must be within the validated live capacity.
+func (w *Workload) RequestSpec(index int, replica int32) lpxv1alpha1.LPUPipelineRequestSpec {
 	plan := w.plan.ForReplica(replica)
-	return model.RequestSpec(plan, plan.Agents[index].CliqueName)
+	return w.modelProjections[index].RequestSpec(plan, plan.Agents[index].CliqueName)
 }
 
 // Render appends the workload to pcs only after its complete rendering succeeds.

@@ -50,7 +50,7 @@ func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1a
 	return requests, nil
 }
 
-// resolvePipelineRequests collects missing or changed intent in replica/model order.
+// resolveNamedPipelineRequests collects missing or changed intent in replica/model order.
 // Pointer inputs are non-nil; deployment has a validated DGD controller owner.
 // currentRequests contains owned observations indexed by name and may be nil.
 // Inputs are not mutated; owner references are added only on publication.
@@ -59,16 +59,9 @@ func resolveNamedPipelineRequests(
 	currentRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	workload *lpx.Workload,
 	replicas int32,
-	grouped bool,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, []*lpxv1alpha1.LPUPipelineRequest) {
 	// The reconcile boundary already validated the DGD owner; rendering uses that identity.
 	dgdOwner := metav1.GetControllerOf(deployment)
-
-	// Only multiple workloads need a group identity; sole workloads retain existing LPR names.
-	groupName := ""
-	if grouped {
-		groupName = workload.ServingComponentName()
-	}
 
 	// Model projections are already ordered (default, or draft0..draft7 then target).
 	projections := workload.ModelProjections()
@@ -76,11 +69,11 @@ func resolveNamedPipelineRequests(
 	var missing []*lpxv1alpha1.LPUPipelineRequest
 
 	for replica := range replicas {
-		for _, projection := range projections {
+		for index, projection := range projections {
 			if projection.AgentReplicas() == 0 {
 				continue
 			}
-			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
+			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, workload.GroupName(), projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -92,7 +85,7 @@ func resolveNamedPipelineRequests(
 						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 					},
 				},
-				Spec: workload.RequestSpec(projection, replica),
+				Spec: workload.RequestSpec(index, replica),
 			}
 
 			if currentRequest := currentRequests[request.Name]; currentRequest != nil && pipelineRequestMatches(currentRequest, request) {
