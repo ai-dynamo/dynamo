@@ -11,21 +11,10 @@ import (
 	"strings"
 )
 
-const lpuChipsPerNode = 8
-
-// BuildCompilationMode records the compiler-authored execution mode in a normalized build.
-type BuildCompilationMode string
-
 // BuildFamily identifies the physical LPU target family of a normalized build.
 type BuildFamily string
 
 const (
-	// BuildCompilationModeUnknown represents a build whose compilation mode is not known.
-	BuildCompilationModeUnknown BuildCompilationMode = ""
-	// BuildCompilationModeLPUOnly represents a build executed entirely on LPUs.
-	BuildCompilationModeLPUOnly BuildCompilationMode = "lpuOnly"
-	// BuildCompilationModeHybrid retains the model manifest's historical "lpx" value.
-	BuildCompilationModeHybrid BuildCompilationMode = "lpx"
 	// BuildFamilyXT identifies the XT8888 LPU target family.
 	BuildFamilyXT BuildFamily = "xt8888"
 	// BuildFamilyHX identifies the HX16x8x2x3 LPU target family.
@@ -41,8 +30,8 @@ type Build struct {
 	Path string
 	// Family is the physical LPU target family.
 	Family BuildFamily
-	// CompilationMode selects the compiler-authored LPU-only or hybrid artifact mode.
-	CompilationMode BuildCompilationMode
+	// HasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
+	HasCUDAPartitions bool
 	// Partitions contains the normalized physical compiler partitions.
 	Partitions []BuildPartition
 	// SelectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
@@ -66,14 +55,20 @@ type BuildPartition struct {
 	PartPath string
 	// Topology is the scheduler-facing node shape for this partition.
 	Topology Topology
+	// DevicesPerNode is the number of chips per physical node in the compiler manifest.
+	DevicesPerNode int
 	// HXExtent is the scheduler-facing four-dimensional HX allocation.
 	HXExtent []int64
 
-	// runtimeNodeCount overrides the node count derived from Topology after
-	// selected prop-sync partitions are collapsed for the LPU runtime. Sub-host
-	// partitions still occupy one scheduler endpoint each, so their combined
-	// chip count alone cannot recover the number of scheduled Agent pods.
+	// runtimeNodeCount sums physical endpoints for a collapsed hybrid chain;
+	// Topology retains the original root stage.
 	runtimeNodeCount int
+}
+
+// Topology holds an opaque compiler name and a chip count.
+type Topology struct {
+	ChipCount int
+	Raw       string
 }
 
 // effectiveNodeCount returns the number of Agent endpoints assigned to the
@@ -83,7 +78,7 @@ func (p BuildPartition) effectiveNodeCount() int {
 	if p.runtimeNodeCount > 0 {
 		return p.runtimeNodeCount
 	}
-	return p.Topology.Replicas()
+	return max(1, p.Topology.ChipCount/p.DevicesPerNode)
 }
 
 func buildRuntimePath(buildPath string, modelStoragePath string) (string, error) {

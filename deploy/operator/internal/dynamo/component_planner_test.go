@@ -32,6 +32,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 				BaseComponentDefaults: &BaseComponentDefaults{},
 			},
 			componentContext: ComponentContext{
+				RuntimeContainerName:           commonconsts.MainContainerName,
 				numberOfNodes:                  1,
 				ParentGraphDeploymentName:      "name",
 				ParentGraphDeploymentNamespace: "namespace",

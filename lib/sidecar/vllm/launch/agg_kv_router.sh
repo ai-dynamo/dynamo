@@ -4,7 +4,6 @@
 #
 # Two aggregated vLLM native-gRPC sidecars behind Dynamo's KV-aware router.
 # Requires a vLLM build that exposes KV-event source discovery.
-# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 
@@ -34,6 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                       Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  VLLM_WORKER1_GPU            First GPU assignment (default: 0)"
             echo "  VLLM_WORKER2_GPU            Second GPU assignment (default: 1)"
@@ -60,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar vllm SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 export PYTHONHASHSEED=0
@@ -67,12 +69,12 @@ export PYTHONHASHSEED=0
 VLLM_HOST="127.0.0.1"
 VLLM_WORKER1_GPU="${VLLM_WORKER1_GPU:-0}"
 VLLM_WORKER2_GPU="${VLLM_WORKER2_GPU:-1}"
-VLLM_WORKER1_HTTP_PORT="${VLLM_WORKER1_HTTP_PORT:-8100}"
-VLLM_WORKER1_GRPC_PORT="${VLLM_WORKER1_GRPC_PORT:-50051}"
-VLLM_WORKER1_KV_EVENT_PORT="${VLLM_WORKER1_KV_EVENT_PORT:-20080}"
-VLLM_WORKER2_HTTP_PORT="${VLLM_WORKER2_HTTP_PORT:-8110}"
-VLLM_WORKER2_GRPC_PORT="${VLLM_WORKER2_GRPC_PORT:-50052}"
-VLLM_WORKER2_KV_EVENT_PORT="${VLLM_WORKER2_KV_EVENT_PORT:-20081}"
+VLLM_WORKER1_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${VLLM_WORKER1_HTTP_PORT:-8100}")
+VLLM_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_WORKER1_GRPC_PORT:-50051}")
+VLLM_WORKER1_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_WORKER1_KV_EVENT_PORT:-20080}")
+VLLM_WORKER2_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${VLLM_WORKER2_HTTP_PORT:-8110}")
+VLLM_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${VLLM_WORKER2_GRPC_PORT:-50052}")
+VLLM_WORKER2_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_WORKER2_KV_EVENT_PORT:-20081}")
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -106,6 +108,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_WORKER1_HTTP_PORT" \
     --grpc-port "$VLLM_WORKER1_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -121,6 +124,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_WORKER2_HTTP_PORT" \
     --grpc-port "$VLLM_WORKER2_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -130,11 +134,11 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -103,12 +105,12 @@ func ResolveWorkload(
 			pipeline = PipelineSingle
 			if len(components) == 2 {
 				pipeline = PipelineSpecDecode
-			} else if snapshot.build.CompilationMode == BuildCompilationModeHybrid {
+			} else if snapshot.build.HasCUDAPartitions {
 				pipeline = PipelineLPX
 			}
 		}
 
-		if err := validateWorkloadConductor(dgd, stage, pipeline, snapshot.build.CompilationMode); err != nil {
+		if err := validateWorkloadConductor(dgd, stage, pipeline, snapshot.build.HasCUDAPartitions); err != nil {
 			return nil, err
 		}
 
@@ -120,6 +122,7 @@ func ResolveWorkload(
 			Models:          modelNames,
 			RuntimeBuildRef: model.BuildID,
 			BuildSnapshot:   snapshot,
+			LocalPartitions: model.LocalPartitions(),
 		}
 		projected, err := appendModelProjections(projections, intent)
 		if err != nil {
@@ -141,7 +144,7 @@ func ResolveWorkload(
 
 	// The conductor component owns explicit capacity or the initial native seed.
 	conductor := components[len(components)-1]
-	scalingGroupReplicas := ptr.Deref(conductor.Replicas, ptr.Deref(conductor.MinAvailable, 1))
+	scalingGroupReplicas := ptr.Deref(conductor.Replicas, provideroverride.EffectiveGroveMinAvailable(conductor))
 
 	// Canonical roles expand into default or draft0..draft7 followed by target.
 	digest, err := workloadSetDigest(projections)
@@ -160,11 +163,11 @@ func validateWorkloadConductor(
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	component *dynamov1beta1.DynamoComponentDeploymentSharedSpec,
 	pipeline Pipeline,
-	compilationMode BuildCompilationMode,
+	requiresGPU bool,
 ) error {
 	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
-	// Hybrid execution is selected by immutable build metadata, not template presence.
-	if compilationMode == BuildCompilationModeHybrid {
+	// Validate the selected hybrid runtime's GPU resources and claim bindings.
+	if requiresGPU {
 		if pipeline == PipelineSpecDecode {
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}

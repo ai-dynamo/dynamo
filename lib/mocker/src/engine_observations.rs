@@ -3,13 +3,22 @@
 
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
-use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData};
+use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
+    KvCacheStoredBlockData, LocalBlockHash, StorageTier,
 };
 
 use crate::common::protocols::ForwardPassSnapshot;
+
+/// Router storage tier of a native KV event. `HostPinned` events describe a
+/// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
+pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
+    match tier {
+        KvEventTier::Device => StorageTier::Device,
+        KvEventTier::HostPinned => StorageTier::HostPinned,
+    }
+}
 
 pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u32>>>) {
     let (data, block_token_ids) = match event.data {
@@ -102,6 +111,7 @@ mod tests {
         blocks: &[(u64, u64, &[u32])],
     ) -> KvEvent {
         KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
@@ -143,6 +153,7 @@ mod tests {
         assert_eq!(token_ids, Some(vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]));
 
         let (event, token_ids) = dynamo_kv_event(KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id: 18,
             dp_rank: 3,
             data: KvEventData::Removed {
@@ -193,6 +204,7 @@ mod tests {
         assert_eq!(matches.scores.get(&worker), Some(&2));
 
         let removed = dynamo_kv_event(KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id: 3,
             dp_rank: 3,
             data: KvEventData::Removed {

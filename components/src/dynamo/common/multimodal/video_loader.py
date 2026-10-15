@@ -27,6 +27,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_by
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
@@ -280,7 +281,9 @@ class VideoLoader:
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
-            logger.error("URL rejected loading video: '%s'", video_url)
+            logger.error(
+                "URL rejected loading video: '%s'", describe_media_source(video_url)
+            )
             raise
         except MissingMediaDecoderError:
             # Already actionable (names the codec and the install); a missing
