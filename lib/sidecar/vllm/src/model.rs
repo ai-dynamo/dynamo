@@ -109,9 +109,9 @@ impl DiscoveredModel {
                 self.server.rl_capabilities, observed.server.rl_capabilities
             )));
         }
-        if self.server.proto_version != observed.server.proto_version {
+        if self.supports_engine_reasoning_gate() != observed.supports_engine_reasoning_gate() {
             return Err(client::protocol_error(format!(
-                "vllm-proto version changed between bootstrap and startup: expected `{}`, observed `{}`",
+                "reasoning-gate support changed between bootstrap and startup: vllm-proto `{}` became `{}`",
                 self.server.proto_version, observed.server.proto_version
             )));
         }
@@ -432,6 +432,21 @@ mod tests {
             .expect_err("zero data parallelism must fail discovery");
 
         assert!(error.to_string().contains("data-parallel size of zero"));
+    }
+
+    #[test]
+    fn startup_compatibility_tracks_reasoning_gate_support() {
+        let bootstrap = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        for (version, compatible) in [("0.6.1", true), ("", false)] {
+            let mut server = server_info();
+            server.proto_version = version.to_string();
+            let observed = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            assert_eq!(
+                bootstrap.ensure_startup_compatible(&observed).is_ok(),
+                compatible,
+                "{version}"
+            );
+        }
     }
 
     #[test]

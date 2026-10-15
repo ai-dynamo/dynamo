@@ -111,6 +111,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_ENCODER_HTTP_PORT" \
     --grpc-port "$VLLM_ENCODER_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --mm-encoder-only \
     --enforce-eager \
@@ -129,6 +130,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_PREFILL_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -146,6 +148,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_DECODE_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

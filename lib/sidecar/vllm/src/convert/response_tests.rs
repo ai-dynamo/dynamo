@@ -455,10 +455,16 @@ fn decode_reports_prefill_cached_tokens_instead_of_transferred_kv() {
             .as_mut()
             .unwrap()
             .num_cached_tokens = Some(3);
-        let terminal = ResponseState::new(&request, DisaggregationMode::Decode)
-            .convert(response)
-            .unwrap()
-            .unwrap();
+        let mut state = ResponseState::new(&request, DisaggregationMode::Decode);
+        // Client cancellation reports usage without a terminal from vLLM.
+        assert_eq!(
+            state
+                .completion_usage(0, None)
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            prefill_cached
+        );
+        let terminal = state.convert(response).unwrap().unwrap();
         assert_eq!(
             terminal
                 .completion_usage
@@ -570,14 +576,16 @@ fn prefill_terminal_has_zero_completion_usage() {
         FinishReason::Cancelled,
     ] {
         let mut response = terminal_response(reason.clone());
-        response
+        let finish = response
             .outputs
             .as_mut()
             .unwrap()
             .finish_info
             .as_mut()
-            .unwrap()
-            .kv_transfer_params = Some(
+            .unwrap();
+        // The frontend hands this count to decode through PrefillResult.
+        finish.num_cached_tokens = Some(2);
+        finish.kv_transfer_params = Some(
             json_to_struct_v14(
                 json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}}),
                 KV_TRANSFER_PARAMS,
@@ -598,6 +606,12 @@ fn prefill_terminal_has_zero_completion_usage() {
                 usage.total_tokens
             ),
             (3, 0, 3)
+        );
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(2)
         );
         assert_eq!(terminal.finish_reason, Some(reason.clone()));
         if reason == FinishReason::Cancelled {

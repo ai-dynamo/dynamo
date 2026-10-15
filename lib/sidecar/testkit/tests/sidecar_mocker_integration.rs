@@ -785,6 +785,7 @@ async fn vllm_generation_controls_preserve_values_over_grpc() {
             "reasoning_ended",
             "thinking_token_budget",
             "bad_words_token_ids",
+            "allowed_token_ids",
             "top_k",
             "min_p",
         ] {
@@ -800,6 +801,10 @@ async fn vllm_generation_controls_preserve_values_over_grpc() {
                 "bad_words_token_ids" => {
                     req.extra_args =
                         Some(json!({"sampling_options": {"bad_words_token_ids": [[7, 11], [0]]}}))
+                }
+                "allowed_token_ids" => {
+                    req.extra_args =
+                        Some(json!({"sampling_options": {"allowed_token_ids": [7, 11]}}))
                 }
                 "top_k" => req.sampling_options.top_k = Some(-1),
                 "min_p" => req.sampling_options.min_p = Some(0.0),
@@ -832,6 +837,10 @@ async fn vllm_generation_controls_preserve_values_over_grpc() {
                         pb::TokenIds { ids: vec![7, 11] },
                         pb::TokenIds { ids: vec![0] }
                     ]
+                ),
+                "allowed_token_ids" => assert_eq!(
+                    wire.decoding.as_ref().unwrap().allowed_token_ids,
+                    vec![7, 11]
                 ),
                 "top_k" => assert_eq!(wire.sampling.as_ref().unwrap().top_k, Some(0)),
                 "min_p" => assert_eq!(wire.sampling.as_ref().unwrap().min_p, Some(0.0)),

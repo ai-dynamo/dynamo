@@ -499,6 +499,8 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         }),
         ("top_k", |r| r.sampling_options.top_k = Some(-2)),
         ("top_p", |r| r.sampling_options.top_p = Some(0.0)),
+        ("top_p", |r| r.sampling_options.top_p = Some(1.5)),
+        ("top_p", |r| r.sampling_options.top_p = Some(f32::NAN)),
         ("reasoning_parser_kwargs", |r| {
             r.extra_args = Some(json!({"reasoning_parser_kwargs": {"unknown_control": true}}))
         }),

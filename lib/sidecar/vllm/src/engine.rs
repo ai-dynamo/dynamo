@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
+    LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig,
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
@@ -51,10 +51,8 @@ pub struct VllmSidecarEngine {
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
-    LLMEngineOutput::cancelled().with_usage(usage(
-        state.prompt_tokens(),
-        state.reported_completion_tokens(),
-    ))
+    LLMEngineOutput::cancelled()
+        .with_usage(state.completion_usage(state.reported_completion_tokens(), None))
 }
 
 impl VllmSidecarEngine {
@@ -209,11 +207,23 @@ impl VllmSidecarEngine {
                 )));
             }
         }
-        if dynamo_parsers && !model.supports_engine_reasoning_gate() {
-            tracing::warn!(
-                proto_version,
-                "vLLM's gRPC server predates vllm-proto 0.6.0 and cannot receive Dynamo's reasoning gate. Running degraded: tool and structured-output grammars apply from the first generated token, and thinking budgets are not enforced. Upgrade vLLM to let the engine gate grammars on reasoning"
-            );
+        match model.reasoning_parser() {
+            None if dynamo_parsers => {
+                let advice = if model.supports_engine_reasoning_gate() {
+                    "Start vllm-rs with a reasoning parser"
+                } else {
+                    "Upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with a reasoning parser"
+                };
+                tracing::warn!(
+                    proto_version,
+                    "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. {advice} to let the engine gate grammars on reasoning"
+                );
+            }
+            Some(parser) if !dynamo_parsers => tracing::warn!(
+                parser,
+                "vLLM runs a reasoning parser, but Dynamo has none, so per-request thinking settings never reach vLLM. It infers from the prompt alone whether reasoning has ended before applying structured output and required or named tool_choice grammars, which can leave them unenforced or suppress reasoning. Set `--dyn-reasoning-parser`, or start vllm-rs with `--reasoning-parser none`"
+            ),
+            _ => {}
         }
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
@@ -837,8 +847,26 @@ impl LLMEngine for VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
         let mut request = normalize_response_options(request)?;
-        if !self.model.supports_engine_reasoning_gate() {
-            consume_reasoning_parser_args(&mut request.extra_args);
+        if !self.model.supports_engine_reasoning_gate()
+            && consume_reasoning_parser_args(&mut request.extra_args)
+            && let Some(parser) = self.model.reasoning_parser()
+        {
+            // Without the settings, vLLM's parser guesses from the prompt where
+            // reasoning ends. Nothing reads them when vLLM runs no parser.
+            return Err(client::invalid_argument(format!(
+                "vLLM runs reasoning parser `{parser}`, but its gRPC server predates vllm-proto 0.6.0 and cannot receive this request's reasoning settings; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
+            )));
+        }
+        if request.stop_conditions.max_thinking_tokens.is_some()
+            && !self.mode.is_prefill()
+            && !self.mode.is_encode()
+            && self.model.reasoning_parser().is_none()
+        {
+            // The native gRPC path skips vLLM's frontend check and would
+            // otherwise ignore the budget.
+            return Err(client::invalid_argument(
+                "max_thinking_tokens requires vLLM to run a reasoning parser",
+            ));
         }
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
@@ -1587,19 +1615,24 @@ mod tests {
             (
                 &["--dyn-reasoning-parser", "qwen3"][..],
                 old_server.clone(),
-                Err("--reasoning-parser none"),
+                Err("predates 0.6.0"),
+            ),
+            (
+                &["--dyn-tool-call-parser", "qwen3_coder"][..],
+                old_server.clone(),
+                Err("predates 0.6.0"),
             ),
             (
                 &["--dyn-tool-call-parser", "qwen3_coder"][..],
                 server_info(),
-                Err("--dyn-reasoning-parser"),
+                Err("set `--dyn-reasoning-parser`"),
             ),
             (
                 &["--dyn-reasoning-parser", "qwen3"][..],
                 server_info(),
                 Ok(true),
             ),
-            // Without Dynamo parsers the frontend builds no tool grammar.
+            // Without Dynamo parsers, startup only warns.
             (&[][..], server_info(), Ok(true)),
             (&[][..], old_server, Ok(false)),
         ] {

@@ -5,8 +5,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
-    PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
+    CompletionUsage, DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput,
+    MultimodalData, PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason,
+    TopLogprob, usage,
 };
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -554,14 +555,19 @@ fn consume_preprocessed_mm_routing_hashes(
     Ok(Some(hashes))
 }
 
-/// The frontend adds these for vLLM's structured-output reasoning gate. Drop
-/// them for servers that can't confirm they read the gate (before vllm-proto
-/// 0.6.0); `--reasoning-parser none` is then required, so nothing reads them.
-pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
-    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
-        extra.remove("reasoning_parser_kwargs");
-        extra.remove("reasoning_ended");
-    }
+/// The frontend adds these for vLLM's structured-output reasoning gate. Servers
+/// before vllm-proto 0.6.0 can't confirm they read the gate, so the caller
+/// drops them there. Returns whether the request carried any.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) -> bool {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return false;
+    };
+    let kwargs = extra.remove("reasoning_parser_kwargs");
+    let ended = extra.remove("reasoning_ended");
+    [kwargs, ended]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_null())
 }
 
 fn take_engine_reasoning_gate(
@@ -1452,8 +1458,27 @@ impl ResponseState {
         }
     }
 
-    pub(crate) fn prompt_tokens(&self) -> u32 {
-        self.prompt_tokens
+    /// Usage with the engine's prefix-cache hit count, when it reported one.
+    pub(crate) fn completion_usage(
+        &self,
+        completion_tokens: u32,
+        engine_cached_tokens: Option<u32>,
+    ) -> CompletionUsage {
+        // A decode engine counts the KV received from prefill as cached, which
+        // would read as a ~100% hit on every disaggregated request. The prefill
+        // leg is the only source there, even when it reported no count.
+        let cached_tokens = if self.mode.is_decode() {
+            self.prefill_cached_tokens
+        } else {
+            engine_cached_tokens
+        };
+        let mut completion_usage = usage(self.prompt_tokens, completion_tokens);
+        completion_usage.prompt_tokens_details =
+            cached_tokens.map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens.min(self.prompt_tokens)),
+                ..Default::default()
+            });
+        completion_usage
     }
 
     pub(crate) fn convert(
@@ -1567,21 +1592,8 @@ impl ResponseState {
                 .then_some(StopReason::Int(i64::from(id))),
             pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
-        // A decode engine counts the KV received from prefill as cached, which
-        // would read as a ~100% hit on every disaggregated request. The prefill
-        // leg is the only source there, even when it reported no count.
-        let cached_tokens = if self.mode.is_decode() {
-            self.prefill_cached_tokens
-        } else {
-            finish.num_cached_tokens
-        };
-        let mut completion_usage = usage(self.prompt_tokens, completion_tokens);
-        completion_usage.prompt_tokens_details =
-            cached_tokens.map(|cached_tokens| PromptTokensDetails {
-                cached_tokens: Some(cached_tokens.min(self.prompt_tokens)),
-                ..Default::default()
-            });
-        mapped.completion_usage = Some(completion_usage);
+        mapped.completion_usage =
+            Some(self.completion_usage(completion_tokens, finish.num_cached_tokens));
         if self.mode.is_encode() {
             if matches!(
                 mapped.finish_reason,

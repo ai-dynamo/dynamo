@@ -1083,8 +1083,27 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     );
 }
 
+async fn started_engine(
+    model: pb::ModelInfo,
+    server: pb::ServerInfo,
+) -> (FakeServer, VllmSidecarEngine) {
+    let fake = FakeServer::start(FakeVllm::default()).await;
+    *fake.service.model_info_override.lock().await = Some(model.clone());
+    *fake.service.server_info_override.lock().await = Some(server.clone());
+    let engine = engine_with_server_info(
+        &fake.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model,
+        server,
+    );
+    engine.start(0).await.expect("start");
+    (fake, engine)
+}
+
 // Regression: servers before vllm-proto 0.6.0 can't confirm they read the
-// reasoning gate, so the sidecar must forward it only to newer servers.
+// reasoning gate. The sidecar must forward it only to newer servers, and must
+// not silently drop it when an older server's reasoning parser needs it.
 #[tokio::test]
 async fn reasoning_gate_reaches_only_servers_reporting_proto_0_6() {
     let mut request = request();
@@ -1094,24 +1113,91 @@ async fn reasoning_gate_reaches_only_servers_reporting_proto_0_6() {
 
     let mut old_server = server_info();
     old_server.proto_version.clear();
-    for (info, forwarded) in [(server_info(), true), (old_server, false)] {
-        let server = FakeServer::start(FakeVllm::default()).await;
-        *server.service.server_info_override.lock().await = Some(info.clone());
-        let engine = engine_with_server_info(
-            &server.endpoint,
-            DisaggregationMode::Aggregated,
-            1,
-            model_info(),
-            info,
-        );
-        engine.start(0).await.expect("start");
-        collect(&engine, request.clone()).await;
-        let gate = server.service.requests.lock().await[0]
-            .engine_reasoning_gate
-            .clone();
+    let mut no_parser = model_info();
+    no_parser.reasoning_parser.clear();
+    // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+    for (model, server, expected) in [
+        (model_info(), server_info(), Ok(Some(false))),
+        (no_parser, old_server.clone(), Ok(None)),
+        (model_info(), old_server, Err("cannot receive")),
+    ] {
+        let (fake, engine) = started_engine(model, server).await;
+        match (collect_result(&engine, request.clone()).await, expected) {
+            (Ok(_), Ok(reasoning_ended)) => {
+                let gate = fake.service.requests.lock().await[0]
+                    .engine_reasoning_gate
+                    .clone();
+                assert_eq!(gate.and_then(|gate| gate.reasoning_ended), reasoning_ended);
+            }
+            (Err(error), Err(expected)) => {
+                assert!(error.to_string().contains(expected), "{error}");
+                assert!(fake.service.requests.lock().await.is_empty());
+            }
+            (result, expected) => panic!("expected {expected:?}, got error {:?}", result.err()),
+        }
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
+// Regression: vLLM enforces thinking budgets only with a reasoning parser,
+// and its native gRPC path ignores them silently otherwise.
+#[tokio::test]
+async fn thinking_budget_requires_engine_reasoning_parser() {
+    let mut request = request();
+    request.stop_conditions.max_thinking_tokens = Some(0);
+    let mut no_parser = model_info();
+    no_parser.reasoning_parser.clear();
+    for (model, accepted) in [(model_info(), true), (no_parser, false)] {
+        let (fake, engine) = started_engine(model, server_info()).await;
+        let result = collect_result(&engine, request.clone()).await;
+        assert_eq!(result.is_ok(), accepted, "{:?}", result.err());
+        if accepted {
+            let budget = fake.service.requests.lock().await[0]
+                .stopping
+                .as_ref()
+                .unwrap()
+                .thinking_token_budget;
+            assert_eq!(budget, Some(0));
+        }
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
+// Regression: the frontend must leave reasoning out of tool grammars only when
+// vLLM's reasoning parser gates them, which needs a vllm-proto 0.6 server.
+#[tokio::test]
+async fn excludes_reasoning_policy_follows_engine_gating() {
+    let mut old_server = server_info();
+    old_server.proto_version.clear();
+    let mut no_parser = model_info();
+    no_parser.reasoning_parser.clear();
+    for (model, server, published) in [
+        (model_info(), server_info(), true),
+        (no_parser, server_info(), false),
+        (model_info(), old_server, false),
+    ] {
+        let service = FakeVllm::default();
+        *service.model_info_override.lock().await = Some(model);
+        *service.server_info_override.lock().await = Some(server);
+        let fake = FakeServer::start(service).await;
+        let argv = vec![
+            "dynamo-vllm-sidecar".to_string(),
+            "--grpc-endpoint".to_string(),
+            fake.endpoint.clone(),
+            "--grpc-startup-deadline-secs".to_string(),
+            "5".to_string(),
+        ];
+        let (engine, _) =
+            tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+                .await
+                .expect("bootstrap task")
+                .expect("bootstrap discovery");
+        let config = engine.start(0).await.expect("start");
         assert_eq!(
-            gate.and_then(|gate| gate.reasoning_ended),
-            forwarded.then_some(false)
+            config.runtime_data.get(
+                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY
+            ),
+            published.then_some(&json!(true))
         );
         engine.cleanup().await.expect("cleanup");
     }
