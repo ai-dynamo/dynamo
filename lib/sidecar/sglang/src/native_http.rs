@@ -22,7 +22,6 @@ use tokio_util::{
 use crate::{client, client::Discovery, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
-const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 /// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
 const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 
@@ -297,7 +296,7 @@ impl NativeHttp {
 
             let bytes = response.bytes_stream().map_err(io::Error::other);
             let reader = StreamReader::new(bytes);
-            let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_EVENT_BYTES));
+            let mut lines = FramedRead::new(reader, LinesCodec::new());
             let mut first_output_seen = false;
             loop {
                 let selected = tokio::select! {
@@ -914,6 +913,38 @@ mod tests {
         assert!(stream.next().await.unwrap().is_ok());
         assert!(*first_token_seen.borrow());
         assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_accepts_events_larger_than_64_mib() {
+        let metadata_len = 64 * 1024 * 1024 + 1;
+        let body = format!(
+            "data: {{\"output_ids\":[101],\"meta_info\":{{\"finish_reason\":{{\"type\":\"stop\"}},\"blob\":\"{}\"}}}}\n\n",
+            "x".repeat(metadata_len)
+        );
+        let (port, server) = serve_once(body, "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let output = stream.next().await.unwrap().unwrap();
+        let blob = output
+            .engine_data
+            .as_ref()
+            .and_then(|data| data.pointer("/sglang_response/meta_info/blob"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert_eq!(blob.len(), metadata_len);
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
