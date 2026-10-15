@@ -9,7 +9,12 @@ from kubernetes.client import rest
 
 from dynamo.common import kubernetes
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 
 def test_client_go_api_client_enables_read_retries(monkeypatch) -> None:
@@ -55,3 +60,25 @@ def test_write_retry_does_not_multiply_transient_request_retries() -> None:
         kubernetes.retry_kubernetes_write(write)
 
     assert attempts == 1
+
+
+def test_conflict_after_ambiguous_request_retry_is_distinguished() -> None:
+    errors = iter([client.ApiException(status=500), client.ApiException(status=409)])
+
+    def request() -> None:
+        raise next(errors)
+
+    with pytest.raises(kubernetes.RetriedRequestConflict):
+        kubernetes.retry_kubernetes_request(request)
+
+
+def test_conflict_after_throttling_remains_an_ordinary_conflict() -> None:
+    errors = iter([client.ApiException(status=429), client.ApiException(status=409)])
+
+    def request() -> None:
+        raise next(errors)
+
+    with pytest.raises(client.ApiException) as raised:
+        kubernetes.retry_kubernetes_request(request)
+
+    assert type(raised.value) is client.ApiException

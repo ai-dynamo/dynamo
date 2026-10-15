@@ -22,8 +22,10 @@ async def test_run_sync_in_thread_joins_worker_before_propagating_cancellation()
         release.wait()
         finished.set()
 
+    tasks_before = asyncio.all_tasks()
     task = asyncio.create_task(run_sync_in_thread(operation))
     assert await asyncio.to_thread(started.wait, 1)
+    assert asyncio.all_tasks() - tasks_before == {task}
 
     try:
         task.cancel()

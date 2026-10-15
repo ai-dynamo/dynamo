@@ -29,7 +29,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
 
-from dynamo.common.async_utils import run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -274,7 +273,7 @@ class Orchestrator:
             return terminal
 
         # Read back current replica counts (outside the lock).
-        current_replicas = await run_sync_in_thread(
+        current_replicas = await asyncio.to_thread(
             self.capacity_manager.current_replicas, participant_id
         )
         logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
@@ -312,7 +311,7 @@ class Orchestrator:
         # backend reads off-thread so the event loop isn't blocked for the N
         # round-trips. When budget is enforced, require a complete snapshot so a
         # partial read can't under-count cluster usage.
-        all_pools = await run_sync_in_thread(
+        all_pools = await asyncio.to_thread(
             self.capacity_manager.observe, self.budget_enforcement_enabled()
         )
 

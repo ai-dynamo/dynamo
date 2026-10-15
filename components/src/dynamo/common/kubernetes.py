@@ -17,6 +17,19 @@ from kubernetes.utils.retry import (
 T = TypeVar("T")
 
 
+class RetriedRequestConflict(rest.ApiException):
+    """A 409 observed after retrying an ambiguously completed request."""
+
+    def __init__(self, conflict: Exception):
+        super().__init__(
+            status=getattr(conflict, "status", 409),
+            reason=getattr(conflict, "reason", None),
+            body=getattr(conflict, "body", None),
+            data=getattr(conflict, "data", None),
+        )
+        self.headers = getattr(conflict, "headers", None)
+
+
 def client_go_api_client() -> client.ApiClient:
     """Build an API client with client-go-compatible read retries enabled."""
 
@@ -33,9 +46,31 @@ def is_transient_api_error(error: Exception) -> bool:
 
 
 def retry_kubernetes_request(fn: Callable[[], T]) -> T:
-    """Retry one API operation on throttling and transient server errors."""
+    """Retry one API operation on throttling and transient server errors.
 
-    return on_retry_after_error(DEFAULT_BACKOFF, is_transient_api_error, fn)
+    If a transport or server failure is followed by a conflict, preserve that
+    ambiguity for callers that cannot safely repeat a relative mutation.
+    """
+
+    ambiguous_completion = False
+
+    def request() -> T:
+        nonlocal ambiguous_completion
+        try:
+            return fn()
+        except Exception as error:
+            status = getattr(error, "status", None)
+            if status == 409 and ambiguous_completion:
+                raise RetriedRequestConflict(error) from error
+            if (
+                isinstance(error, rest.urllib3.exceptions.HTTPError)
+                or status == 0
+                or (isinstance(status, int) and status >= 500)
+            ):
+                ambiguous_completion = True
+            raise
+
+    return on_retry_after_error(DEFAULT_BACKOFF, is_transient_api_error, request)
 
 
 def retry_kubernetes_write(fn: Callable[[], T]) -> T:

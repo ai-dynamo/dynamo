@@ -5,6 +5,7 @@
 
 import asyncio
 from collections.abc import Callable
+from functools import partial
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -20,15 +21,17 @@ async def run_sync_in_thread(
     mutating operation has stopped while it can still commit in the background.
     """
 
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    worker = asyncio.get_running_loop().run_in_executor(
+        None, partial(function, *args, **kwargs)
+    )
     try:
-        return await asyncio.shield(task)
+        return await asyncio.shield(worker)
     except asyncio.CancelledError:
-        while not task.done():
+        while not worker.done():
             try:
-                await asyncio.wait({task})
+                await asyncio.wait({worker})
             except asyncio.CancelledError:
                 continue
-        if not task.cancelled():
-            task.exception()
+        if not worker.cancelled():
+            worker.exception()
         raise

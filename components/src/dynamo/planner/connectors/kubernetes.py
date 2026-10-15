@@ -18,7 +18,7 @@ import copy
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Optional
@@ -26,7 +26,7 @@ from typing import Optional
 from kubernetes.client import ApiException
 
 from dynamo.common.async_utils import run_sync_in_thread
-from dynamo.common.kubernetes import retry_kubernetes_write
+from dynamo.common.kubernetes import RetriedRequestConflict, retry_kubernetes_write
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
@@ -74,6 +74,10 @@ WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
 
+class _ReplicaTargetCommittedConflict(ApiException):
+    """A conflict found only after a replica write returned successfully."""
+
+
 @dataclass(frozen=True)
 class _ReplicaUpdatePlan:
     """One fully resolved replica target from a single DGD snapshot."""
@@ -97,6 +101,22 @@ class _StartupReductionTracker:
 
     def clear(self) -> None:
         self.attempted.clear()
+
+
+@dataclass
+class _ReplicaUpdateTracker:
+    """Remember whether any write in a retried batch may have committed."""
+
+    possibly_applied: bool = False
+
+    def run(self, write: Callable[[], None]) -> None:
+        try:
+            write()
+        except (RetriedRequestConflict, _ReplicaTargetCommittedConflict):
+            self.possibly_applied = True
+            raise
+        else:
+            self.possibly_applied = True
 
 
 class KubernetesConnector(PlannerConnector):
@@ -1081,6 +1101,7 @@ class KubernetesConnector(PlannerConnector):
         unset_uid = object()
         expected_uid: object = unset_uid
         startup_reductions = _StartupReductionTracker()
+        transaction = _ReplicaUpdateTracker()
 
         def update() -> bool:
             nonlocal expected_uid
@@ -1091,9 +1112,14 @@ class KubernetesConnector(PlannerConnector):
             elif current_uid != expected_uid:
                 startup_reductions.clear()
                 raise RuntimeError("DGD identity changed during replica update retry")
-            return self._set_component_replicas_once(
-                deployment, target_replicas, startup_reductions
+            should_wait = self._set_component_replicas_once(
+                deployment, target_replicas, startup_reductions, transaction
             )
+            if not should_wait and transaction.possibly_applied:
+                raise RuntimeError(
+                    "replica update became unready after partial application"
+                )
+            return should_wait
 
         try:
             should_wait = await run_sync_in_thread(retry_kubernetes_write, update)
@@ -1109,6 +1135,7 @@ class KubernetesConnector(PlannerConnector):
         deployment: dict,
         target_replicas: list[TargetReplica],
         startup_reductions: _StartupReductionTracker,
+        transaction: _ReplicaUpdateTracker,
     ) -> bool:
         """Validate and apply one conflict-free replica update attempt."""
         deployment_ready = self.kube_api.is_deployment_ready(deployment)
@@ -1299,11 +1326,13 @@ class KubernetesConnector(PlannerConnector):
         for plan in adapter_reductions:
             if startup_reduction:
                 startup_reductions.record_attempts([plan])
-            self._write_preflighted_replica_target(
-                plan.deployment,
-                plan.service,
-                plan.target.desired_replicas,
-                plan.scaling_adapter,
+            transaction.run(
+                lambda plan=plan: self._write_preflighted_replica_target(
+                    plan.deployment,
+                    plan.service,
+                    plan.target.desired_replicas,
+                    plan.scaling_adapter,
+                )
             )
 
         dgd_mutations = [plan for plan in mutations if plan.scaling_adapter is None]
@@ -1311,30 +1340,36 @@ class KubernetesConnector(PlannerConnector):
             plan = dgd_mutations[0]
             if startup_reduction:
                 startup_reductions.record_attempts(dgd_mutations)
-            self._write_preflighted_replica_target(
-                plan.deployment,
-                plan.service,
-                plan.target.desired_replicas,
-                None,
+            transaction.run(
+                lambda: self._write_preflighted_replica_target(
+                    plan.deployment,
+                    plan.service,
+                    plan.target.desired_replicas,
+                    None,
+                )
             )
         elif dgd_mutations:
             if startup_reduction:
                 startup_reductions.record_attempts(dgd_mutations)
-            self.kube_api.update_dgd_replica_targets(
-                self.graph_deployment_name,
-                {
-                    plan.service.name: plan.target.desired_replicas
-                    for plan in dgd_mutations
-                },
-                deployment=deployment,
+            transaction.run(
+                lambda: self.kube_api.update_dgd_replica_targets(
+                    self.graph_deployment_name,
+                    {
+                        plan.service.name: plan.target.desired_replicas
+                        for plan in dgd_mutations
+                    },
+                    deployment=deployment,
+                )
             )
 
         for plan in adapter_increases:
-            self._write_preflighted_replica_target(
-                plan.deployment,
-                plan.service,
-                plan.target.desired_replicas,
-                plan.scaling_adapter,
+            transaction.run(
+                lambda plan=plan: self._write_preflighted_replica_target(
+                    plan.deployment,
+                    plan.service,
+                    plan.target.desired_replicas,
+                    plan.scaling_adapter,
+                )
             )
 
         for plan in plans:
@@ -1534,10 +1569,9 @@ class KubernetesConnector(PlannerConnector):
         unset_uid = object()
         expected_uid: object = unset_uid
         attempted_component: str | None = None
-        attempted_replicas: int | None = None
 
         def write() -> bool:
-            nonlocal attempted_component, attempted_replicas, expected_uid
+            nonlocal attempted_component, expected_uid
             current_deployment = self.kube_api.get_graph_deployment(
                 self.graph_deployment_name
             )
@@ -1559,22 +1593,25 @@ class KubernetesConnector(PlannerConnector):
             current_replicas, current_adapter = self._authoritative_replica_state(
                 current_deployment, current_service
             )
-            if (
-                attempted_replicas is not None
-                and current_replicas == attempted_replicas
-            ):
-                return True
             replicas = current_replicas + delta
             if replicas < 0:
                 return False
             attempted_component = current_service.name
-            attempted_replicas = replicas
-            self._write_preflighted_replica_target(
-                current_deployment,
-                current_service,
-                replicas,
-                current_adapter,
-            )
+            try:
+                self._write_preflighted_replica_target(
+                    current_deployment,
+                    current_service,
+                    replicas,
+                    current_adapter,
+                )
+            except (
+                RetriedRequestConflict,
+                _ReplicaTargetCommittedConflict,
+            ) as error:
+                raise RuntimeError(
+                    "relative replica update may already have been applied; "
+                    "refusing to repeat it"
+                ) from error
             return True
 
         return retry_kubernetes_write(write)
@@ -1629,10 +1666,18 @@ class KubernetesConnector(PlannerConnector):
 
         # DGDSA and DGD are separate objects. Verify that the parent snapshot
         # still assigns authority to the adapter after the Scale PATCH.
-        refreshed = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        try:
+            refreshed = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        except ApiException as error:
+            if error.status != 409:
+                raise
+            raise _ReplicaTargetCommittedConflict(
+                status=409,
+                reason="DGD conflicted after DGDSA Scale PATCH committed",
+            ) from error
         rejection = self._dgdsa_authority_rejection(deployment, refreshed, service.name)
         if rejection is not None:
-            raise ApiException(status=409, reason=rejection)
+            raise _ReplicaTargetCommittedConflict(status=409, reason=rejection)
 
     @staticmethod
     def _dgdsa_authority_rejection(

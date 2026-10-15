@@ -10,7 +10,8 @@ Kubernetes, no runtime — which previews how offline replay plugs a non-K8s
 backend into the same orchestrator, including the ``use_lock`` toggle.
 """
 
-from threading import get_ident
+import asyncio
+from threading import Event, get_ident
 
 import pytest
 
@@ -240,6 +241,40 @@ async def test_submit_approves_and_actuates(use_lock):
     assert cm.pools["default/a"]["prefill"][0] == 3  # actuated
     assert out.current_replicas == {"prefill": 3, "decode": 1}
     assert cm.current_replicas_thread_id != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_cancelled_observation_releases_scale_lock():
+    class BlockingFirstObserveCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.observe_started = Event()
+            self.release_observe = Event()
+            self.observe_calls = 0
+
+        def observe(self, require_complete=False):
+            self.observe_calls += 1
+            if self.observe_calls == 1:
+                self.observe_started.set()
+                self.release_observe.wait()
+            return super().observe(require_complete)
+
+    cm = BlockingFirstObserveCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm)
+    first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
+    assert await asyncio.to_thread(cm.observe_started.wait, 1)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first, 1)
+    try:
+        second = await asyncio.wait_for(
+            _submit(orch, "default/a", _targets(prefill=3)), 1
+        )
+        assert second.status == ScaleStatus.SUCCESS
+    finally:
+        cm.release_observe.set()
 
 
 @pytest.mark.asyncio
