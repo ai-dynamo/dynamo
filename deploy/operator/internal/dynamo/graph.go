@@ -57,6 +57,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -1995,9 +1996,9 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		}
 	}
 
-	// Validate the effective shutdown configuration after all pod overrides.
+	// Warn without rejecting previously valid workloads during operator upgrades.
 	if err := validateShutdownBudget(&podSpec, IsWorkerComponent(string(component.ComponentType))); err != nil {
-		return nil, err
+		klog.Warningf("Shutdown budget for component %s/%s/%s: %v; continuing reconciliation", namespace, parentGraphDeploymentName, serviceName, err)
 	}
 
 	return &podSpec, nil

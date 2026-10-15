@@ -586,11 +586,9 @@ impl Worker {
             Duration::ZERO,
             &budget,
         ));
-        let teardown = tokio::time::timeout(
-            teardown_bound,
-            runtime.shutdown_and_wait(Some(teardown_bound)),
-        )
-        .await;
+        let teardown =
+            tokio::time::timeout(teardown_bound, runtime.shutdown_with_budget(teardown_bound))
+                .await;
         let outcome = StageOutcome::new(
             Stage::Runtime,
             match &teardown {

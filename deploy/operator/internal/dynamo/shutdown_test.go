@@ -8,9 +8,49 @@ package dynamo
 import (
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
+
+func TestShutdownBudgetWarningsPreserveExistingPodSpecs(t *testing.T) {
+	// An operator upgrade must still render workloads with previously accepted budgets.
+	for _, tc := range []struct {
+		name  string
+		grace *int64
+		env   []corev1.EnvVar
+	}{
+		{name: "defaults"},
+		{name: "explicit thirty seconds", grace: ptr.To[int64](30)},
+		{name: "legacy sixty seconds", env: []corev1.EnvVar{{Name: "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", Value: "60"}}},
+		{name: "config map total", env: []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "timeout"}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					PodSpec:       &corev1.PodSpec{TerminationGracePeriodSeconds: tc.grace},
+					MainContainer: &corev1.Container{Image: "worker:test", Env: tc.env},
+				},
+			}
+			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{}, "dgd", "default", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			// Diagnostics must not change the grace period or the configured environment.
+			wantGrace := int64(60)
+			if tc.grace != nil {
+				wantGrace = *tc.grace
+			}
+			require.Equal(t, wantGrace, *pod.TerminationGracePeriodSeconds)
+			for _, env := range tc.env {
+				require.Contains(t, pod.Containers[0].Env, env)
+			}
+		})
+	}
+}
 
 func TestValidateShutdownBudget(t *testing.T) {
 	// Regression: pod overrides can let Kubernetes kill a worker before its deadline.
