@@ -11,7 +11,7 @@
 #
 # Unlike aggregated, the engine binds 0.0.0.0 so its bootstrap server (8998) is
 # reachable across pods; the decode worker dials the prefill worker's advertised
-# bootstrap (SGLANG_DISAGGREGATION_BOOTSTRAP_HOST = pod IP). SGLang's single
+# bootstrap address, which the sidecar auto-detects. SGLang's single
 # --host binds ALL listeners, so the unauthenticated native gRPC (30001) is also
 # exposed on the pod network — rely on NetworkPolicy, not loopback isolation.
 #
@@ -56,12 +56,6 @@ spec:
           - --grpc-endpoint
           - 127.0.0.1:30001
           restartPolicy: Always
-          env:
-          # Advertise this pod's IP as the bootstrap host decode workers dial.
-          - name: SGLANG_DISAGGREGATION_BOOTSTRAP_HOST
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret

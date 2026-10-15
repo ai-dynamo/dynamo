@@ -10,8 +10,8 @@
 #
 # SGLang binds 0.0.0.0 so its bootstrap server is reachable across pods. The
 # native gRPC service is therefore also exposed on the pod network; restrict it
-# with NetworkPolicy. ZMQ publishers bind all pod interfaces, and each sidecar
-# connects over its pod IP so GetServerInfo's wildcard becomes routable.
+# with NetworkPolicy. Each sidecar connects to its local engine over loopback;
+# GetServerInfo's wildcard KV-event address is normalized to that endpoint.
 #
 # PREREQUISITES / CAVEATS:
 #   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
@@ -54,17 +54,8 @@ spec:
           - dynamo-sglang-sidecar
           args:
           - --grpc-endpoint
-          - $(POD_IP):30001
+          - 127.0.0.1:30001
           restartPolicy: Always
-          env:
-          - name: POD_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
-          - name: SGLANG_DISAGGREGATION_BOOTSTRAP_HOST
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -148,13 +139,8 @@ spec:
           - dynamo-sglang-sidecar
           args:
           - --grpc-endpoint
-          - $(POD_IP):30001
+          - 127.0.0.1:30001
           restartPolicy: Always
-          env:
-          - name: POD_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret

@@ -47,13 +47,8 @@ spec:
           - dynamo-sglang-sidecar
           args:
           - --grpc-endpoint
-          - $(POD_IP):30001
+          - 127.0.0.1:30001
           restartPolicy: Always
-          env:
-          - name: POD_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
           envFrom:
           - secretRef:
               name: hf-token-secret
