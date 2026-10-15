@@ -8,9 +8,9 @@ write_reports serves new assessments. regenerate copies an existing assessment
 into evidence/ and rebuilds its findings and reports with the current interpreter.
 Interpretations can change; raw deltas do not, and comparison is not rerun.
 
-report.json carries the assessment and finding inventory; findings.json contains
-only that inventory; report.md presents it for human review. See README.md for
-CLI usage and the distinction between findings and approved changes.
+report.json carries the assessment and finding inventory; report.md presents it
+for human review. See README.md for CLI usage and the distinction between findings
+and approved changes.
 """
 
 import argparse
@@ -142,8 +142,10 @@ def render(
     marked unavailable. `evidence_prefix` is the trusted relative evidence directory,
     including its trailing slash, or empty for a new assessment. When available_files
     is supplied, mark missing output-relative files instead of emitting broken links.
-    Unknown categories follow the documented categories. Inputs are unchanged;
-    rendering does not adjudicate runtime behavior or policy.
+    Put target-only request/response guidance below its category heading.
+    Omit empty sections and generic per-finding guidance; retain specific checks
+    and limitations. Unknown categories follow the documented categories. Inputs
+    are unchanged; rendering does not adjudicate runtime behavior or policy.
     """
     inventory = report.get("finding_inventory") or build_findings(report)
 
@@ -153,39 +155,29 @@ def render(
             return prose(label) + " (not retained)"
         return file_link(label, filename, location, prefix)
 
-    counts, accounting = inventory["counts"], inventory["accounting"]
+    counts = inventory["counts"]
     lines = [
         f"# Dynamo versus {prose(report['framework_name'])} request/response-contract assessment",
         "",
         f"Status: **{prose(report['status'])}**. Behavioral conformance: **not assessed**.",
         "",
-        "These are declaration candidates, not confirmed runtime defects. For requests, check "
-        "reference-client inputs against Dynamo admission and effects. For responses, check "
-        "possible Dynamo outputs against the client's expectations.",
+        "These are schema findings, not confirmed runtime defects or approved fixes.",
         "",
-        f"{counts['readable_findings']} readable findings. "
-        f"All {accounting['raw_terminal_count']} raw candidate terminals are accounted for exactly once. "
-        "Findings are not confirmed defects or a compatibility score.",
+        f"{counts['readable_findings']} findings.",
         "",
         "## Review actions",
         "",
-        "1. Inspect both declarations and each suggested check below. Resolve structural ambiguity "
-        "before calling a field removed or a value forbidden.",
-        "2. Investigate coverage gaps. A missing default annotation is not a null default; "
-        "alias names do not prove value compatibility.",
-        "3. Attach revision-scoped evidence, an owner and a disposition to each candidate. "
-        "Intentional policy and historical runtime observations require reviewer evidence. "
-        "This generator supplies neither approval nor current runtime confirmation.",
+        "1. Inspect both declarations and linked evidence. Resolve structural ambiguity and coverage gaps.",
+        "2. In pinned code, check target inputs against Dynamo validation and backend effects. "
+        "For responses, check Dynamo output against target-client decoding, including JSON/SSE errors.",
+        "3. Record revision-scoped evidence and a disposition before proposing changes.",
         "",
         "## Categories in review order",
         "",
         "Use this order to start review, not to assign severity. Prioritize findings by "
-        "impact and evidence. The target is the framework compared with Dynamo. "
-        "Categories describe schema evidence, not runtime support.",
+        "impact and evidence. The target is the framework compared with Dynamo.",
         "",
-        "Exact declared alias matches appear as alias evidence, not one-sided field gaps. "
-        "Alias names alone do not establish value compatibility. An absent default annotation "
-        "does not make a field absent.",
+        "Exact declared alias matches appear as alias evidence, not one-sided field gaps.",
         "",
         "| Category | Findings | Meaning and review focus |",
         "| --- | ---: | --- |",
@@ -206,18 +198,39 @@ def render(
     lines.extend(
         [
             "",
-            evidence_link("Complete inventory and accounting", "findings.json") + ". "
+            evidence_link("Structured assessment", "report.json") + ". "
             "Finding IDs identify locations and change kinds, not unchanged content.",
         ]
     )
     for name, title, _ in categories:
-        lines.extend(["", "## " + prose(title), ""])
-        selected = [row for row in inventory["findings"] if row["category"] == name]
+        selected = [
+            (index, row)
+            for index, row in enumerate(inventory["findings"])
+            if row["category"] == name
+        ]
         if not selected:
-            lines.append(
-                "None reported in this category; this is not a runtime compatibility verdict."
+            continue
+        lines.extend(["", "## " + prose(title), ""])
+        if name == "target_only":
+            lines.extend(
+                [
+                    "**Requests:** Reference-only declaration at this location. "
+                    "Extra accepted input is not itself a client incompatibility; "
+                    "missing input declarations do not prove rejection.",
+                    "",
+                    "**Next action:** Check the missing field against pinned validation/translation "
+                    "code, then probe its declared boundary and backend effect.",
+                    "",
+                    "**Responses:** Reference-only declaration at this location. "
+                    "Extra possible output can affect clients; missing declarations do not "
+                    "prove the output never occurs.",
+                    "",
+                    "**Next action:** Check the missing field or response against the serializer "
+                    "and client decoder; include JSON/SSE error cases before changing the response contract.",
+                    "",
+                ]
             )
-        for row in selected:
+        for index, row in selected:
             scope = f"{row['endpoint']} · {row['transport']}"
             if row["kind"] in {"request", "response"}:
                 scope += " · " + row["kind"]
@@ -228,36 +241,50 @@ def render(
                     "",
                     f"### {row['id']} — {prose(scope)} · {prose(row['field'])}",
                     "",
-                    f"Category: {prose(row['category'])}. Direction: {prose(row['direction'])}.",
-                    "",
                     "| Declaration | Recorded constraints |",
                     "| --- | --- |",
                     f"| Reference | {prose(row['declarations']['framework']['summary'])} |",
                     f"| Dynamo | {prose(row['declarations']['dynamo']['summary'])} |",
                     "",
-                    prose(reported_change(row)),
-                    "",
-                    prose(row["interpretation"]),
-                    "",
-                    "**Next action:** " + prose(row["suggested_action"]),
-                    "",
-                    "Location: " + prose(row["location"]) + ".",
                 ]
             )
-            links = []
+            change = reported_change(row)
+            if change:
+                lines.extend([change, ""])
+            if (
+                row["change"] in {"structure", "unknown", "default", "required"}
+                or row["category"]
+                not in {"target_only", "dynamo_only", "both_declared_mismatch"}
+                or row["alias_report_pointers"]
+            ):
+                lines.extend(
+                    [
+                        prose(row["interpretation"]),
+                        "",
+                        "**Next check:** " + prose(row["suggested_action"]),
+                        "",
+                    ]
+                )
+            links = [
+                evidence_link(
+                    "Finding details",
+                    "report.json",
+                    f"#/finding_inventory/findings/{index}",
+                )
+            ]
             for side, declaration in row["declarations"].items():
-                for record in declaration["evidence"]:
+                for number, record in enumerate(declaration["evidence"], 1):
                     links.append(
                         evidence_link(
-                            side + " declaration " + record["pointer"],
+                            f"{'Target' if side == 'framework' else 'Dynamo'} declaration {number}",
                             record["file"],
                             record["pointer"],
                             evidence_prefix,
                         )
                     )
             links.extend(
-                evidence_link("raw delta " + raw, "report.json", raw)
-                for raw in row["raw_report_pointers"]
+                evidence_link(f"Raw delta {number}", "report.json", raw)
+                for number, raw in enumerate(row["raw_report_pointers"], 1)
             )
             links.extend(
                 evidence_link("alias evidence", "report.json", raw)
@@ -365,7 +392,7 @@ def load_projections(directory: Path) -> dict:
 def write_reports(
     report: dict, directory: Path, projections: dict, evidence_prefix: str = ""
 ) -> dict:
-    """Rebuild findings and overwrite report.json, findings.json, and report.md.
+    """Rebuild findings and overwrite report.json and report.md.
 
     directory must exist; projections follows build_findings' filename-to-document
     mapping. evidence_prefix follows render's relative-directory convention.
@@ -375,11 +402,7 @@ def write_reports(
     """
     result = copy.deepcopy(report)
     result["finding_inventory"] = build_findings(result, projections)
-    for name, value in (
-        ("report.json", result),
-        ("findings.json", result["finding_inventory"]),
-    ):
-        write_json(directory / name, value)
+    write_json(directory / "report.json", result)
     available = {
         path.relative_to(directory).as_posix()
         for path in directory.rglob("*")

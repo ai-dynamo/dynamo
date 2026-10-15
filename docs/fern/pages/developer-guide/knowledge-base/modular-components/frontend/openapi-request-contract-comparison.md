@@ -192,11 +192,10 @@ exists only in Dynamo and a deletion exists only in the framework. A structural 
 such as moving a property into `allOf`, does not by itself prove that the field was removed.
 Direction alone does not determine compatibility.
 
-Read `report.md` for review, or `report.json` for programmatic use. Both contain findings
-with declarations, locations, interpretations, evidence pointers, and suggested checks.
-`findings.json` contains only the structured inventory. Missing declaration evidence is
-marked unavailable. The accounting check assigns every raw delta terminal to a finding;
-it does not prove compatibility. Unresolved union or `allOf` changes remain whole findings.
+Read `report.md` for a concise review with declarations, specific checks, and evidence links.
+Use `report.json` for the full structured findings, raw deltas, and provenance; agents do not
+need to parse Markdown. Missing declaration evidence is marked unavailable. Unresolved
+union or `allOf` changes remain whole findings.
 
 The report defines categories in a suggested review order, not a severity ranking.
 Declared aliases classify spelling-only differences as `alias_evidence`; value constraints

@@ -496,6 +496,9 @@ class FindingReportTests(unittest.TestCase):
         self.assertEqual([entry[0] for entry in CATEGORY_GUIDE], order)
         report, sources = self.fixture({"properties": {"deleted": ["value"]}})
         inventory = build_findings(report, sources)
+        self.assertNotIn(
+            "**Next check:**", render({**report, "finding_inventory": inventory})
+        )
         template = inventory["findings"][0]
         # Presentation fixture: reverse order to prove rendering does not inherit it.
         inventory["findings"] = [
@@ -508,6 +511,14 @@ class FindingReportTests(unittest.TestCase):
         report["finding_inventory"] = inventory
         before = copy.deepcopy(report)
         markdown = render(report)
+        introduction = markdown.split("## Target-only declarations\n", 1)[1].split(
+            "### ", 1
+        )[0]
+        self.assertIn("missing input declarations do not prove rejection", introduction)
+        self.assertIn("probe its declared boundary and backend effect", introduction)
+        self.assertIn("serializer and client decoder", introduction)
+        self.assertEqual(introduction.count("**Next action:**"), 2)
+        self.assertEqual(markdown.count(introduction), 1)
         table_positions, section_positions = [], []
         for name, title, description in CATEGORY_GUIDE:
             escaped = name.replace("_", "\\_")
@@ -520,11 +531,13 @@ class FindingReportTests(unittest.TestCase):
             markdown.index("## future\\_category"), section_positions[-1]
         )
         self.assertIn("not to assign severity", markdown)
+        self.assertNotIn("raw candidate terminals", markdown)
         self.assertIn("Exact declared alias matches appear as alias evidence", markdown)
         self.assertEqual(report, before)
         empty, sources = self.fixture({})
         empty["finding_inventory"] = build_findings(empty, sources)
         self.assertIn("| target\\_only | 0 |", render(empty))
+        self.assertNotIn("## Target-only declarations", render(empty))
 
     def test_declared_aliases_replace_one_sided_spelling_categories(self):
         """Known spellings share alias evidence; value differences and raw IDs survive."""
@@ -723,6 +736,9 @@ class FindingReportTests(unittest.TestCase):
         )
         self.assertEqual((report, sources), before)
         self.assertIn(
+            "**Next check:**", render({**report, "finding_inventory": result})
+        )
+        self.assertIn(
             "Reported required-member change: added model; deleted value.",
             render({**report, "finding_inventory": result}),
         )
@@ -779,8 +795,8 @@ class FindingReportTests(unittest.TestCase):
         self.assertEqual(len({row["id"] for row in result["findings"]}), 3)
         self.assertTrue(all(row["field"] == "value[]" for row in result["findings"]))
         self.assertEqual(
-            result["accounting"]["raw_terminal_count"],
-            result["accounting"]["owned_terminal_count"],
+            result["accounting"],
+            {"raw_terminal_count": 4, "owned_terminal_count": 4},
         )
         report["differences"][0]["delta"] = {
             "content": {"modified": {"application/json": {}}}
@@ -931,6 +947,7 @@ class FindingReportTests(unittest.TestCase):
                 (frozen / name).write_text(json.dumps(value))
             before = {path.name: path.read_bytes() for path in frozen.iterdir()}
             result = regenerate(frozen, output)
+            self.assertFalse((output / "findings.json").exists())
             self.assertEqual(
                 {path.name: path.read_bytes() for path in frozen.iterdir()}, before
             )
@@ -939,6 +956,12 @@ class FindingReportTests(unittest.TestCase):
                 report_before,
             )
             markdown = (output / "report.md").read_text()
+            self.assertIn(
+                "[Finding details](report.json#/finding_inventory/findings/0)", markdown
+            )
+            self.assertIn("[Target declaration 1]", markdown)
+            self.assertIn("[Raw delta 1]", markdown)
+            self.assertNotIn("Location: #/", markdown)
             self.assertNotIn("<script>", markdown)
             self.assertNotIn("[x](javascript:", markdown)
             self.assertIn("evidence/dynamo.requests.normalized.json#", markdown)

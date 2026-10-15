@@ -851,8 +851,6 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
         "accounting": {
             "raw_terminal_count": len(expected),
             "owned_terminal_count": len(ownership),
-            "unaccounted": [],
-            "multiply_owned": [],
         },
         "counts": {
             "readable_findings": len(rows),

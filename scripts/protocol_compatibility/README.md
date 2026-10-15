@@ -136,9 +136,8 @@ Start with `assessment/report.md`. Retain the entire assessment directory:
 
 | Output | Purpose |
 | --- | --- |
-| `report.md` | Human-readable findings, category descriptions, suggested checks, and evidence links |
+| `report.md` | Human-readable findings, category counts, specific checks, and evidence links |
 | `report.json` | Full machine-readable assessment: deltas, gaps, input metadata, comparator commands, and `finding_inventory` |
-| `findings.json` | The same `finding_inventory`, without the surrounding assessment metadata |
 | `dynamo.composed.json` | Dynamo document after pinned imports and guarded corrections |
 | `*.requests.json` | Original request projections |
 | `*.requests.normalized.json`, `normalization.json` | Comparison inputs and equivalent-representation audit |
@@ -166,9 +165,11 @@ known gaps, so a completed assessment returns `1` even if the comparator finds n
 
 ### Using the Findings
 
+Use `report.md` to review findings; it omits repeated generic checks and empty category sections.
 For programmatic use, read `report.json` and its `finding_inventory`. Each finding includes
 its category, declarations, interpretation, suggested action, raw delta, and evidence
-pointers. Agents and scripts do not need to parse Markdown.
+pointers. Raw deltas and provenance remain supporting evidence in the same report.
+Agents and scripts do not need to parse Markdown.
 
 Finding IDs identify locations and change kinds, not unchanged content or confirmed defects.
 The accounting check assigns each raw delta terminal to one finding. Unresolved union or
@@ -187,7 +188,7 @@ python -m scripts.protocol_compatibility.reporting.openapi \
 ```
 
 The output directory must be new and outside the input directory. The renderer copies
-the original assessment into `evidence/` and rebuilds `report.json`, `findings.json`, and
+the original assessment into `evidence/` and rebuilds `report.json` and
 `report.md` with the current interpretation code. Categories and suggested checks can
 change when that code changes; raw deltas remain unchanged. It does not modify the input
 or rerun composition or comparison. Missing normalized projections appear as unavailable

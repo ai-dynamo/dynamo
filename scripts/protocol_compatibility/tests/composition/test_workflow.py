@@ -197,10 +197,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["differences"], [])
         self.assertEqual(report["response_differences"][0]["delta"], delta)
         self.assertEqual(report["comparator"]["response_command"], ["mock-response"])
-        inventory = json.loads((self.args.output_dir / "findings.json").read_text())
-        self.assertEqual(inventory, report["finding_inventory"])
+        inventory = report["finding_inventory"]
+        self.assertFalse((self.args.output_dir / "findings.json").exists())
         self.assertTrue(any(row["status"] == "200" for row in inventory["findings"]))
-        self.assertEqual(inventory["accounting"]["unaccounted"], [])
         self.assertEqual(
             json.loads((self.args.output_dir / "response-oasdiff.json").read_text()),
             response_diff,
