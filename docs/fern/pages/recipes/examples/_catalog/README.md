@@ -6,9 +6,14 @@ SPDX-License-Identifier: Apache-2.0
 # Authoring Examples
 
 Examples are deployment-first pages, not performance-tuned model recipes. The selector and its
-source embeds include only DGD/DGDR manifests and inference launch scripts. Keep each page to a
-short introduction, required safety or setup notes, and source-file embeds. Do not copy source-file
-contents into Markdown.
+source embeds include only DGD/DGDR manifests and inference launch scripts. Keep each page to the
+source-file embeds plus only what a reader needs before deploying: a one-line
+`**Prerequisites:** [Setup guide](…)` when the example needs setup, and notes specific to the
+example, such as validation caveats. Put a prerequisite above the selector when it applies to every
+choice, or inside the one source bundle it applies to. Skip generic advice, such as running commands
+from the repository root or replacing images, Secrets, storage, and hardware settings: the run
+commands and the deployment customizer already cover it. Do not copy source-file contents into
+Markdown.
 
 Each example has three authoring surfaces:
 
@@ -79,8 +84,11 @@ leaves the link unresolved. In order:
 Each detail page uses one `ExampleSelector` with a `variants` array. Each entry declares `id`,
 `target` (`platform:backend`), `label` (the short option name), and `description`. Match each ID to
 one `<div className="dynamo-example-variant" data-example-variant="id">` containing its native
-source embeds and any necessary notes. The metadata array drives all the selection rows; do not
-repeat platform/backend lists elsewhere in the page.
+source embeds and any necessary notes. Put a ``[Source: `file`](https://github.com/ai-dynamo/dynamo/blob/main/…)``
+link, alone in its paragraph, directly before each embed. For a YAML manifest, the deployment
+customizer shows that link in its header instead of above it, so the URL must end with the embed's
+`title`. The metadata array drives all the selection rows; do not repeat platform/backend lists
+elsewhere in the page.
 
 Platform and backend share one compact control panel. An Example row appears only when the chosen
 target has multiple source bundles. One bundle is always selected and server-rendered open; do not
@@ -118,8 +126,11 @@ validation or benchmarking.
 
 Kubernetes YAML embeds render through `DeploymentCustomizer`, which lets readers change the model,
 image, scale, environment variables, model cache, and token Secret, then copy the result with
-generated prerequisites and deploy steps. It works from the manifest itself, so write manifests it
-can read:
+generated prerequisites and deploy steps. The model, image, scale, template variables, and deploy
+names stay in view; the model cache, token Secret, environment variables, and file bundling sit in
+an **Additional options** section that starts closed. Long sections collapse to a one-line summary;
+environment variables, and scale tables with more than four components, start collapsed. It works
+from the manifest itself, so write manifests it can read:
 
 - Use `my-registry/<repository>:my-tag` or `nvcr.io/nvidia/ai-dynamo/<repository>:my-tag` for
   Dynamo images. Pin a digest only when the example requires that exact build; digests stay as

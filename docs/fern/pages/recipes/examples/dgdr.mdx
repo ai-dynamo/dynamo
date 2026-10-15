@@ -9,32 +9,15 @@ hide-toc: true
 import { ExampleSelector } from "@/components/ExampleSelector";
 
 A `DynamoGraphDeploymentRequest` (DGDR) describes a model, workload, hardware, and optional latency
-targets. Dynamo profiles that intent and generates the `DynamoGraphDeployment` (DGD) that serves
-traffic. Use these templates when you want Dynamo to choose a deployment configuration instead of
-writing the complete DGD yourself.
+targets. Dynamo profiles it and generates the `DynamoGraphDeployment` (DGD) that serves traffic, so you
+don't write the complete DGD yourself.
 
-Each manifest is embedded from
-[`examples/deployments/dgdr/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr).
-Select an example, use the copy button, and adjust its model, backend, hardware, and namespace before
-applying it.
+**Prerequisites:** [Dynamo Kubernetes platform](../../kubernetes/installation/install-dynamo.md)
 
-## Prerequisites
-
-- Install the Dynamo Kubernetes platform and operator.
-- Create `hf-token-secret` in the target namespace when the model requires authentication.
-- For namespace-restricted operator installations, set `hardware.gpuSku`, `hardware.vramMb`, and
-  `hardware.numGpusPerNode` explicitly.
-
-Release installations select the matching profiler image when `spec.image` is omitted. For a local
-operator build without a known release version, set `spec.image` to a compatible `dynamo-planner`
-image.
-
-Apply a template with:
-
-```bash
-export NAMESPACE=dynamo-cloud
-kubectl apply -f rapid.yaml -n ${NAMESPACE}
-```
+- With a namespace-restricted operator, set `hardware.gpuSku`, `hardware.vramMb`, and
+  `hardware.numGpusPerNode`.
+- With a local operator build that has no release version, set `spec.image` to a compatible
+  `dynamo-planner` image. Release installations select it automatically.
 
 <ExampleSelector
   variants={[
@@ -55,6 +38,8 @@ kubectl apply -f rapid.yaml -n ${NAMESPACE}
 Uses simulated performance estimates to generate a DGD without benchmarking candidate engines
 on real GPUs.
 
+[Source: `rapid.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/rapid.yaml)
+
 <Code src="../../../../../examples/deployments/dgdr/rapid.yaml" title="rapid.yaml" language="yaml" maxLines={0} />
 
 </div>
@@ -62,6 +47,8 @@ on real GPUs.
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-thorough-yaml">
 
 Deploys and benchmarks candidate configurations before selecting and generating the DGD.
+
+[Source: `thorough.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/thorough.yaml)
 
 <Code src="../../../../../examples/deployments/dgdr/thorough.yaml" title="thorough.yaml" language="yaml" maxLines={0} />
 
@@ -72,6 +59,8 @@ Deploys and benchmarks candidate configurations before selecting and generating 
 Adds a Planner configuration so the generated disaggregated deployment can adjust prefill and
 decode replicas at runtime.
 
+[Source: `planner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/planner.yaml)
+
 <Code src="../../../../../examples/deployments/dgdr/planner.yaml" title="planner.yaml" language="yaml" maxLines={0} />
 
 </div>
@@ -81,6 +70,8 @@ decode replicas at runtime.
 Uses SGLang and a 32-GPU budget for a large Mixture-of-Experts model. Adapt its hardware,
 scheduling, model-cache, and SLA settings before applying it.
 
+[Source: `moe-sglang.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/moe-sglang.yaml)
+
 <Code src="../../../../../examples/deployments/dgdr/moe-sglang.yaml" title="moe-sglang.yaml" language="yaml" maxLines={0} />
 
 </div>
@@ -88,6 +79,8 @@ scheduling, model-cache, and SLA settings before applying it.
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-review-before-deploy-yaml">
 
 Sets `autoApply: false` so the request stops after generation instead of creating the DGD.
+
+[Source: `review-before-deploy.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/review-before-deploy.yaml)
 
 <Code src="../../../../../examples/deployments/dgdr/review-before-deploy.yaml" title="review-before-deploy.yaml" language="yaml" maxLines={0} />
 
@@ -98,6 +91,8 @@ Sets `autoApply: false` so the request stops after generation instead of creatin
 Merges an environment-variable override into the generated frontend component. Overrides can
 modify generated components but cannot add a new topology component.
 
+[Source: `generated-dgd-override.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/generated-dgd-override.yaml)
+
 <Code src="../../../../../examples/deployments/dgdr/generated-dgd-override.yaml" title="generated-dgd-override.yaml" language="yaml" maxLines={0} />
 
 </div>
@@ -106,6 +101,8 @@ modify generated components but cannot add a new topology component.
 
 Mounts a pre-populated model cache into the profiling job and generated workers. Replace the
 snapshot placeholder and create the PVC before applying the request.
+
+[Source: `model-cache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/model-cache.yaml)
 
 <Code src="../../../../../examples/deployments/dgdr/model-cache.yaml" title="model-cache.yaml" language="yaml" maxLines={0} />
 
@@ -116,6 +113,8 @@ snapshot placeholder and create the PVC before applying the request.
 Replaces model-serving workers with mock workers for testing routing, profiling, and Planner
 behavior without serving the model on GPUs.
 
+[Source: `mocker.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/mocker.yaml)
+
 <Code src="../../../../../examples/deployments/dgdr/mocker.yaml" title="mocker.yaml" language="yaml" maxLines={0} />
 
 </div>
@@ -124,6 +123,8 @@ behavior without serving the model on GPUs.
 
 Replaces the profiling output volume with the existing `dynamo-pvc` claim so plots, logs,
 configurations, and raw profiling data remain available after the Job completes.
+
+[Source: `profiling-artifacts.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/dgdr/profiling-artifacts.yaml)
 
 <Code src="../../../../../examples/deployments/dgdr/profiling-artifacts.yaml" title="profiling-artifacts.yaml" language="yaml" maxLines={0} />
 

@@ -275,14 +275,28 @@ embed. The source therefore stays a native embed: Fern resolves the file for eac
 the page's Markdown twin keeps the original file. If a manifest cannot be read or customized, the
 native code block renders instead.
 
+A paragraph holding only a link to the embedded file, such as
+``[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/…/agg.yaml)`` directly before
+the embed, moves into the customizer header. The URL path must end with the embed's `title`, so
+other links stay in place, and the paragraph renders again on fallback.
+
+The panel keeps the model, image, scale, template variables, and deploy names in view. The model
+cache, token Secret, environment variables, and file bundling sit under **Additional options**,
+closed by default, which lists its sections and counts changed ones. Scale, variables, model cache,
+and environment variables collapse to a one-line summary. Environment variables, and scale tables
+with more than four components, start collapsed.
+
 `ExampleSelector` wraps its bundles in `DeploymentCustomizerProvider`, so model, image, storage,
-and Secret choices carry across the bundles on a page; replicas, environment variables, and names
-stay per manifest. Outside `ExampleSelector`, wrap a YAML embed directly:
+and Secret choices, and which sections are open, carry across the bundles on a page; replicas,
+environment variables, and names stay per manifest. Outside `ExampleSelector`, wrap a YAML embed
+directly; other content inside the wrapper renders as written:
 
 ```mdx
 import { DeploymentCustomizer } from "@/components/DeploymentCustomizer";
 
 <DeploymentCustomizer>
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml)
 
 <Code src="../../../../../examples/backends/vllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
 
