@@ -379,6 +379,57 @@ targets:
     summary: 3,276 raw output tok/s/GPU, 155.9 user tok/s P50, TTFT P50 1.12 s at concurrency 528 (7P4D, swe-bench-pro-trace,
       synthetic MTP acceptance 4.063; measured on the previous image with the KV split fixes added; the recipe
       defaults to natural acceptance)
+- id: trtllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+  topology: aggregated
+  techniques:
+  - session-affinity
+  - mtp-speculative-decoding
+  - fp8-kv-cache
+  - cpu-kv-offload
+  workload:
+    type: swe-bench-pro-trace
+    sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
+  deploy:
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/trtllm/agg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 995 output tok/s/GPU, 78.98 user tok/s P50, TTFT P50 0.655 s at concurrency 80 (4 GPUs, 4 workers, MTP3, SWE-bench Pro replay).
+- id: trtllm-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+  topology: disaggregated
+  techniques:
+  - session-affinity
+  - mtp-speculative-decoding
+  - fp8-kv-cache
+  - cpu-kv-offload
+  - disaggregated-prefill-decode
+  workload:
+    type: swe-bench-pro-trace
+    sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
+  deploy:
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/trtllm/disagg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,119.13 output tok/s/GPU, 144.61 user tok/s P50, TTFT P50 2.366 s at concurrency 80 (4 GPUs, 2P2D MTP3, SWE-bench Pro replay).
 maintainer: Alexandre Milesi
 gaps:
 - Image and video qualification pending.

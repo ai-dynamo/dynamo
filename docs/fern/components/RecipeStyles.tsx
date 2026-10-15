@@ -2191,6 +2191,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 /* Variant visibility: hide blocks that do not match the checked framework/sku/usecase */
 body:has(input[name="recipe-framework"][value="vllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="vllm"]),
+body:has(input[name="recipe-framework"][value="trtllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="trtllm"]),
 body:has(input[name="recipe-framework"][value="sglang"]:checked) [data-recipe-framework]:not([data-recipe-framework~="sglang"]),
 body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sku~="b200"]),
 body:has(input[name="recipe-sku"][value="b300"]:checked) [data-sku]:not([data-sku~="b300"]),
