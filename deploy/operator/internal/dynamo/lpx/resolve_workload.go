@@ -44,7 +44,7 @@ func ResolveWorkloads(ctx context.Context, reader client.Reader, dgd *dynamov1be
 	groups := ComponentGroups(dgd)
 	workloads := make([]*Workload, 0, len(groups))
 	for _, name := range slices.Sorted(maps.Keys(groups)) {
-		workload, err := ResolveWorkload(ctx, reader, dgd, groups[name], registry)
+		workload, err := resolveWorkload(ctx, reader, dgd, groups[name], registry)
 		if err != nil {
 			return nil, err
 		}
@@ -66,11 +66,11 @@ func ResolveWorkloads(ctx context.Context, reader client.Reader, dgd *dynamov1be
 	return workloads, nil
 }
 
-// ResolveWorkload projects one admitted component group against immutable builds.
+// resolveWorkload projects one admitted component group against immutable builds.
 // reader, dgd and registry must be non-nil. componentNames must contain exactly the members
 // of one ComponentGroups entry from the admitted dgd, in any order.
 // Inputs are read without mutation.
-func ResolveWorkload(
+func resolveWorkload(
 	ctx context.Context,
 	reader client.Reader,
 	dgd *dynamov1beta1.DynamoGraphDeployment,

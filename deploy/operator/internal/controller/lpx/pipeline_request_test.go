@@ -14,6 +14,7 @@ import (
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -470,6 +471,48 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				if !tc.intentChanged && request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex < int64(tc.replicas) {
 					require.Same(t, request, requests[request.Name])
 				}
+			}
+		})
+	}
+}
+
+func TestResolveNamedPipelineRequestsUsesResolvedGroupIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		count int
+	}{
+		{name: "sole workload", count: 1},
+		{name: "multiple workloads", count: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Resolve complete workloads through the public resolver")
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			if test.count == 2 {
+				second := dgd.Spec.Components[0].DeepCopy()
+				second.ComponentName = "independent"
+				dgd.Spec.Components = append(dgd.Spec.Components, *second)
+			}
+			r := newLPXTestReconciler(t, registry, child, dgd)
+			workloads, err := lpx.ResolveWorkloads(t.Context(), r.Client, dgd, dynamo.PCSNameForLPX(child), registry)
+			require.NoError(t, err)
+			require.Len(t, workloads, test.count)
+
+			t.Log("Publish each workload independently using the group identity fixed during resolution")
+			names := make(map[string]bool)
+			for _, workload := range workloads {
+				group := ""
+				if test.count == 2 {
+					group = workload.ServingComponentName()
+				}
+				require.Equal(t, group, workload.GroupName())
+				_, missing := resolveNamedPipelineRequests(child, nil, workload, 1)
+				require.Len(t, missing, 1)
+				request := missing[0]
+				digest := pipelineRequestIdentityDigest(child.Namespace, child.Name, child.UID, group, "default", 0)
+				require.Equal(t, pipelineRequestName(child.Name, digest), request.Name)
+				require.Equal(t, workload.ScalingGroup(), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name)
+				require.False(t, names[request.Name])
+				names[request.Name] = true
 			}
 		})
 	}

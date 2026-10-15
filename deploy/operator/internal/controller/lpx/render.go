@@ -21,7 +21,7 @@ import (
 
 const deploymentUIDLabel = "lpx.nvidia.com/deployment-uid"
 
-// renderPodCliqueSet composes resolved workloads into one Grove envelope with
+// renderWorkloads composes resolved workloads into one Grove envelope with
 // runtime ConfigMaps and, for Kubernetes discovery, serving Services.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.

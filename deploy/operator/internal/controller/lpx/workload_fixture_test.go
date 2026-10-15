@@ -66,5 +66,5 @@ func resolvePipelineRequests(deployment *v1alpha1.LPXGraphDeployment, current ma
 	if err != nil {
 		panic(err)
 	}
-	return resolveNamedPipelineRequests(deployment, current, named, plan.Replicas, group != "")
+	return resolveNamedPipelineRequests(deployment, current, named, plan.Replicas)
 }

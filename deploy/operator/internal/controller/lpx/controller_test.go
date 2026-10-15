@@ -1277,8 +1277,10 @@ func TestLPXInvalidReplacementPreservesExistingWorkload(t *testing.T) {
 	agent := draft.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 	mounts := agent.PodTemplate.Spec.Containers[0].VolumeMounts
 	agent.PodTemplate.Spec.Containers[0].VolumeMounts = nil
-	replacement, err := lpx.ResolveWorkload(ctx, fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), registry)
+	resolved, err := lpx.ResolveWorkloads(ctx, fake.NewClientBuilder().Build(), dgd, dynamo.PCSNameForLPX(child), registry)
 	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	replacement := resolved[0]
 	require.NotEqual(t, selected.workload.Digest(), replacement.Digest())
 	updateTestDGD(t, r, child, dgd)
 
@@ -2987,8 +2989,10 @@ func resolveLPXTestWorkload(t *testing.T, registry lpx.ModelRegistry, ctx contex
 	deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment,
 ) *lpxTestWorkload {
 	t.Helper()
-	workload, err := lpx.ResolveWorkload(ctx, fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), registry)
+	resolved, err := lpx.ResolveWorkloads(ctx, fake.NewClientBuilder().Build(), dgd, dynamo.PCSNameForLPX(deployment), registry)
 	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	workload := resolved[0]
 	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
 	require.NoError(t, err)
 	_, missing := resolvePipelineRequests(deployment, nil, workload, plan)

@@ -316,7 +316,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
+	selected, err := resolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
 		"draft-build": draftSnapshot, "target-build": targetSnapshot,
 	})
 	require.NoError(t, err)

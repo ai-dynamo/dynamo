@@ -65,9 +65,9 @@ func RenderLPXPodCliqueSet(
 	return pcs, nil
 }
 
-// RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
+// RenderLPXWorkload appends one workload's roles and scaling group to pcs and returns its resources.
 // Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
-// Inputs are not mutated.
+// Only pcs is mutated, after the workload renders successfully.
 func RenderLPXWorkload(
 	pcs *grovev1alpha1.PodCliqueSet,
 	source *v1beta1.DynamoGraphDeployment,
@@ -91,13 +91,6 @@ func RenderLPXWorkload(
 	rendered, err := workload.Render(pcs, *input)
 	if err != nil {
 		return nil, err
-	}
-
-	// The conductor component owns the complete workload's disruption budget.
-	if component.ProviderOverride != nil {
-		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
-			pcs.Spec.Template.PodCliqueScalingGroupConfigs[len(pcs.Spec.Template.PodCliqueScalingGroupConfigs)-1].RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(budget)}
-		}
 	}
 
 	// Scope the rendered resources to the graph's Kubernetes namespace.
@@ -257,7 +250,7 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 // renderLPXComponents merges ordinary Dynamo defaults independently into every
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
-// Preflight supplies the non-nil validated workload and materialization plan.
+// Preflight supplies the non-nil validated and named workload.
 func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload) (*dynamolpx.RenderInput, error) {
 	// Cooperating workers use one serving revision; discovery labels keep the base namespace.
 	servingHash, err := ComputeDGDWorkersSpecHash(p.dynamoDeployment)
@@ -268,6 +261,12 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload) (*dynamol
 	input := &dynamolpx.RenderInput{
 		MinAvailable: ptr.To(provideroverride.EffectiveGroveMinAvailable(p.component)),
 		Stages:       make(map[string]corev1.PodTemplateSpec),
+	}
+	// The conductor component owns the complete workload's disruption budget.
+	if p.component.ProviderOverride != nil {
+		if budget, exists := provideroverride.GroveMaxUnavailable(p.component.ProviderOverride.Value.Raw); exists {
+			input.MaxUnavailable = ptr.To(budget)
+		}
 	}
 
 	// Resolve preserved alpha metadata once for all independently rendered roles.
@@ -305,18 +304,13 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload) (*dynamol
 			continue
 		}
 
-		// Omitted hybrid capacity starts with one complete compiled client group.
-		minimumReplicas, err := workload.MinimumCyborgReplicas()
-		if err != nil {
-			return nil, err
-		}
-		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
-		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
+		// Render the hybrid capacity already resolved and validated for this workload.
+		role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: servingHash}
 		gpu := p
 		gpu.component = role
-		gpu.r = ServiceRole{Name: workload.ConductorTemplate(), Role: RoleMain, Replicas: replicas}
+		gpu.r = ServiceRole{Name: workload.ConductorTemplate(), Role: RoleMain, Replicas: workload.ConductorReplicas()}
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults)
 		if err != nil {

@@ -247,7 +247,7 @@ func (r *graphReconciler) reconcileWorkloads(
 			explicitReplicas[workload.ScalingGroup()] = explicit
 			scalingRequired = scalingRequired || required
 
-			desired, missing := resolveNamedPipelineRequests(deployment, requests, workload, replicas, len(workloads) > 1)
+			desired, missing := resolveNamedPipelineRequests(deployment, requests, workload, replicas)
 
 			maps.Copy(desiredRequests, desired)
 			missingRequests = append(missingRequests, missing...)
@@ -470,7 +470,7 @@ func (r *graphReconciler) reconcileWorkloadCapacities(
 }
 
 // reconcileWorkloadCapacity applies explicit capacity and validates external Cyborg counts.
-// Component, pcsg, workload and plan are non-nil. The caller establishes that scaling is allowed.
+// Component, pcsg and workload are non-nil. The caller establishes that scaling is allowed.
 // Omitted replica counts are never written.
 // The returned bool reports successful scale writes that require a fresh observation.
 func (r *graphReconciler) reconcileWorkloadCapacity(
