@@ -33,6 +33,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 from . import envs
 
@@ -377,11 +378,6 @@ def update_engine_config_with_dynamo(
         ensure_side_channel_host()
 
     defaults: Dict[str, Any] = {
-        # As of vLLM >=0.10.0 the engine unconditionally calls
-        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
-        # skip tokenizer initialisation.  Setting this to **False** avoids
-        # a NoneType error when the processor accesses the tokenizer.
-        "skip_tokenizer_init": False,
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
@@ -610,7 +606,7 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
+    inside MultiConnector or PdConnector (kv_connector_extra_config.connectors contains
     "NixlConnector").
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
@@ -618,9 +614,8 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
