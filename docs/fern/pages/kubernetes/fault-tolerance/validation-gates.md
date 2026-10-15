@@ -7,9 +7,9 @@ subtitle: Run your own checks against a new worker before it takes client traffi
 
 A worker can pass its probes and still be broken in ways only a real request shows, such as a bad
 tool-call parser or the wrong weight revision. Validation gates run your checks against a new worker
-before it becomes routable. Until every gate passes, its pod isn't Ready and, in the default `card`
-hold mode, it gets no client requests; liveness is unaffected, so it isn't restarted. Nothing changes
-when gates aren't set.
+before it becomes routable. Until every gate passes, its pod isn't Ready and, while its
+`before_publish` gates run, it gets no requests at all; liveness is unaffected, so it isn't restarted.
+Nothing changes when gates aren't set.
 
 ## Configure gates
 
@@ -23,8 +23,8 @@ env:
     }
 ```
 
-Each gate runs once, in parallel, as soon as the worker's engine is serving, and must reach a verdict
-within `timeout_secs`.
+Each gate runs once and must reach a verdict within `timeout_secs`. Gates run in parallel within their
+[phase](#phases), starting as soon as the worker's engine is serving.
 
 | Gate | Runs | Verdict |
 |---|---|---|
@@ -42,17 +42,28 @@ preprocessor, tool-call and reasoning parsers as the frontend. `url` gates recei
 request body. Workers without a chat or completions surface, such as prefill workers, get no
 `OPENAI_BASE_URL`.
 
-## Hold modes
+## Phases
 
-`DYN_WORKER_VALIDATION_HOLD` sets what a held worker keeps back:
+Each gate's optional `"phase"` sets when it runs relative to the worker's model card being written to
+discovery:
 
-- `card` (default): the model card isn't written to discovery until release, so no frontend routes to
-  the worker under any router. `/health` reports 503.
-- `health`: the card is written at once and only `/health` is held. Use it when the deployment keeps
-  traffic off the worker by other means.
+- `before_publish` (default): the card isn't written while the gate runs, so no frontend routes to the
+  worker under any router. The worker is quiet, so measurements are comparable across pods.
+- `after_publish`: runs once every `before_publish` gate has passed and the card has been written. Use
+  it for a check that needs the frontend to see the worker, such as warming up on traffic the
+  deployment routes to it. The deployment must keep client traffic off the worker by other means.
 
-Under etcd discovery the frontend routes on cards, not pod readiness, so use `card` there unless you
-have another way to keep traffic off the worker.
+```json
+{
+  "completion": {"exec": ["python3", "-m", "dynamo.validation.completion"], "timeout_secs": 300},
+  "soak": {"exec": ["python3", "/checks/soak.py"], "timeout_secs": 600},
+  "warm": {"exec": ["python3", "/checks/warm.py"], "timeout_secs": 600, "phase": "after_publish"}
+}
+```
+
+A failed `before_publish` gate means the card is never written. `/health` reports 503 until every
+gate in both phases passes. Under etcd discovery the frontend routes on cards, not pod readiness, so
+use `after_publish` only when the deployment keeps traffic off the worker by other means.
 
 ## Run checks in a sidecar
 

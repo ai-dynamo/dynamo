@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parsing for `DYN_WORKER_VALIDATION_GATES` and `DYN_WORKER_VALIDATION_HOLD`.
+//! Parsing for `DYN_WORKER_VALIDATION_GATES`.
 //!
 //! Every misconfiguration is an error: a worker that cannot tell what it is
 //! supposed to check must not start unchecked.
@@ -14,16 +14,20 @@ use serde::Deserialize;
 
 use crate::config::environment_names::runtime::validation as env_validation;
 
-/// What a held worker keeps back until every gate passes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum HoldMode {
-    /// Hold the model card's discovery write as well as `/health`. No card
-    /// means no routing under any router.
+/// When a gate runs relative to the worker's model card being published.
+/// `/health` is held until every gate passes, whatever its phase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatePhase {
+    /// Run while the card is held: no frontend routes to the worker, so it
+    /// is quiet. No card means no routing under any router.
     #[default]
-    Card,
-    /// Publish the card at once and hold only `/health`. The deployment's own
-    /// routing must keep client traffic off the worker.
-    Health,
+    BeforePublish,
+    /// Run once every `before_publish` gate has passed and the card has been
+    /// published, for checks that need the frontend to see the worker, such
+    /// as warming up on traffic the deployment routes to it. The deployment's
+    /// own routing must keep client traffic off the worker.
+    AfterPublish,
 }
 
 /// How one gate is checked.
@@ -43,6 +47,8 @@ pub struct GateSpec {
     pub check: GateCheck,
     /// The gate fails if it has no verdict by then.
     pub timeout: Duration,
+    /// Gates of one phase run in parallel with one another.
+    pub phase: GatePhase,
 }
 
 /// Parsed validation configuration. Only exists when gates are configured.
@@ -50,7 +56,6 @@ pub struct GateSpec {
 pub struct ValidationConfig {
     /// Gates in name order.
     pub gates: Vec<GateSpec>,
-    pub hold: HoldMode,
 }
 
 #[derive(Deserialize)]
@@ -59,41 +64,26 @@ struct RawGate {
     exec: Option<Vec<String>>,
     url: Option<String>,
     timeout_secs: u64,
+    #[serde(default)]
+    phase: GatePhase,
 }
 
 impl ValidationConfig {
     /// Read the configuration from the environment. `Ok(None)` when no gates
     /// are configured, which keeps today's behaviour unchanged.
     pub fn from_env() -> Result<Option<Self>> {
-        Self::parse(
-            std::env::var(env_validation::DYN_WORKER_VALIDATION_GATES).ok(),
-            std::env::var(env_validation::DYN_WORKER_VALIDATION_HOLD).ok(),
-        )
+        Self::parse(std::env::var(env_validation::DYN_WORKER_VALIDATION_GATES).ok())
     }
 
-    pub fn parse(gates: Option<String>, hold: Option<String>) -> Result<Option<Self>> {
-        let gates = gates.filter(|value| !value.trim().is_empty());
-        let hold = match (hold.as_deref().map(str::trim), &gates) {
-            (None | Some(""), _) => HoldMode::Card,
-            (Some(_), None) => bail!(
-                "{} is set but {} is not",
-                env_validation::DYN_WORKER_VALIDATION_HOLD,
-                env_validation::DYN_WORKER_VALIDATION_GATES
-            ),
-            (Some("card"), _) => HoldMode::Card,
-            (Some("health"), _) => HoldMode::Health,
-            (Some(other), _) => bail!(
-                "{} must be \"card\" or \"health\", got {other:?}",
-                env_validation::DYN_WORKER_VALIDATION_HOLD
-            ),
-        };
-        let Some(gates) = gates else {
+    pub fn parse(gates: Option<String>) -> Result<Option<Self>> {
+        let Some(gates) = gates.filter(|value| !value.trim().is_empty()) else {
             return Ok(None);
         };
         let raw: BTreeMap<String, RawGate> = serde_json::from_str(&gates).with_context(|| {
             format!(
                 "{} must be a JSON object of gate name to \
-                 {{\"exec\": [...] or \"url\": \"...\", \"timeout_secs\": N}}",
+                 {{\"exec\": [...] or \"url\": \"...\", \"timeout_secs\": N, \
+                 \"phase\": \"before_publish\" (default) or \"after_publish\"}}",
                 env_validation::DYN_WORKER_VALIDATION_GATES
             )
         })?;
@@ -127,10 +117,19 @@ impl ValidationConfig {
                     name,
                     check,
                     timeout: Duration::from_secs(gate.timeout_secs),
+                    phase: gate.phase,
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(Some(ValidationConfig { gates, hold }))
+        Ok(Some(ValidationConfig { gates }))
+    }
+
+    /// True when the model card is held until the `before_publish` gates
+    /// pass, which is whenever there are any.
+    pub fn holds_card(&self) -> bool {
+        self.gates
+            .iter()
+            .any(|gate| gate.phase == GatePhase::BeforePublish)
     }
 }
 
@@ -154,12 +153,19 @@ mod tests {
     use super::*;
 
     fn parse(gates: &str) -> Result<Option<ValidationConfig>> {
-        ValidationConfig::parse(Some(gates.to_string()), None)
+        ValidationConfig::parse(Some(gates.to_string()))
+    }
+
+    fn phases(gates: &str) -> (Vec<GatePhase>, bool) {
+        let config = parse(gates).unwrap().unwrap();
+        let phases = config.gates.iter().map(|gate| gate.phase).collect();
+        (phases, config.holds_card())
     }
 
     #[test]
     fn parses_gates_in_name_order() {
-        assert_eq!(ValidationConfig::parse(None, None).unwrap(), None);
+        assert_eq!(ValidationConfig::parse(None).unwrap(), None);
+        assert_eq!(ValidationConfig::parse(Some(" ".into())).unwrap(), None);
         let config = parse(
             r#"{"smoke": {"exec": ["python", "/checks/smoke.py"], "timeout_secs": 900},
                 "basic": {"url": "http://127.0.0.1:9100/validate", "timeout_secs": 60}}"#,
@@ -177,12 +183,26 @@ mod tests {
             GateCheck::Exec(vec!["python".into(), "/checks/smoke.py".into()])
         );
         assert_eq!(config.gates[1].timeout, Duration::from_secs(900));
-        assert_eq!(config.hold, HoldMode::Card);
-        let health = ValidationConfig::parse(
-            Some(r#"{"a": {"exec": ["true"], "timeout_secs": 1}}"#.into()),
-            Some("health".into()),
+    }
+
+    #[test]
+    fn phase_decides_whether_the_card_is_held() {
+        use GatePhase::{AfterPublish, BeforePublish};
+        assert_eq!(
+            phases(r#"{"a": {"exec": ["true"], "timeout_secs": 1}}"#),
+            (vec![BeforePublish], true)
         );
-        assert_eq!(health.unwrap().unwrap().hold, HoldMode::Health);
+        assert_eq!(
+            phases(
+                r#"{"soak": {"exec": ["true"], "timeout_secs": 1, "phase": "before_publish"},
+                    "warm": {"exec": ["true"], "timeout_secs": 1, "phase": "after_publish"}}"#
+            ),
+            (vec![BeforePublish, AfterPublish], true)
+        );
+        assert_eq!(
+            phases(r#"{"a": {"exec": ["true"], "timeout_secs": 1, "phase": "after_publish"}}"#),
+            (vec![AfterPublish], false)
+        );
     }
 
     #[test]
@@ -209,23 +229,16 @@ mod tests {
                 r#"{"a": {"exec": ["true"], "timeout_secs": 1, "retries": 3}}"#,
                 "must be a JSON object",
             ),
-        ] {
-            let error = format!("{:#}", parse(gates).unwrap_err());
-            assert!(
-                error.contains(expected),
-                "{gates:?}: expected {expected:?} in {error:?}"
-            );
-        }
-        for (gates, hold, expected) in [
-            (None, "card", "is set but"),
             (
-                Some(r#"{"a": {"exec": ["true"], "timeout_secs": 1}}"#),
-                "both",
-                "must be \"card\"",
+                r#"{"a": {"exec": ["true"], "timeout_secs": 1, "phase": "later"}}"#,
+                "must be a JSON object",
+            ),
+            (
+                r#"{"a": {"exec": ["true"], "timeout_secs": 1, "after_publish": true}}"#,
+                "must be a JSON object",
             ),
         ] {
-            let error = ValidationConfig::parse(gates.map(Into::into), Some(hold.into()));
-            let error = format!("{:#}", error.unwrap_err());
+            let error = format!("{:#}", parse(gates).unwrap_err());
             assert!(
                 error.contains(expected),
                 "{gates:?}: expected {expected:?} in {error:?}"

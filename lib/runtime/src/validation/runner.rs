@@ -97,6 +97,7 @@ fn tail(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::GatePhase;
     use std::time::{Duration, Instant};
 
     #[tokio::test]
@@ -111,6 +112,7 @@ mod tests {
             name: "g".into(),
             check: GateCheck::Url(format!("http://{addr}{path}").parse().unwrap()),
             timeout: Duration::from_secs(10),
+            phase: GatePhase::BeforePublish,
         };
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -139,6 +141,7 @@ mod tests {
             name: "g".into(),
             check: GateCheck::Exec(vec!["sleep".into(), "30".into()]),
             timeout: Duration::from_secs(1),
+            phase: GatePhase::BeforePublish,
         };
         let reason = run_gate(&gate, &[]).await.unwrap_err();
         assert!(reason.contains("no verdict within"), "{reason}");
