@@ -339,36 +339,37 @@ def test_generate_rejects_request_missing_tensors_key():
 
 
 @pytest.mark.parametrize(
-    "dynamo_dtype, expected_np_dtype",
+    "dynamo_dtype, expected_np_dtype, bits",
     [
-        ("Float16", np.float16),
+        ("Float16", np.float16, [0x3E00, 0xC080, 0x4240]),
         # BF16 is not a native NumPy dtype; ml_dtypes.bfloat16 is what
         # tritonclient.utils.triton_to_np_dtype("BF16") returns, so it is what
         # dynamo_tensor_to_numpy produces from a BFloat16 Dynamo tensor.
-        ("BFloat16", ml_dtypes.bfloat16),
+        ("BFloat16", ml_dtypes.bfloat16, [0x3FC0, 0xC010, 0x4048]),
     ],
     ids=["fp16", "bf16"],
 )
-def test_generate_accepts_half_precision_input(dynamo_dtype, expected_np_dtype):
+def test_generate_accepts_half_precision_input(dynamo_dtype, expected_np_dtype, bits):
     """FP16 and BF16 input tensors are no longer rejected up front; they flow
     through as the corresponding half-precision NumPy arrays into tritonserver.
 
     Regression guard for the input path, which became reachable once the tensor
-    protocol grew Float16 / BFloat16 variants."""
-    values = [1.5, -2.25, 0.5]
+    protocol grew Float16 / BFloat16 variants. Half-precision values arrive as
+    u16 bit patterns (how the Rust `half` types serialize) and must reach the
+    model as the decoded floats, not the integers cast to float."""
     # Use an int32 output so the response path (np.from_dlpack) stays out of
     # scope of this test — the guard removal is on the input side only.
     model, _ = run_handler_generate(
         [{"name": "OUT", "datatype": "INT32"}],
         [build_triton_response("req-id", "identity", {"OUT": np.array([0], np.int32)})],
-        build_dynamo_request(("IN", dynamo_dtype, [3], values)),
+        build_dynamo_request(("IN", dynamo_dtype, [3], bits)),
     )
 
     assert model.last_request is not None
     triton_input = model.last_request.inputs["IN"]
     assert triton_input.dtype == expected_np_dtype
     np.testing.assert_array_equal(
-        triton_input, np.array(values, dtype=expected_np_dtype)
+        triton_input, np.array([1.5, -2.25, 3.125], dtype=expected_np_dtype)
     )
 
 

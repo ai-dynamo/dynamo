@@ -108,6 +108,12 @@ def dynamo_tensor_to_numpy(tensor: dict) -> np.ndarray:
     if np_dtype is None:
         raise ValueError(f"Unsupported tensor data type '{data_type}'")
 
+    if data_type in ("Float16", "BFloat16"):
+        # The Rust `half::f16` / `half::bf16` types serialize as their raw u16
+        # bit patterns, not as numbers, so reinterpret the bits instead of
+        # casting the integers numerically (0x3e00 is 1.5, not 15872.0).
+        return np.asarray(values, dtype=np.uint16).view(np_dtype).reshape(shape)
+
     return np.array(values, dtype=np_dtype).reshape(shape)
 
 
