@@ -120,10 +120,11 @@ Validation for discoveryBackend configuration
 
 {{/*
 Validation for an externally managed Grove (global.grove.enabled=true, global.grove.install=false).
-Dynamo 1.6.0 multinode workers need Grove v0.1.0-alpha.14 or later. Grove releases carry no
-readable version label, so the check reads the PodCliqueSet CRD schema: the per-clique
-rollingUpdate field first appears in v0.1.0-alpha.14. lookup returns nothing under
-helm template, --dry-run, or without CRD read access; the operator repeats the check per DGD.
+Dynamo 1.6.0 multinode workers need Grove v0.1.0-alpha.14 or later. The CRDs carry no
+version label, so the check reads the PodCliqueSet CRD schema: the per-clique rollingUpdate
+field first appears in v0.1.0-alpha.14. lookup returns nothing under helm template or
+client-side --dry-run, or when the CRD is not found; without read access it fails the render.
+The operator repeats the CRD check per DGD and also checks the Grove controller image tag.
 */}}
 {{- define "dynamo-operator.validateExternalGrove" -}}
 {{- $grove := dict -}}

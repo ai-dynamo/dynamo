@@ -34,9 +34,11 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1208,9 +1210,12 @@ func TestGroveProgramBlocksMultinodeAliasesOnIncompatibleGrove(t *testing.T) {
 		groveCRD            *apiextensionsv1.CustomResourceDefinition
 		nodeCount           int32
 		originVersion       string
+		groveImage          string
+		crdReadErr          error
 		namespaceRestricted bool
 		wantReason          Reason
 		wantEvent           bool
+		wantErr             bool
 	}{
 		{
 			name:          "1.6.0 multinode DGD on old Grove is blocked",
@@ -1233,6 +1238,23 @@ func TestGroveProgramBlocksMultinodeAliasesOnIncompatibleGrove(t *testing.T) {
 			originVersion:       "1.6.0",
 			namespaceRestricted: true,
 			wantEvent:           true,
+		},
+		{
+			name:          "1.6.0 multinode DGD on old Grove controller with new CRDs is blocked",
+			groveCRD:      newGroveCRD,
+			groveImage:    "ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-alpha.11",
+			nodeCount:     2,
+			originVersion: "1.6.0",
+			wantReason:    reasonIncompatibleGroveVersion,
+			wantEvent:     true,
+		},
+		{
+			name:          "transient CRD read error is retried without failing the DGD",
+			groveCRD:      newGroveCRD,
+			crdReadErr:    apierrors.NewServiceUnavailable("etcd leader changed"),
+			nodeCount:     2,
+			originVersion: "1.6.0",
+			wantErr:       true,
 		},
 		{
 			name:          "1.6.0 multinode DGD on compatible Grove is not blocked",
@@ -1278,10 +1300,34 @@ func TestGroveProgramBlocksMultinodeAliasesOnIncompatibleGrove(t *testing.T) {
 			if tt.groveCRD != nil {
 				objects = append(objects, tt.groveCRD.DeepCopy())
 			}
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-				WithObjects(objects...).
-				Build()
+			if tt.groveImage != "" {
+				objects = append(objects, &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "grove-operator",
+						Namespace: "grove-system",
+						Labels:    map[string]string{"app.kubernetes.io/name": "grove-operator"},
+					},
+					Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "grove-operator", Image: tt.groveImage}},
+					}}},
+				})
+			}
+			scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			builder := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...)
+			if tt.crdReadErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+							return tt.crdReadErr
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				})
+			}
+			kubeClient := builder.Build()
 			restricted := ""
 			if tt.namespaceRestricted {
 				restricted = dgd.Namespace
@@ -1309,6 +1355,12 @@ func TestGroveProgramBlocksMultinodeAliasesOnIncompatibleGrove(t *testing.T) {
 				}
 			}
 			assert.Equal(t, tt.wantEvent, gotEvent)
+			if tt.wantErr {
+				require.ErrorIs(t, err, tt.crdReadErr)
+				assert.NotEqual(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+				assert.Nil(t, ready, "a transient probe error must not touch the Ready condition")
+				return
+			}
 			if tt.wantReason == "" {
 				if ready != nil {
 					assert.NotEqual(t, string(reasonIncompatibleGroveVersion), ready.Reason)

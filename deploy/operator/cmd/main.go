@@ -396,9 +396,12 @@ func main() {
 	if gates.Grove {
 		// Read CRDs directly so the operator does not start a CRD informer.
 		runtimeConfig.GroveCompatibility = features.NewGroveCompatibilityProbe(mgr.GetAPIReader())
-		compatibility := runtimeConfig.GroveCompatibility.Check(mainCtx)
-		setupLog.Info("Grove compatibility probed",
-			"state", compatibility.State, "minimumVersion", features.GroveMinimumVersion, "message", compatibility.Message)
+		if compatibility, err := runtimeConfig.GroveCompatibility.Check(mainCtx); err != nil {
+			setupLog.Error(err, "Grove compatibility probe failed; DGD reconciles will retry it")
+		} else {
+			setupLog.Info("Grove compatibility probed",
+				"state", compatibility.State, "minimumVersion", features.GroveMinimumVersion, "message", compatibility.Message)
+		}
 	}
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)

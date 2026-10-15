@@ -7,10 +7,13 @@ package features
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,11 +60,29 @@ func testPodCliqueSetCRD(withMarker bool) *apiextensionsv1.CustomResourceDefinit
 	}
 }
 
+// testGroveOperatorDeployment returns a grove-operator Deployment labelled as
+// the Grove chart labels it, running image.
+func testGroveOperatorDeployment(image string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      groveControllerName,
+			Namespace: "grove-system",
+			Labels:    map[string]string{"app.kubernetes.io/name": groveControllerName},
+		},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: groveControllerName, Image: image}},
+		}}},
+	}
+}
+
 func newGroveCompatibilityTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add apiextensions scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
 	}
 	return scheme
 }
@@ -76,13 +97,39 @@ func TestGroveCompatibilityProbeCheck(t *testing.T) {
 		name         string
 		objects      []client.Object
 		getErr       error
+		listErr      error
 		wantState    GroveCompatibilityState
 		wantContains []string
 	}{
 		{
-			name:      "CRD with per-clique rollingUpdate is compatible",
-			objects:   []client.Object{testPodCliqueSetCRD(true)},
+			name:      "new controller and CRD with per-clique rollingUpdate is compatible",
+			objects:   []client.Object{testPodCliqueSetCRD(true), testGroveOperatorDeployment("ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-alpha.14")},
 			wantState: GroveCompatible,
+		},
+		{
+			name:         "CRD with per-clique rollingUpdate and no controller Deployment is compatible",
+			objects:      []client.Object{testPodCliqueSetCRD(true)},
+			wantState:    GroveCompatible,
+			wantContains: []string{"controller version could not be identified"},
+		},
+		{
+			name:         "old controller tag with a new CRD is incompatible",
+			objects:      []client.Object{testPodCliqueSetCRD(true), testGroveOperatorDeployment("ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-alpha.11")},
+			wantState:    GroveIncompatible,
+			wantContains: []string{"External Grove v0.1.0-alpha.11 is incompatible", "v0.1.0-alpha.14", "Upgrade the Grove controller and matching CRDs"},
+		},
+		{
+			name:         "unparsable controller tag with a new CRD is compatible",
+			objects:      []client.Object{testPodCliqueSetCRD(true), testGroveOperatorDeployment("registry.example.com/grove-operator:v0.1.0-dev")},
+			wantState:    GroveCompatible,
+			wantContains: []string{"controller version could not be identified"},
+		},
+		{
+			name:         "forbidden Deployment list keeps the CRD verdict",
+			objects:      []client.Object{testPodCliqueSetCRD(true)},
+			listErr:      apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "", nil),
+			wantState:    GroveCompatible,
+			wantContains: []string{"controller version could not be identified"},
 		},
 		{
 			name:         "CRD without per-clique rollingUpdate is incompatible",
@@ -109,23 +156,30 @@ func TestGroveCompatibilityProbeCheck(t *testing.T) {
 			builder := fake.NewClientBuilder().
 				WithScheme(newGroveCompatibilityTestScheme(t)).
 				WithObjects(tt.objects...)
+			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
-				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
-					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-						return tt.getErr
-					},
-				})
+				funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return tt.getErr
+				}
 			}
-			probe := NewGroveCompatibilityProbe(builder.Build())
+			if tt.listErr != nil {
+				funcs.List = func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return tt.listErr
+				}
+			}
+			probe := NewGroveCompatibilityProbe(builder.WithInterceptorFuncs(funcs).Build())
 
 			t.Log("Probe Grove compatibility")
-			got := probe.Check(t.Context())
+			got, err := probe.Check(t.Context())
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
 
 			t.Log("Verify the state and the actionable message")
 			if got.State != tt.wantState {
 				t.Fatalf("Check().State = %q, want %q (message %q)", got.State, tt.wantState, got.Message)
 			}
-			if tt.wantState == GroveCompatible && got.Message != "" {
+			if tt.wantState == GroveCompatible && len(tt.wantContains) == 0 && got.Message != "" {
 				t.Errorf("Check().Message = %q, want empty for a compatible Grove", got.Message)
 			}
 			for _, want := range tt.wantContains {
@@ -146,7 +200,7 @@ func TestGroveCompatibilityProbeRechecksAfterTTL(t *testing.T) {
 	probe := NewGroveCompatibilityProbe(reader)
 	now := time.Unix(1000, 0)
 	probe.now = func() time.Time { return now }
-	if got := probe.Check(t.Context()).State; got != GroveIncompatible {
+	if got := mustCheck(t, probe).State; got != GroveIncompatible {
 		t.Fatalf("initial Check().State = %q, want %q", got, GroveIncompatible)
 	}
 
@@ -161,20 +215,94 @@ func TestGroveCompatibilityProbeRechecksAfterTTL(t *testing.T) {
 		t.Fatalf("update CRD: %v", err)
 	}
 	now = now.Add(groveCompatibilityTTL / 2)
-	if got := probe.Check(t.Context()).State; got != GroveIncompatible {
+	if got := mustCheck(t, probe).State; got != GroveIncompatible {
 		t.Fatalf("cached Check().State = %q, want %q", got, GroveIncompatible)
 	}
 
 	t.Log("Advance past the TTL and verify the upgrade is observed")
 	now = now.Add(groveCompatibilityTTL)
-	if got := probe.Check(t.Context()).State; got != GroveCompatible {
+	if got := mustCheck(t, probe).State; got != GroveCompatible {
 		t.Fatalf("rechecked Check().State = %q, want %q", got, GroveCompatible)
 	}
 }
 
 func TestNilGroveCompatibilityProbeIsCompatible(t *testing.T) {
 	var probe *GroveCompatibilityProbe
-	if got := probe.Check(t.Context()).State; got != GroveCompatible {
+	if got := mustCheck(t, probe).State; got != GroveCompatible {
 		t.Fatalf("nil probe Check().State = %q, want %q", got, GroveCompatible)
 	}
+}
+
+func TestGroveCompatibilityProbeDoesNotCacheTransientErrors(t *testing.T) {
+	t.Log("Serve a new CRD through a reader whose CRD reads fail transiently")
+	transient := apierrors.NewServiceUnavailable("etcd leader changed")
+	failing := true
+	reader := fake.NewClientBuilder().
+		WithScheme(newGroveCompatibilityTestScheme(t)).
+		WithObjects(testPodCliqueSetCRD(true)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if failing {
+					return transient
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	probe := NewGroveCompatibilityProbe(reader)
+	now := time.Unix(1000, 0)
+	probe.now = func() time.Time { return now }
+
+	t.Log("Verify a transient error with no previous verdict is returned, not reported as Unverifiable")
+	got, err := probe.Check(t.Context())
+	if !errors.Is(err, transient) {
+		t.Fatalf("Check() = (%+v, %v), want the transient error", got, err)
+	}
+	if got.State == GroveUnverifiable {
+		t.Fatalf("Check().State = %q, want no verdict for a transient error", got.State)
+	}
+
+	t.Log("Verify the error was not cached: the next call within the TTL probes again")
+	failing = false
+	if got := mustCheck(t, probe).State; got != GroveCompatible {
+		t.Fatalf("Check().State after recovery = %q, want %q", got, GroveCompatible)
+	}
+
+	t.Log("Verify a transient error after the TTL keeps the previous verdict")
+	failing = true
+	now = now.Add(2 * groveCompatibilityTTL)
+	if got := mustCheck(t, probe).State; got != GroveCompatible {
+		t.Fatalf("Check().State on transient error = %q, want previous %q", got, GroveCompatible)
+	}
+}
+
+func TestGroveControllerTagParsing(t *testing.T) {
+	tests := []struct {
+		image  string
+		wantN  int
+		wantOK bool
+	}{
+		{image: "ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-alpha.11", wantN: 11, wantOK: true},
+		{image: "ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-alpha.14-rc1", wantN: 14, wantOK: true},
+		{image: "localhost:5000/grove-operator:v0.1.0-alpha.9@sha256:abc", wantN: 9, wantOK: true},
+		{image: "localhost:5000/grove-operator", wantOK: false},
+		{image: "ghcr.io/ai-dynamo/grove/grove-operator@sha256:abc", wantOK: false},
+		{image: "ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-dev", wantOK: false},
+		{image: "grove-operator:custom", wantOK: false},
+	}
+	for _, tt := range tests {
+		n, ok := groveAlphaNumber(imageTag(tt.image))
+		if ok != tt.wantOK || n != tt.wantN {
+			t.Errorf("groveAlphaNumber(imageTag(%q)) = (%d, %v), want (%d, %v)", tt.image, n, ok, tt.wantN, tt.wantOK)
+		}
+	}
+}
+
+func mustCheck(t *testing.T, probe *GroveCompatibilityProbe) GroveCompatibility {
+	t.Helper()
+	got, err := probe.Check(t.Context())
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	return got
 }

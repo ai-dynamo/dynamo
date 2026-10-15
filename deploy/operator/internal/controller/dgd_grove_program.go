@@ -47,7 +47,7 @@ type groveProgram struct {
 	lpx                *dgdLPXHandoff
 	// groveCompatibility is nil when no external Grove check is wired.
 	groveCompatibility *features.GroveCompatibilityProbe
-	// namespaceRestricted operators cannot read cluster-scoped CRDs, so an
+	// The chart grants namespace-restricted operators no CRD read, so an
 	// unverifiable Grove only warns there instead of blocking.
 	namespaceRestricted bool
 }
@@ -148,8 +148,10 @@ func (p *groveProgram) Reconcile(
 	}
 
 	// Block multinode rank aliases before any write when Grove cannot expand them.
-	if blocked := p.checkGroveCompatibility(ctx, req.DGD, &programResult); blocked {
-		return programResult, nil
+	// A transient probe error is returned without failing the DGD so
+	// controller-runtime retries with backoff.
+	if blocked, err := p.checkGroveCompatibility(ctx, req.DGD, &programResult); err != nil || blocked {
+		return programResult, err
 	}
 	defer func() {
 		if retErr != nil {
@@ -271,26 +273,30 @@ const groveCompatibilityRecheckInterval = time.Minute
 // checkGroveCompatibility fails the DGD and reports true when its multinode
 // workers would reference GROVE_PCSG_POD_INDEX on a Grove that does not set it.
 // Single-node DGDs and DGDs created before the rank aliases are never blocked.
+// A transient probe error is returned as is and leaves the DGD status alone.
 func (p *groveProgram) checkGroveCompatibility(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	programResult *workloadProgramResult,
-) bool {
+) (bool, error) {
 	if !dgd.HasAnyMultinodeComponent() || !compatibility.MultinodeTopologyAliases.Enabled(dgd.Annotations) {
-		return false
+		return false, nil
 	}
-	result := p.groveCompatibility.Check(ctx)
+	result, err := p.groveCompatibility.Check(ctx)
+	if err != nil {
+		return false, fmt.Errorf("check Grove compatibility: %w", err)
+	}
 	if result.State == features.GroveCompatible {
-		return false
+		return false, nil
 	}
 
-	// A namespace-restricted operator can never read CRDs; warn once per generation.
+	// The chart gives a namespace-restricted operator no CRD read; warn once per generation.
 	if result.State == features.GroveUnverifiable && p.namespaceRestricted {
 		log.FromContext(ctx).Info("Grove compatibility unverifiable; continuing", "message", result.Message)
 		if dgd.Status.ObservedGeneration != dgd.Generation {
 			programResult.Eventf(corev1.EventTypeWarning, string(reasonUnverifiableGroveVersion), "%s", result.Message)
 		}
-		return false
+		return false, nil
 	}
 
 	// Fail without writing workloads and emit the event only on a new failure reason.
@@ -304,5 +310,5 @@ func (p *groveProgram) checkGroveCompatibility(
 		programResult.Eventf(corev1.EventTypeWarning, string(reason), "%s", result.Message)
 	}
 	programResult.RequeueAfter = groveCompatibilityRecheckInterval
-	return true
+	return true, nil
 }
