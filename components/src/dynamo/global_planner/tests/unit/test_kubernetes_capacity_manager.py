@@ -15,7 +15,11 @@ from kubernetes import client
 from dynamo.global_planner.capacity_manager import PoolSpec
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.errors import GPUShapeUnavailableError
+from dynamo.planner.connectors.base import ReplicaUpdateResult
+from dynamo.planner.errors import (
+    DynamoGraphDeploymentNotFoundError,
+    GPUShapeUnavailableError,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -88,7 +92,9 @@ def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
     connector = MagicMock()
     connector.parent_dgd_name = parent_dgd_name
-    connector.set_component_replicas = AsyncMock(return_value=True)
+    connector.set_component_replicas = AsyncMock(
+        return_value=ReplicaUpdateResult(accepted=True, applied=True)
+    )
     connector.wait_for_deployment_ready = AsyncMock()
     connector.kube_api = MagicMock()
     connector.kube_api.current_namespace = key.split("/", 1)[0]
@@ -254,6 +260,29 @@ async def test_scale_calls_connector():
 
 
 @pytest.mark.asyncio
+async def test_scale_preserves_accepted_noop_result():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    connector.set_component_replicas.return_value = ReplicaUpdateResult(
+        accepted=True, applied=False
+    )
+
+    result = await cm.scale(
+        "default/my-dgd",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                desired_replicas=1,
+            )
+        ],
+        blocking=True,
+    )
+
+    assert result.accepted
+    assert not result.applied
+
+
+@pytest.mark.asyncio
 async def test_scale_treats_legacy_none_result_as_applied():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
@@ -272,6 +301,28 @@ async def test_scale_treats_legacy_none_result_as_applied():
 
     assert result.accepted
     assert result.applied
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_result", [True, False])
+async def test_scale_treats_legacy_bool_result_conservatively(legacy_result):
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    connector.set_component_replicas.return_value = legacy_result
+
+    result = await cm.scale(
+        "default/my-dgd",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                desired_replicas=3,
+            )
+        ],
+        blocking=True,
+    )
+
+    assert result.accepted is legacy_result
+    assert result.applied is legacy_result
 
 
 @pytest.mark.asyncio
@@ -459,6 +510,18 @@ def test_observe_require_complete_raises_on_read_failure():
     cm.connectors["default/bad"] = bad
     with pytest.raises(RuntimeError):
         cm.observe(require_complete=True)
+
+
+def test_observe_require_complete_tolerates_managed_deployment_not_found():
+    cm = KubernetesCapacityManager("default")
+    missing = _install_connector(
+        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+    )
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
+
+    assert cm.observe(require_complete=True) == {"default/missing": {}}
 
 
 def test_observe_implicit_mode_lists_once_per_namespace():

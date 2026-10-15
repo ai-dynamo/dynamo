@@ -489,7 +489,23 @@ class Orchestrator:
             ):
                 raise asyncio.CancelledError
             if blocking:
-                await self._wait_for_ready_or_cancel(pid, cancel_requested)
+                try:
+                    await self._wait_for_ready_or_cancel(pid, cancel_requested)
+                except Exception as readiness_error:
+                    if not applied:
+                        raise
+                    logger.error(
+                        "Multi-partner transfer: readiness wait on %s failed "
+                        "after applying %s: %s; stopping plan until the next tick",
+                        pid,
+                        applied,
+                        readiness_error,
+                    )
+                    return self._partial_plan_error(
+                        pid,
+                        applied,
+                        f"readiness wait failed: {readiness_error}",
+                    )
 
         return None, completed
 

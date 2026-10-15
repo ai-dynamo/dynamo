@@ -30,6 +30,7 @@ from dynamo.global_planner.capacity_manager import (
 from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.planner.monitoring.dgd_services import (
     V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
     Service,
@@ -237,6 +238,11 @@ class KubernetesCapacityManager(CapacityManager):
         error: Exception,
         require_complete: bool,
     ) -> None:
+        if isinstance(error, DynamoGraphDeploymentNotFoundError):
+            logger.info(f"Managed deployment {participant_id} does not exist yet")
+            all_pools[participant_id] = {}
+            return
+
         if require_complete:
             raise RuntimeError(
                 f"Failed to read deployment for {participant_id}: {error}"

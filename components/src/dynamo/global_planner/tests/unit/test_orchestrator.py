@@ -15,6 +15,7 @@ from threading import Event
 from unittest.mock import patch
 
 import pytest
+from kubernetes import client
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
 from dynamo.global_planner.orchestrator import Orchestrator
@@ -513,7 +514,7 @@ async def test_blocking_transfer_settles_accepted_noop_before_upscale():
 
 
 @pytest.mark.asyncio
-async def test_blocking_transfer_stops_when_downscale_does_not_settle():
+async def test_blocking_transfer_reports_partial_error_when_downscale_does_not_settle():
     class FailingDownscaleSettlementCapacityManager(FakeCapacityManager):
         async def wait_for_ready(self, participant_id):
             if participant_id == "default/a":
@@ -527,17 +528,62 @@ async def test_blocking_transfer_stops_when_downscale_does_not_settle():
     rejected = await _submit(orch, "default/a", _targets(decode=1))
     assert rejected.status == ScaleStatus.REJECTED
 
-    with pytest.raises(RuntimeError, match="downscale did not settle"):
-        await orch.submit(
-            "default/b",
-            _targets(decode=3),
-            blocking=True,
-            deployment_name="default/b",
-            caller_name="default/b",
-        )
+    result = await orch.submit(
+        "default/b",
+        _targets(decode=3),
+        blocking=True,
+        deployment_name="default/b",
+        caller_name="default/b",
+    )
 
+    assert result.status == ScaleStatus.ERROR
+    assert "after applying ['default/a']" in result.message
+    assert "downscale did not settle" in result.message
     assert cm.pools["default/a"]["decode"][0] == 1
     assert cm.pools["default/b"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
+async def test_readiness_conflict_after_write_does_not_replay_transaction():
+    class ReadinessConflictCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.operation_attempts = 0
+            self.scale_calls = 0
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            return await super().scale(participant_id, targets, blocking)
+
+        async def wait_for_ready(self, participant_id):
+            raise client.ApiException(status=409)
+
+        async def run_with_conflict_retry(self, operation):
+            self.operation_attempts += 1
+            try:
+                return await operation()
+            except client.ApiException as error:
+                if error.status != 409:
+                    raise
+                self.operation_attempts += 1
+                return await operation()
+
+    cm = ReadinessConflictCapacityManager()
+    cm.add("default/a", decode=1)
+    orch = _orch(cm)
+
+    result = await orch.submit(
+        "default/a",
+        _targets(decode=2),
+        blocking=True,
+        deployment_name="default/a",
+        caller_name="default/a",
+    )
+
+    assert result.status == ScaleStatus.ERROR
+    assert "readiness wait failed" in result.message
+    assert cm.operation_attempts == 1
+    assert cm.scale_calls == 1
 
 
 @pytest.mark.asyncio

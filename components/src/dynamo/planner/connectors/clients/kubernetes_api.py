@@ -396,11 +396,8 @@ class KubernetesAPI:
                     graph_deployment_name, components, service_name
                 )
                 if "scalingAdapter" in components[index]:
-                    raise client.ApiException(
-                        status=409,
-                        reason=(
-                            f"component {service_name!r} now declares a scalingAdapter"
-                        ),
+                    raise RuntimeError(
+                        f"component {service_name!r} now declares a scalingAdapter"
                     )
                 updated_components[index]["replicas"] = replicas
             retry_kubernetes_request(

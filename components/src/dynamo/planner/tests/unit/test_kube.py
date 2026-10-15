@@ -522,7 +522,7 @@ def test_update_dgd_replica_targets_uses_one_resource_version_patch(
 def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
     k8s_api, mock_custom_api
 ):
-    """A DGDSA opt-in after connector preflight must retry via new authority."""
+    """A DGDSA opt-in after connector preflight must stop the stale write."""
     mock_custom_api.get_namespaced_custom_object.return_value = {
         "metadata": {"name": "test-deployment", "resourceVersion": "43"},
         "spec": {
@@ -537,10 +537,10 @@ def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
         },
     }
 
-    with pytest.raises(client.ApiException) as error:
+    with pytest.raises(RuntimeError, match="now declares a scalingAdapter"):
         k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
 
-    assert error.value.status == 409
+    mock_custom_api.get_namespaced_custom_object.assert_called_once()
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
 
 

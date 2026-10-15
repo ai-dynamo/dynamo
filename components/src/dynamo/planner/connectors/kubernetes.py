@@ -1382,7 +1382,6 @@ class KubernetesConnector(PlannerConnector):
                 transaction.run(
                     lambda plan=plan: self._write_adapter_stage_after_prior_updates(
                         deployment,
-                        plans,
                         committed_adapter_plans,
                         [],
                         plan,
@@ -1442,7 +1441,6 @@ class KubernetesConnector(PlannerConnector):
                 transaction.run(
                     lambda plan=plan: self._write_adapter_stage_after_prior_updates(
                         deployment,
-                        plans,
                         committed_adapter_plans,
                         dgd_mutations,
                         plan,
@@ -1702,20 +1700,12 @@ class KubernetesConnector(PlannerConnector):
     def _write_adapter_stage_after_prior_updates(
         self,
         deployment: dict,
-        plans: list[_ReplicaUpdatePlan],
         committed_adapter_plans: list[_ReplicaUpdatePlan],
         committed_direct_plans: list[_ReplicaUpdatePlan],
         pending_plan: _ReplicaUpdatePlan,
     ) -> None:
         """Retry one unapplied DGDSA stage without replaying prior writes."""
         expected_uid = (deployment.get("metadata", {}) or {}).get("uid")
-        expected_authorities = {
-            plan.service.name: self._replica_authority_identity(
-                plan.service, plan.scaling_adapter
-            )
-            for plan in plans
-        }
-        initial_replicas = {plan.service.name: plan.current_replicas for plan in plans}
         committed_adapter_targets = {
             plan.service.name: plan.target.desired_replicas
             for plan in committed_adapter_plans
@@ -1726,7 +1716,10 @@ class KubernetesConnector(PlannerConnector):
         }
         pending_name = pending_plan.service.name
         pending_target = pending_plan.target.desired_replicas
-        targets = [plan.target for plan in plans]
+        initial_replicas = pending_plan.current_replicas
+        expected_authority = self._replica_authority_identity(
+            pending_plan.service, pending_plan.scaling_adapter
+        )
 
         def write() -> None:
             refreshed = self.kube_api.get_graph_deployment(self.graph_deployment_name)
@@ -1741,41 +1734,33 @@ class KubernetesConnector(PlannerConnector):
                 },
                 direct_targets=committed_direct_targets,
             )
-            refreshed_plans = self._preflight_replica_updates(refreshed, targets)
-            refreshed_by_name = {plan.service.name: plan for plan in refreshed_plans}
-            if set(refreshed_by_name) != set(expected_authorities):
+            component = get_components_by_name(refreshed).get(pending_name)
+            if component is None:
                 raise RuntimeError("component identity changed after prior updates")
-
-            for name, plan in refreshed_by_name.items():
-                if (
-                    self._replica_authority_identity(plan.service, plan.scaling_adapter)
-                    != expected_authorities[name]
-                ):
-                    raise RuntimeError(
-                        "replica authority identity changed after prior updates"
-                    )
-                expected = initial_replicas[name]
-                if name in committed_adapter_targets:
-                    expected = committed_adapter_targets[name]
-                elif name in committed_direct_targets:
-                    expected = committed_direct_targets[name]
-                elif name == pending_name and plan.current_replicas == pending_target:
-                    continue
-                if plan.current_replicas != expected:
-                    raise RuntimeError(
-                        f"replica target for component {name!r} changed after "
-                        "prior updates"
-                    )
-
-            current = refreshed_by_name[pending_name]
-            if current.current_replicas == pending_target:
+            service = Service(name=pending_name, service=component)
+            current_replicas, scaling_adapter = self._authoritative_replica_state(
+                refreshed, service
+            )
+            if (
+                self._replica_authority_identity(service, scaling_adapter)
+                != expected_authority
+            ):
+                raise RuntimeError(
+                    "replica authority identity changed after prior updates"
+                )
+            if current_replicas == pending_target:
                 return
+            if current_replicas != initial_replicas:
+                raise RuntimeError(
+                    f"replica target for component {pending_name!r} changed after "
+                    "prior updates"
+                )
             try:
                 self._write_preflighted_replica_target(
                     refreshed,
-                    current.service,
+                    service,
                     pending_target,
-                    current.scaling_adapter,
+                    scaling_adapter,
                 )
             except (_ReplicaAuthorityChanged, _ReplicaTargetCommittedConflict) as error:
                 raise RuntimeError(

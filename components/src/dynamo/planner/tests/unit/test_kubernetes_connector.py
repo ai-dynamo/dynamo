@@ -1210,8 +1210,6 @@ async def test_set_component_replicas_retries_second_adapter_reduction(
     mock_kube_api.is_spec_generation_observed.return_value = True
 
     first_initial = _scaling_adapter("first-down", replicas=2)
-    first_applied = _scaling_adapter("first-down", replicas=1)
-    first_applied["metadata"]["resourceVersion"] = "102"
     second_initial = _scaling_adapter("second-down", replicas=2)
     second_initial["metadata"]["resourceVersion"] = "201"
     second_refreshed = deepcopy(second_initial)
@@ -1219,9 +1217,7 @@ async def test_set_component_replicas_retries_second_adapter_reduction(
     mock_kube_api.get_service_scaling_adapter.side_effect = [
         first_initial,
         second_initial,
-        first_applied,
         second_initial,
-        first_applied,
         second_refreshed,
     ]
     mock_kube_api.update_scaling_adapter_replicas.side_effect = [
@@ -1251,6 +1247,7 @@ async def test_set_component_replicas_retries_second_adapter_reduction(
         call("test-graph", "second-down", 1, resource_version="201"),
         call("test-graph", "second-down", 1, resource_version="202"),
     ]
+    assert mock_kube_api.get_service_scaling_adapter.call_count == 4
 
 
 @pytest.mark.asyncio
