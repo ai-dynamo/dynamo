@@ -121,6 +121,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_error_terminal_still_renders_native_response() {
+        // Workers type an error-bearing SGLang abort for the router; the client
+        // still receives SGLang's own response.
+        let native_response = serde_json::json!({
+            "output_ids": [],
+            "meta_info": {"finish_reason": {"type": "abort", "status_code": 400}}
+        });
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": native_response})),
+            ..LLMEngineOutput::error("bad request".to_string())
+        })]);
+        assert_eq!(
+            SglangGenerateStream::fold(stream, merger()).await.unwrap(),
+            native_response
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_chunks_without_native_response() {
         let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput::default())]);
         let result = SglangGenerateStream::from_annotated_stream(stream, merger(), Value::clone)

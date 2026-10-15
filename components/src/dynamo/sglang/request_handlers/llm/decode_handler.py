@@ -206,6 +206,17 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _native_user_stop_token_ids(sampling_params: Any) -> set[int]:
+    """The user's stop token ids in a native SGLang ``sampling_params``."""
+    if not isinstance(sampling_params, Mapping):
+        return set()
+    return {
+        token_id
+        for token_id in (sampling_params.get("stop_token_ids") or [])
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    }
+
+
 def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | None:
     """Build Dynamo's completion_usage from SGLang's terminal meta_info."""
     prompt_tokens = meta_info.get("prompt_tokens")
@@ -219,7 +230,9 @@ def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | N
     }
     cached_tokens = meta_info.get("cached_tokens")
     if cached_tokens is not None and cached_tokens > 0:
-        usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+        usage["prompt_tokens_details"] = {
+            "cached_tokens": min(cached_tokens, prompt_tokens)
+        }
     return usage
 
 
@@ -728,11 +741,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 priority,
             )
             native_sampling_params = native_payload.get("sampling_params")
-            # Batched (list) sampling params report no token-id stop_reason.
-            native_user_stop_token_ids = _user_stop_token_ids(
+            native_user_stop_token_ids = _native_user_stop_token_ids(
                 native_sampling_params
-                if isinstance(native_sampling_params, dict)
-                else {}
             )
             async for output in self._process_native_generate_stream(
                 stream,
@@ -1021,8 +1031,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     else None
                 )
                 if isinstance(finish_reason, dict):
-                    # Typed fields for Dynamo's router and request tracker; the
-                    # frontend renders only sglang_response to the client.
                     output = {
                         **output,
                         **_native_terminal_fields(

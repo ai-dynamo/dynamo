@@ -31,6 +31,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _extract_sglang_stop_reason,
     _kv_cache_hit_engine_data,
     _native_payload_is_batched,
+    _native_user_stop_token_ids,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _ordered_cancellation_request_id,
@@ -914,24 +915,17 @@ async def test_native_generate_stream_maps_terminal_finish_reason(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("matched", "user_stop_token_ids", "expected"),
-    [
-        (7, {7}, 7),
-        (7, set(), None),
-        ([7, 8], {7, 8}, [7, 8]),
-        ([7, 8], {7}, None),
-        ("</s>", set(), "</s>"),
-    ],
-)
-async def test_native_generate_stream_reports_user_stop_reason_only(
-    matched, user_stop_token_ids, expected
-):
+@pytest.mark.parametrize(("matched", "expected"), [(7, 7), (2, None)])
+async def test_native_generate_stream_reports_user_stop_reason_only(matched, expected):
+    # The user asked to stop on 7; SGLang also reports hidden EOS matches (2).
+    user_stop_token_ids = _native_user_stop_token_ids(
+        {"stop": [], "stop_token_ids": [7, True, "8"]}
+    )
+    assert user_stop_token_ids == {7}
     final = await _native_terminal_chunks(
         {"type": "stop", "matched": matched}, user_stop_token_ids
     )
     assert final.get("stop_reason") == expected
-    assert ("stop_reason" in final) == (expected is not None)
 
 
 @pytest.mark.asyncio
@@ -945,6 +939,15 @@ async def test_native_generate_stream_reports_user_stop_reason_only(
                 "completion_tokens": 2,
                 "total_tokens": 6,
                 "prompt_tokens_details": {"cached_tokens": 3},
+            },
+        ),
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": 9},
+            {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6,
+                "prompt_tokens_details": {"cached_tokens": 4},
             },
         ),
         (

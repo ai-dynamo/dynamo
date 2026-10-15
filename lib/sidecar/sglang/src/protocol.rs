@@ -443,14 +443,19 @@ pub(crate) fn terminal_from_meta(
         generated,
         meta_u32(meta, "cached_tokens"),
     ));
-    output.stop_reason = finish.get("matched").and_then(|matched| {
-        stop_reason(
-            matched,
-            stop_conditions
-                .stop_token_ids
-                .as_deref()
-                .unwrap_or_default(),
-        )
+    output.stop_reason = finish.get("matched").and_then(|matched| match matched {
+        Value::String(value) => Some(StopReason::String(value.clone())),
+        Value::Number(value) => value
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .filter(|id| {
+                stop_conditions
+                    .stop_token_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(id))
+            })
+            .map(|id| StopReason::Int(i64::from(id))),
+        _ => None,
     });
     Ok(output)
 }
@@ -468,27 +473,6 @@ pub(crate) fn completion_usage(
             ..Default::default()
         });
     completion_usage
-}
-
-/// Map SGLang's `finish_reason.matched`. SGLang also reports EOS and other
-/// hidden stop tokens there; only the user's stop tokens are reported.
-pub(crate) fn stop_reason(matched: &Value, user_stop_token_ids: &[u32]) -> Option<StopReason> {
-    let user_stop = |id: &Value| {
-        id.as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .filter(|id| user_stop_token_ids.contains(id))
-            .map(i64::from)
-    };
-    match matched {
-        Value::String(value) => Some(StopReason::String(value.clone())),
-        Value::Number(_) => user_stop(matched).map(StopReason::Int),
-        Value::Array(ids) => ids
-            .iter()
-            .map(user_stop)
-            .collect::<Option<_>>()
-            .map(StopReason::IntArray),
-        _ => None,
-    }
 }
 
 pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
