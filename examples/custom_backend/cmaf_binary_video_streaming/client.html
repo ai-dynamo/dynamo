@@ -1,0 +1,210 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dynamo CMAF video streaming</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
+  label { display: inline-block; min-width: 5rem; }
+  input[type=text] { width: 32rem; }
+  video { width: 100%; max-width: 52rem; background: #111; margin-top: 1rem; }
+  #log { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap;
+         background: #f4f4f4; padding: .75rem; margin-top: 1rem; max-height: 20rem;
+         overflow: auto; }
+  .err { color: #b00; }
+</style>
+</head>
+<body>
+
+<h1>Dynamo CMAF video streaming</h1>
+
+<div>
+  <label for="model">Model</label>
+  <input id="model" type="text" value="Wan-AI/Wan2.1-T2V-1.3B-Diffusers">
+</div>
+<div>
+  <label for="prompt">Prompt</label>
+  <input id="prompt" type="text" value="a cat playing piano">
+</div>
+<p><button id="go">Stream</button></p>
+
+<video id="video" controls autoplay muted playsinline></video>
+<div id="log"></div>
+
+<script>
+const KIND = { METADATA: 0x01, INIT: 0x02, SEGMENT: 0x03, ERROR: 0x04, DONE: 0x05 };
+const HEADER_SIZE = 5;
+
+// A short request, fixed rather than exposed as a control: nothing reaches the
+// page until the whole clip is denoised, so the 97-frame server default looks
+// like a hang. 30 frames at 16fps is ~2s of video, four CMAF segments.
+const SIZE = "832x480";
+const NUM_FRAMES = 30;
+const FPS = 16;
+const NUM_INFERENCE_STEPS = 20;
+
+const logEl = document.getElementById("log");
+const videoEl = document.getElementById("video");
+const t0 = () => performance.now() / 1000;
+let start = 0;
+
+function log(msg, isError) {
+  const line = document.createElement("div");
+  if (isError) line.className = "err";
+  line.textContent = `${(t0() - start).toFixed(2).padStart(7)}s  ${msg}`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+/** Parse the framed byte stream into [kind, payload] pairs. */
+async function* frames(reader) {
+  let buf = new Uint8Array(0);
+  const need = (n) => buf.length >= n;
+  const grow = (chunk) => {
+    const next = new Uint8Array(buf.length + chunk.length);
+    next.set(buf, 0);
+    next.set(chunk, buf.length);
+    buf = next;
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) grow(value);
+    for (;;) {
+      if (!need(HEADER_SIZE)) break;
+      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      const kind = view.getUint8(0);
+      const len = view.getUint32(1, false); // big-endian
+      if (!need(HEADER_SIZE + len)) break;
+      yield [kind, buf.slice(HEADER_SIZE, HEADER_SIZE + len)];
+      buf = buf.slice(HEADER_SIZE + len);
+    }
+    if (done) {
+      if (buf.length) throw new Error(`stream ended with ${buf.length} trailing bytes`);
+      return;
+    }
+  }
+}
+
+/** SourceBuffer accepts one append at a time; serialize them. */
+function appender(sourceBuffer) {
+  const queue = [];
+  let busy = false;
+  const pump = () => {
+    if (busy || !queue.length || sourceBuffer.updating) return;
+    busy = true;
+    const { data, resolve, reject } = queue.shift();
+    const onUpdate = () => { cleanup(); busy = false; resolve(); pump(); };
+    const onError = () => { cleanup(); busy = false; reject(new Error("appendBuffer failed")); };
+    const cleanup = () => {
+      sourceBuffer.removeEventListener("updateend", onUpdate);
+      sourceBuffer.removeEventListener("error", onError);
+    };
+    sourceBuffer.addEventListener("updateend", onUpdate);
+    sourceBuffer.addEventListener("error", onError);
+    try {
+      sourceBuffer.appendBuffer(data);
+    } catch (e) {
+      cleanup();
+      busy = false;
+      reject(e);
+    }
+  };
+  sourceBuffer.addEventListener("updateend", pump);
+  return (data) => new Promise((resolve, reject) => {
+    queue.push({ data, resolve, reject });
+    pump();
+  });
+}
+
+async function stream() {
+  logEl.textContent = "";
+  start = t0();
+
+  const body = {
+    model: document.getElementById("model").value,
+    prompt: document.getElementById("prompt").value,
+    size: SIZE,
+    nvext: {
+      fps: FPS,
+      num_frames: NUM_FRAMES,
+      num_inference_steps: NUM_INFERENCE_STEPS,
+    },
+  };
+
+  // A relative URL keeps the request same-origin: the frontend sends no CORS
+  // headers, so a cross-origin POST never leaves the browser. Serve this page
+  // with run_proxy.py, which answers both the page and /v1/* on one port.
+  const response = await fetch("/v1/videos/stream/cmaf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    log(`HTTP ${response.status}: ${await response.text()}`, true);
+    return;
+  }
+  log(`connected, streaming`);
+
+  const mediaSource = new MediaSource();
+  videoEl.src = URL.createObjectURL(mediaSource);
+  await new Promise((r) => mediaSource.addEventListener("sourceopen", r, { once: true }));
+
+  let append = null;
+  let segments = 0;
+  let failed = false;
+
+  for await (const [kind, payload] of frames(response.body.getReader())) {
+    switch (kind) {
+      case KIND.METADATA: {
+        const meta = JSON.parse(new TextDecoder().decode(payload));
+        log(`metadata ${JSON.stringify(meta)}`);
+        if (!MediaSource.isTypeSupported(meta.mime_type)) {
+          log(`this browser cannot play ${meta.mime_type}`, true);
+          failed = true;
+          break;
+        }
+        const sourceBuffer = mediaSource.addSourceBuffer(meta.mime_type);
+        sourceBuffer.mode = "segments";
+        append = appender(sourceBuffer);
+        break;
+      }
+      case KIND.INIT:
+        log(`init     ${payload.length} bytes`);
+        if (append) await append(payload);
+        break;
+      case KIND.SEGMENT:
+        log(`segment  #${segments++} ${payload.length} bytes`);
+        if (append) await append(payload);
+        if (videoEl.paused) videoEl.play().catch(() => {});
+        break;
+      case KIND.ERROR:
+        log(`ERROR    ${new TextDecoder().decode(payload)}`, true);
+        failed = true;
+        break;
+      case KIND.DONE:
+        log(`done`);
+        break;
+      default:
+        log(`unknown kind 0x${kind.toString(16)}, dropping`);
+    }
+    if (failed) break;
+  }
+
+  if (mediaSource.readyState === "open") {
+    mediaSource.endOfStream();
+  }
+  log(failed ? `stopped after ${segments} segment(s)` : `${segments} segment(s) played`,
+      failed);
+}
+
+document.getElementById("go").addEventListener("click", () => {
+  stream().catch((e) => log(String(e), true));
+});
+</script>
+
+</body>
+</html>
