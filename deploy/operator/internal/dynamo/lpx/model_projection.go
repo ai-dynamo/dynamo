@@ -112,12 +112,11 @@ func (p *Model) RequestSpec(
 	partitions := make([]lpxv1alpha1.PartitionRequest, len(p.partitions))
 	mappings := make([]lpxv1alpha1.NodeLocalPartitionMapping, len(p.partitions))
 	for index, partition := range p.partitions {
-		partitionID := fmt.Sprintf("partition-%03d", index)
 		request := p.configuredBuild.topology.partitionRequest(index, partition)
 		partitions[index] = request
 		mappings[index] = lpxv1alpha1.NodeLocalPartitionMapping{
 			ModelPartitionID: int64(index),
-			PartitionID:      partitionID,
+			PartitionID:      request.ID,
 		}
 	}
 	spec := lpxv1alpha1.LPUPipelineRequestSpec{
@@ -131,7 +130,7 @@ func (p *Model) RequestSpec(
 		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
 		PropSyncConnectors: connectors,
 		TargetFamily:       p.configuredBuild.topology.target(),
-		WorkloadMode:       p.schedulerWorkloadMode(),
+		WorkloadMode:       p.configuredBuild.topology.workloadMode(p.pipeline),
 		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
 		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
 			AgentPodCliqueRef: lpxv1alpha1.PodCliqueReference{Name: agentPodCliqueName},
@@ -144,11 +143,6 @@ func (p *Model) RequestSpec(
 		spec.CyborgPodCliqueRef = &lpxv1alpha1.PodCliqueReference{Name: plan.CyborgClique}
 	}
 	return spec
-}
-
-// schedulerWorkloadMode translates the normalized build family and pipeline at the LPX wire boundary.
-func (p *Model) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
-	return p.configuredBuild.topology.workloadMode(p.pipeline)
 }
 
 func newPartitionRequest(index int, partition buildPartition) lpxv1alpha1.PartitionRequest {

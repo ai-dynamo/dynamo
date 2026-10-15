@@ -189,7 +189,7 @@ func RenderNodeLocal(
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.name
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
-		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
+		annotations[WorkloadModeAnnotation] = string(projection.configuredBuild.topology.workloadMode(projection.pipeline))
 		replicas := int32(agent.Replicas)
 		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        agent.TemplateName,
