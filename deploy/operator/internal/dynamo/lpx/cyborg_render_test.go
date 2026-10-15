@@ -23,7 +23,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
 	projection.configuredBuild.ioFPGACount = 1
 	projection.configuredBuild.ioFanoutFactor = 1
@@ -89,7 +89,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	build.ioFPGACount = 2
 	build.ioFanoutFactor = 2
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"},
+		Pipeline: PipelineHybrid, Models: []string{"default"},
 		Build:           normalized,
 		RuntimeBuildRef: "model-build",
 	})

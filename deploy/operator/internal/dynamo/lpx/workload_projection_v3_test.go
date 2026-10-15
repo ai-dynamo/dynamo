@@ -28,7 +28,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 
 	t.Log("Project hybrid while keeping manifest-selected links independent of global prop sync")
 	intent := ModelProjectionInput{
-		Pipeline: PipelineLPX,
+		Pipeline: PipelineHybrid,
 		Models:   []string{"default"},
 		Build:    acquireTestSnapshot(t, buildDir),
 	}

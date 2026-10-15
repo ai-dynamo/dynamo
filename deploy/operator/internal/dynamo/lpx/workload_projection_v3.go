@@ -29,7 +29,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	if err != nil {
 		return nil, err
 	}
-	if intent.Pipeline != PipelineLPX && len(edgePositions) != len(manifestPartitions)-1 {
+	if intent.Pipeline != PipelineHybrid && len(edgePositions) != len(manifestPartitions)-1 {
 		return nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 
@@ -38,7 +38,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		partitions = packPropSyncPartitions(manifestPartitions)
 	}
 	if len(partitions) < len(manifestPartitions) {
-		if intent.Pipeline == PipelineLPX {
+		if intent.Pipeline == PipelineHybrid {
 			if intent.LocalPartitions != nil {
 				return nil, fmt.Errorf("%w: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload", ErrUnsupportedRuntime)
 			}

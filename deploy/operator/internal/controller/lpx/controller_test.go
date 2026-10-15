@@ -87,7 +87,7 @@ func TestLPXControllerRemovesOnlyJournaledAgentPods(t *testing.T) {
 
 func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 	t.Log("Materialize two hybrid workloads, each with two backbones")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 	second := dgd.Spec.Components[0].DeepCopy()
 	second.ComponentName = "second"
@@ -284,7 +284,7 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	}))
 	registry, err := lpx.NewModelRegistry(root, nil)
 	require.NoError(t, err)
-	dgd := loadTestDGD(t, lpx.PipelineLPX, buildID)
+	dgd := loadTestDGD(t, lpx.PipelineHybrid, buildID)
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = nil
 	child := newLPXTestDeployment(t, dgd)
@@ -2149,7 +2149,7 @@ func TestLPXCorrectsTopLevelReplicaDrift(t *testing.T) {
 
 func TestLPXReconcileRejectsForeignPodClique(t *testing.T) {
 	t.Log("Materialize a workload whose workers need scaling")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	dgd.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(3))
 	r, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
@@ -2194,7 +2194,7 @@ func TestLPXScalingWaitsForObservedCapacity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Observe a hybrid workload with group or clique capacity still to apply")
 			ctx := t.Context()
-			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 			dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -3028,7 +3028,7 @@ func findLPXTestPodCliqueSet(t *testing.T, objects []client.Object) *grovev1alph
 func newLPXTestDGD(t *testing.T, pipeline lpx.Pipeline) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
 	compilationMode := manifestcapnpv2.CompilationMode_lpuOnly
-	if pipeline == lpx.PipelineLPX {
+	if pipeline == lpx.PipelineHybrid {
 		compilationMode = manifestcapnpv2.CompilationMode_lpx
 	}
 	const buildID = "build-v2"
@@ -3060,7 +3060,7 @@ func loadTestDGD(t testing.TB, pipeline lpx.Pipeline, buildID string) *v1beta1.D
 	dgd.Spec.Components[0].LPX.BuildID = buildID
 
 	// Hybrid pipelines author a GPU conductor while retaining the same Agent template.
-	if pipeline == lpx.PipelineLPX {
+	if pipeline == lpx.PipelineHybrid {
 		payload, err = os.ReadFile("testdata/hybrid-conductor.yaml")
 		require.NoError(t, err)
 		conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
@@ -4171,7 +4171,7 @@ func TestLPXScaleFailureRetainsRetry(t *testing.T) {
 func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T) {
 	ctx := t.Context()
 	t.Log("Publish a ready hybrid workload with two backbones and one Cyborg per backbone")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)

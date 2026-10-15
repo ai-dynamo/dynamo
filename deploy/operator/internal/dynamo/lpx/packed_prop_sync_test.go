@@ -44,7 +44,7 @@ func TestPropSyncProjection(t *testing.T) {
 		{name: "invalid selected chain", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{1, 3}}, cpu: true, wantError: "not contiguous"},
 		{family: BuildFamilyXT, name: "XT unselected stages", widths: []uint32{4, 4}, chains: [][]uint32{}},
 		{family: BuildFamilyXT, name: "XT whole node chain", widths: []uint32{8, 8}},
-		{family: BuildFamilyXT, name: "XT hybrid separate reservations", widths: []uint32{4, 4}, pipeline: PipelineLPX},
+		{family: BuildFamilyXT, name: "XT hybrid separate reservations", widths: []uint32{4, 4}, pipeline: PipelineHybrid},
 		{family: BuildFamilyHX, name: "HX mixed subnode widths", widths: []uint32{8, 4}},
 		{family: BuildFamilyXT, name: "XT mixed subnode widths", widths: []uint32{4, 2}},
 		{family: BuildFamilyXT, name: "XT width does not divide node", widths: []uint32{3, 3}},
@@ -56,9 +56,9 @@ func TestPropSyncProjection(t *testing.T) {
 		{family: BuildFamilyHX, name: "HX eighteen nodes", widths: slices.Repeat([]uint32{8}, 36), wantError: "288 does not fit a supported HX extent"},
 		{family: BuildFamilyHX, name: "HX more than two racks", widths: slices.Repeat([]uint32{8}, 66), wantError: "528 does not fit a supported HX extent"},
 		{family: BuildFamilyHX, name: "HX incomplete chain", widths: []uint32{8, 8, 8}, chains: [][]uint32{{1, 2}}, wantError: "complete adjacent prop-sync connector chain"},
-		{family: BuildFamilyHX, name: "HX hybrid", widths: []uint32{8, 8}, pipeline: PipelineLPX, wantError: "requires an LPU-only workload"},
-		{family: BuildFamilyHX, name: "HX hybrid unselected stages", widths: []uint32{8, 8}, pipeline: PipelineLPX, chains: [][]uint32{}},
-		{family: BuildFamilyHX, name: "HX hybrid partial chain", widths: []uint32{8, 8, 8}, pipeline: PipelineLPX, chains: [][]uint32{{1, 2}}},
+		{family: BuildFamilyHX, name: "HX hybrid", widths: []uint32{8, 8}, pipeline: PipelineHybrid, wantError: "requires an LPU-only workload"},
+		{family: BuildFamilyHX, name: "HX hybrid unselected stages", widths: []uint32{8, 8}, pipeline: PipelineHybrid, chains: [][]uint32{}},
+		{family: BuildFamilyHX, name: "HX hybrid partial chain", widths: []uint32{8, 8, 8}, pipeline: PipelineHybrid, chains: [][]uint32{{1, 2}}},
 		{family: BuildFamilyHX, name: "HX aggregate connection budget", widths: []uint32{4096, 4096, 4096}, nodeWidth: 4096},
 		{family: BuildFamilyHX, name: "HX aggregate connection budget exceeded", widths: []uint32{4097, 4097, 4097}, nodeWidth: 4097, wantError: "exceeds 8192 logical connections"},
 		{family: BuildFamilyHX, name: "HX maximum manifest node width", widths: []uint32{math.MaxUint32, math.MaxUint32}, nodeWidth: math.MaxUint32, wantError: "exceeds 8192 logical connections"},
@@ -143,7 +143,7 @@ func TestPropSyncProjection(t *testing.T) {
 			if pipeline == "" {
 				pipeline = PipelineSingle
 			}
-			if pipeline == PipelineLPX {
+			if pipeline == PipelineHybrid {
 				fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 			}
 
