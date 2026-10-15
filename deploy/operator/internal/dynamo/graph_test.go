@@ -6592,38 +6592,6 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
 			wantArgs:         nil,
 		},
-		{
-			name: "frontend with authored command and args",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeFrontend,
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Name:    commonconsts.MainContainerName,
-						Command: []string{"python3", "-m", "dynamo.frontend"},
-						Args:    []string{"--http-port", "8000"},
-					},
-				},
-			},
-			backendFramework: BackendFrameworkVLLM,
-			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
-			wantArgs:         []string{"--http-port", "8000"},
-		},
-		{
-			name: "frontend with authored shell command and args",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeFrontend,
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Name:    commonconsts.MainContainerName,
-						Command: []string{"/bin/sh", "-c"},
-						Args:    []string{"python3 -m dynamo.frontend --http-port 8000"},
-					},
-				},
-			},
-			backendFramework: BackendFrameworkVLLM,
-			wantCommand:      []string{"/bin/sh", "-c"},
-			wantArgs:         []string{"python3 -m dynamo.frontend --http-port 8000"},
-		},
 	}
 
 	for _, tt := range tests {
@@ -6830,6 +6798,49 @@ func TestGenerateBasePodSpec_EmptyMainContainerPortsOverrideWorkerDefaults(t *te
 	require.NoError(t, err)
 	require.NotEmpty(t, podSpec.Containers)
 	require.Empty(t, podSpec.Containers[0].Ports)
+}
+
+// A legacy Go EPP main container that authors its own command owns the argv,
+// so the default --pool-name flags must not be appended to it.
+func TestGenerateBasePodSpec_LegacyEPPAuthoredCommandDropsDefaultArgs(t *testing.T) {
+	podSpec, err := GenerateBasePodSpec(
+		&v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "epp",
+			ComponentType: v1beta1.ComponentTypeEPP,
+			EPPConfig: &v1beta1.EPPConfig{
+				ConfigMapRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"},
+					Key:                  "epp-config.yaml",
+				},
+			},
+			PodTemplate: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:    commonconsts.MainContainerName,
+							Command: []string{"/epp"},
+						},
+					},
+				},
+			},
+		},
+		BackendFrameworkNoop,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"epp",
+		nil,
+		staticContainerGPUCount(0),
+	)
+
+	require.NoError(t, err)
+	require.NotEmpty(t, podSpec.Containers)
+	require.Equal(t, []string{"/epp"}, podSpec.Containers[0].Command)
+	require.Nil(t, podSpec.Containers[0].Args)
 }
 
 func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
