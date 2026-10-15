@@ -41,7 +41,7 @@ rules:
   verbs: ["get", "list", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters"]
-  verbs: ["get", "patch"]
+  verbs: ["get", "list", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
   # Read the authoritative target to detect superseded asynchronous requests.
@@ -91,7 +91,7 @@ rules:
   verbs: ["get", "list", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters"]
-  verbs: ["get", "patch"]
+  verbs: ["get", "list", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
   # Read the authoritative target to detect superseded asynchronous requests.

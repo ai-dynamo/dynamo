@@ -32,6 +32,7 @@ from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.kubernetes import ReplicaUpdateRetryState
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.planner.monitoring.dgd_services import (
     V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
     Service,
@@ -98,8 +99,9 @@ class KubernetesCapacityManager(CapacityManager):
         """Pre-populate connectors for deployments managed by this GlobalPlanner.
 
         Ensures the GPU budget accounts for deployments that have not sent a scale
-        request yet. Explicitly managed names are registered without an API read;
-        implicit mode discovers every deployment in the namespace with one LIST.
+        request yet. Explicit mode verifies each configured name with one scoped
+        GET; implicit mode discovers every deployment in the namespace with one
+        LIST.
         """
         managed_deployment_names = self._managed_deployment_names(managed_deployments)
         self._observe_all_deployments = managed_deployment_names is None
@@ -116,23 +118,65 @@ class KubernetesCapacityManager(CapacityManager):
                 if (name := dgd.get("metadata", {}).get("name", ""))
             ]
         else:
-            deployment_names = sorted(managed_deployment_names)
+            deployment_names = []
+            for name in sorted(managed_deployment_names):
+                participant_id = f"{self.namespace}/{name}"
+                connector = self.connectors.get(participant_id)
+                if connector is None:
+                    connector = self._new_connector("discovered", self.namespace, name)
+                try:
+                    connector.kube_api.get_graph_deployment(name)
+                except DynamoGraphDeploymentNotFoundError:
+                    self._discard_connector(participant_id, connector)
+                    logger.info(
+                        "Configured deployment %s/%s does not exist yet",
+                        self.namespace,
+                        name,
+                    )
+                    continue
+                except Exception as error:
+                    # Keep an unknown deployment in the accounting set. A later
+                    # complete observation will retry the read and fail closed.
+                    logger.warning(
+                        "Failed to verify configured deployment %s/%s: %s",
+                        self.namespace,
+                        name,
+                        error,
+                    )
+                if participant_id not in self.connectors:
+                    self.connectors[participant_id] = connector
+                deployment_names.append(name)
 
         registered: list[str] = []
         for name in deployment_names:
             participant_id = f"{self.namespace}/{name}"
             if participant_id not in self.connectors:
-                connector = KubernetesConnector(
-                    dynamo_namespace="discovered",
-                    k8s_namespace=self.namespace,
-                    parent_dgd_name=name,
-                    raise_not_ready=True,
-                    retry_conflicts=False,
+                self.connectors[participant_id] = self._new_connector(
+                    "discovered", self.namespace, name
                 )
-                self.connectors[participant_id] = connector
             registered.append(name)
         logger.info(f"Registered {len(registered)} managed deployments: {registered}")
         return registered
+
+    @staticmethod
+    def _new_connector(
+        caller_name: str, namespace: str, deployment_name: str
+    ) -> KubernetesConnector:
+        return KubernetesConnector(
+            dynamo_namespace=caller_name,
+            k8s_namespace=namespace,
+            parent_dgd_name=deployment_name,
+            raise_not_ready=True,
+            retry_conflicts=False,
+        )
+
+    def _discard_connector(
+        self, participant_id: str, connector: KubernetesConnector
+    ) -> None:
+        """Forget a connector only if it is still the observed instance."""
+        if self.connectors.get(participant_id) is connector:
+            del self.connectors[participant_id]
+            self._component_roles.pop(participant_id, None)
 
     def ensure_participant(
         self,
@@ -142,14 +186,9 @@ class KubernetesCapacityManager(CapacityManager):
         deployment_name: str,
     ) -> None:
         if participant_id not in self.connectors:
-            connector = KubernetesConnector(
-                dynamo_namespace=caller_name,
-                k8s_namespace=namespace,
-                parent_dgd_name=deployment_name,
-                raise_not_ready=True,
-                retry_conflicts=False,
+            self.connectors[participant_id] = self._new_connector(
+                caller_name, namespace, deployment_name
             )
-            self.connectors[participant_id] = connector
             logger.debug(f"Created new connector for {participant_id}")
         else:
             logger.debug(f"Reusing cached connector for {participant_id}")
@@ -190,6 +229,11 @@ class KubernetesCapacityManager(CapacityManager):
                     all_pools[key] = self._read_pools(
                         connector, self._component_roles.get(key)
                     )
+                except DynamoGraphDeploymentNotFoundError as error:
+                    self._discard_connector(key, connector)
+                    self._record_observation_failure(
+                        all_pools, key, error, require_complete
+                    )
                 except Exception as error:
                     self._record_observation_failure(
                         all_pools, key, error, require_complete
@@ -223,7 +267,10 @@ class KubernetesCapacityManager(CapacityManager):
 
             for key, connector in connectors:
                 try:
-                    deployment = deployments_by_name[connector.parent_dgd_name]
+                    deployment = deployments_by_name.get(connector.parent_dgd_name)
+                    if deployment is None:
+                        self._discard_connector(key, connector)
+                        continue
                     all_pools[key] = self._pools_from_deployment(
                         connector,
                         deployment,

@@ -160,7 +160,8 @@ def test_discover_explicit_mode():
             "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
-        mock_connector_cls.return_value = MagicMock()
+        connector = MagicMock()
+        mock_connector_cls.return_value = connector
 
         # Managed callers are namespaces; the deployment name is derived.
         discovered = cm.discover({"default-model-a"})
@@ -169,6 +170,7 @@ def test_discover_explicit_mode():
         assert "default/model-a" in cm.connectors
         assert "default/model-b" not in cm.connectors
         mock_kube_cls.assert_not_called()
+        connector.kube_api.get_graph_deployment.assert_called_once_with("model-a")
         assert not cm._observe_all_deployments
         mock_connector_cls.assert_called_once_with(
             dynamo_namespace="discovered",
@@ -177,6 +179,36 @@ def test_discover_explicit_mode():
             raise_not_ready=True,
             retry_conflicts=False,
         )
+
+
+def test_discover_explicit_mode_skips_absent_allowlisted_deployment():
+    cm = KubernetesCapacityManager("default")
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
+    ) as mock_connector_cls:
+        connector = MagicMock()
+        connector.kube_api.get_graph_deployment.side_effect = (
+            DynamoGraphDeploymentNotFoundError("model-a", "default")
+        )
+        mock_connector_cls.return_value = connector
+
+        assert cm.discover({"default-model-a"}) == []
+
+    assert cm.connectors == {}
+
+
+def test_discover_explicit_mode_retains_unknown_deployment_fail_closed():
+    cm = KubernetesCapacityManager("default")
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
+    ) as mock_connector_cls:
+        connector = MagicMock()
+        connector.kube_api.get_graph_deployment.side_effect = RuntimeError("timeout")
+        mock_connector_cls.return_value = connector
+
+        assert cm.discover({"default-model-a"}) == ["model-a"]
+
+    assert cm.connectors == {"default/model-a": connector}
 
 
 def test_discover_implicit_mode():
@@ -542,7 +574,7 @@ def test_observe_require_complete_raises_on_read_failure():
         cm.observe(require_complete=True)
 
 
-def test_observe_managed_deployment_not_found_fails_complete_snapshot():
+def test_observe_managed_deployment_not_found_fails_then_evicts_connector():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
@@ -551,10 +583,19 @@ def test_observe_managed_deployment_not_found_fails_complete_snapshot():
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
 
-    assert cm.observe() == {"default/missing": {}}
     with pytest.raises(RuntimeError) as error:
         cm.observe(require_complete=True)
     assert isinstance(error.value.__cause__, DynamoGraphDeploymentNotFoundError)
+    assert not cm.participant_exists("default/missing")
+
+    missing = _install_connector(
+        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+    )
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
+    assert cm.observe() == {"default/missing": {}}
+    assert not cm.participant_exists("default/missing")
 
 
 def test_observe_implicit_mode_lists_once_per_namespace():

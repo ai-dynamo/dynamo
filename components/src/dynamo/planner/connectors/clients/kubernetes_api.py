@@ -55,6 +55,7 @@ DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
 # The legacy replica-stability path (require_backing_settled=False) does not
 # raise on Failed because it predates the rolling-update contract.
 ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress"})
+JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 # Stable labels the operator stamps on every worker Pod.
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
@@ -430,8 +431,16 @@ class KubernetesAPI:
 
         def update(snapshot: dict) -> None:
             resource_version = self._resource_version(snapshot, graph_deployment_name)
+            uid = self._resource_uid(snapshot, graph_deployment_name)
             components = self._dgd_components(snapshot, graph_deployment_name)
-            updated_components = copy.deepcopy(components)
+            patch: list[dict[str, object]] = [
+                {"op": "test", "path": "/metadata/uid", "value": uid},
+                {
+                    "op": "test",
+                    "path": "/metadata/resourceVersion",
+                    "value": resource_version,
+                },
+            ]
             for service_name, replicas in replica_targets.items():
                 index = self._find_component_index(
                     graph_deployment_name, components, service_name
@@ -440,20 +449,21 @@ class KubernetesAPI:
                     raise RuntimeError(
                         f"component {service_name!r} now declares a scalingAdapter"
                     )
-                updated_components[index]["replicas"] = replicas
-            retry_kubernetes_request(
-                lambda: self.custom_api.patch_namespaced_custom_object(
-                    group=NVIDIA_API_GROUP,
-                    version=DYNAMO_API_VERSION,
-                    namespace=self.current_namespace,
-                    plural=DGD_PLURAL,
-                    name=graph_deployment_name,
-                    body={
-                        "metadata": {"resourceVersion": resource_version},
-                        "spec": {"components": updated_components},
-                    },
+                patch.extend(
+                    [
+                        {
+                            "op": "test",
+                            "path": f"/spec/components/{index}/name",
+                            "value": service_name,
+                        },
+                        {
+                            "op": "add",
+                            "path": f"/spec/components/{index}/replicas",
+                            "value": replicas,
+                        },
+                    ]
                 )
-            )
+            self._patch_dgd_with_json_patch(graph_deployment_name, patch)
 
         if deployment is None:
             expected_uid: str | None = None
@@ -518,6 +528,60 @@ class KubernetesAPI:
         raise KeyError(
             f"component {component_name!r} not found in DGD {graph_deployment_name!r}"
         )
+
+    @staticmethod
+    def _is_json_patch_test_failure(error: client.ApiException) -> bool:
+        if error.status != 422:
+            return False
+        detail = " ".join(
+            str(value)
+            for value in (error.reason, error.body, getattr(error, "data", None))
+            if value is not None
+        ).lower()
+        return any(
+            marker in detail
+            for marker in ("test operation", "test failed", "testing value")
+        )
+
+    def _patch_dgd_with_json_patch(
+        self, graph_deployment_name: str, patch: list[dict[str, object]]
+    ) -> None:
+        """Apply a DGD JSON Patch and surface a failed CAS test as 409."""
+
+        def request() -> None:
+            self.custom_api.api_client.call_api(
+                "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+                "PATCH",
+                {
+                    "group": NVIDIA_API_GROUP,
+                    "version": DYNAMO_API_VERSION,
+                    "namespace": self.current_namespace,
+                    "plural": DGD_PLURAL,
+                    "name": graph_deployment_name,
+                },
+                [],
+                {
+                    "Accept": "application/json",
+                    "Content-Type": JSON_PATCH_CONTENT_TYPE,
+                },
+                body=patch,
+                response_type="object",
+                auth_settings=["BearerToken"],
+                _return_http_data_only=True,
+                collection_formats={},
+            )
+
+        try:
+            retry_kubernetes_request(request)
+        except AmbiguousKubernetesWriteError:
+            raise
+        except client.ApiException as error:
+            if self._is_json_patch_test_failure(error):
+                raise client.ApiException(
+                    status=409,
+                    reason="DGD changed while applying replica targets",
+                ) from error
+            raise
 
     def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
