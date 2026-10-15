@@ -13,7 +13,7 @@ from tritonserver import RateLimitMode as TritonRateLimitMode
 from dynamo.common.configuration.utils import add_argument
 from dynamo.triton.args import Config, DynamoArgGroup
 
-_TASK_CHOICES = ("tensor", "classify")
+_TASK_CHOICES = ("tensor", "classify", "embeddings")
 
 
 def _enum_arg(enum_cls, flag: str) -> Callable[[str], object]:
@@ -411,10 +411,9 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             default="tensor",
             choices=_TASK_CHOICES,
             help=(
-                "Endpoint the worker advertises. 'tensor' (default) serves "
-                "raw Dynamo tensor inference; 'classify' serves OpenAI "
-                "/v1/classify by translating requests to a BYTES text tensor "
-                "and reading an FP32 probability output."
+                "Endpoint the worker advertises: 'tensor' (default, raw "
+                "Dynamo tensor inference), 'classify' (/v1/classify), "
+                "or 'embeddings' (/v1/embeddings)."
             ),
         )
         add_argument(
@@ -436,6 +435,30 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             default=None,
             help=(
                 "Explicit output tensor name for --task classify. Omit to "
+                "auto-detect the sole TYPE_FP32 output in the model's "
+                "config.pbtxt; required when the model declares more than "
+                "one FP32 output."
+            ),
+        )
+        add_argument(
+            endpoint_group,
+            flag_name="--embeddings-input-name",
+            env_var="DYN_TRITON_EMBEDDINGS_INPUT_NAME",
+            default=None,
+            help=(
+                "Explicit input tensor name for --task embeddings. Omit to "
+                "auto-detect the sole TYPE_STRING input in the model's "
+                "config.pbtxt; required when the model declares more than "
+                "one BYTES input."
+            ),
+        )
+        add_argument(
+            endpoint_group,
+            flag_name="--embeddings-output-name",
+            env_var="DYN_TRITON_EMBEDDINGS_OUTPUT_NAME",
+            default=None,
+            help=(
+                "Explicit output tensor name for --task embeddings. Omit to "
                 "auto-detect the sole TYPE_FP32 output in the model's "
                 "config.pbtxt; required when the model declares more than "
                 "one FP32 output."
@@ -485,6 +508,8 @@ class DynamoTritonConfig(Config):
     task: str
     classify_input_name: Optional[str]
     classify_output_name: Optional[str]
+    embeddings_input_name: Optional[str]
+    embeddings_output_name: Optional[str]
 
     def validate(self) -> None:
         if hasattr(super(), "validate"):
@@ -501,8 +526,8 @@ class DynamoTritonConfig(Config):
                 f"--task must be one of {list(_TASK_CHOICES)}, got {self.task!r}"
             )
 
-        # Classify-only overrides don't make sense on the tensor path; reject
-        # them early so an operator who typoed `--task tensor` doesn't spend
+        # Per-task overrides don't make sense on other paths; reject them
+        # early so an operator who typoed `--task tensor` doesn't spend
         # startup wondering why their name overrides are ignored.
         if self.task != "classify" and (
             self.classify_input_name is not None
@@ -511,6 +536,14 @@ class DynamoTritonConfig(Config):
             raise ValueError(
                 "--classify-input-name and --classify-output-name are only "
                 "valid with --task classify"
+            )
+        if self.task != "embeddings" and (
+            self.embeddings_input_name is not None
+            or self.embeddings_output_name is not None
+        ):
+            raise ValueError(
+                "--embeddings-input-name and --embeddings-output-name are only "
+                "valid with --task embeddings"
             )
 
         if self.backend_directory is not None and not os.path.isdir(
@@ -549,7 +582,13 @@ class DynamoTritonConfig(Config):
 # rather than a Triton server option. They must be excluded from
 # to_server_options() so tritonserver.Server(**opts) doesn't reject them.
 _NON_TRITON_SERVER_FIELDS = frozenset(
-    ("task", "classify_input_name", "classify_output_name")
+    (
+        "task",
+        "classify_input_name",
+        "classify_output_name",
+        "embeddings_input_name",
+        "embeddings_output_name",
+    )
 )
 
 

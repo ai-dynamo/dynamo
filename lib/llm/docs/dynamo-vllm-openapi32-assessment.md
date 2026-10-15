@@ -5,8 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Pinned vLLM OpenAPI 3.2 assessment
 
-Use the [response-capable profile](../../../scripts/protocol_compatibility/frameworks/vllm-openapi32.json)
-for the ongoing request **and response** assessment. The
+The [response-capable profile](../../../scripts/protocol_compatibility/frameworks/vllm-openapi32.json)
+pins the recorded request **and response** assessment to vLLM source
+`b04e80127bea278758743ca3277d40a234f73b09`. It does not track the latest upstream
+PR revision or release. The
 [vLLM 0.30 recipe](dynamo-vllm-protocol-assessment.md) and its five-field generated
 fixture are historical request-comparison evidence, not evidence for this build.
 
@@ -39,13 +41,24 @@ revision. Direct vLLM uses `--reasoning-parser qwen3 --enable-auto-tool-choice
 stop only owned services. These single-GPU runs are functional probes, not
 benchmarks or qualification of every engine/model capability.
 
-Capture `/openapi.json` from each exact running build using the
-[generic acquisition CLI](../../../scripts/protocol_compatibility/README.md).
-Retain the raw captures, version/source observations and deployment arguments.
-Run `assess` with the manifest-pinned OpenAI composition input and oasdiff 1.33.0.
+Capture `/openapi.json` from each exact running build with an HTTP client, such as
+`curl --fail`, into separate local files. Retain the raw captures, checksums,
+version/source observations and deployment arguments. The comparator no longer
+fetches URLs or accepts capture directories. Run the
+[offline assessment CLI](../../../scripts/protocol_compatibility/README.md)
+with `--dynamo` and `--framework` pointing to the raw files, `--framework-name vllm`,
+the manifest-pinned OpenAI composition input and oasdiff 1.33.0. Pass optional
+JSON provenance annotations through `--dynamo-metadata` and `--framework-metadata`;
+the tool retains them without verifying their claims.
 Do not interpret native Dynamo's unresolved dependency slots as absent contracts.
 
-## Current evidence and limits
+These configured HTTP captures describe the recorded deployments, not necessarily
+each framework's full declared surface. For full-contract comparison, use the
+current guide's full-surface input requirements. Do not replace the historical
+profile or its evidence merely to adopt a newer comparator. New reports can have
+different finding categories and IDs; retain their comparator revision separately.
+
+## Recorded evidence and limits
 
 - Clean Dynamo parent cannot import the pinned vLLM backend; with the prerequisite,
   all 19 embedding-worker unit tests pass. This does not test real embedding serving.

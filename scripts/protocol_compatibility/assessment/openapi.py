@@ -1,10 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Request-only projection and coverage guards around the pinned oasdiff engine.
+"""Prepare request schemas and run the shared oasdiff comparison engine.
 
-This module selects schemas, normalizes a bounded equivalent representation,
-and reports unsupported constructs. It does not implement a source parser,
-schema merger, or general semantic compatibility algorithm.
+request_document selects POST JSON bodies for chat and legacy completions, with
+their referenced components and comparison gaps. Explicit input aliases get
+separate value probes so name matching cannot hide constraint differences.
+
+The response pipeline shares the schema walker, validator, nullable-string
+normalization, and compare. compare runs framework-to-Dynamo; its raw deltas are
+not runtime compatibility verdicts. openapi_workflow.py owns file retention and
+reporting, keeping those effects separate from schema projection.
 """
 
 import copy
@@ -96,11 +101,13 @@ KNOWN = (
 )
 
 
-def pointer(*parts: str) -> str:
+def pointer(*parts: str | int) -> str:
+    """Encode path segments as a local JSON Pointer, escaping slashes and tildes."""
     return "#" + jsonpointer.JsonPointer.from_parts(parts).path
 
 
 def request_pointer(endpoint: str) -> str:
+    """Return the POST JSON request-schema pointer for an endpoint path."""
     return pointer(
         "paths",
         endpoint,
@@ -117,6 +124,8 @@ def schema_nodes(document: dict, schema: dict | bool, location: str, seen=None):
 
     Locations refer to retained input documents, including referenced components.
     Literal '$ref' keys in defaults/examples or property names remain data.
+    Yield (pointer, schema) pairs once per location, updating `seen` if supplied.
+    Unsupported or unresolved references raise; document contents are unchanged.
     """
     seen = set() if seen is None else seen
     if location in seen:
@@ -205,8 +214,9 @@ def validate_comparison_document(document: dict, roots: list[str]) -> None:
 
 
 def request_document(document: dict) -> tuple[dict, list[dict]]:
-    """Copy scoped request contracts into a 3.1 comparator input, reporting gaps.
+    """Return a request comparison document and gaps for the two ENDPOINTS.
 
+    Both paths must declare POST requestBody with only application/json content.
     Standard 3.2 request schema keywords use the same 2020-12 semantics here. The
     projection is not a server export: responses and other API surfaces are removed.
     Original documents remain untouched. Missing contracts or unresolved imports
@@ -317,6 +327,13 @@ def normalize_nullable_strings(
 def compare(
     binary: Path, native: Path, dynamo: Path, *, flatten: bool
 ) -> tuple[dict, list[str]]:
+    """Run pinned oasdiff from the target (`native`) to Dynamo; return delta and argv.
+
+    Inputs must be retained comparator projections. Set `flatten` only when their
+    schema coverage permits allOf merging. The process cannot fetch external refs.
+    Version mismatches, subprocess failures/timeouts, and invalid JSON raise;
+    files are not changed. Empty output means an empty delta, not runtime parity.
+    """
     version = subprocess.run(
         [str(binary), "--version"],
         check=True,
@@ -348,14 +365,19 @@ def compare(
 
 
 def request_fields(document: dict, endpoint: str) -> list[dict]:
-    """Index instance paths, not component names or union branch indexes.
+    """Index fields beneath endpoint's POST JSON body for alias matching.
 
+    Records contain instance path segments (None for array items), schema pointers,
+    declarations, and parent context; component names are not instance paths.
     Union and parent constraints stay attached as context; a name match never
     establishes whole-object equivalence. Recursive refs are not expanded forever.
+    Missing pointers raise. Returned schema/context objects refer to input data;
+    callers must treat them as read-only.
     """
     fields = []
 
     def walk(node, location, path, context, refs):
+        """Append fields with parent/union context; stop at references already on this path."""
         if not isinstance(node, dict):
             return
         if "$ref" in node:
@@ -425,6 +447,8 @@ def match_input_aliases(dynamo: dict, native: dict) -> tuple[list[dict], list[di
     Does not rewrite schemas, infer aliases from similar names, or discard the
     original comparator delta. Multiple declarations are ambiguous, not a match.
     x-dynamo-input-aliases implies rejection of multiple spellings together.
+    Return matches and ambiguity gaps. Invalid alias metadata or unresolved
+    references raise; neither document is modified.
     """
     matches, gaps = [], []
     for endpoint in ENDPOINTS:
@@ -470,6 +494,7 @@ def match_input_aliases(dynamo: dict, native: dict) -> tuple[list[dict], list[di
                 if len(owners) != 1 or len(candidates) > 1:
                     gaps.append(
                         {
+                            "kind": "request",
                             "side": "dynamo",
                             "endpoint": endpoint,
                             "field": ".".join(
@@ -508,6 +533,8 @@ def alias_value_document(document: dict, location: str) -> dict:
 
     Parent constraints are deliberately NOT claimed covered by this probe; they
     remain in the complete request diff and alias match's parent_context.
+    `location` must resolve in the input; resolution failures propagate.
+    The input is unchanged.
     """
     result = copy.deepcopy(document)
     value = copy.deepcopy(jsonpointer.resolve_pointer(document, location[1:]))
@@ -517,7 +544,11 @@ def alias_value_document(document: dict, location: str) -> dict:
 
 
 def request_differences(diff: dict) -> list[dict]:
-    """Expose complete request-body deltas, not response/component rename noise."""
+    """Select request-body deltas, excluding response/component-only changes.
+
+    Return records referencing the raw delta; callers must not mutate them.
+    Added/deleted scoped paths raise ValueError instead of reporting an empty diff.
+    """
     findings = []
     for endpoint, change in sorted(diff.get("paths", {}).get("modified", {}).items()):
         operation = change.get("operations", {}).get("modified", {}).get("POST", {})

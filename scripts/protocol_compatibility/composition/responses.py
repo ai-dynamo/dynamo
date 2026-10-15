@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compose request and response imports with the existing pinned OpenAI engine.
+"""Generate a composed Dynamo document without running an assessment.
 
-This entrypoint only completes schema imports; it does not compare providers or
-claim behavioral compatibility. The request manifest remains the shared base.
+Despite the module name, this CLI fills both request and response placeholders
+through composition.openai. It shares assess's manifest and writes
+openapi.composed.json plus composition.yaml.
+Use it for schema/Serde fidelity checks; use assess for framework comparison.
 """
 
 from __future__ import annotations
@@ -20,11 +22,16 @@ DIRECTORY = Path(__file__).resolve().parent
 
 
 def response_manifest() -> dict:
-    """Use the same reviewed manifest as request assessment, never a fork."""
+    """Load the bundled request/response manifest; file and YAML errors propagate."""
     return yaml.safe_load((DIRECTORY / "async-openai-0.42.1.yaml").read_bytes())
 
 
 def main() -> None:
+    """Compose CLI-selected JSON and pinned OpenAI YAML into a new directory.
+
+    Parsing, composition and I/O errors propagate. A failed save can leave partial
+    output; source files are unchanged.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", type=Path, required=True)
     parser.add_argument("--openai", type=Path, required=True)

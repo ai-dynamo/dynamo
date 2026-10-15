@@ -3,102 +3,92 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Protocol compatibility tooling
+# Protocol Compatibility Tooling
 
-Compare Dynamo and framework OpenAPI 3.1/3.2 request and response contracts for
-`/v1/chat/completions` and `/v1/completions`. Read the
-[OpenAPI request-contract comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
-for scope, provenance, normalization, aliases, and interpretation. Schema agreement
-does not establish actual acceptance or behavioral compatibility.
+Compare local, versioned NVIDIA Dynamo and framework OpenAPI 3.1/3.2 specifications for
+`/v1/chat/completions` and `/v1/completions`. Inputs can be source exports, published
+specifications, or previous server captures. The tool does not generate or fetch them
+and requires no running server. Schema agreement does not prove runtime compatibility.
+See the [comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
+for scope, provenance, normalization, aliases, and interpretation.
 
-This package composes explicit dependency imports from the native export, then
-compares requests and responses independently. Composition is a temporary offline
-step; the guide explains the
+Use inputs that describe the full declared request/response contract for those endpoints,
+not only one deployment's enabled features. Supplied scope and configuration labels are
+retained, not used to filter differences. The tool cannot recover variants missing from
+an input or attest its completeness.
+
+The `assess` command fills dependency placeholders in Dynamo's native export, then
+compares requests and responses separately. The guide explains the temporary
 [async-openai annotation gap and removal condition](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance).
-It does not modify the running frontend's `/openapi.json` or `/docs`.
+Composition does not modify the running frontend's `/openapi.json` or `/docs`.
 
-For the current response-capable backend, see the
-[pinned vLLM OpenAPI 3.2 assessment](../../lib/llm/docs/dynamo-vllm-openapi32-assessment.md).
+For pinned deployment evidence, see the
+[vLLM OpenAPI 3.2 assessment](../../lib/llm/docs/dynamo-vllm-openapi32-assessment.md).
 The [vLLM 0.30 recipe](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md)
 and its regression fragments remain historical request-only evidence.
+Neither profile establishes the current upstream contract.
 
 ## Installation
 
-On a Linux validation host, install the pinned Python requirements and
+From the repository root on a Linux validation host, install the pinned Python requirements and
 [oasdiff 1.33.0](https://github.com/oasdiff/oasdiff/releases/tag/v1.33.0).
 Verify the release checksum for your platform; CI pins the Linux amd64 checksum.
 
 ```bash
 python -m pip install -r scripts/protocol_compatibility/requirements.txt
-python -m scripts.protocol_compatibility acquire --help
 python -m scripts.protocol_compatibility assess --help
 ```
 
 ## CLI Examples
 
-Run from the selected Dynamo checkout. Generate the default Dynamo input without a
-GPU or listener:
+Prepare local Dynamo and framework JSON/YAML specifications and the
+[pinned OpenAI schema](https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml)
+before comparison. How those files are generated or acquired is separate from this tool.
+When a fresh Dynamo export is needed, run its file generator from the selected checkout:
 
 ```bash
 cargo run --locked -p dynamo-llm --no-default-features --bin generate-frontend-openapi
 ```
 
-Download the composition input pinned by the default manifest:
+This writes `docs/frontends/openapi.json` without a listener, model, or GPU. To compare it,
+save the framework spec as `framework.yaml` and the pinned schema as `openai-d4535923.yaml`.
+Replace `example-engine` with the framework's lowercase identifier and the comparator path
+with its installed location. Use a new output directory:
 
 ```bash
-curl --fail --location \
-  https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml \
-  --output openai-d4535923.yaml
-```
-
-Set `FRAMEWORK_NAME` to a lowercase identity such as `example-engine` and
-`FRAMEWORK_SPEC_URL` to its direct published or live OpenAPI URL. Capture and compare:
-
-```bash
-python -m scripts.protocol_compatibility acquire \
-  --server "$FRAMEWORK_NAME" --url "$FRAMEWORK_SPEC_URL" \
-  --output-dir captures/framework
-
 python -m scripts.protocol_compatibility assess \
-  --dynamo docs/frontends/openapi.json --framework captures/framework \
-  --framework-name "$FRAMEWORK_NAME" \
+  --dynamo docs/frontends/openapi.json --framework framework.yaml \
+  --framework-name example-engine \
   --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
   --output-dir assessment
 ```
 
-Alternatively, pass JSON/YAML files directly as `--dynamo` and `--framework`.
-To package a local file with acquisition metadata, use `acquire --file framework.yaml`
-instead of `--url`. For optional Dynamo HTTP capture, use
-`acquire --server dynamo --url http://127.0.0.1:8000/openapi.json` with a fresh
-`--output-dir`. The generated Dynamo file still needs composition, performed by `assess`.
+For optional scope, configuration, or provenance annotations, pass JSON object files with
+`--dynamo-metadata` and `--framework-metadata`. Their contents are retained as unverified
+`caller_metadata`; they do not restrict comparison or prove the inputs' source versions.
 
 ### Arguments
 
-| Command | Argument | Meaning |
-| --- | --- | --- |
-| `acquire` | `--server` | Required identity: `dynamo` or a lowercase framework slug |
-| `acquire` | `--url` / `--file` | Exactly one HTTP(S) URL or local JSON/YAML file |
-| `acquire` | `--metadata` | Optional JSON annotations, retained as unverified `caller_metadata` |
-| `assess` | `--dynamo`, `--framework` | Required files or checksummed capture directories |
-| `assess` | `--framework-name` | Required non-Dynamo identity; must match capture metadata |
-| `assess` | `--openai` | Required pinned OpenAI YAML; checksum checked against the manifest |
-| `assess` | `--manifest` | Optional composition manifest; defaults to `composition/async-openai-0.42.1.yaml` within this package |
-| `assess` | `--oasdiff` | Required path to the pinned oasdiff 1.33.0 executable |
-| Both | `--output-dir` | Required output directory that must not already exist |
+| Argument | Meaning |
+| --- | --- |
+| `--dynamo`, `--framework` | Required local OpenAPI JSON/YAML files |
+| `--dynamo-metadata`, `--framework-metadata` | Optional JSON annotation files |
+| `--framework-name` | Required lowercase slug, 1–64 characters, starting with a letter; allows digits, `_`, and `-`; cannot be `dynamo` |
+| `--openai` | Required pinned OpenAI YAML; checksum checked against the manifest |
+| `--manifest` | Optional composition manifest; defaults to `composition/async-openai-0.42.1.yaml` within this package |
+| `--response-adapters` | Optional YAML with exact input hashes, source identities, server-sent event (SSE) interpretations, and bounded route mappings |
+| `--oasdiff` | Required path to the pinned oasdiff 1.33.0 executable |
+| `--output-dir` | Required output directory that must not already exist |
 
-The framework identity does not select an adapter or schema exceptions. URLs must
-be direct HTTP(S), with no credentials, query strings, fragments, or redirects.
-Downloads are bounded to 32 MiB and 30 seconds; proxies are disabled. Review paths,
-URLs, and annotations for secrets before publishing artifacts.
+Review retained paths and annotations for secrets before publishing artifacts.
 
 ## Composition
 
-The shared request/response
-[manifest](composition/async-openai-0.42.1.yaml) records the expected
+The shared [manifest](composition/async-openai-0.42.1.yaml) records the expected
 `dynamo-protocols` and `async-openai` versions, OpenAI source revision and checksum,
-import mappings, and corrections reviewed against Rust serialization. A dependency
-upgrade requires reviewing these inputs and revalidating schema/Serde agreement
-and runtime consumers. Never change a checksum to bypass a failed correction guard.
+import mappings, and corrections reviewed against Rust serialization. When upgrading
+a dependency, review these inputs and retest schema/Serde agreement and runtime
+consumers. Never change a checksum to bypass a failed correction guard.
 
 To compose without running the comparator, use the native export and pinned OpenAI
 file from the CLI examples:
@@ -110,49 +100,66 @@ python -m scripts.protocol_compatibility.composition.responses \
   --output-dir composed
 ```
 
-Despite the module name, this uses the same engine and manifest for both request
-and response imports. It requires a new output directory and writes
-`openapi.composed.json` and `composition.yaml`. Keep the raw capture and acquisition
+The `composition.responses` command handles both request and response imports.
+It requires a new output directory and writes
+`openapi.composed.json` and `composition.yaml`. Keep the raw input and provenance
 metadata separately. This command does not require the `oasdiff` executable.
 
 ### Composition Invariants
 
-- Preserve raw inputs, Dynamo endpoints, owned fields, and SSE envelopes in a
-  separate composed document. Never fill gaps from a framework's schema.
-- Resolve explicit import slots and their reachable components only. Namespace
-  imported components; reject collisions, unmapped slots, external references,
-  and unsupported reference constructs.
-- Guard each JSON Patch correction with a preceding `test` of the affected value
-  (or parent for additions) and record its Rust-code rationale.
-- Redirect references to corrected definitions so nested uses receive the same
-  corrections. Preserve recursion as references and walk schema positions only;
-  literal examples and defaults remain data.
+The composer:
 
-A passing checksum or patch guard verifies input assumptions, not runtime fidelity.
-An explicit `serde_json::Value` is intentionally untyped; an unresolved import is
-a coverage gap. Record Dynamo-specific `nvext` exclusions without claiming parity.
+- Creates a separate document. It preserves raw inputs, Dynamo endpoints, owned fields,
+  and SSE envelopes. It never fills gaps from a framework's schema.
+- Imports only definitions selected by placeholders and the components they reference.
+  It gives imported components distinct names and rejects collisions, unmapped placeholders,
+  external references, and unsupported reference constructs.
+- Requires a `test` operation immediately before each JSON Patch correction.
+  The test must check the affected value, or its parent for additions.
+  Each correction must include a rationale based on Rust code.
+- Redirects references to corrected definitions so nested uses receive the corrections.
+  It preserves recursive references and traverses only schema locations.
+  Literal examples and defaults remain data.
+
+Checksums and patch guards verify input assumptions, not runtime behavior.
+An explicit `serde_json::Value` is intentionally untyped. Record excluded Dynamo-specific
+`nvext` fields without claiming compatibility.
 
 ## Outputs and Exit Codes
 
-Acquisition writes exact JSON/YAML bytes to `openapi.raw` and observations to
-`acquisition.json`. Legacy v1 capture directories with `openapi.raw.json` remain
-readable; their deployment metadata is not reverified.
+The `assess` command retains inputs under `dynamo/` and `framework/`. Each directory contains:
+
+- `openapi.raw`: the exact input bytes, including JSON/YAML formatting.
+- `acquisition.json`: the source path, input identity, SHA-256 checksum, read time
+  (`captured_at`), and optional unverified `caller_metadata`.
+
+Despite its name, `acquisition.json` records local file loading, not a server fetch.
+Its timestamp does not identify when the schema was generated. To reuse an input, pass
+its raw file to `--dynamo` or `--framework`. Supply provenance labels separately through
+the corresponding metadata option.
 
 Start with `assessment/report.md`. Retain the entire assessment directory:
 
 | Output | Purpose |
 | --- | --- |
-| `report.md`, `report.json` | Findings, coverage gaps, exclusions, framework identity, and input provenance |
+| `report.md` | Human-readable findings, category descriptions, suggested checks, and evidence links |
+| `report.json` | Full machine-readable assessment: deltas, gaps, input metadata, comparator commands, and `finding_inventory` |
+| `findings.json` | The same `finding_inventory`, without the surrounding assessment metadata |
 | `dynamo.composed.json` | Dynamo document after pinned imports and guarded corrections |
 | `*.requests.json` | Original request projections |
 | `*.requests.normalized.json`, `normalization.json` | Comparison inputs and equivalent-representation audit |
 | `oasdiff.json` | Complete comparator delta on normalized inputs |
 | `*.responses.json`, `*.responses.normalized.json` | Response projections and comparator inputs |
 | `response-oasdiff.json`, `response-normalization.json` | Response deltas and equivalent-representation audit |
+| `response-sources.json`, `response-adapters.yaml` | Source pointers and interpretations; adapter YAML is retained when supplied |
+| `response-chunk-probes.json`, `chunk-probes/` | Separate selected-chunk comparisons when a source declares chunks only |
 | `alias-matches.json` | Alias-name matches, parent constraints, and value-schema comparison results |
 
-The directory also retains input and composition/coverage evidence. Invalid capture
-checksums, pinned OpenAI checksum mismatches, and unresolved imports fail visibly.
+The `assess` command also saves the pinned OpenAI document, composition manifest, and coverage catalog.
+Checksum mismatches and unresolved Dynamo imports stop the command with an error.
+A later failure can leave partial output; use a new output directory for a retry.
+
+The `assess` command returns these exit codes:
 
 | Exit | Meaning |
 | --- | --- |
@@ -160,49 +167,102 @@ checksums, pinned OpenAI checksum mismatches, and unresolved imports fail visibl
 | `1` | Differences or coverage gaps require review |
 | `2` | Invalid inputs or tooling failure |
 
-None of these statuses proves runtime parity. The current coverage catalog prevents
-a complete-coverage result until its known limitations are resolved.
+No exit code proves runtime compatibility. The current coverage catalog contains
+known gaps, so a completed assessment returns `1` even if the comparator finds no differences.
 
-## Response comparison boundaries
+### Using the Findings
 
-The report lists request candidates first and response candidates separately.
-Both compare the framework export to Dynamo; a structural delta is a candidate,
-not a compatibility decision. To establish that a framework client can use Dynamo,
-verify request acceptance and semantics and whether Dynamo responses meet that
-client's expectations. Reverse-direction and additive differences need separate
-interpretation, not automatic fixes.
+For programmatic use, read `report.json` and its `finding_inventory`. Each finding includes
+its category, declarations, interpretation, suggested action, raw delta, and evidence
+pointers. Agents and scripts do not need to parse Markdown.
 
-Response comparison keeps status codes, media types and JSON body schemas. For
-SSE it requires OpenAPI 3.2 `text/event-stream.itemSchema`: a parsed event object
-with string `data`. A JSON data branch uses `contentMediaType: application/json`
-and `contentSchema`; a literal marker uses `const: "[DONE]"`.
+Finding IDs identify locations and change kinds, not unchanged content or confirmed defects.
+The accounting check assigns each raw delta terminal to one finding. Unresolved union or
+`allOf` changes remain whole findings. Suggested actions are investigation guidance, not
+approved fixes. See the guide's
+[review workflow](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#from-generated-findings-to-reviewed-actions)
+for deciding and validating changes.
 
-The pinned comparison engine does not consume these new media keywords directly.
-The tooling therefore creates an explicitly comparison-only OpenAPI 3.1 copy:
-`itemSchema` becomes an event `schema`, and data becomes an object tagged with
-`encoding: json` plus its decoded `value`, or `encoding: literal` plus the marker.
-This makes the embedded payload constraints visible to the comparator without
-confusing the literal `[DONE]` marker with JSON containing the string `"[DONE]"`.
-Raw server exports remain unchanged. Real-binary tests check that changes inside
-`contentSchema` and to the marker produce deltas, while equivalent inline/local
-event references do not.
+### Re-render Saved Evidence
 
-Only these explicit data encodings are supported. Encoded-string constraints,
-unsupported keywords or media types, unresolved references/imports, and missing
-body schemas are reported as coverage gaps. A description-only error response is
-not proof that the body is empty. Response headers, other endpoints, event ordering,
-termination timing and cancellation are outside this comparison's coverage.
-Generic JSON Schema validation does not assert JSON inside a `contentSchema`:
-real-server tests must parse SSE, decode and validate JSON data explicitly, and
-check stream lifecycle separately. Neither the comparison projection nor the
-success-payload fixtures replace that E2E evidence.
+To rebuild finding interpretations and Markdown from retained evidence, run:
 
-After parsing a data-bearing SSE event, call
-`assessment.responses.validate_sse_event(document, item_schema, event)` to check
-its envelope and encoded content. Supply a composed document with local payload
-references and the endpoint's `itemSchema`; `event["data"]` must still be a string.
-The helper returns `None` on success and raises on invalid or unsupported input.
-It does not parse raw frames, count events, or establish a valid stream lifecycle.
+```bash
+python -m scripts.protocol_compatibility.reporting.openapi \
+  --assessment-dir assessment --output-dir assessment-readable
+```
+
+The output directory must be new and outside the input directory. The renderer copies
+the original assessment into `evidence/` and rebuilds `report.json`, `findings.json`, and
+`report.md` with the current interpretation code. Categories and suggested checks can
+change when that code changes; raw deltas remain unchanged. It does not modify the input
+or rerun composition or comparison. Missing normalized projections appear as unavailable
+declarations, not as absent fields. `render-source.json` records source hashes and that
+comparison was not rerun.
+Rendering exits `0` on success or `2` on failure; success is not a compatibility verdict.
+
+## Source-qualified SSE Adapters
+
+See the guide's [streaming comparison model](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#streaming-responses)
+for decoded-event semantics and limits. The
+[`validate_sse_event` helper](assessment/responses.py) checks one parsed event's envelope
+and encoded payload; it does not parse frames or check stream order or termination.
+
+Pass `--response-adapters adapters.yaml` to select a non-native representation. Each source
+requires the SHA-256 of the exact raw input bytes, a source identifier, and a revision.
+The tool verifies the checksum, but not the source and revision labels.
+This example selects one vLLM-style envelope. Replace the checksum and revision with those
+of the local input. Add one stream entry per selected endpoint and status code.
+
+```yaml
+version: 1
+sources:
+  framework:
+    sha256: REPLACE_WITH_RAW_INPUT_SHA256
+    source: vllm-project/vllm
+    revision: REPLACE_WITH_SOURCE_REVISION
+    streams:
+      - pointer: '#/paths/~1v1~1chat~1completions/post/responses/200/content/text~1event-stream/schema'
+        interpretation: event-schema
+```
+
+Choose the interpretation that matches the source declaration:
+
+| Interpretation | Source declaration |
+| --- | --- |
+| `event-schema` | OpenAPI 3.1 parsed event envelope under `schema` |
+| `event-item-schema` | OpenAPI 3.2 parsed event under `itemSchema` |
+| `decoded-chunk` | OpenAPI 3.1 Chat object with `choices`, not an envelope with `data` |
+
+For framework inputs, pointers select schemas in the original document. The `dynamo` source
+uses the same format, but its pointers apply after composition; its checksum still identifies
+the raw export. The tool reports unsupported schema forms as coverage gaps. Invalid selectors,
+duplicate keys, unknown interpretations, and checksum mismatches stop the command.
+
+When either side uses `decoded-chunk`, the tool compares selected chunks separately.
+For an event declaration, set `chunk_pointer` to the JSON `contentSchema` under
+`properties/data`. The pointer can pass through `anyOf` data alternatives and `anyOf` or
+`oneOf` event alternatives. It cannot traverse event-envelope references. The tool preserves
+payload references and reports missing or unsupported chunk selections as coverage gaps.
+
+For that pair, the full response comparison omits both SSE body schemas but keeps status
+and media differences. The tool retains the full projections in `*.responses.json`.
+A chunk comparison does not check the chunk-only source's envelopes, encoding, errors,
+terminators, or extensions. The tool does not infer error schemas or termination behavior.
+
+For the retained OpenAI snapshot's unprefixed routes, add this optional source field:
+
+```yaml
+path_mappings:
+  /chat/completions: /v1/chat/completions
+  /completions: /v1/completions
+```
+
+Only these two mappings are supported. They affect request and response comparison copies,
+not raw inputs. Missing source operations and source/target collisions are errors.
+The report retains original operation pointers and server context; it does not resolve
+server URLs or assert deployed endpoint identity. The retained snapshot does not establish
+the latest OpenAI contract. Its missing legacy-completion SSE declaration remains missing.
 
 ## Validation
 
@@ -221,7 +281,21 @@ python -m scripts.protocol_compatibility.tests.composition.response_fidelity \
   --spec assessment/dynamo.composed.json
 ```
 
-Real-comparator tests explicitly skip without `OASDIFF_BIN`; that skip is not
-validation evidence. CI supplies the verified binary. See the
+When `OASDIFF_BIN` is unset, tests that execute `oasdiff` skip. A skipped test does not
+validate the comparator. The protocol-tooling workflow runs the real comparator on fixtures.
+The pre-merge Rust workflow separately generates and uploads the native schema artifact.
+Neither workflow composes that artifact or runs `assess` against a pinned framework schema. See the
 [guide's validation boundaries](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#maintenance-and-validation)
 for what these checks establish.
+
+## Module Map
+
+| Module | Responsibility |
+| --- | --- |
+| [`inputs.py`](inputs.py) | Keep exact input bytes and metadata separate from derived comparison documents |
+| [`composition/openai.py`](composition/openai.py) | Fill dependency placeholders from pinned imports and guarded corrections |
+| [`assessment/openapi.py`](assessment/openapi.py) | Project requests and match aliases; supply shared schema helpers and the oasdiff runner |
+| [`assessment/responses.py`](assessment/responses.py) | Project JSON bodies, decoded events, and selected chunks; identify unsupported response declarations |
+| [`assessment/openapi_workflow.py`](assessment/openapi_workflow.py) | Run an assessment and retain its inputs, projections, comparator results, and reports |
+| [`reporting/findings.py`](reporting/findings.py) | Classify retained evidence and build structured findings with raw-delta accounting |
+| [`reporting/openapi.py`](reporting/openapi.py) | Write JSON/Markdown reports and rebuild interpretations from saved evidence without rerunning comparison |

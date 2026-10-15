@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate the composed HTTP response schemas against real-Serde fixtures."""
+"""Check composed success-response schemas against shared Rust serialization fixtures.
+
+Run with --spec pointing to a composed OpenAPI 3.2 export. Cases in
+lib/llm/tests/fixtures/openapi/responses.json cover unary bodies and stream payloads;
+the checks also remove required fields to catch overly permissive schemas.
+Run lib/llm/tests/protocols/openapi_response_schema.rs at the same revision to
+verify the fixtures still match serialization. This suite does not exercise a
+server, error responses, or stream ordering.
+"""
 
 import argparse
 import copy

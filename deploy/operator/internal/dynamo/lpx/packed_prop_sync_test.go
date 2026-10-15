@@ -27,7 +27,6 @@ func TestPropSyncProjection(t *testing.T) {
 		family        BuildFamily
 		widths        []uint32
 		nodeWidths    []uint32
-		nodes         uint32
 		cpu           bool
 		runtimeStart  int
 		chains        [][]uint32
@@ -40,17 +39,12 @@ func TestPropSyncProjection(t *testing.T) {
 		physicalNodes int32
 		wantError     string
 	}{
-		{name: "selected subset", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{1, 2}}, nodes: 3, runtimeStart: 1, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
-		{name: "CPU embeddings inside chain", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{0, 1, 2}}, nodes: 1, cpu: true, runtimeStart: 1, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
-		{name: "host embedding node count", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{0, 1, 2}}, nodes: 2, cpu: true, runtimeStart: 1, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
-		{name: "unrelated node count", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{1, 2}}, nodes: 4, cpu: true, wantError: "deployment.numLpuNodes"},
-		{name: "LPU embeddings cannot pack", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{0, 1, 2}}, nodes: 1, wantError: "deployment.numLpuNodes"},
-		{name: "invalid selected chain", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{1, 3}}, nodes: 1, cpu: true, wantError: "not contiguous"},
+		{name: "selected subset", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{1, 2}}, runtimeStart: 1, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
+		{name: "CPU embeddings inside chain", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{0, 1, 2}}, cpu: true, runtimeStart: 1, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
+		{name: "invalid selected chain", family: BuildFamilyXT, widths: []uint32{8, 4, 4}, ids: []uint32{0, 1, 2}, chains: [][]uint32{{1, 3}}, cpu: true, wantError: "not contiguous"},
 		{family: BuildFamilyXT, name: "XT unselected stages", widths: []uint32{4, 4}, chains: [][]uint32{}},
 		{family: BuildFamilyXT, name: "XT whole node chain", widths: []uint32{8, 8}},
 		{family: BuildFamilyXT, name: "XT hybrid separate reservations", widths: []uint32{4, 4}, pipeline: PipelineLPX},
-		{family: BuildFamilyXT, name: "XT hybrid packed node count", widths: []uint32{4, 4}, pipeline: PipelineLPX, nodes: 1, wantError: "LPU partitions use 2 LPU nodes, want deployment.numLpuNodes 1"},
-		{family: BuildFamilyHX, name: "HX unrelated packed node count", widths: []uint32{8, 8}, nodes: 3, wantError: "deployment.numLpuNodes"},
 		{family: BuildFamilyHX, name: "HX mixed subnode widths", widths: []uint32{8, 4}},
 		{family: BuildFamilyHX, name: "HX narrower nonstandard destination", widths: []uint32{8, 4}, nodeWidths: []uint32{8, 4}, wantError: "destination partition 2 has 4 devices, need 8"},
 		{family: BuildFamilyHX, name: "HX wider destination", widths: []uint32{8, 16}, nodeWidths: []uint32{8, 16}},
@@ -59,7 +53,7 @@ func TestPropSyncProjection(t *testing.T) {
 		{family: BuildFamilyXT, name: "XT mixed node widths", widths: []uint32{4, 4}, nodeWidths: []uint32{8, 16}},
 		{family: BuildFamilyXT, name: "XT width does not divide node", widths: []uint32{3, 3}},
 		{family: BuildFamilyXT, name: "XT different topology names", widths: []uint32{4, 4}, topologies: []string{"topology-a", "topology-b"}},
-		{family: BuildFamilyXT, name: "XT packed twelve-node chain", widths: slices.Repeat([]uint32{4}, 24), nodes: 12, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC96), physicalNodes: 12},
+		{family: BuildFamilyXT, name: "XT packed twelve-node chain", widths: slices.Repeat([]uint32{4}, 24), shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC96), physicalNodes: 12},
 		{family: BuildFamilyXT, name: "XT unregistered whole-node shape", widths: []uint32{72}, wantError: "unregistered XT shape c72"},
 		{family: BuildFamilyXT, name: "XT unregistered packed shape", widths: []uint32{1, 1}, nodeWidths: []uint32{3, 3}, wantError: "unregistered XT shape c3"},
 		{family: BuildFamilyHX, name: "HX nine nodes", widths: slices.Repeat([]uint32{8}, 18), wantError: "144 does not fit a supported HX extent"},
@@ -74,13 +68,13 @@ func TestPropSyncProjection(t *testing.T) {
 		{family: BuildFamilyHX, name: "HX maximum manifest node width", widths: []uint32{math.MaxUint32, math.MaxUint32}, nodeWidths: []uint32{math.MaxUint32, math.MaxUint32}, wantError: "exceeds 8192 logical connections"},
 		{family: BuildFamilyHX, name: "HX wide singleton without connectors", widths: []uint32{math.MaxUint32}, nodeWidths: []uint32{math.MaxUint32}},
 		{
-			name: "2x4c", family: BuildFamilyXT, widths: []uint32{4, 4}, nodes: 1, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1,
+			name: "2x4c", family: BuildFamilyXT, widths: []uint32{4, 4}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1,
 		},
 		{
 			name: "4x2c", family: BuildFamilyXT, widths: []uint32{2, 2, 2, 2}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1,
 		},
 		{
-			name: "6x4c", family: BuildFamilyXT, widths: []uint32{4, 4, 4, 4, 4, 4}, nodes: 3, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC24), physicalNodes: 3,
+			name: "6x4c", family: BuildFamilyXT, widths: []uint32{4, 4, 4, 4, 4, 4}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC24), physicalNodes: 3,
 		},
 		{
 			name: "partial last owner", family: BuildFamilyXT, widths: []uint32{4, 4, 4}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC16), physicalNodes: 2,
@@ -89,10 +83,10 @@ func TestPropSyncProjection(t *testing.T) {
 			name: "LP30 2x8c without topology metadata", family: BuildFamilyHX, widths: []uint32{8, 8}, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1, omitMetadata: true,
 		},
 		{
-			name: "LP30 4x4c", family: BuildFamilyHX, widths: []uint32{4, 4, 4, 4}, nodes: 1, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1,
+			name: "LP30 4x4c", family: BuildFamilyHX, widths: []uint32{4, 4, 4, 4}, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1,
 		},
 		{
-			name: "LP30 partial last node in manifest order", family: BuildFamilyHX, widths: []uint32{8, 8, 8}, ids: []uint32{11, 3, 9}, nodes: 2, extent: ptr.To([]int64{16, 2, 1, 1}), physicalNodes: 2,
+			name: "LP30 partial last node in manifest order", family: BuildFamilyHX, widths: []uint32{8, 8, 8}, ids: []uint32{11, 3, 9}, extent: ptr.To([]int64{16, 2, 1, 1}), physicalNodes: 2,
 		},
 		{name: "XT single subnode partition", family: BuildFamilyXT, widths: []uint32{2}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
 		{name: "LP30 single subnode stage", family: BuildFamilyHX, widths: []uint32{8}, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1},
@@ -113,7 +107,8 @@ func TestPropSyncProjection(t *testing.T) {
 				fixture = newV3CompilerFixture()
 			}
 			width := fixture.partitions[0].devicesPerNode
-			fixture.numLPUNodes, fixture.cpuEmbeddings = 0, test.cpu
+			fixture.cpuEmbeddings = test.cpu
+			wantAgentReplicas := uint32(0)
 			fixture.partitions = make([]testV3CapnpPartition, len(test.widths))
 			fixture.selectedPropSyncChains = [][]uint32{make([]uint32, len(test.widths))}
 			for index, chips := range test.widths {
@@ -140,13 +135,10 @@ func TestPropSyncProjection(t *testing.T) {
 					partition.topologyFamily, partition.partitionShape = "", nil
 				}
 				fixture.selectedPropSyncChains[0][index] = partition.id
-				fixture.numLPUNodes += max(1, chips/partition.devicesPerNode)
+				wantAgentReplicas += max(1, chips/partition.devicesPerNode)
 			}
 			if len(test.widths) == 1 {
 				fixture.selectedPropSyncChains = nil
-			}
-			if test.nodes != 0 {
-				fixture.numLPUNodes = test.nodes
 			}
 			if test.chains != nil {
 				fixture.selectedPropSyncChains = test.chains
@@ -181,7 +173,7 @@ func TestPropSyncProjection(t *testing.T) {
 			if test.physicalNodes == 0 {
 				t.Log("Retain separate reservations and HX device-index connectors when packing does not apply")
 				require.Equal(t, original, projection.partitions)
-				require.EqualValues(t, fixture.numLPUNodes, projection.agentReplicas)
+				require.EqualValues(t, wantAgentReplicas, projection.agentReplicas)
 				edges := 0
 				for _, chain := range fixture.selectedPropSyncChains {
 					edges += len(chain) - 1

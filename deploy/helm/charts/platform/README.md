@@ -62,6 +62,16 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### CRD and admission breaking changes
 
+##### Complete health probes
+
+**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only probes and probes with multiple handlers. An authored probe replaces the applicable operator default as a complete value.
+
+**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main containers, sidecars, and role templates.
+
+**Action:** Before upgrading, supply a complete handler with any custom timing settings, or omit the probe to use the applicable operator default.
+
+**Existing deployments:** Installing the CRDs does not rewrite stored probes. Correct invalid probes before the next specification update; new and updated manifests must satisfy the validation rules.
+
 ##### Reserved runtime init container name
 
 **Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
@@ -338,7 +348,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.1 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.3 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values

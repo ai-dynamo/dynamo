@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Acquire OpenAPI documents and assess Dynamo/framework request and response contracts."""
+"""Run an offline Dynamo/framework assessment from local OpenAPI files.
+
+This CLI parses arguments and translates input/tool errors to exit code 2.
+assessment.openapi_workflow owns the assessment and its output directory;
+reporting.openapi provides a separate CLI to rebuild reports from saved evidence.
+See README.md for commands, input requirements, and output formats.
+"""
 
 import argparse
 import subprocess
@@ -12,56 +18,54 @@ from jsonpatch import JsonPatchException
 from jsonpointer import JsonPointerException
 from openapi_spec_validator.validation.exceptions import OpenAPIValidationError
 
-from .acquisition.http import acquire
 from .assessment.openapi_workflow import DEFAULT_MANIFEST, assess
 
 
 def main(argv=None) -> int:
+    """Run assess with argument tokens, or process arguments when argv is None.
+
+    Return 0 for no differences/gaps, 1 for review findings, or 2 for caught
+    input/tool errors reported on stderr. argparse exits on help or invalid syntax.
+    See assess for output writes and partial results after a failure.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    capture = commands.add_parser(
-        "acquire", help="Save an OpenAPI file or HTTP(S) URL with its checksum"
-    )
-    capture.add_argument(
-        "--server",
-        required=True,
-        help="Server identity: dynamo or a lowercase framework slug",
-    )
-    source = capture.add_mutually_exclusive_group(required=True)
-    source.add_argument("--url", help="Published or live HTTP(S) OpenAPI URL")
-    source.add_argument("--file", type=Path, help="Local JSON or YAML OpenAPI file")
-    capture.add_argument(
-        "--metadata",
-        type=Path,
-        help="Optional caller-supplied JSON annotations, retained without verification",
-    )
-    capture.add_argument("--output-dir", type=Path, required=True)
-    capture.set_defaults(run=acquire)
     assessment = commands.add_parser(
         "assess",
-        help="Compose Dynamo and compare request/response contracts to a framework server",
+        help="Compose Dynamo and compare request/response contracts to a framework specification",
     )
     assessment.add_argument(
         "--dynamo",
         type=Path,
         required=True,
-        help="Dynamo JSON/YAML file or capture directory",
+        help="Local Dynamo OpenAPI JSON/YAML file",
     )
     assessment.add_argument(
         "--framework",
         type=Path,
         required=True,
-        help="Framework JSON/YAML file or capture directory",
+        help="Local framework OpenAPI JSON/YAML file",
     )
     assessment.add_argument(
         "--framework-name",
         required=True,
-        help="Caller-selected identity; must match a capture's --server (not dynamo)",
+        help="Caller-selected lowercase identity (not dynamo)",
     )
+    for side in ("dynamo", "framework"):
+        assessment.add_argument(
+            f"--{side}-metadata",
+            type=Path,
+            help=f"Optional JSON annotations for the {side} file, retained without verification",
+        )
     assessment.add_argument(
         "--openai", type=Path, required=True, help="pinned async-openai openapi.yaml"
     )
     assessment.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    assessment.add_argument(
+        "--response-adapters",
+        type=Path,
+        help="Optional hash-qualified SSE interpretations and explicit completion path mappings",
+    )
     assessment.add_argument(
         "--oasdiff", type=Path, required=True, help="pinned oasdiff 1.33.0 executable"
     )

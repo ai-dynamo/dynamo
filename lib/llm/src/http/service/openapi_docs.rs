@@ -318,7 +318,7 @@ fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(
     let components = document.components.as_mut().ok_or("missing components")?;
     for (name, field, alias) in [
         (
-            "NvCreateChatCompletionRequest",
+            NvCreateChatCompletionRequest::name().as_ref(),
             "chat_template_args",
             "chat_template_kwargs",
         ),
@@ -398,7 +398,7 @@ fn configure_response_schemas(
 }
 
 /// Create an OpenAPI operation for a specific route
-/// Uses the handler kind for schemas; the registered URL remains the operation ID.
+/// Uses the handler kind for schemas and prose; the registered URL remains the operation ID.
 fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operation {
     use utoipa::openapi::ResponseBuilder;
     use utoipa::openapi::path::OperationBuilder;
@@ -410,8 +410,17 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
         method.to_lowercase(),
         path.replace('/', "_").trim_matches('_')
     );
-    let summary = generate_summary_for_path(path);
-    let description = generate_description_for_path(path);
+    // Select the built-in prose by handler identity, even at a remapped URL.
+    // Other routes retain their existing path-based descriptions.
+    let description_path = match route.openapi_kind() {
+        Some(OpenApiRouteKind::ChatCompletions) => "/v1/chat/completions",
+        Some(OpenApiRouteKind::Completions) => "/v1/completions",
+        Some(OpenApiRouteKind::Embeddings) => "/v1/embeddings",
+        Some(OpenApiRouteKind::Responses) => "/v1/responses",
+        None => path,
+    };
+    let summary = generate_summary_for_path(description_path);
+    let description = generate_description_for_path(description_path);
 
     let mut operation = OperationBuilder::new()
         .operation_id(Some(operation_id))
@@ -720,6 +729,8 @@ fn generate_description_for_path(path: &str) -> String {
 /// Generation is lazy and cached as serialized bytes per router/service. A schema
 /// error is logged once and cached as HTTP 500 for `/openapi.json`; inference remains
 /// available. Neither an invalid partial document nor internal diagnostics are served.
+/// Thread-launch failures return HTTP 500 without initializing the cache, so a later
+/// request can retry.
 pub fn openapi_router(
     route_docs: Vec<RouteDoc>,
     options: OpenApiOptions,
@@ -747,29 +758,56 @@ struct CachedOpenApi {
 }
 
 impl CachedOpenApi {
-    /// Generate and serialize once on first access, sharing the result across callers.
-    /// Uses a blocking worker plus an 8 MiB stack for recursive schema derivation;
-    /// schema, serialization, thread creation and panic failures are cached and logged.
-    async fn bytes(self: &Arc<Self>) -> &Result<Bytes, String> {
-        self.bytes.get_or_init(|| async {
-            let document = Arc::clone(self);
-            let result = tokio::task::spawn_blocking(move || {
-                std::thread::Builder::new()
-                    .name("openapi-schema".into())
-                    .stack_size(8 * 1024 * 1024)
-                    .spawn(move || {
-                        let value = generate_openapi_spec_with_options(&document.routes, document.options)?;
-                        serde_json::to_vec(&value).map(Bytes::from).map_err(|error| error.to_string())
-                    })
-                    .map_err(|error| error.to_string())?
-                    .join()
-                    .map_err(|_| "OpenAPI generator panicked".to_owned())?
-            }).await.unwrap_or_else(|error| Err(error.to_string()));
-            if let Err(error) = &result {
-                tracing::error!(%error, "OpenAPI documentation unavailable; inference is unaffected");
-            }
-            result
-        }).await
+    /// Return shared serialized bytes, generating on an 8 MiB thread on first access.
+    /// Await its channel without parking a blocking-pool thread. Cache generation
+    /// failures, but allow later requests to retry after a thread-launch failure.
+    async fn bytes(self: &Arc<Self>) -> Result<Bytes, String> {
+        self.bytes_with_spawn(|generate| {
+            std::thread::Builder::new()
+                .name("openapi-schema".into())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(generate)
+                .map(|_| ())
+        })
+        .await
+    }
+
+    /// Initialize the cache with an injectable thread launcher for failure testing.
+    /// `spawn` must run its task independently on success, or return an error without
+    /// running it. Launch errors leave the cache empty; generation errors or a lost
+    /// sender are cached. Successful calls return a cheap clone of the cached bytes.
+    async fn bytes_with_spawn<F>(self: &Arc<Self>, spawn: F) -> Result<Bytes, String>
+    where
+        F: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+    {
+        self.bytes
+            .get_or_try_init(|| async {
+                let document = Arc::clone(self);
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                spawn(Box::new(move || {
+                    let result = generate_openapi_spec_with_options(&document.routes, document.options)
+                        .and_then(|value| {
+                            serde_json::to_vec(&value)
+                                .map(Bytes::from)
+                                .map_err(|error| error.to_string())
+                        });
+                    // A cancelled request can drop the receiver while generation finishes.
+                    let _ = sender.send(result);
+                }))?;
+                let result = receiver.await.unwrap_or_else(|_| {
+                    Err("OpenAPI generator exited without a result".to_owned())
+                });
+                if let Err(error) = &result {
+                    tracing::error!(%error, "OpenAPI documentation unavailable; inference is unaffected");
+                }
+                Ok::<_, std::io::Error>(result)
+            })
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "OpenAPI generator could not start; a later request can retry");
+                error.to_string()
+            })?
+            .clone()
     }
 }
 
@@ -790,7 +828,7 @@ async fn serve_openapi(
     match document.bytes().await {
         Ok(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            bytes.clone(),
+            bytes,
         )
             .into_response(),
         Err(_) => (
@@ -832,6 +870,21 @@ mod tests {
             let spec = generate_openapi_spec(&routes).unwrap();
             assert_eq!(spec["paths"].as_object().unwrap().len(), routes.len());
             let operation = &spec["paths"][routes[0].path()]["post"];
+            let (summary, description) = match routes[0].openapi_kind().unwrap() {
+                OpenApiRouteKind::ChatCompletions => {
+                    ("Create chat completion", "chat conversation")
+                }
+                OpenApiRouteKind::Completions => ("Create text completion", "given prompt"),
+                OpenApiRouteKind::Embeddings => ("Create embeddings", "embedding vector"),
+                OpenApiRouteKind::Responses => ("Create response", "given input"),
+            };
+            assert_eq!(operation["summary"], summary);
+            assert!(
+                operation["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains(description)
+            );
             assert_eq!(
                 operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
                 format!("#/components/schemas/{request}")
@@ -880,7 +933,10 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let events = spec["paths"]["/chat"]["post"]["responses"]["200"]["content"]["text/event-stream"]["itemSchema"]["anyOf"].as_array().unwrap();
+                let events = spec["paths"]["/chat"]["post"]["responses"]["200"]["content"]
+                    ["text/event-stream"]["itemSchema"]["anyOf"]
+                    .as_array()
+                    .unwrap();
                 assert_eq!(events.len(), 1 + usize::from(tool) + usize::from(reasoning));
                 for (event, enabled) in [
                     ("tool_call_dispatch", tool),
@@ -928,7 +984,7 @@ mod tests {
             let first = first.bytes().await.unwrap();
             assert_eq!(first, second.unwrap().bytes().await.unwrap());
             assert_eq!(&first, document.bytes.get().unwrap().as_ref().unwrap());
-            let cached = document.bytes().await.as_ref().unwrap();
+            let cached = document.bytes().await.unwrap();
             assert_eq!(
                 cached.as_ptr(),
                 document.bytes().await.as_ref().unwrap().as_ptr()
@@ -952,6 +1008,75 @@ mod tests {
             server.abort();
             let _ = server.await;
         }
+    }
+
+    /// A failed launch must leave the document retryable, then reuse the successful bytes.
+    #[tokio::test]
+    async fn openapi_thread_launch_failure_is_retryable() {
+        let document = Arc::new(CachedOpenApi {
+            routes: vec![],
+            options: OpenApiOptions::default(),
+            bytes: OnceCell::new(),
+        });
+        let failed = document
+            .bytes_with_spawn(|_| Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)))
+            .await;
+        assert!(failed.is_err());
+        assert!(document.bytes.get().is_none());
+        let bytes = document.bytes().await.unwrap();
+        let cached = document
+            .bytes_with_spawn(|_| panic!("cached bytes must not start another thread"))
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ptr(), cached.as_ptr());
+    }
+
+    /// Handler prose takes precedence over URL spelling; untyped routes keep their fallback.
+    #[test]
+    fn openapi_route_prose_follows_handler_identity() {
+        let route = RouteDoc::new(axum::http::Method::POST, "/v1/embeddings")
+            .with_openapi_kind(OpenApiRouteKind::ChatCompletions);
+        let operation = create_operation_for_route(&route);
+        assert_eq!(operation.summary.as_deref(), Some("Create chat completion"));
+        assert!(operation.description.unwrap().contains("chat conversation"));
+        assert_eq!(
+            operation.operation_id.as_deref(),
+            Some("post_v1_embeddings")
+        );
+
+        let health = create_operation_for_route(&RouteDoc::new(axum::http::Method::GET, "/health"));
+        assert_eq!(health.summary.as_deref(), Some("Health check"));
+        let custom = create_operation_for_route(&RouteDoc::new(axum::http::Method::GET, "/custom"));
+        assert_eq!(custom.summary.as_deref(), Some("Endpoint: /custom"));
+        assert_eq!(
+            custom.description.as_deref(),
+            Some("Endpoint for path: /custom")
+        );
+    }
+
+    /// A generator that exits without sending a result must not hang or relaunch forever.
+    #[tokio::test]
+    async fn openapi_generator_exit_is_cached() {
+        let document = Arc::new(CachedOpenApi {
+            routes: vec![],
+            options: OpenApiOptions::default(),
+            bytes: OnceCell::new(),
+        });
+        let error = document
+            .bytes_with_spawn(|task| {
+                drop(task);
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error, "OpenAPI generator exited without a result");
+        assert_eq!(
+            document
+                .bytes_with_spawn(|_| panic!("cached error must not start another thread"))
+                .await
+                .unwrap_err(),
+            error
+        );
     }
 
     /// A cached generation error returns a generic 500 without disabling unrelated routes.

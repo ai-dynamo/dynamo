@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Resolve explicit import slots, never infer Dynamo contracts from a framework.
+"""Fill dependency-schema placeholders before Dynamo's export can be compared.
 
-The manifest selects JSON Pointers in one pinned OpenAI document. Corrections
-are standard JSON Patch with mandatory preceding test operations; they are
-reviewed spec-to-code adjustments, not a source parser or permissive fallback.
+The pinned async-openai lacks OpenAPI annotations. compose replaces explicit
+x-dynamo-schema-import slots from a checksum-pinned OpenAI document, applying
+manifest corrections reviewed against Rust serialization. It returns a separate
+document; it does not infer contracts from the framework being compared.
+
+Remove this workaround when native annotations replace the compared placeholders,
+including the frontend's value_type overrides. Integration is tracked at
+https://github.com/ai-dynamo/frontend-crates/issues/351. The shared manifest owns
+version pins and correction rationales; README.md explains maintenance checks.
 """
 
 from __future__ import annotations
@@ -22,7 +28,11 @@ PREFIX = "OpenAIBaseline."
 
 
 def corrected(schema: Any, mapping: dict[str, Any], name: str) -> Any:
-    """Apply reviewed JSON Patch, rejecting stale or unrelated guards."""
+    """Return a patched copy; reject missing/wrong guards or a missing rationale.
+
+    `mapping` contains optional `patch` and `rationale`; `name` labels failures.
+    Invalid operations raise ValueError; failed tests propagate JSON Patch errors.
+    """
     operations = mapping.get("patch", [])
     for index, operation in enumerate(operations):
         if operation["op"] not in {"test", "add", "remove", "replace"}:
@@ -49,11 +59,14 @@ def compose(
     *,
     baseline_bytes: bytes,
 ) -> dict[str, Any]:
-    """Return a separate document, preserving raw inputs and endpoint definitions.
+    """Fill marked schema components in raw using manifest and pinned baseline bytes.
 
     Only schema components reachable from explicit slots are imported. All refs
     must be document-local; imports cannot overwrite Dynamo-owned definitions.
     Unmapped markers are errors, never a successful partially composed export.
+    `baseline_bytes` must match the manifest checksum. Bad mappings, references,
+    patch guards, or collisions raise. Return a separate document with composition
+    provenance; inputs and endpoint definitions remain unchanged. No I/O occurs.
     """
     if hashlib.sha256(baseline_bytes).hexdigest() != manifest["openai"]["sha256"]:
         raise ValueError("OpenAI specification checksum mismatch")
@@ -73,6 +86,11 @@ def compose(
                 mapped_pointers[pointer] = name
 
     def copy_schema(node: Any) -> Any:
+        """Copy schema positions and populate imports, preserving cycles and literal data.
+
+        Reject external/dynamic references and name collisions. A failure may
+        populate the local imports table, but does not mutate caller inputs.
+        """
         if isinstance(node, list):
             return [copy_schema(item) for item in node]
         if not isinstance(node, dict):

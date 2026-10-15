@@ -13,7 +13,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.protocol_compatibility.acquisition.http import write_json
 from scripts.protocol_compatibility.assessment.openapi import (
     alias_value_document,
     compare,
@@ -21,6 +20,7 @@ from scripts.protocol_compatibility.assessment.openapi import (
     normalize_nullable_strings,
     request_differences,
 )
+from scripts.protocol_compatibility.inputs import write_json
 from scripts.protocol_compatibility.tests.composition.vllm_fixture import (
     FIXTURE,
     PROFILE,

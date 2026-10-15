@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo versus vLLM request-contract assessment
 
-This is the historical vLLM 0.30 request-only recipe. For the current response-capable
-build and ongoing paired-server investigation, use the
+This is the historical vLLM 0.30 request-only recipe. For the separately pinned
+response-capable build and paired-server investigation, use the
 [OpenAPI 3.2 assessment](dynamo-vllm-openapi32-assessment.md). The fixtures below
 remain useful regression inputs but do not qualify the newer build.
 
@@ -53,7 +53,7 @@ Prerequisites: Linux Docker with GPU support, capacity for the pinned model,
 `jq`, the pinned comparison dependencies, and a Dynamo spec with its matching
 OpenAI YAML. A published/checked-in spec is sufficient for comparison; this
 recipe adds deployment evidence when reproducing a live vLLM capture. It is
-caller-owned, not a requirement imposed by the generic acquisition tool.
+caller-owned, not a requirement imposed by the offline comparator.
 Use task-specific container names and fresh evidence/output directories.
 
 Set `MODEL_CACHE` to the model-specific Hugging Face cache containing `snapshots/`
@@ -109,14 +109,15 @@ jq -n --slurpfile profile "$PROFILE" \
   '{declared_profile: $profile[0], observed_container: $container[0],
     observed_image: $image[0], observed_version: $version[0]}' \
   > vllm-metadata.json
-python -m scripts.protocol_compatibility acquire \
-  --server "$(jq -r '.framework_name' "$PROFILE")" \
-  --url "http://127.0.0.1:$VLLM_PORT/openapi.json" \
-  --metadata vllm-metadata.json --output-dir captures/vllm
+mkdir -p captures/vllm
+curl --fail "http://127.0.0.1:$VLLM_PORT/openapi.json" \
+  > captures/vllm/openapi.raw
+sha256sum captures/vllm/openapi.raw > deployment-evidence/openapi.sha256
 python -m scripts.protocol_compatibility assess \
-  --dynamo docs/frontends/openapi.json --framework captures/vllm \
+  --dynamo docs/frontends/openapi.json --framework captures/vllm/openapi.raw \
   --framework-name "$(jq -r '.framework_name' "$PROFILE")" \
-  --openai openai-884aff95.yaml --oasdiff /absolute/path/to/oasdiff \
+  --framework-metadata vllm-metadata.json \
+  --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
   --output-dir assessment-vllm
 ```
 
@@ -129,7 +130,7 @@ port; they do not attest a source build or automatically validate every flag.
 Review command arguments for secrets before archiving them. The generic tool
 preserves `vllm-metadata.json` as unverified caller annotations.
 
-Review `report.md`, the complete request deltas, normalization audit and alias
+Review `assessment-vllm/assessment/report.md`, the complete request deltas, normalization audit and alias
 value probes. Exit 1 means differences or gaps require review, not tool failure.
 Retain both raw captures and acquisition metadata. Then stop and remove only
 the task container, and verify GPU resources were released:
@@ -189,45 +190,23 @@ responses, streaming, forwarding or inference behavior.
 
 ## Optional Dynamo deployment evidence
 
-Ordinary comparison can use the existing generator's file output described in
-the [comparison guide](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance). When verifying a deployment's
-HTTP export, build and package the same helper from the exact source and lockfile:
+For a deployment-specific check, capture an already running Dynamo frontend's
+`/openapi.json` with an HTTP client and retain its source, lockfile, startup
+configuration and checksum separately:
 
 ```sh
-cargo build --locked -p dynamo-llm --no-default-features --bin generate-frontend-openapi
-mkdir image-context
-cp target/debug/generate-frontend-openapi image-context/generate-frontend-openapi
-strip image-context/generate-frontend-openapi
-cp scripts/protocol_compatibility/frameworks/Dockerfile.dynamo image-context/Dockerfile
-docker build --platform linux/amd64 --provenance=false -t "$DYNAMO_IMAGE_TAG" image-context
+mkdir -p captures/dynamo
+curl --fail "http://127.0.0.1:$DYNAMO_PORT/openapi.json" \
+  > captures/dynamo/openapi.raw
+sha256sum captures/dynamo/openapi.raw
 ```
 
-Retain compiler version, source revision/patch, Cargo lockfile and original/stripped
-binary hashes. Publish the image through the caller's approved registry procedure,
-verify its manifest digest, and set `DYNAMO_IMAGE` to the digest-qualified reference.
-Packaging a binary is not proof of a reproducible source build.
+Pass the raw file to `assess --dynamo` and optional JSON annotations to
+`--dynamo-metadata`. The comparator does not fetch URLs, load capture directories,
+or verify annotation claims. Configured HTTP exports can omit disabled variants;
+they do not replace full-surface inputs for a full-contract comparison.
 
-```sh
-docker run -d --name "$DYNAMO_CONTAINER" -p 127.0.0.1::8000 "$DYNAMO_IMAGE"
-docker port "$DYNAMO_CONTAINER" 8000/tcp
-```
-
-Record the assigned `DYNAMO_PORT`, wait for readiness, and inspect the running
-container using the same whitelist/image/port checks above. Verify the source
-lockfile against the reviewed composition manifest's `dependencies` and preserve
-the build evidence. If they differ, review the manifest/spec pair before using
-composition. Caller annotations do not override the pinned OpenAI checksum or
-schema-patch guards.
-
-```sh
-python -m scripts.protocol_compatibility acquire \
-  --server dynamo --url "http://127.0.0.1:$DYNAMO_PORT/openapi.json" \
-  --metadata dynamo-metadata.json --output-dir captures/dynamo
-docker stop "$DYNAMO_CONTAINER"
-docker rm "$DYNAMO_CONTAINER"
-```
-
-Create `dynamo-metadata.json` from reviewed build/deployment evidence before
-acquisition, or omit `--metadata` when keeping that evidence separately.
-The helper uses the actual HTTP router without workers or model weights; this
-recapture uses no GPU and does not establish inference or runtime fidelity.
+The current `generate-frontend-openapi` helper only writes a file; it has no
+`--serve` mode. Use the static export above when a running frontend is not needed.
+The former helper-server container recipe has been removed. Neither static
+export nor HTTP recapture establishes inference or runtime fidelity.
