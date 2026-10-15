@@ -28,7 +28,9 @@ def test_disagg_planner_example_uses_inline_config_and_runtime_observations(back
     source = (
         root / "examples" / "backends" / backend / "deploy" / "disagg_planner.yaml"
     ).read_text()
-    manifests = list(yaml.safe_load_all(source))
+    manifests = [
+        manifest for manifest in yaml.safe_load_all(source) if manifest is not None
+    ]
     assert all(manifest["kind"] != "ConfigMap" for manifest in manifests)
     deployments = [
         manifest
