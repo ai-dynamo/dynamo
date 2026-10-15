@@ -15,10 +15,9 @@ each default, and leaves the webhook handler as a narrow request boundary.
   obtain request-scoped inputs, call the root `default<Type>` function, and return.
   Put each field default in the structural function for the API type that declares
   that field.
-- Treat conversion as an explicit boundary. Register admission for the canonical
-  hub representation and dispatch foreign-version behavior from the converted
-  object shape, including version envelopes. Do not dispatch semantic behavior
-  from the client's original `requestKind` alone.
+- Apply defaults to the canonical API representation whenever conversion preserves
+  the required field presence and semantics. Use version-specific behavior only
+  when conversion cannot represent the information the rule needs.
 - Preserve explicit user values. Fill only absence defined by the API and never
   silently rewrite an explicit value to make it valid.
 
@@ -102,8 +101,9 @@ function and nested API types are handled by their exact-type functions.
 - Put defaults for API types shared by multiple resources in the corresponding
   `shared_<version>.go` file and call the same function from every resource
   traversal. Do not duplicate a shared default under each handler.
-- Keep compatibility behavior for a non-storage API version in a separate
-  `<owner>_<version>.go` file. Conversion fidelity remains independently tested.
+- Version-specific defaults are exceptional. Document why conversion cannot carry
+  the required semantics, keep the rule in `<owner>_<version>.go`, and test its
+  conversion behavior independently.
 - Use one `<owner>_helpers.go` file across API versions; typed signatures make the
   applicable version explicit.
 
