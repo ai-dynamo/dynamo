@@ -25,7 +25,7 @@ def _bare_agent() -> PowerAgent:
     agent.node_name = "node-under-test"
     agent.safe_default_watts = 500
     agent.metrics = MagicMock()
-    agent._last_good_cycle = 0.0
+    agent._cycle_state = (None, False)
     return agent
 
 
@@ -95,11 +95,13 @@ class TestReadinessEndpoint(unittest.TestCase):
         status, body = _get_readyz(agent)
 
         self.assertTrue(status.startswith("503"))
-        self.assertEqual(body, "not-ready last_good_cycle_age_s=none\n")
+        self.assertEqual(
+            body, "not-ready last_good_cycle_age_s=none last_cycle_ok=false\n"
+        )
 
     def test_ready_immediately_after_a_successful_cycle(self):
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         status, body = _get_readyz(agent)
 
@@ -111,7 +113,7 @@ class TestReadinessEndpoint(unittest.TestCase):
         probe's failureThreshold cannot see it, because nothing is failing —
         the timestamp is simply not advancing."""
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic() - power_agent.STALE_AFTER_S - 1
+        agent._cycle_state = (time.monotonic() - power_agent.STALE_AFTER_S - 1, True)
 
         status, body = _get_readyz(agent)
 
@@ -128,16 +130,16 @@ class TestReadinessEndpoint(unittest.TestCase):
 
         # A cycle taking just under 2x the interval still leaves the agent
         # Ready at the moment the next one would publish...
-        agent._last_good_cycle = time.monotonic() - (interval + 2 * interval - 1)
+        agent._cycle_state = (time.monotonic() - (interval + 2 * interval - 1), True)
         self.assertTrue(_get_readyz(agent)[0].startswith("200"))
 
         # ...and one exceeding it exposes a 503.
-        agent._last_good_cycle = time.monotonic() - (interval + 2 * interval + 1)
+        agent._cycle_state = (time.monotonic() - (interval + 2 * interval + 1), True)
         self.assertTrue(_get_readyz(agent)[0].startswith("503"))
 
     def test_non_readyz_paths_are_404(self):
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         status, body = _get_readyz(agent, path="/metrics")
 
@@ -149,14 +151,14 @@ class TestReadinessEndpoint(unittest.TestCase):
         container-start clock jump must not make a stale agent look fresh (or
         the reverse)."""
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         with patch.object(power_agent.time, "time", return_value=time.time() + 86400):
             self.assertTrue(_get_readyz(agent)[0].startswith("200"))
 
 
 class TestReadinessTimestamp(unittest.TestCase):
-    """`run()` assigns `_last_good_cycle` exactly once per cycle."""
+    """`run()` assigns `_cycle_state` exactly once per cycle."""
 
     def setUp(self):
         power_agent._shutdown.clear()
@@ -181,26 +183,56 @@ class TestReadinessTimestamp(unittest.TestCase):
 
         agent = self._run_one_cycle(reconcile)
 
-        self.assertNotEqual(agent._last_good_cycle, 0.0)
+        self.assertIsNotNone(agent._cycle_state[0])
         self.assertTrue(_get_readyz(agent)[0].startswith("200"))
 
-    def test_failed_cycle_resets_the_timestamp(self):
+    def test_failed_cycle_is_not_ready(self):
         def reconcile():
             power_agent._shutdown.set()
             return False
 
         agent = self._run_one_cycle(reconcile)
 
-        self.assertEqual(agent._last_good_cycle, 0.0)
+        self.assertFalse(agent._cycle_state[1])
         self.assertTrue(_get_readyz(agent)[0].startswith("503"))
 
-    def test_raising_cycle_resets_the_timestamp_and_does_not_exit(self):
+    def test_failed_cycle_after_success_keeps_the_last_good_age(self):
+        """A failure after a success must not look like startup: the body
+        reports the latest-cycle failure and the age of the real last good
+        cycle. Only startup reports `age=none`."""
+        agent = _bare_agent()
+        agent._start_readyz_server = MagicMock()
+        results = iter([True, False])
+
+        def reconcile():
+            ok = next(results)
+            if not ok:
+                power_agent._shutdown.set()
+            return ok
+
+        agent.reconcile_once = reconcile
+        with patch.object(power_agent.signal, "signal"), patch.object(
+            power_agent, "_shutdown_cleanup"
+        ), patch.object(power_agent._shutdown, "wait"), patch.object(
+            power_agent.time, "monotonic", side_effect=[100.0, 105.0]
+        ):
+            agent.run()
+
+        with patch.object(power_agent.time, "monotonic", return_value=105.0):
+            status, body = _get_readyz(agent)
+
+        self.assertTrue(status.startswith("503"))
+        self.assertEqual(
+            body, "not-ready last_good_cycle_age_s=5.0 last_cycle_ok=false\n"
+        )
+
+    def test_raising_cycle_is_not_ready_and_does_not_exit(self):
         """An unexpected exception must take the pod NotReady on the NEXT poll
         rather than after the staleness bound — and must NOT terminate the
         process: a NotReady agent that keeps reconciling can recover, while a
         restart drops in-memory GPU ownership."""
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()  # a previously good cycle
+        agent._cycle_state = (time.monotonic(), True)  # a previously good cycle
         agent._start_readyz_server = MagicMock()
 
         def reconcile():
@@ -213,7 +245,7 @@ class TestReadinessTimestamp(unittest.TestCase):
         ) as cleanup:
             agent.run()  # must not raise
 
-        self.assertEqual(agent._last_good_cycle, 0.0)
+        self.assertFalse(agent._cycle_state[1])
         self.assertTrue(_get_readyz(agent)[0].startswith("503"))
         cleanup.assert_called_once()
 
@@ -236,7 +268,7 @@ class TestReadinessServer(unittest.TestCase):
         agent = _bare_agent()
         # prometheus_port=0 → PowerAgentMetrics starts no HTTP server at all.
         agent.metrics = power_agent.PowerAgentMetrics(0)
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         with _readyz_server(agent) as port:
             status, body = _http_get_readyz(port)
@@ -252,7 +284,7 @@ class TestReadinessServer(unittest.TestCase):
         except OSError:
             self.skipTest("IPv6 loopback unavailable")
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         with patch.dict(os.environ, {"POD_IP": "::1"}):
             with _readyz_server(agent) as port:
@@ -339,7 +371,7 @@ class TestReadinessServer(unittest.TestCase):
         not complete at all while this client keeps dripping.
         """
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         stop = threading.Event()
 
@@ -383,7 +415,7 @@ class TestReadinessServer(unittest.TestCase):
         """The absolute bound is enforced, so slow-drip connections (and their
         threads) cannot accumulate without limit."""
         agent = _bare_agent()
-        agent._last_good_cycle = time.monotonic()
+        agent._cycle_state = (time.monotonic(), True)
 
         with patch.object(
             power_agent._QuietWSGIHandler, "max_connection_seconds", 0.3

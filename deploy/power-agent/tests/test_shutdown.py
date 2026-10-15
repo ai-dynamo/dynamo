@@ -90,7 +90,7 @@ class TestRunLoopRunsCleanupOnce(_ShutdownTestBase):
         agent._actuator = MagicMock()
         agent.node_name = "node-1"
         agent.safe_default_watts = 500
-        agent._last_good_cycle = 0.0
+        agent._cycle_state = (None, False)
         agent.reconcile_once = reconcile
         # `run()` binds the readiness port; these tests are about cleanup, and
         # a real bind would leak a listener across the suite.

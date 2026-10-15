@@ -30,8 +30,9 @@ reconcile cycle completed every enforcement action it was required to take, with
 no reported failure, and completed recently. Each pod serves this on port 8081:
 
   kubectl exec -n {{ .Release.Namespace }} <pod> -- curl -s localhost:8081/readyz
-  # "ok last_good_cycle_age_s=3.2"  (HTTP 200)
-  # "not-ready last_good_cycle_age_s=none"  (HTTP 503 — no cycle has succeeded)
+  # "ok last_good_cycle_age_s=3.2 last_cycle_ok=true"  (HTTP 200)
+  # "not-ready last_good_cycle_age_s=8.1 last_cycle_ok=false"  (HTTP 503 — latest cycle failed)
+  # "not-ready last_good_cycle_age_s=none last_cycle_ok=false"  (HTTP 503 — no cycle has succeeded)
 
 An agent that is not enforcing goes NotReady, which consumes the DaemonSet
 rollout budget under `daemonset.updateStrategy.rollingUpdate.maxUnavailable`

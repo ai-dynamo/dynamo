@@ -1400,16 +1400,15 @@ class PowerAgent:
         self.k8s_namespace = k8s_namespace
         self.metrics = PowerAgentMetrics(prometheus_port)
 
-        # Readiness state: the monotonic timestamp of the last cycle that
-        # enforced everything it was required to, or 0.0 for "no cycle has ever
-        # succeeded / the last one failed". ONE float, assigned exactly once per
-        # cycle in `run()`, so a reader on the server thread can never see a torn
-        # mix and an exception can never leave a stale SUCCESSFUL timestamp in
-        # place. No lock is needed. An instance attribute rather than a module
+        # Readiness state: (monotonic timestamp of the last cycle that enforced
+        # everything it was required to, or None if none ever has; whether the
+        # latest cycle did). ONE tuple, assigned exactly once per cycle in
+        # `run()`, so a reader on the server thread can never see a torn mix.
+        # No lock is needed. An instance attribute rather than a module
         # global because `power_agent` is `__main__` under the entrypoint while
         # `actuator.py` reaches it via `import power_agent` — two distinct module
         # objects, and a global would exist twice.
-        self._last_good_cycle: float = 0.0
+        self._cycle_state: tuple[Optional[float], bool] = (None, False)
 
         if pynvml is None:
             raise RuntimeError("pynvml is required — install pynvml or nvidia-ml-py")
@@ -1859,19 +1858,16 @@ class PowerAgent:
         result = self._actuator.apply_cap(gpu_idx, cap_w, expected_uuid=expected_uuid)
         return result.ok
 
-    def _readiness(self) -> tuple[bool, Optional[float]]:
-        """Return (ready, age_seconds). A `None` age means no cycle has ever
-        succeeded.
-
-        `0.0` is unambiguous as that sentinel: `time.monotonic()` is
-        CLOCK_MONOTONIC (seconds since boot) and cannot realistically be exactly
-        `0.0` at the moment a cycle completes.
+    def _readiness(self) -> tuple[bool, Optional[float], bool]:
+        """Return (ready, age_seconds, last_cycle_ok). A `None` age means no
+        cycle has ever succeeded. Ready requires the latest cycle to have
+        succeeded and the last good cycle to be fresh.
         """
-        last = self._last_good_cycle
-        if last == 0.0:
-            return False, None
-        age = time.monotonic() - last
-        return age < STALE_AFTER_S, age
+        last_good, last_ok = self._cycle_state
+        if last_good is None:
+            return False, None, last_ok
+        age = time.monotonic() - last_good
+        return last_ok and age < STALE_AFTER_S, age, last_ok
 
     def _readyz_app(self, environ, start_response):
         """WSGI app serving the single fixed `GET /readyz` endpoint.
@@ -1888,9 +1884,12 @@ class PowerAgent:
         if environ["PATH_INFO"] != "/readyz":
             start_response("404 Not Found", [("Content-Type", "text/plain")])
             return [b""]
-        ready, age = self._readiness()
+        ready, age, last_ok = self._readiness()
         age_s = "none" if age is None else f"{age:.1f}"
-        body = f"{'ok' if ready else 'not-ready'} last_good_cycle_age_s={age_s}\n"
+        body = (
+            f"{'ok' if ready else 'not-ready'} last_good_cycle_age_s={age_s} "
+            f"last_cycle_ok={str(last_ok).lower()}\n"
+        )
         status = "200 OK" if ready else "503 Service Unavailable"
         start_response(status, [("Content-Type", "text/plain; charset=utf-8")])
         return [body.encode("utf-8")]
@@ -1952,9 +1951,11 @@ class PowerAgent:
                 except Exception as e:
                     logger.exception("Unexpected error in reconcile loop: %s", e)
                     cycle_ok = False
-                # Exactly one assignment per cycle, computed after the `try`, so
-                # an exception cannot leave a stale SUCCESSFUL timestamp behind.
-                self._last_good_cycle = time.monotonic() if cycle_ok else 0.0
+                # Exactly one assignment per cycle, computed after the `try`. A
+                # failed cycle keeps the last good timestamp for diagnosis and
+                # publishes last_cycle_ok=False, which alone makes it not ready.
+                last_good = time.monotonic() if cycle_ok else self._cycle_state[0]
+                self._cycle_state = (last_good, cycle_ok)
                 _shutdown.wait(timeout=RECONCILE_INTERVAL_S)
         finally:
             _shutdown_cleanup(self._actuator)
