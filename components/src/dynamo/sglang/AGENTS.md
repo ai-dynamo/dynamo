@@ -40,6 +40,10 @@ in the header of `lib/llm/src/protocols/sglang/merge.rs`. Re-check that code, an
 `tests/test_sglang_generate_merge_contract.py`, which fails on any unclassified response
 field or request flag.
 
+Routed experts under P/D disaggregation need SGLang 0.5.22: before sgl-project/sglang#44002
+the prefill server returns no `routed_experts`, so the frontend drops the field instead of
+returning decode's stale prompt rows. Remove this note when the pin reaches 0.5.22.
+
 ## Multi-process gateway (`--gateway-workers N`)
 
 `gateway.py`. One `dynamo.sglang` process fronts every DP rank of its engine: SGLang's

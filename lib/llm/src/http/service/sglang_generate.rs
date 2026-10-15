@@ -37,9 +37,7 @@ use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use crate::protocols::response_merge::{
-    PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
-};
+use crate::protocols::response_merge::PrefillNeed;
 use crate::protocols::sglang::generate::SglangGenerateRequest;
 use crate::protocols::sglang::merge::merger;
 use crate::protocols::sglang::stream::SglangGenerateStream;
@@ -209,13 +207,9 @@ fn preprocessed_request(
     let streaming = request.stream;
     let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
     // Hold decode output for prefill only when every streamed chunk needs it.
-    let annotations = match merger().prefill_need(&worker_envelope) {
-        PrefillNeed::None => vec![],
-        PrefillNeed::BeforeFirst if streaming => vec![
-            PREFILL_OUTPUT_ANNOTATION.to_string(),
-            PREFILL_OUTPUT_FIRST_ANNOTATION.to_string(),
-        ],
-        _ => vec![PREFILL_OUTPUT_ANNOTATION.to_string()],
+    let need = match merger().prefill_need(&worker_envelope) {
+        PrefillNeed::BeforeFirst if !streaming => PrefillNeed::BeforeLast,
+        need => need,
     };
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("sglang_tito".to_string(), worker_envelope);
@@ -246,7 +240,7 @@ fn preprocessed_request(
             ..Default::default()
         }))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
-        .annotations(annotations)
+        .annotations(need.annotations())
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -411,9 +405,9 @@ async fn dispatch(
         inflight_guard.mark_error(ErrorType::Cancelled);
         return cancelled_response();
     }
-    let stream = match generate_result {
-        Ok(stream) => stream,
-        Err(error) => {
+    // Errors before the stream and while joining it share one HTTP mapping.
+    let error_response_for =
+        |error: anyhow::Error, inflight_guard: &mut super::metrics::InflightGuard| {
             let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
@@ -464,8 +458,11 @@ async fn dispatch(
                 );
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "SGLang engine generate call failed");
-            return internal_error_response();
-        }
+            internal_error_response()
+        };
+    let stream = match generate_result {
+        Ok(stream) => stream,
+        Err(error) => return error_response_for(error, &mut inflight_guard),
     };
 
     let engine_context = stream.context();
@@ -476,23 +473,7 @@ async fn dispatch(
                 inflight_guard.mark_ok();
                 Json(response).into_response()
             }
-            Some(Err(error)) => {
-                let (error_type, body) = stream_error(&error);
-                if error_type == ErrorType::Internal {
-                    tracing::error!(%request_id, %error, "SGLang generate stream failed");
-                }
-                let status = match error_type {
-                    ErrorType::Validation => StatusCode::BAD_REQUEST,
-                    ErrorType::Overload | ErrorType::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-                    ErrorType::Cancelled => {
-                        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST)
-                    }
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                inflight_guard.mark_error(error_type);
-                let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
-                (status, json, body).into_response()
-            }
+            Some(Err(error)) => error_response_for(error.into(), &mut inflight_guard),
             _ => {
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 cancelled_response()
