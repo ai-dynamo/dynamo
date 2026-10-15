@@ -15,12 +15,12 @@
 #   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
 #   - Group 1 (general):     dynamo runtime, planner, frontend,
 #                            operator, snapshot, power-agent  (cuda13.0 base)
-#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa      (cuda13.1 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa, Triton (cuda13.1 base)
 #
 # Groups follow the dynamo_base image tag, not the framework: that is where the
 # rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
-# runtime_wheel_builder are shared by every build kind. TRT-LLM is the only
-# build on a different base, so it gets its own group. vLLM and SGLang share
+# runtime_wheel_builder are shared by every build kind. TRT-LLM and Triton share
+# the cuda13.1 base, so they use one group. vLLM and SGLang share
 # one because their build filters differ, and a dedicated pool for either would
 # idle whenever only the other changed.
 #
@@ -59,7 +59,7 @@ set -e
 ARCH_INPUT=""
 FLAVOR_INPUT=""
 CUDA_VERSION=""
-ALL_FLAVORS=("vllm" "trtllm" "sglang" "general")
+ALL_FLAVORS=("vllm" "trtllm" "sglang" "triton" "general")
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <13.0|13.1>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|triton|general|all> [--cuda <13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -88,7 +88,7 @@ if [ -z "$ARCH_INPUT" ]; then
 fi
 
 if [ -z "$FLAVOR_INPUT" ]; then
-  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|general|all>."
+  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|triton|general|all>."
   exit 1
 fi
 
@@ -117,9 +117,9 @@ esac
 
 # Validate flavor input
 case $FLAVOR_INPUT in
-  vllm|trtllm|sglang|general|all) ;;
+  vllm|trtllm|sglang|triton|general|all) ;;
   *)
-    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, general, or all."
+    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, triton, general, or all."
     exit 1
     ;;
 esac
@@ -157,7 +157,7 @@ PORT="1234"
 # Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
 # maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
 # never discovered and sit idle while builds queue on the pods below it.
-MAX_POD_CHECK=${MAX_POD_CHECK:-16}
+MAX_POD_CHECK=${MAX_POD_CHECK:-25}
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
@@ -204,7 +204,7 @@ flavor_to_group() {
   local flavor=$1
   case "$flavor" in
     vllm|sglang) echo 0 ;;
-    trtllm) echo 2 ;;
+    trtllm|triton) echo 2 ;;
     general|*) echo 1 ;;
   esac
 }

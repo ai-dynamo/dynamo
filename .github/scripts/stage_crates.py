@@ -195,13 +195,25 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
     publish rejects deps without a registry version, and a git dep — including a
     versioned dep redirected by [patch.crates-io] — can't resolve faithfully for
     a registry consumer. Only optional deps are dropped (non-optional is a hard
-    error); the feature KEY is kept (emptied) so `<crate>/<feature>` refs resolve."""
-    git_names = set(
-        re.findall(
-            r"(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=",
-            (root / "Cargo.toml").read_text(),
-        )
-    )
+    error); the feature KEY is kept (emptied) so `<crate>/<feature>` refs resolve.
+    A non-optional `workspace = true` dep that is only [patch]-overridden (not
+    declared as a git dep) keeps its registry requirement: dropping it would
+    leave the crate uncompilable."""
+    git_names: set[str] = set()
+    patched_only: set[str] = set()
+    section = ""
+    for line in (root / "Cargo.toml").read_text().splitlines():
+        h = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+        if h:
+            section = h.group(1).strip()
+            continue
+        g = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=", line)
+        if g:
+            (patched_only if section.startswith("patch.") else git_names).add(
+                g.group(1)
+            )
+    patched_only -= git_names
+    git_names |= patched_only
     if not git_names:
         return
     for mp in manifests:
@@ -214,6 +226,10 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
                 or (
                     m.group(1) in git_names
                     and re.search(r"\bworkspace\s*=\s*true", m.group(2))
+                    and not (
+                        m.group(1) in patched_only
+                        and not re.search(r"\boptional\s*=\s*true", m.group(2))
+                    )
                 )
             ):
                 removed.add(m.group(1))

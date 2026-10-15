@@ -133,6 +133,7 @@ define_dynamo_exceptions!(
     (Cancelled, BackendError::Cancelled),
     (EngineShutdown, BackendError::EngineShutdown),
     (StreamIncomplete, BackendError::StreamIncomplete),
+    (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
 
 /// Preserve explicitly public validation errors across Rust-to-Python streams.
