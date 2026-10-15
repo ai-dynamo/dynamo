@@ -34,9 +34,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
-    protocols::response_merge::{
-        PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
-    },
+    protocols::response_merge::PrefillNeed,
     session_affinity::{AffinityTarget, SessionAffinityMode},
 };
 
@@ -615,15 +613,7 @@ impl
             self.conditional_disagg_policy.is_enabled(),
         ));
 
-        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
-        let output = match (
-            annotated(PREFILL_OUTPUT_ANNOTATION),
-            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
-        ) {
-            (false, _) => PrefillNeed::None,
-            (true, false) => PrefillNeed::BeforeLast,
-            (true, true) => PrefillNeed::BeforeFirst,
-        };
+        let output = PrefillNeed::from_request(&decode_req);
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
             Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,

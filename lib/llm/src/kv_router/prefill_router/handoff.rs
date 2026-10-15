@@ -99,19 +99,23 @@ impl PrefillTask {
         request_context: Arc<dyn AsyncEngineContext>,
         output: PrefillNeed,
     ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let hold_decode = output == PrefillNeed::BeforeFirst;
         let emit = output != PrefillNeed::None;
-        let mut completion = Box::pin(self.wait());
+        let mut completion = Box::pin(async move {
+            let prefill = self.wait().await?;
+            Ok::<_, PrefillError>(emit.then(|| output_item(prefill)).flatten())
+        });
         tokio::pin!(decode);
         let mut response = tokio::select! {
             biased;
             result = &mut completion => {
-                let prefill = result.inspect_err(|_| request_context.stop_generating())?;
+                let item = result.inspect_err(|_| request_context.stop_generating())?;
                 let response = decode.await?;
-                if !emit {
+                let Some(item) = item else {
                     return Ok(response);
-                }
+                };
                 let context = response.context();
-                let stream = stream::iter(output_item(prefill)).chain(response);
+                let stream = stream::iter([item]).chain(response);
                 return Ok(ResponseStream::new(Box::pin(stream), context));
             }
             result = &mut decode => result?,
@@ -121,31 +125,14 @@ impl PrefillTask {
         let context = response.context();
         let stream_context = context.clone();
         let stream = async_stream::stream! {
-            if output == PrefillNeed::BeforeFirst {
-                match completion.as_mut().await {
-                    Ok(output) => {
-                        if let Some(item) = output_item(output) {
-                            yield item;
-                        }
-                    }
-                    Err(error) => {
-                        request_context.stop_generating();
-                        stream_context.stop_generating();
-                        yield Annotated::from_err(error);
-                        return;
-                    }
-                }
-                while let Some(output) = response.next().await {
-                    yield output;
-                }
-                return;
-            }
+            // Decode's end (`None` when its stream ended), held for prefill.
+            let mut end = None;
             loop {
                 tokio::select! {
                     biased;
                     result = &mut completion => {
                         match result {
-                            Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
+                            Ok(item) => if let Some(item) = item {
                                 yield item;
                             },
                             Err(error) => {
@@ -155,45 +142,29 @@ impl PrefillTask {
                                 return;
                             }
                         }
-                        while let Some(output) = response.next().await {
-                            yield output;
+                        match end {
+                            Some(end) => if let Some(end) = end {
+                                yield end;
+                            },
+                            None => while let Some(output) = response.next().await {
+                                yield output;
+                            },
                         }
                         return;
                     }
-                    output = response.next() => {
-                        if output.as_ref().is_some_and(|output| {
-                            output.err().is_some() || matches!(
-                                output.data.as_ref().and_then(|data| data.finish_reason.as_ref()),
-                                Some(FinishReason::Error(_) | FinishReason::Cancelled)
-                            )
-                        }) {
-                            yield output.unwrap();
+                    output = response.next(), if !hold_decode && end.is_none() => match output {
+                        Some(output) if output.err().is_some() || matches!(
+                            output.data.as_ref().and_then(|data| data.finish_reason.as_ref()),
+                            Some(FinishReason::Error(_) | FinishReason::Cancelled)
+                        ) => {
+                            yield output;
                             return;
                         }
-                        let terminal = output.as_ref().is_none_or(|output| {
-                            output.data.as_ref().is_some_and(|data| data.finish_reason.is_some())
-                        });
-                        if terminal {
-                            match completion.as_mut().await {
-                                Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
-                                    yield item;
-                                },
-                                Err(error) => {
-                                    request_context.stop_generating();
-                                    stream_context.stop_generating();
-                                    yield Annotated::from_err(error);
-                                    return;
-                                }
-                            }
+                        Some(output) if output.data.as_ref().is_none_or(|data| data.finish_reason.is_none()) => {
+                            yield output;
                         }
-                        match output {
-                            Some(output) => yield output,
-                            None => return,
-                        }
-                        if terminal {
-                            return;
-                        }
-                    }
+                        output => end = Some(output),
+                    },
                 }
             }
         };

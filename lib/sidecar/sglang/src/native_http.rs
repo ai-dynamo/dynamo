@@ -8,6 +8,7 @@ use std::{collections::HashMap, io, time::Duration};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
+use dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
@@ -23,8 +24,6 @@ use crate::{client, client::Discovery, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
-/// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
-const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 
 pub(crate) struct NativeRequest {
     body: Value,
@@ -130,10 +129,7 @@ pub(crate) fn request(
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
         prefill_handoff,
-        keep_prefill_output: request
-            .annotations
-            .iter()
-            .any(|a| a == PREFILL_OUTPUT_ANNOTATION),
+        keep_prefill_output: request.has_annotation(PREFILL_OUTPUT_ANNOTATION),
     }))
 }
 
@@ -473,8 +469,8 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, output, request, response_error,
-        response_has_output,
+        NativeHttp, NativeRequest, PREFILL_OUTPUT_ANNOTATION, authentication_error, output,
+        request, response_error, response_has_output,
     };
     use crate::client::Discovery;
 
@@ -981,7 +977,7 @@ mod tests {
     async fn annotated_prefill_keeps_its_final_native_response() {
         let mut canonical = canonical_request();
         canonical.extra_args = Some(json!({"sglang_tito": {}}));
-        canonical.annotations = vec![super::PREFILL_OUTPUT_ANNOTATION.to_string()];
+        canonical.annotations = vec![PREFILL_OUTPUT_ANNOTATION.to_string()];
         let mode = DisaggregationMode::Prefill;
         let native = request(&canonical, "rid", mode, Some("prefill"), Some(5000));
         let native = native.unwrap().unwrap();

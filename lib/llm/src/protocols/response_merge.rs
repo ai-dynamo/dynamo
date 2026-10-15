@@ -15,6 +15,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::protocols::common::preprocessor::PreprocessedRequest;
+
 /// Request annotation asking the prefill router to send prefill's final
 /// `engine_data` into the decode stream, in an item with this event name. It
 /// arrives before decode's final output.
@@ -30,6 +32,30 @@ pub enum PrefillNeed {
     BeforeLast,
     /// Every chunk carries prefill's values.
     BeforeFirst,
+}
+
+impl PrefillNeed {
+    /// The request annotations that carry this need to the prefill router.
+    pub fn annotations(self) -> Vec<String> {
+        let names: &[&str] = match self {
+            Self::None => &[],
+            Self::BeforeLast => &[PREFILL_OUTPUT_ANNOTATION],
+            Self::BeforeFirst => &[PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION],
+        };
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// Inverse of [`Self::annotations`].
+    pub fn from_request(request: &PreprocessedRequest) -> Self {
+        match (
+            request.has_annotation(PREFILL_OUTPUT_ANNOTATION),
+            request.has_annotation(PREFILL_OUTPUT_FIRST_ANNOTATION),
+        ) {
+            (false, _) => Self::None,
+            (true, false) => Self::BeforeLast,
+            (true, true) => Self::BeforeFirst,
+        }
+    }
 }
 
 pub trait ResponseMerger: Send + Sync {
