@@ -26,17 +26,13 @@ data:
     part-1
     part-1
     part-1
-  topologies: |-
-    opaque-v3-topology
-    opaque-v3-topology
-    opaque-v3-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+  name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
   namespace: test
 ---
 metadata:
@@ -54,7 +50,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:70b8c66242a0c348fd6169ffc49ce9ca0a038a42f3d75943d2580a2089844080
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:524a4abff1d23c130dd2b320e06972f95d9a3df4f717eff0c10f638a6238b1c2
         scheduling.lpu.nvidia.com/model: draft0
@@ -200,13 +196,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
             name: config
         replicas: 1
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:70b8c66242a0c348fd6169ffc49ce9ca0a038a42f3d75943d2580a2089844080
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:91b843092138d3d7e3d623edb803294cf765d7def7c52ae7d23841b2e07ac9b8
         scheduling.lpu.nvidia.com/model: draft1
@@ -352,13 +348,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
             name: config
         replicas: 1
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:70b8c66242a0c348fd6169ffc49ce9ca0a038a42f3d75943d2580a2089844080
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f876cb93a8ba9492e499358ba7a37d9eabd4e67ce068c16b0957a57345e6a066
         scheduling.lpu.nvidia.com/model: target
@@ -504,13 +500,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
             name: config
         replicas: 1
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7433f8e5f691483f29022ee048c4d0623f3fee5e4842750c99c8257ac3bf36d5
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -700,7 +696,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
             name: config
         replicas: 1
         roleName: cond

@@ -68,7 +68,7 @@ func buildXTPartition(subject, topology string, raw interface {
 	if numChips > devicesPerNode && numChips%devicesPerNode != 0 {
 		return BuildPartition{}, fmt.Errorf("%s has %d chips, not divisible by %d LPU devices per node", subject, numChips, devicesPerNode)
 	}
-	return BuildPartition{Topology: Topology{Raw: topology, ChipCount: numChips}, DevicesPerNode: devicesPerNode}, nil
+	return BuildPartition{topology: topology, NumChips: numChips, DevicesPerNode: devicesPerNode}, nil
 }
 
 type lpuTopologyMetadata interface {
@@ -91,9 +91,9 @@ func buildHXPartition[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](subject,
 	if err != nil {
 		return BuildPartition{}, err
 	}
-	partition := BuildPartition{Topology: Topology{Raw: topology, ChipCount: int(raw.NumChips())}, DevicesPerNode: devicesPerNode}
+	partition := BuildPartition{topology: topology, NumChips: int(raw.NumChips()), DevicesPerNode: devicesPerNode}
 	if !raw.HasTopologyMetadata() {
-		chips := partition.Topology.ChipCount
+		chips := partition.NumChips
 		if chips <= 0 || chips > devicesPerNode || devicesPerNode%chips != 0 {
 			return BuildPartition{}, fmt.Errorf("V3 %s without topologyMetadata requires a one-node stage whose chip count divides %d", subject, devicesPerNode)
 		}

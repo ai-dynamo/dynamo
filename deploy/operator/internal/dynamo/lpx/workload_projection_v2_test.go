@@ -109,8 +109,8 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	suffix.SourcePartitionID, suffix.PartPath = 11, "part-11"
 	build.Partitions = append([]BuildPartition{prefix}, append(build.Partitions, suffix)...)
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
-	build.Partitions[1].Topology.Raw = " stage-a "
-	build.Partitions[2].Topology.Raw = "stage-b"
+	build.Partitions[1].topology = " stage-a "
+	build.Partitions[2].topology = "stage-b"
 
 	t.Log("Project the compiler-selected chain")
 	projection := projectTestBuild(t, normalized, PipelineSingle)
@@ -125,7 +125,8 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	require.Equal(t, spec.Partitions[1].ID, spec.PropSyncConnectors[0].ToPartitionID)
 
 	t.Log("Forward the selected stages' opaque names unchanged")
-	require.Equal(t, " stage-a \nstage-b", resolvedPartitionData([]*ModelProjection{projection})["topologies"])
+
+	require.NotContains(t, resolvedPartitionData([]*ModelProjection{projection}), "topologies")
 }
 
 func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T) {
@@ -134,8 +135,10 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	build := normalized.build
 
 	t.Log("Use individually schedulable physical shapes whose collapsed runtime total is not a scheduler shape")
-	build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
-	build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
+	build.Partitions[0].topology = "stage-a"
+	build.Partitions[0].NumChips = 8
+	build.Partitions[1].topology = "stage-b"
+	build.Partitions[1].NumChips = 64
 	third := build.Partitions[1]
 	third.SourcePartitionID = 11
 	third.PartPath = "part-11"
@@ -158,11 +161,12 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	require.Equal(t, "9\n8", data["nodes_per_partition"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
 	require.Equal(t, "part-7\npart-11", data["partition_paths"])
-	require.Equal(t, "stage-a\nstage-b", data["topologies"])
+
+	require.NotContains(t, data, "topologies")
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, 17, projection.agentReplicas)
 	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
-	require.Equal(t, 8, build.Partitions[0].Topology.ChipCount)
+	require.Equal(t, 8, build.Partitions[0].NumChips)
 
 	t.Log("Preserve physical output order when selected chains are declared in reverse")
 	fourth := build.Partitions[2]
@@ -190,7 +194,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 		partitions[sourceID] = build.Partitions[0]
 		partitions[sourceID].SourcePartitionID = sourceID
 		partitions[sourceID].PartPath = fmt.Sprintf("part-%d", sourceID)
-		partitions[sourceID].Topology.ChipCount = 8
+		partitions[sourceID].NumChips = 8
 	}
 	build.Partitions = partitions
 	build.SelectedPropSyncChains = [][]int{{0, 1, 2}}
@@ -212,7 +216,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	require.Equal(t, "0", data["partition_ids"])
 	require.Equal(t, "3", data["nodes_per_partition"])
 	require.Equal(t, "part-0", data["partition_paths"])
-	require.Equal(t, build.Partitions[0].Topology, projection.configuredBuild.Partitions[0].Topology)
+	require.Equal(t, build.Partitions[0].NumChips, projection.configuredBuild.Partitions[0].NumChips)
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, [][]int{{0, 1, 2}}, build.SelectedPropSyncChains)
 }
@@ -225,7 +229,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	build := normalized.build
 
 	for index := range build.Partitions {
-		build.Partitions[index].Topology.ChipCount = 2
+		build.Partitions[index].NumChips = 2
 	}
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
 
@@ -241,7 +245,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	require.Equal(t, "2", data["nodes_per_partition"])
 	require.Equal(t, "0", data["partition_node_offsets"])
 	require.Equal(t, 2, projection.configuredBuild.Partitions[0].effectiveNodeCount())
-	require.Equal(t, build.Partitions[0].Topology, projection.configuredBuild.Partitions[0].Topology)
+	require.Equal(t, build.Partitions[0].NumChips, projection.configuredBuild.Partitions[0].NumChips)
 }
 
 func TestBuildRejectsInvalidRuntimeSelectedPropSyncChain(t *testing.T) {
