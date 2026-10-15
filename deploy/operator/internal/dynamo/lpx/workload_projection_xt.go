@@ -13,10 +13,10 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
-const v2ProjectionVersion = "v2-xt-node-local/v1"
+const xtProjectionVersion = "xt-node-local/v1"
 
-//nolint:gocyclo // V2 projection validates one complete transformation.
-func projectV2Component(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
+//nolint:gocyclo // XT projection validates one complete transformation.
+func projectXTComponent(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
 	configured := *intent.Build
 	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
 		intent.Pipeline == PipelineSpecDecode
@@ -26,7 +26,7 @@ func projectV2Component(intent ModelProjectionInput, transcript digestTranscript
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
 	if usesResolvedRuntime {
 		if err := configured.selectXTRuntimePartitions(); err != nil {
-			return ModelProjection{}, fmt.Errorf("resolving configured V2 build: %w", err)
+			return ModelProjection{}, fmt.Errorf("resolving configured XT build: %w", err)
 		}
 	}
 
@@ -67,7 +67,7 @@ func projectV2Component(intent ModelProjectionInput, transcript digestTranscript
 		transcript.field("xt-shape", []byte(shape))
 	}
 
-	connectors, err := v2Connectors(connectorBuild, partitions)
+	connectors, err := xtConnectors(connectorBuild, partitions)
 	if err != nil {
 		return ModelProjection{}, err
 	}
@@ -126,11 +126,11 @@ func xtShape(partition buildPartition) (lpxv1alpha1.Xt8888PartitionShape, error)
 	}
 }
 
-// v2Connectors validates source chains before emitting edges between reservations.
+// xtConnectors validates source chains before emitting edges between reservations.
 // build is normalized and nonnil; partitions holds the retained reservations in
 // build order. An edge is emitted only when both endpoints are retained, so a
 // packed chain's non-root members and GPU-local partitions produce no edge.
-func v2Connectors(
+func xtConnectors(
 	build *Build,
 	partitions []buildPartition,
 ) ([]lpxv1alpha1.PropSyncConnectorRequest, error) {

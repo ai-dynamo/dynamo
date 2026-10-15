@@ -102,7 +102,7 @@ func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 		{
 			name:       "missing edge evidence precedes overlap validation",
 			partitions: 2, chains: [][]uint32{{1, 1}, {1, 3}},
-			wantErr: "selected V3 prop-sync chain 1 references missing partition ID 3",
+			wantErr: "selected HX prop-sync chain 1 references missing partition ID 3",
 		},
 		{
 			name:       "selected prop-sync chains overlap",
@@ -148,7 +148,7 @@ func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 }
 
 func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
-	t.Log("Create a two-partition V3 build with one selected adjacent prop-sync chain")
+	t.Log("Create a two-partition HX build with one selected adjacent prop-sync chain")
 	fixture := newV3CompilerFixture()
 	second := fixture.partitions[0]
 	second.id = 2
@@ -227,7 +227,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 }
 
 func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
-	t.Log("Create adjacent V3 partitions whose source boundary begins at logical device 16")
+	t.Log("Create adjacent HX partitions whose source boundary begins at logical device 16")
 	fixture := newV3CompilerFixture()
 	second := fixture.partitions[0]
 	second.id = 2
@@ -252,7 +252,7 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 }
 
 func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T) {
-	t.Log("Create and project a one-node V3 topology-metadata manifest")
+	t.Log("Create and project a one-node HX topology-metadata manifest")
 	fixture := newV3CompilerFixture()
 	fixture.partitions[0].topology = v3HXTopologyFamily
 	fixture.partitions[0].topologyFamily = v3HXTopologyFamily
