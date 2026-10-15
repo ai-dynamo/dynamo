@@ -52,9 +52,14 @@ python -m dynamo.frontend \
 > [!WARNING]
 > Set `--router-predicted-ttl-secs` lower than the end-to-end time of one request. Start at about 1 second. A larger value makes the router use its own predictions instead of real KV events.
 
-The predicted-placement window covers one gap only. This gap is the delay between sibling requests as they arrive at the frontend over HTTP. The window is not a cache lifetime.
+The predicted-placement window covers one gap only. This gap starts at the first routing decision for a prefix. It ends when the engine publishes a usable KV event for that prefix. Sibling requests that arrive at the frontend over HTTP in this gap use the prediction. The window is not a cache lifetime.
 
-Each routing decision resets the timer for the prefix blocks that it records. If the window is longer than the time between batches or turns, these predictions never expire. The router then routes on its own predictions and does not see evictions. This behavior is approximate routing.
+Use these two limits to set the value:
+
+- Lower limit: the delay from a routing decision to the first usable KV event. If the TTL is shorter, later siblings lose the predicted placement.
+- Upper limit: the end-to-end time of one request.
+
+Each routing decision resets the timer for the prefix blocks that it records. A prediction stays alive while requests with the same prefix arrive more often than the TTL. A short TTL only limits how long a prediction lives after the last of these requests. If the TTL is longer than the time between batches or turns, the predictions never expire. The router then routes on its own predictions and does not see evictions. This behavior is approximate routing.
 
 Confirm that equivalent prompts use the same model, tokenizer, cache salt, LoRA identity, and token sequence. The router cannot recover reuse that the request representation hides.
 
