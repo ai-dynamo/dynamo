@@ -21,12 +21,16 @@ use prometheus::{
 };
 use serde::Serialize;
 use std::{
-    sync::{Arc, LazyLock, OnceLock},
+    collections::HashMap,
+    sync::{
+        Arc, LazyLock, OnceLock,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
     time::{Duration, Instant},
 };
 
 use crate::discovery::ModelManager;
-use crate::frontend_load::{FrontendLoadTracker, RequestOutcome, TrackedRequest};
+use crate::frontend_load::{FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -35,6 +39,7 @@ use crate::protocols::{
 };
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+use dynamo_runtime::{engine::Data, pipeline::Context};
 
 use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 
@@ -622,7 +627,13 @@ struct MetricsHandlerState {
 }
 
 pub struct Metrics {
-    frontend_load: Arc<FrontendLoadTracker>,
+    load_incarnation: u64,
+    load_sequence: AtomicU64,
+    requests_awaiting_first_token: IntGaugeVec,
+    requests_generating: IntGaugeVec,
+    awaiting_first_token_input_tokens: IntGaugeVec,
+    inflight_input_tokens: IntGaugeVec,
+    input_tokens_counter: IntCounterVec,
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
     /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
@@ -684,7 +695,7 @@ pub struct HttpQueueGuard {
 /// the counter with `status` label [`frontend_service::status::SUCCESS`]
 pub struct InflightGuard {
     metrics: Arc<Metrics>,
-    tracked: TrackedRequest,
+    request: Arc<RequestMetrics>,
     model: String,
     endpoint: Endpoint,
     request_type: RequestType,
@@ -693,6 +704,137 @@ pub struct InflightGuard {
     timer: Instant,
     request_id: String,
     span: tracing::Span,
+}
+
+// Shared by the guard, tokenization, and response collector. The metric handles
+// point to the same counters exposed by Prometheus; only request progress is local.
+pub(crate) struct RequestMetrics {
+    // Prompt tokens and phase flags transition together; gauge deltas may arrive
+    // out of order across pipeline tasks, so gauges are signed and samples clamp.
+    state: AtomicU64,
+    requests_awaiting_first_token: prometheus::IntGauge,
+    requests_generating: prometheus::IntGauge,
+    awaiting_first_token_input_tokens: prometheus::IntGauge,
+    inflight_input_tokens: prometheus::IntGauge,
+    input_tokens: prometheus::IntCounter,
+    output_tokens: prometheus::IntCounter,
+}
+
+const REQUEST_METRICS_KEY: &str = "frontend.request_metrics";
+const FINISHED: u64 = 1 << 63;
+const GENERATING: u64 = 1 << 62;
+const INPUT_TOKENS: u64 = GENERATING - 1;
+
+impl RequestMetrics {
+    fn new(metrics: &Metrics, model: &str) -> Self {
+        let labels = &[model];
+        let requests_awaiting_first_token = metrics
+            .requests_awaiting_first_token
+            .with_label_values(labels);
+        requests_awaiting_first_token.inc();
+        Self {
+            state: AtomicU64::new(0),
+            requests_awaiting_first_token,
+            requests_generating: metrics.requests_generating.with_label_values(labels),
+            awaiting_first_token_input_tokens: metrics
+                .awaiting_first_token_input_tokens
+                .with_label_values(labels),
+            inflight_input_tokens: metrics.inflight_input_tokens.with_label_values(labels),
+            input_tokens: metrics.input_tokens_counter.with_label_values(labels),
+            output_tokens: metrics.output_tokens_counter.with_label_values(labels),
+        }
+    }
+
+    pub(crate) fn attach_to<T: Data>(self: &Arc<Self>, context: &mut Context<T>) {
+        context.insert_shared(REQUEST_METRICS_KEY, self.clone());
+    }
+
+    pub(crate) fn from_context<T: Data>(context: &Context<T>) -> Option<Arc<Self>> {
+        context
+            .get_optional(REQUEST_METRICS_KEY)
+            .expect("request metrics have a fixed registry type")
+    }
+
+    /// Count a prompt of `tokens` tokens as soon as it is tokenized. A batched
+    /// completion request reports each of its prompts.
+    pub(crate) fn add_input_tokens(&self, tokens: usize) {
+        self.update_input_tokens(|known| known.saturating_add(tokens as u64));
+    }
+
+    /// Report the request's whole prompt size from a response annotation, which
+    /// repeats it on every chunk. Never lowers the known size, so it neither
+    /// double counts nor undoes [`add_input_tokens`](Self::add_input_tokens).
+    pub(crate) fn observe_input_tokens(&self, tokens: usize) {
+        self.update_input_tokens(|known| known.max(tokens as u64));
+    }
+
+    fn update_input_tokens(&self, input_tokens: impl Fn(u64) -> u64) {
+        let mut added = 0;
+        let Ok(previous) = self.state.fetch_update(Relaxed, Relaxed, |state| {
+            if state & FINISHED != 0 {
+                return None;
+            }
+            let known = state & INPUT_TOKENS;
+            added = input_tokens(known).min(INPUT_TOKENS).saturating_sub(known);
+            (added > 0).then_some(state + added)
+        }) else {
+            return;
+        };
+        self.input_tokens.inc_by(added);
+        let added = added as i64;
+        self.inflight_input_tokens.add(added);
+        if previous & GENERATING == 0 {
+            self.awaiting_first_token_input_tokens.add(added);
+        }
+    }
+
+    /// Count `tokens` newly generated output tokens (a delta, not a total). The
+    /// first output token moves the request from awaiting to generating.
+    pub(crate) fn add_output_tokens(&self, tokens: usize) {
+        let state = self.state.load(Relaxed);
+        if tokens == 0 || state & FINISHED != 0 {
+            return;
+        }
+        self.output_tokens.inc_by(tokens as u64);
+        if state & GENERATING != 0 {
+            return;
+        }
+        let previous = self.state.fetch_or(GENERATING, Relaxed);
+        if previous & (GENERATING | FINISHED) != 0 {
+            return;
+        }
+        let input = (previous & INPUT_TOKENS) as i64;
+        self.requests_awaiting_first_token.dec();
+        self.awaiting_first_token_input_tokens.sub(input);
+        self.requests_generating.inc();
+    }
+
+    /// Stop tracking the request. Only the first call on any clone counts.
+    fn finish(&self) {
+        let previous = self.state.fetch_or(FINISHED, Relaxed);
+        if previous & FINISHED != 0 {
+            return;
+        }
+        let input = (previous & INPUT_TOKENS) as i64;
+        self.inflight_input_tokens.sub(input);
+        if previous & GENERATING != 0 {
+            self.requests_generating.dec();
+        } else {
+            self.requests_awaiting_first_token.dec();
+            self.awaiting_first_token_input_tokens.sub(input);
+        }
+    }
+}
+
+// Read the integer counter handles, not the exported f64 samples, so load totals
+// remain exact even after a counter exceeds 2^53.
+fn metric_label<'a>(metric: &'a Metric, name: &str) -> &'a str {
+    metric
+        .get_label()
+        .iter()
+        .find(|label| label.name() == name)
+        .expect("frontend metrics have fixed labels")
+        .value()
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -770,6 +912,16 @@ enum RequestCompletion {
 }
 
 impl RequestCompletion {
+    fn from_labels(status: &str, error: &str) -> Self {
+        if status == Status::Success.as_str() {
+            Self::Success
+        } else if error == ErrorType::Cancelled.as_str() {
+            Self::Cancelled
+        } else {
+            Self::Error
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -805,14 +957,13 @@ pub enum ErrorType {
 /// Track response-specific metrics
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
-    tracked: TrackedRequest,
+    request: Arc<RequestMetrics>,
     model: String,
     // Per-model metric handles cached for the request. Most are resolved at construction;
     // ITL is resolved lazily on its first observation so requests that never produce ITL
     // do not allocate a local histogram. Caching avoids re-hashing the `model` label on
     // every chunk or output token. Each handle shares the underlying metric with its vec,
     // so observations are equivalent.
-    output_tokens_counter: prometheus::IntCounter,
     time_to_first_token: prometheus::Histogram,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
     itl_pending_tokens: u64,
@@ -955,6 +1106,51 @@ impl Metrics {
             );
         }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
+
+        let requests_awaiting_first_token = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::REQUESTS_AWAITING_FIRST_TOKEN),
+                "Admitted requests awaiting their first output token",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let requests_generating = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::REQUESTS_GENERATING),
+                "Inflight requests that have produced output tokens",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let awaiting_first_token_input_tokens = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::AWAITING_FIRST_TOKEN_INPUT_TOKENS),
+                "Known prompt tokens in requests awaiting their first output token",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let inflight_input_tokens = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::INFLIGHT_INPUT_TOKENS),
+                "Known prompt tokens in all inflight requests",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let input_tokens_counter = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::INPUT_TOKENS_TOTAL),
+                "Total known input tokens of admitted requests",
+            ),
+            &["model"],
+        )
+        .unwrap();
 
         let request_counter = IntCounterVec::new(
             Opts::new(
@@ -1316,7 +1512,13 @@ impl Metrics {
         .unwrap();
 
         Metrics {
-            frontend_load: Arc::default(),
+            load_incarnation: rand::random(),
+            load_sequence: AtomicU64::new(0),
+            requests_awaiting_first_token,
+            requests_generating,
+            awaiting_first_token_input_tokens,
+            inflight_input_tokens,
+            input_tokens_counter,
             request_started_counter,
             request_counter,
             inflight_gauge,
@@ -1476,6 +1678,11 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.requests_awaiting_first_token.clone()))?;
+        registry.register(Box::new(self.requests_generating.clone()))?;
+        registry.register(Box::new(self.awaiting_first_token_input_tokens.clone()))?;
+        registry.register(Box::new(self.inflight_input_tokens.clone()))?;
+        registry.register(Box::new(self.input_tokens_counter.clone()))?;
         registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
@@ -1695,8 +1902,93 @@ impl Metrics {
         )
     }
 
-    pub(crate) fn frontend_load(&self) -> &Arc<FrontendLoadTracker> {
-        &self.frontend_load
+    /// Snapshot existing metric handles; counters are never reset by publication.
+    pub(crate) fn frontend_load(
+        &self,
+        frontend_instance_id: u64,
+        is_serving_ready: bool,
+        models: Vec<crate::discovery::CommittedModelView>,
+    ) -> FrontendLoadFrame {
+        let mut totals = HashMap::<String, RequestTotals>::new();
+        for family in self.request_started_counter.collect() {
+            for metric in family.get_metric() {
+                let model = metric_label(metric, "model");
+                let count = self
+                    .request_started_counter
+                    .with_label_values(&[
+                        model,
+                        metric_label(metric, "endpoint"),
+                        metric_label(metric, "request_type"),
+                    ])
+                    .get();
+                let total = &mut totals.entry(model.to_owned()).or_default().requests_started;
+                *total = total.saturating_add(count);
+            }
+        }
+        for family in self.request_counter.collect() {
+            for metric in family.get_metric() {
+                let model = metric_label(metric, "model");
+                let status = metric_label(metric, "status");
+                let error = metric_label(metric, "error_type");
+                let count = self
+                    .request_counter
+                    .with_label_values(&[
+                        model,
+                        metric_label(metric, "endpoint"),
+                        metric_label(metric, "request_type"),
+                        status,
+                        error,
+                    ])
+                    .get();
+                let totals = totals.entry(model.to_owned()).or_default();
+                let total = match RequestCompletion::from_labels(status, error) {
+                    RequestCompletion::Success => &mut totals.requests_completed,
+                    RequestCompletion::Cancelled => &mut totals.requests_cancelled,
+                    RequestCompletion::Error => &mut totals.requests_failed,
+                };
+                *total = total.saturating_add(count);
+            }
+        }
+        let models = models
+            .into_iter()
+            .map(|view| {
+                let mut load = FrontendModelLoad {
+                    model: view.name,
+                    aliases: view.aliases,
+                    ..Default::default()
+                };
+                for name in std::iter::once(&load.model).chain(&load.aliases) {
+                    let labels = &[name.as_str()];
+                    let gauge = |family: &IntGaugeVec| {
+                        u64::try_from(family.with_label_values(labels).get()).unwrap_or(0)
+                    };
+                    load.gauges.add(&RequestGauges {
+                        requests_awaiting_first_token: gauge(&self.requests_awaiting_first_token),
+                        requests_generating: gauge(&self.requests_generating),
+                        awaiting_first_token_input_tokens: gauge(
+                            &self.awaiting_first_token_input_tokens,
+                        ),
+                        inflight_input_tokens: gauge(&self.inflight_input_tokens),
+                    });
+                    if let Some(total) = totals.get(name) {
+                        load.totals.add(total);
+                    }
+                    load.totals.add(&RequestTotals {
+                        input_tokens: self.input_tokens_counter.with_label_values(labels).get(),
+                        output_tokens: self.output_tokens_counter.with_label_values(labels).get(),
+                        ..Default::default()
+                    });
+                }
+                load
+            })
+            .collect();
+        FrontendLoadFrame {
+            frontend_instance_id,
+            incarnation: self.load_incarnation,
+            sequence: self.load_sequence.fetch_add(1, Relaxed) + 1,
+            is_serving_ready,
+            models,
+        }
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -1733,7 +2025,7 @@ impl InflightGuard {
         request_id: String,
     ) -> Self {
         let timer = Instant::now();
-        let tracked = metrics.frontend_load.start_request(&model);
+        let request = Arc::new(RequestMetrics::new(&metrics, &model));
         metrics.inc_inflight_gauge(&model);
         metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
@@ -1749,7 +2041,7 @@ impl InflightGuard {
 
         InflightGuard {
             metrics,
-            tracked,
+            request,
             model,
             endpoint,
             request_type,
@@ -1780,8 +2072,8 @@ impl InflightGuard {
         self.timer.elapsed().as_millis()
     }
 
-    pub(crate) fn tracked_request(&self) -> &TrackedRequest {
-        &self.tracked
+    pub(crate) fn request_metrics(&self) -> &Arc<RequestMetrics> {
+        &self.request
     }
 
     /// Create the [`ResponseMetricCollector`] for this request's responses.
@@ -1789,7 +2081,7 @@ impl InflightGuard {
         ResponseMetricCollector::new(
             self.metrics.clone(),
             self.model.clone(),
-            self.tracked.clone(),
+            self.request.clone(),
         )
     }
 
@@ -1804,11 +2096,7 @@ impl InflightGuard {
     }
 
     fn request_completion(&self) -> RequestCompletion {
-        match (&self.status, &self.error_type) {
-            (Status::Success, _) => RequestCompletion::Success,
-            (Status::Error, ErrorType::Cancelled) => RequestCompletion::Cancelled,
-            (Status::Error, _) => RequestCompletion::Error,
-        }
+        RequestCompletion::from_labels(self.status.as_str(), self.error_type.as_str())
     }
 }
 
@@ -1830,11 +2118,7 @@ impl Drop for InflightGuard {
             .observe(duration);
 
         let completion = self.request_completion();
-        self.tracked.finish(match completion {
-            RequestCompletion::Success => RequestOutcome::Completed,
-            RequestCompletion::Cancelled => RequestOutcome::Cancelled,
-            RequestCompletion::Error => RequestOutcome::Failed,
-        });
+        self.request.finish();
         self.span.record("request.outcome", completion.as_str());
 
         let elapsed_ms = (duration * 1000.0) as u64;
@@ -1982,10 +2266,9 @@ impl std::fmt::Display for ErrorType {
 }
 
 impl ResponseMetricCollector {
-    fn new(metrics: Arc<Metrics>, model: String, tracked: TrackedRequest) -> Self {
+    fn new(metrics: Arc<Metrics>, model: String, request: Arc<RequestMetrics>) -> Self {
         // Resolve the per-model handles once (cheap clones of the vec entries) so the
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
-        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
         let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
         let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
@@ -1997,9 +2280,8 @@ impl ResponseMetricCollector {
             .with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
-            tracked,
+            request,
             model,
-            output_tokens_counter,
             time_to_first_token,
             inter_token_latency: None,
             itl_pending_tokens: 0,
@@ -2183,17 +2465,14 @@ impl ResponseMetricCollector {
 
     /// Observe a response with input sequence length and number of new tokens
     pub fn observe_response(&mut self, isl: usize, num_tokens: usize) {
-        self.tracked.observe_input_tokens(isl);
-        self.tracked.add_output_tokens(num_tokens);
+        self.request.observe_input_tokens(isl);
+        self.request.add_output_tokens(num_tokens);
         if num_tokens == 0 {
             return;
         }
 
         // Store ISL for span recording on drop
         self.isl = isl;
-
-        // Increment the real-time output tokens counter
-        self.output_tokens_counter.inc_by(num_tokens as u64);
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
@@ -2638,7 +2917,7 @@ mod tests {
         ResponseMetricCollector::new(
             metrics.clone(),
             model.to_string(),
-            metrics.frontend_load.start_request(model),
+            Arc::new(RequestMetrics::new(metrics, model)),
         )
     }
 
@@ -3246,8 +3525,7 @@ mod tests {
                 name: model.to_string(),
                 aliases: Vec::new(),
             };
-            let mut frame = metrics.frontend_load().next_frame(0, true, vec![view]);
-            frame.models.remove(0)
+            metrics.frontend_load(0, true, vec![view]).models.remove(0)
         };
         let mut inflight =
             metrics
@@ -3274,6 +3552,153 @@ mod tests {
         assert_eq!(finished.totals.requests_completed, 1);
         assert_eq!(finished.totals.input_tokens, 10);
         assert_eq!(finished.totals.output_tokens, 5);
+    }
+
+    #[test]
+    fn frontend_frames_keep_the_metrics_incarnation_across_publications() {
+        let metrics = Metrics::new();
+        let first = metrics.frontend_load(7, true, Vec::new());
+        let second = metrics.frontend_load(7, false, Vec::new());
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(first.incarnation, second.incarnation);
+    }
+
+    #[test]
+    fn frontend_load_reads_existing_counters_and_keeps_integer_precision() {
+        let metrics = Metrics::new();
+        let large_count = (1_u64 << 53) + 1;
+        metrics
+            .request_started_counter
+            .with_label_values(&["uncommitted", "completions", "stream"])
+            .inc();
+        metrics
+            .request_started_counter
+            .with_label_values(&["primary", "completions", "stream"])
+            .inc_by(large_count);
+        metrics
+            .request_counter
+            .with_label_values(&["alias", "embeddings", "unary", "error", "cancelled"])
+            .inc_by(3);
+        metrics
+            .request_counter
+            .with_label_values(&["primary", "completions", "stream", "success", "none"])
+            .inc_by(7);
+        metrics
+            .request_counter
+            .with_label_values(&["primary", "completions", "stream", "error", "internal"])
+            .inc_by(2);
+        metrics
+            .output_tokens_counter
+            .with_label_values(&["alias"])
+            .inc_by(large_count);
+        let frame = metrics.frontend_load(
+            0,
+            true,
+            vec![crate::discovery::CommittedModelView {
+                name: "primary".into(),
+                aliases: vec!["alias".into()],
+            }],
+        );
+        assert_eq!(
+            frame.models[0].totals,
+            RequestTotals {
+                requests_started: large_count,
+                requests_completed: 7,
+                requests_failed: 2,
+                requests_cancelled: 3,
+                output_tokens: large_count,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_request_metrics_ignore_updates_after_guard_finishes() {
+        let metrics = Arc::new(Metrics::new());
+        let mut guard =
+            metrics
+                .clone()
+                .create_inflight_guard("model", Endpoint::Completions, true, "");
+        let request = guard.request_metrics().clone();
+        let mut context = Context::new(());
+        request.attach_to(&mut context);
+        assert!(Arc::ptr_eq(
+            &request,
+            &RequestMetrics::from_context(&context).unwrap()
+        ));
+        request.add_input_tokens(3);
+        request.add_input_tokens(5);
+        request.observe_input_tokens(5);
+        request.observe_input_tokens(3);
+        assert_eq!(
+            metrics
+                .input_tokens_counter
+                .with_label_values(&["model"])
+                .get(),
+            8
+        );
+        guard.mark_error(ErrorType::Cancelled);
+        drop(guard);
+        request.add_input_tokens(9);
+        request.add_output_tokens(1);
+        let frame = metrics.frontend_load(
+            0,
+            true,
+            vec![crate::discovery::CommittedModelView {
+                name: "model".into(),
+                aliases: vec![],
+            }],
+        );
+        assert_eq!(frame.models[0].gauges, RequestGauges::default());
+        assert_eq!(
+            frame.models[0].totals,
+            RequestTotals {
+                requests_started: 1,
+                requests_cancelled: 1,
+                input_tokens: 8,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_gauges_settle_after_concurrent_request_transitions() {
+        let metrics = Arc::new(Metrics::new());
+        for _ in 0..32 {
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard("model", Endpoint::Completions, true, "");
+            let request = guard.request_metrics().clone();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    request.add_input_tokens(7);
+                });
+                scope.spawn(|| {
+                    request.add_output_tokens(1);
+                });
+                scope.spawn(move || drop(guard));
+            });
+        }
+        assert_eq!(
+            metrics.get_request_counter(
+                "model",
+                &Endpoint::Completions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            32
+        );
+        for gauge in [
+            &metrics.requests_awaiting_first_token,
+            &metrics.requests_generating,
+            &metrics.awaiting_first_token_input_tokens,
+            &metrics.inflight_input_tokens,
+        ] {
+            assert_eq!(gauge.with_label_values(&["model"]).get(), 0);
+        }
     }
 
     #[test]

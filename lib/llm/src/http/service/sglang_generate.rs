@@ -402,7 +402,7 @@ async fn dispatch(
         streaming,
         &request_id,
     );
-    let tracked = inflight_guard.tracked_request().clone();
+    let tracked = inflight_guard.request_metrics().clone();
     tracked.add_input_tokens(context.content().token_ids.len());
     let request_context = context.context();
     let generate_result =

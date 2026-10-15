@@ -742,13 +742,13 @@ pub struct HttpService {
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
-    frontend_load_publisher: Option<FrontendLoadPublisher>,
+    frontend_load_target: Option<FrontendLoadTarget>,
 }
 
 /// Where this service publishes frontend load.
 #[derive(Clone)]
-struct FrontendLoadPublisher {
-    runtime: Arc<DistributedRuntime>,
+struct FrontendLoadTarget {
+    runtime: DistributedRuntime,
     namespace: String,
 }
 
@@ -857,7 +857,7 @@ pub struct HttpServiceConfig {
     /// Distributed runtime used by the RL worker discovery API and to publish
     /// frontend load to the KV DC Relay.
     #[builder(default = "None")]
-    runtime: Option<Arc<DistributedRuntime>>,
+    runtime: Option<DistributedRuntime>,
 
     /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
     /// See [`frontend_load_namespace`](crate::frontend_load::frontend_load_namespace).
@@ -1044,15 +1044,15 @@ impl HttpService {
         if !crate::kv_dc_relay::serving_load_publishing_enabled() {
             return;
         }
-        let Some(publisher) = &self.frontend_load_publisher else {
+        let Some(target) = &self.frontend_load_target else {
             return;
         };
         let observer = self.state.service_observer();
         crate::frontend_load::start_frontend_load_publisher(
-            publisher.runtime.clone(),
-            publisher.namespace.clone(),
+            target.runtime.clone(),
+            target.namespace.clone(),
             self.state.manager_clone(),
-            self.state.metrics_clone().frontend_load().clone(),
+            self.state.metrics_clone(),
             move || observer.is_ready(),
             cancel_token.child_token(),
         );
@@ -1525,7 +1525,7 @@ impl HttpServiceConfigBuilder {
                      or enable_rl) but HttpServiceConfig.runtime is not set."
                 ));
             };
-            let router = super::openai::rl_router(drt.clone())?;
+            let router = super::openai::rl_router(Arc::new(drt.clone()))?;
             tracing::info!(
                 rl_port = config.rl_port,
                 "RL worker discovery enabled at /v1/rl/workers"
@@ -1554,7 +1554,7 @@ impl HttpServiceConfigBuilder {
             generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
-            frontend_load_publisher: config.runtime.map(|runtime| FrontendLoadPublisher {
+            frontend_load_target: config.runtime.map(|runtime| FrontendLoadTarget {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
             }),

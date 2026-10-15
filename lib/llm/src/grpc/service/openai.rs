@@ -107,7 +107,7 @@ pub async fn completion_response_stream(
     );
 
     let mut response_collector = inflight_guard.response_collector();
-    inflight_guard.tracked_request().attach_to(&mut request);
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();

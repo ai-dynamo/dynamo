@@ -151,8 +151,8 @@ pub(crate) struct RemovedDiscoveryGroup {
 }
 
 pub(crate) struct CommittedModelView {
-    pub name: String,
-    pub aliases: Vec<String>,
+    pub(crate) name: String,
+    pub(crate) aliases: Vec<String>,
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -3475,9 +3475,7 @@ mod tests {
             metrics
                 .clone()
                 .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
-        let frame = metrics
-            .frontend_load()
-            .next_frame(0, true, mm.committed_model_views());
+        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
         assert_eq!(frame.models.len(), 1);
         assert_eq!(frame.models[0].model, "llama");
         assert_eq!(frame.models[0].aliases, ["llama-alias"]);

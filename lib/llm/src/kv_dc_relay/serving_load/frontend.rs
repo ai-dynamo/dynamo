@@ -245,7 +245,7 @@ impl FrontendReports {
         source.publisher_id = publisher_id;
         source.published_at_ms = published_at_ms;
         source.received_at = received_at;
-        source.serving_ready = frame.serving_ready;
+        source.serving_ready = frame.is_serving_ready;
         source.models = frame.models;
     }
 
@@ -418,7 +418,7 @@ mod tests {
             frontend_instance_id: FRONTEND,
             incarnation,
             sequence,
-            serving_ready: true,
+            is_serving_ready: true,
             models,
         }
     }
@@ -698,7 +698,7 @@ mod tests {
         );
         let mut other = frame(1, 1, vec![model_load("b", 4, 5)]);
         other.frontend_instance_id = 20;
-        other.serving_ready = false;
+        other.is_serving_ready = false;
         record(&mut reports, 2, other);
 
         let models = reports.model_loads(&catalog(Vec::new()), &listed(&[]), Instant::now());

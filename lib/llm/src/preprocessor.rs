@@ -54,7 +54,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::frontend_load::TrackedRequest;
+use crate::http::service::metrics::RequestMetrics;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -7877,7 +7877,7 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
-        if let Some(tracked) = TrackedRequest::from_context(&context) {
+        if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
         attach_request_context_metadata(&mut common_request, &context);
@@ -8109,7 +8109,7 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
-        if let Some(tracked) = TrackedRequest::from_context(&context) {
+        if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
         attach_request_context_metadata(&mut common_request, &context);
@@ -8201,6 +8201,9 @@ impl
         // Preprocess the embedding request
         let (preprocessed_request, annotations) =
             self.preprocess_embedding_request(&request).await?;
+        if let Some(metrics) = RequestMetrics::from_context(&context) {
+            metrics.add_input_tokens(preprocessed_request.token_ids.iter().map(Vec::len).sum());
+        }
 
         // Forward to next stage
         let preprocessed_request = context.map(|_| preprocessed_request);
@@ -13980,14 +13983,60 @@ mod tests {
         }
     }
 
-    fn awaiting_first_token_input_tokens(
-        tracker: &crate::frontend_load::FrontendLoadTracker,
-    ) -> u64 {
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedEmbeddingRequest>,
+            ManyOut<Annotated<EmbeddingsEngineOutput>>,
+            Error,
+        > for PromptRecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedEmbeddingRequest>,
+        ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(request.token_ids.iter().map(Vec::len));
+            anyhow::bail!("stop before any output")
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_operator_reports_batched_input_tokens_before_output() {
+        let preprocessor = mock_llama_preprocessor();
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "input": [[1, 2, 3], [4, 5]],
+        }))
+        .unwrap();
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::Embeddings,
+            false,
+            "",
+        );
+        let mut context = PipelineContext::new(request);
+        inflight.request_metrics().attach_to(&mut context);
+        let backend = Arc::new(PromptRecordingBackend::default());
+        assert!(
+            Operator::generate(preprocessor.as_ref(), context, backend.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 5);
+        drop(inflight);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
+    }
+
+    fn awaiting_first_token_input_tokens(metrics: &crate::http::service::metrics::Metrics) -> u64 {
         let view = crate::discovery::CommittedModelView {
             name: "test-model".to_string(),
             aliases: Vec::new(),
         };
-        tracker.next_frame(0, true, vec![view]).models[0]
+        metrics.frontend_load(0, true, vec![view]).models[0]
             .gauges
             .awaiting_first_token_input_tokens
     }
@@ -14009,9 +14058,15 @@ mod tests {
             "messages": [{"role": "user", "content": "What is the weather?"}],
         }))
         .unwrap();
-        let tracker = crate::frontend_load::FrontendLoadTracker::default();
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::ChatCompletions,
+            false,
+            "",
+        );
         let mut context = PipelineContext::new(request);
-        tracker.start_request("test-model").attach_to(&mut context);
+        inflight.request_metrics().attach_to(&mut context);
         let backend = Arc::new(PromptRecordingBackend::default());
 
         let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
@@ -14021,7 +14076,7 @@ mod tests {
         assert_eq!(dispatched.len(), 1);
         assert!(dispatched[0] > 0);
         assert_eq!(
-            awaiting_first_token_input_tokens(&tracker),
+            awaiting_first_token_input_tokens(&metrics),
             dispatched[0] as u64
         );
     }
@@ -14029,8 +14084,14 @@ mod tests {
     #[tokio::test]
     async fn completion_operator_sums_batched_prompts_on_one_request() {
         let preprocessor = mock_llama_preprocessor();
-        let tracker = crate::frontend_load::FrontendLoadTracker::default();
-        let tracked = tracker.start_request("test-model");
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::Completions,
+            false,
+            "",
+        );
+        let tracked = inflight.request_metrics();
         let backend = Arc::new(PromptRecordingBackend::default());
 
         for prompt in [vec![1, 2, 3], vec![4, 5]] {
@@ -14047,7 +14108,7 @@ mod tests {
         }
 
         assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
-        assert_eq!(awaiting_first_token_input_tokens(&tracker), 5);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 5);
     }
 
     fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {

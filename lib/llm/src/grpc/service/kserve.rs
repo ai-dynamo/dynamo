@@ -192,7 +192,7 @@ pub struct KserveServiceConfig {
 
     /// Distributed runtime used to publish frontend load to the KV DC Relay.
     #[builder(default = "None")]
-    runtime: Option<Arc<dynamo_runtime::DistributedRuntime>>,
+    runtime: Option<dynamo_runtime::DistributedRuntime>,
 
     /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
     #[builder(default = "None")]

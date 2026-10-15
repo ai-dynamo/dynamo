@@ -752,7 +752,7 @@ impl GenerateMetricLifecycle {
             request_id,
         );
         // The prompt is already tokenized, so report its size before any output.
-        inflight.tracked_request().add_input_tokens(input_tokens);
+        inflight.request_metrics().add_input_tokens(input_tokens);
         Self {
             collector: GenerateMetricCollector::new(
                 inflight.response_collector(),
