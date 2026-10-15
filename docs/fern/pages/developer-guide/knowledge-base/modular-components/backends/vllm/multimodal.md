@@ -53,8 +53,8 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
 >
 > To refuse remote media fetches entirely, set `DYN_MM_ALLOW_REMOTE_URLS=0` on the
-> frontend and the workers. Every `http://` and `https://` media URL is then rejected,
-> and clients must send media inline as `data:` URLs.
+> frontend and the workers. Every `http://` and `https://` media URL is then rejected;
+> `data:` URLs and local sources still work.
 
 ## Deployment Patterns
 

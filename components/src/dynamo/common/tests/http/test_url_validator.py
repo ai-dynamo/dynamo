@@ -433,7 +433,17 @@ def test_policy_from_env_defaults(monkeypatch) -> None:
     assert policy.allow_remote_urls is True
 
 
-@pytest.mark.parametrize("raw, expected", [("0", False), ("false", False), ("1", True)])
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("0", False),
+        ("false", False),
+        ("1", True),
+        ("true", True),
+        ("on", True),
+        ("", True),
+    ],
+)
 def test_policy_from_env_allow_remote_urls(monkeypatch, raw, expected) -> None:
     monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", raw)
     assert UrlValidationPolicy.from_env().allow_remote_urls is expected

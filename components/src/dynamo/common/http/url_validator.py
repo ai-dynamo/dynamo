@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import unquote, urlparse
 
+from dynamo.common.configuration.utils import parse_bool
+
 logger = logging.getLogger(__name__)
 
 
@@ -201,11 +203,13 @@ class UrlValidationPolicy:
     def from_env(cls) -> "UrlValidationPolicy":
         """Build a policy by reading the ``DYN_MM_*`` environment variables."""
         allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        raw_allow_remote = os.getenv("DYN_MM_ALLOW_REMOTE_URLS", "").strip()
+        allow_remote = parse_bool(raw_allow_remote) if raw_allow_remote else True
         return cls(
             allow_http=allow_internal,
             allow_private_ips=allow_internal,
             allowed_local_path=os.getenv("DYN_MM_LOCAL_PATH", "").strip() or None,
-            allow_remote_urls=os.getenv("DYN_MM_ALLOW_REMOTE_URLS", "1") == "1",
+            allow_remote_urls=allow_remote,
         )
 
 
