@@ -257,9 +257,7 @@ fn block_on<T>(future: BoxFuture<'static, T>) -> anyhow::Result<T> {
 ///
 /// Sample timestamps are dropped: the scrape instant is the observation time
 /// of a proxied sample. Counter families regain their `_total` suffix, which
-/// is how classic text names them and what the integrated path emits. Untyped
-/// families render as gauges, as the typed builder maps them; the text encoder
-/// does not implement the `untyped` word.
+/// is how classic text names them and what the integrated path emits.
 fn render_text(mut families: Vec<TypedFamily>) -> anyhow::Result<String> {
     for family in &mut families {
         for sample in &mut family.samples {
@@ -275,15 +273,76 @@ fn render_text(mut families: Vec<TypedFamily>) -> anyhow::Result<String> {
             family.name.push_str("_total");
         }
     }
-    let families: Vec<_> = build_families(families)
-        .into_iter()
-        .map(|BuiltFamily { family, .. }| family)
-        .collect();
+    let encoder = prometheus::TextEncoder::new();
     let mut text = String::new();
-    prometheus::TextEncoder::new()
-        .encode_utf8(&families, &mut text)
-        .context("encoding engine metrics")?;
+    for BuiltFamily {
+        family, prom_type, ..
+    } in build_families(families)
+    {
+        // `TextEncoder` has no `untyped` arm (it panics on `MetricType::UNTYPED`),
+        // and re-typing the family as a gauge would claim a type the engine never
+        // declared. Render untyped families by hand so the engine's word survives.
+        if prom_type == "unknown" {
+            render_untyped(&family, &mut text);
+        } else {
+            encoder
+                .encode_utf8(std::slice::from_ref(&family), &mut text)
+                .context("encoding engine metrics")?;
+        }
+    }
     Ok(text)
+}
+
+/// Write one untyped family in the same shape `TextEncoder` uses for a gauge,
+/// with the `untyped` type word. Untyped samples carry no suffixes or buckets.
+fn render_untyped(family: &prometheus::proto::MetricFamily, out: &mut String) {
+    let name = family.name();
+    if !family.help().is_empty() {
+        out.push_str("# HELP ");
+        out.push_str(name);
+        out.push(' ');
+        out.push_str(&escape_exposition(family.help(), false));
+        out.push('\n');
+    }
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" untyped\n");
+    for metric in family.get_metric() {
+        out.push_str(name);
+        let labels = metric.get_label();
+        if !labels.is_empty() {
+            out.push('{');
+            for (index, pair) in labels.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(pair.name());
+                out.push_str("=\"");
+                out.push_str(&escape_exposition(pair.value(), true));
+                out.push('"');
+            }
+            out.push('}');
+        }
+        out.push(' ');
+        // The typed builder stores an untyped sample's value in a gauge.
+        out.push_str(&metric.get_gauge().value().to_string());
+        out.push('\n');
+    }
+}
+
+/// The escaping `TextEncoder` applies: backslash and newline always, double
+/// quotes inside label values.
+fn escape_exposition(value: &str, label_value: bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '"' if label_value => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -381,8 +440,12 @@ http_requests_total{handler=\"/metrics\"} 5
             data_line(&text, "vllm:num_requests_running").unwrap(),
             "vllm:num_requests_running{engine=\"0\",model=\"qwen3\",model_name=\"qwen3\"} 2"
         );
-        // The text encoder has no untyped rendering; untyped families ship as gauges.
-        assert!(text.contains("# TYPE vllm:custom gauge"), "{text}");
+        // Untyped families keep the engine's type word and gain the same labels.
+        assert!(text.contains("# TYPE vllm:custom untyped"), "{text}");
+        assert_eq!(
+            data_line(&text, "vllm:custom").unwrap(),
+            "vllm:custom{model=\"qwen3\",model_name=\"qwen3\"} 7"
+        );
         assert!(!text.contains("http_requests"), "{text}");
         assert!(
             !text.contains("1700000000"),
