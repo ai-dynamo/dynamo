@@ -351,33 +351,26 @@ async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches()
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
-    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
     let inner = PushRouter::from_client_with_dispatch(
         client,
         RouterMode::RoundRobin,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        Arc::new(CompletedBuiltinDispatch::default()) as Arc<dyn StreamingDispatch<_, _>>,
     )
     .await
     .unwrap();
-    let (host, _) = builtin_host_with_affinity(
+    let (mut host, _) = builtin_host_with_affinity(
         inner,
         load_context,
         crate::session_affinity::SessionAffinityMode::Soft,
     );
-    let outcomes = ["new", "followed", "rerouted"];
-    let decisions = || {
-        outcomes.map(|outcome| {
-            host.request_metrics
-                .session_affinity_decisions_total
-                .with_label_values(&[RequestPhase::Aggregated.as_str(), outcome])
-                .get()
-        })
-    };
+    // Parallel tests must not share the process-global request counters.
+    host.request_metrics = crate::kv_router::metrics::RouterRequestMetrics::for_test(
+        &dynamo_runtime::MetricsRegistry::new(),
+    );
     let generate = async |request| {
         let mut stream = host.generate(request).await.unwrap();
         while stream.next().await.is_some() {}
     };
-    let before = decisions();
 
     generate(affinity_request("decision-session", None)).await;
     generate(affinity_request("decision-session", None)).await;
@@ -388,9 +381,13 @@ async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches()
     bind_affinity_target(&host, &moved, AffinityTarget::worker(worker_id + 1)).await;
     generate(affinity_request("decision-moved", None)).await;
 
-    let after = decisions();
-    let delta: Vec<_> = after.iter().zip(before).map(|(a, b)| a - b).collect();
-    assert_eq!(delta, [1, 1, 1], "outcomes {outcomes:?}");
+    let decisions = ["new", "followed", "rerouted"].map(|outcome| {
+        host.request_metrics
+            .session_affinity_decisions_total
+            .with_label_values(&[RequestPhase::Aggregated.as_str(), outcome])
+            .get()
+    });
+    assert_eq!(decisions, [1, 1, 1]);
 
     drop(host);
     runtime.shutdown();

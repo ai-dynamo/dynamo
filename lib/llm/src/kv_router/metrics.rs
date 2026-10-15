@@ -1056,7 +1056,7 @@ pub struct RouterRequestMetrics {
     pub kv_selected_cached_prefix_tokens: IntCounterVec,
     /// Backend-reported reused tokens, counted once per attempt; same labels.
     pub kv_worker_reused_tokens: IntCounterVec,
-    /// Dispatched requests that have a session binding. Labels: `phase` and
+    /// Dispatched requests that have a session ID. Labels: `phase` and
     /// `outcome` (`new`, `followed`, `rerouted`).
     pub session_affinity_decisions_total: IntCounterVec,
 }
