@@ -44,6 +44,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           name: main
           workingDir: /workspace
@@ -69,6 +70,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           name: main
           workingDir: /workspace
