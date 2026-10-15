@@ -1262,6 +1262,20 @@ def _logprobs_processor(vllm_processor_module):
     )
 
 
+def test_disabled_mm_transfer_omits_shm_requirement_log(
+    vllm_processor_module,
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setenv("DYNAMO_DISABLE_NIXL_MM", "1")
+    monkeypatch.delenv("DYNAMO_MM_TRANSFER", raising=False)
+
+    with caplog.at_level("INFO"):
+        _logprobs_processor(vllm_processor_module)
+
+    assert "SHM transfer requires" not in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("top_logprobs", [-1])
 async def test_generator_rejects_negative_top_logprobs_before_preprocess(
@@ -1662,9 +1676,10 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
     request_for_sampling = RequestForSampling(
         max_completion_tokens=None,
         max_tokens=1,
+        logprobs=None,
+        top_logprobs=None,
         cache_salt=None,
         mm_processor_kwargs=None,
-        logprobs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
     )
     monkeypatch.setattr(
@@ -1834,6 +1849,43 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [
+            {"error": "Multimodal SHM transfer failed"},
+            "error: Multimodal SHM transfer failed",
+        ],
+    )
+    async def test_generation_error_ends_stream_with_error_envelope(
+        self,
+        vllm_processor_module,
+        finish_reason,
+    ):
+        class _UnexpectedOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                raise AssertionError("error response reached normal output processing")
+
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [], "index": 0, "finish_reason": finish_reason},
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _UnexpectedOutputProcessor()
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks == [
+            {
+                "_dynamo_annotated": True,
+                "event": "error",
+                "comment": ["Multimodal SHM transfer failed"],
+            }
+        ]
+        assert routed_engine.yielded == 1
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module

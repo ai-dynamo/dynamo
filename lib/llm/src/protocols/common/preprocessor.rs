@@ -364,7 +364,7 @@ pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
-#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+#[derive(Serialize, Deserialize, Clone, Builder)]
 pub struct PreprocessedRequest {
     /// ID of the model to use.
     ///
@@ -708,6 +708,17 @@ where
         ));
     }
     Ok(value)
+}
+
+impl std::fmt::Debug for PreprocessedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreprocessedRequest")
+            .field("model", &self.model)
+            .field("token_count", &self.token_ids.len())
+            .field("output_options", &self.output_options)
+            .field("extra_args", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreprocessedRequest {
@@ -1099,6 +1110,20 @@ mod tests {
         assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
         assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
         assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn metadata_upload_capability_is_serialized_but_never_debug_logged() {
+        let mut request = request_with_tokens(vec![1, 2, 3]);
+        request.extra_args = Some(
+            serde_json::json!({"nvext": {"metadata_upload": {"destination": {"url": "https://storage.example?sig=secret", "required_headers": {"x-token": "private-token"}}}}}),
+        );
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("private-token"));
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("sig=secret"));
+        assert!(serialized.contains("private-token"));
     }
 
     #[test]
