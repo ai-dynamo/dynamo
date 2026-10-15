@@ -48,16 +48,38 @@ The default model is `Qwen/Qwen3-0.6B`.
 </Accordion>
 <Accordion title="Qwen3-ASR Realtime Transcription">
 
-**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM 0.30.0's native
-Qwen3-ASR support. The launch script requires an explicit `--hf-overrides` argument:
+**Experimental.** Transcribe audio over `/v1/realtime` using vLLM's native Qwen3-ASR
+support. This example was validated with English audio.
+
+The default model is `Qwen/Qwen3-ASR-0.6B`. The launch script selects its
+`Qwen3ASRRealtimeGeneration` architecture automatically.
+
+Follow the [vLLM installation instructions](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md#installation)
+to use Dynamo's compatible backend version.
+
+**Command-line flags:** `--model` sets the model identifier or path. `--hf-overrides`
+selects the realtime architecture; it is optional for the default model and required
+for other models.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
+Start the default model:
 
 ```bash
-./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
-    --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}' \
-    --max-model-len 4096 --max-num-seqs 2
+./launch/agg_realtime_transcription.sh --max-model-len 4096 --max-num-seqs 2
 ```
 
-In another terminal, send a speech file longer than five seconds to check incremental delivery:
+For another realtime-capable model, replace `MODEL_ID` and `REALTIME_ARCHITECTURE`
+with its model identifier and realtime architecture:
+
+```bash
+./launch/agg_realtime_transcription.sh --model MODEL_ID \
+    --hf-overrides '{"architectures":["REALTIME_ARCHITECTURE"]}'
+```
+
+In another terminal, send a speech file longer than five seconds to check incremental
+delivery from the default model. Replace `speech.wav` with your audio file and set
+`--model` to the served model if you changed it:
 
 ```bash
 python launch/realtime_audio_client.py \
@@ -187,6 +209,8 @@ and media cache overlap. This path uses the Rust multimodal router in the fronte
 
 The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 
+In single-GPU mode (`--single-gpu` or `SINGLE_GPU=true`), set `CUDA_VISIBLE_DEVICES` to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. All workers use its first entry. An unset or empty first entry is an error; there is no GPU 0 fallback.
+
 **Configuration**
 
 | Variable | Default | Description |
@@ -194,12 +218,13 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 | `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
 | `NAMESPACE` | `mm-router` | Dynamo discovery namespace used by the frontend and workers. |
 | `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `CUDA_VISIBLE_DEVICES` | `Unset` | First entry selects the inherited GPU in single-GPU mode. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 | `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
 | `GPU_MEMORY_UTILIZATION` | `0.20` | Fraction of GPU memory available to each backend worker. |
 | `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
 | `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
-| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on the first GPU in `CUDA_VISIBLE_DEVICES` for functional testing. |
 | `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
 | `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
 | `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
@@ -226,6 +251,8 @@ and etcd to be running before it starts.
 
 The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 
+In single-GPU mode (`--single-gpu` or `SINGLE_GPU=true`), set `CUDA_VISIBLE_DEVICES` to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. All workers use its first entry. An unset or empty first entry is an error; there is no GPU 0 fallback.
+
 **Configuration**
 
 | Variable | Default | Description |
@@ -233,12 +260,13 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 | `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
 | `NAMESPACE` | `dynamo` | Dynamo discovery namespace used by the frontend and workers. |
 | `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `CUDA_VISIBLE_DEVICES` | `Unset` | First entry selects the inherited GPU in single-GPU mode. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 | `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
 | `GPU_MEMORY_UTILIZATION` | `0.40` | Fraction of GPU memory available to each backend worker. |
 | `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
 | `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
-| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on the first GPU in `CUDA_VISIBLE_DEVICES` for functional testing. |
 | `NUM_FRONTENDS` | `1` | Number of frontend replicas launched by the script. |
 | `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
 | `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
@@ -501,13 +529,16 @@ encoding should scale independently but language-model stages can remain togethe
 
 The default model is `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`.
 
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Each explicit `DYN_*_WORKER_GPU` value takes precedence. If any worker needs the inherited default, an unset or empty first entry is an error; there is no GPU 0 fallback.
+
 **Configuration**
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | `Unset` | First entry selects the inherited GPU in single-GPU mode. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker; `--single-gpu` also uses `0`. |
-| `DYN_PD_WORKER_GPU` | `1` | GPU for the combined prefill/decode worker; `--single-gpu` changes the default to `0`. |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker; in `--single-gpu` mode, defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
+| `DYN_PD_WORKER_GPU` | `1` | GPU for the combined prefill/decode worker; in `--single-gpu` mode, defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
 | `DYN_ENCODE_GPU_MEM` | `0.9` | Encode-worker GPU-memory fraction; `--single-gpu` changes the default to `0.1`. |
 | `DYN_PD_GPU_MEM` | `0.9` | Prefill/decode GPU-memory fraction; `--single-gpu` changes the default to `0.7`. |
 | `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
@@ -531,14 +562,17 @@ single-GPU and two-GPU modes for functional testing in addition to the full layo
 
 The default model is `llava-hf/llava-1.5-7b-hf`.
 
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Each explicit `DYN_*_WORKER_GPU` value takes precedence. If any worker needs the inherited default, an unset or empty first entry is an error; there is no GPU 0 fallback.
+
 **Configuration**
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | `Unset` | First entry selects the inherited GPU in single-GPU mode. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker in the default three-GPU layout. |
-| `DYN_PREFILL_WORKER_GPU` | `1` | GPU for the prefill worker; packed modes change this default to `0`. |
-| `DYN_DECODE_WORKER_GPU` | `2` | GPU for the decode worker; `--two-gpu` changes this to `1` and `--single-gpu` to `0`. |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker; in `--single-gpu` mode, defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
+| `DYN_PREFILL_WORKER_GPU` | `1` | GPU for the prefill worker; `--two-gpu` defaults to `0`, while `--single-gpu` defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
+| `DYN_DECODE_WORKER_GPU` | `2` | GPU for the decode worker; `--two-gpu` defaults to `1`, while `--single-gpu` defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
 | `DYN_ENCODE_GPU_MEM` | `0.9` | Encode-worker GPU-memory fraction; packed modes change the default to `0.1`. |
 | `DYN_PREFILL_GPU_MEM` | `0.9` | Prefill-worker GPU-memory fraction; two- and one-GPU modes use `0.7` and `0.4`. |
 | `DYN_DECODE_GPU_MEM` | `0.9` | Decode-worker GPU-memory fraction; single-GPU mode changes the default to `0.4`. |
@@ -568,13 +602,16 @@ uses fewer processes than encode-prefill-decode at the cost of more work on pref
 
 The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Each explicit `DYN_*_WORKER_GPU` value takes precedence. If any worker needs the inherited default, an unset or empty first entry is an error; there is no GPU 0 fallback.
+
 **Configuration**
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | `Unset` | First entry selects the inherited GPU in single-GPU mode. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-| `DYN_PREFILL_WORKER_GPU` | `0` | GPU device assigned to the corresponding worker. |
-| `DYN_DECODE_WORKER_GPU` | `1` | GPU device assigned to the corresponding worker. |
+| `DYN_PREFILL_WORKER_GPU` | `0` | GPU for this worker; in `--single-gpu` mode, defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
+| `DYN_DECODE_WORKER_GPU` | `1` | GPU for this worker; in `--single-gpu` mode, defaults to the first `CUDA_VISIBLE_DEVICES` entry. |
 | `DYN_PREFILL_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
 | `DYN_DECODE_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
 | `DYN_SYSTEM_PORT1` | `${DYN_SYSTEM_PORT:-8081}` | System and metrics port for the first worker. |

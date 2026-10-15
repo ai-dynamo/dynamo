@@ -37,7 +37,7 @@ export interface CommunityMeeting {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-10-14";
+export const GENERATED_ON = "2026-10-15";
 
 /** The weekly community meeting, read from its recurring series on the calendar. */
 export const COMMUNITY_MEETING: CommunityMeeting = {
