@@ -76,6 +76,13 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
+	// Like the v1beta2 defaulter, this only handles requests the API server sends, and the
+	// Helm chart sends none until the v1beta2 API is enabled.
+	dgdrV1Beta2Handler := webhookvalidation.NewDynamoGraphDeploymentRequestV1Beta2Handler()
+	if err := dgdrV1Beta2Handler.RegisterWithManager(mgr, gate); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest v1beta2 webhook: %w", err)
+	}
+
 	if isClusterWide {
 		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 			Complete(); err != nil {
