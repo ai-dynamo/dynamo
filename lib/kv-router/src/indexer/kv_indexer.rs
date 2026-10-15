@@ -15,7 +15,8 @@ use super::{
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
     ContainsWorkerBlockRequest, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
-    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest, panic_payload_message,
+    MatchRequest, PreBoundEventCounters, RadixTree, ResidentBlockCountsHandle,
+    RoutingDecisionRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -336,6 +337,12 @@ pub struct KvIndexer {
     remove_worker_dp_rank_tx: mpsc::Sender<(WorkerId, DpRank)>,
     /// A sender for get workers requests.
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
+    /// Starts live per-rank block counts in the actor.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    track_resident_blocks_tx: mpsc::Sender<ResidentBlockCountsHandle>,
+    /// The live counts, once a policy reads them. Shared so every clone tracks into one handle.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    resident_blocks: Arc<std::sync::OnceLock<ResidentBlockCountsHandle>>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
     /// A sender for flush requests.
@@ -430,6 +437,8 @@ impl KvIndexer {
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
+        let (track_resident_blocks_tx, track_resident_blocks_rx) =
+            mpsc::channel::<ResidentBlockCountsHandle>(1);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
@@ -460,6 +469,7 @@ impl KvIndexer {
                     let mut remove_worker_rx = remove_worker_rx;
                     let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                     let mut get_workers_rx = get_workers_rx;
+                    let mut track_resident_blocks_rx = track_resident_blocks_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
                     let mut trie = delegate.map_or_else(RadixTree::new, RadixTree::new_with_delegate);
@@ -496,6 +506,10 @@ impl KvIndexer {
                                 if let Some(pm) = &prune_manager {
                                     pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
                                 }
+                            }
+
+                            Some(counts) = track_resident_blocks_rx.recv() => {
+                                trie.track_resident_blocks(counts);
                             }
 
                             Some(mutation) = mutation_rx.recv() => {
@@ -656,6 +670,8 @@ impl KvIndexer {
             remove_worker_tx,
             remove_worker_dp_rank_tx,
             get_workers_tx,
+            track_resident_blocks_tx,
+            resident_blocks: Arc::default(),
             dump_tx,
             flush_tx,
             routing_tx,
@@ -773,6 +789,19 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `GetWorkersRequest`s.
     pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
         self.get_workers_tx.clone()
+    }
+
+    /// Live per-rank block counts, which the actor starts keeping on the first call.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.resident_blocks
+            .get_or_init(|| {
+                let counts = ResidentBlockCountsHandle::default();
+                // A stopped actor never sees this, and every rank reads None.
+                let _ = self.track_resident_blocks_tx.try_send(counts.clone());
+                counts
+            })
+            .clone()
     }
 }
 

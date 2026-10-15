@@ -158,6 +158,16 @@ print(f"runs={len(values)} mean={statistics.fmean(values):.3f} median={statistic
 PY
 ```
 
+### Resident block tracking cost
+
+To measure what `RESIDENT_BLOCKS` tracking costs the event threads, run the single
+CRTC trial with `--track-resident-blocks`, which keeps live per-rank block counters,
+and compare `achieved_block_ops_per_sec` against an untracked run. Add
+`--resident-blocks-reader-cpu <CPU>` to also read every counter in a loop from a
+thread pinned to that CPU, as selections do, so the result includes the cache-line
+traffic between event threads and readers. Keep that CPU outside the backend and
+issuer masks.
+
 ### Sweep
 
 Sweep cells use the same completion-correct implementation. Each cell regenerates

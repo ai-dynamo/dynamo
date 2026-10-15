@@ -601,6 +601,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             request,
             eligibility,
             block_size,
+            None,
         )
     }
 }

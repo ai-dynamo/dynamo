@@ -69,6 +69,7 @@ mod lower_tier_indexers;
 mod metrics;
 #[cfg(feature = "bench")]
 mod observation;
+mod resident_blocks;
 mod thread_pool;
 mod traits;
 mod types;
@@ -95,6 +96,8 @@ pub use lower_tier_indexers::*;
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;
+pub use resident_blocks::ResidentBlockCountsHandle;
+pub(crate) use resident_blocks::{ResidentBlockCounts, ResidentBlockTracker};
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;

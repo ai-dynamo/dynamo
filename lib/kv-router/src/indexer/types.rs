@@ -653,6 +653,8 @@ pub enum WorkerTask {
         resp: oneshot::Sender<bool>,
     },
     Flush(oneshot::Sender<()>),
+    /// Keep live per-rank block counts in these counters from now on.
+    TrackResidentBlocks(super::ResidentBlockCountsHandle),
     Terminate,
 }
 
