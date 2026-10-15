@@ -156,11 +156,14 @@ add the aliases.
 
 **Preflight:** With `global.grove.enabled=true` and `global.grove.install=false`, `helm install`
 and `helm upgrade` fail when the `podcliquesets.grove.io` CRD predates `v0.1.0-alpha.14`. The
-check is skipped when Helm cannot read cluster state, for example under `helm template` or
-`--dry-run`. The operator also checks the CRD, and the image tag of the `grove-operator` Deployment,
-before it creates workers for a new multinode DGD. On an older Grove controller or CRD, the DGD
+check is skipped when Helm renders without cluster access, for example under `helm template` or
+client-side `--dry-run`; `--dry-run=server` runs it. If Helm can reach the cluster but lacks
+permission to read CRDs, rendering fails instead of skipping the check. The operator also checks
+the CRD, and the image tag of the `grove-operator` Deployment, before it creates workers for a new multinode DGD. On an older Grove controller or CRD, the DGD
 reports `Ready=False` with reason `incompatible_grove_version` and a Warning event; when the
-operator cannot read the CRD, the reason is `unverifiable_grove_version`. A digest, `-dev`, or
+CRD is not found or the operator is forbidden to read it, the reason is
+`unverifiable_grove_version`. Other API read errors are treated as transient: the operator reuses
+its last check result, or retries without changing the DGD status. A digest, `-dev`, or
 custom image tag cannot be compared, so the CRD result decides. The chart grants a
 namespace-restricted operator no CRD read, so in that mode it only emits the Warning event. Single-node
 DGDs and DGDs created before 1.6.0 are not blocked. After Grove is upgraded, blocked DGDs reconcile
