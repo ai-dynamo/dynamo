@@ -9,6 +9,7 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
+use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
@@ -71,7 +72,7 @@ pub(crate) fn build_request_end_trace_state(
     )
 }
 
-fn build_request_end_trace_state_for_policy(
+pub(crate) fn build_request_end_trace_state_for_policy(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
@@ -219,6 +220,46 @@ pub(crate) fn wrap_completion_request_end_stream(
 
     let stream = stream.map(move |response| {
         super::record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
+        response
+    });
+    wrap_request_end_stream(Box::pin(stream), trace_state)
+}
+
+/// Request-end tracing for routes that serve the raw engine stream, such as
+/// native `/generate`. Tool calls are not parsed on these routes.
+pub(crate) fn wrap_engine_output_request_end_stream(
+    stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
+    trace_state: Option<RequestEndTraceState>,
+) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
+    let Some(state) = trace_state.as_ref() else {
+        return stream;
+    };
+    let tracker = state
+        .request
+        .as_ref()
+        .map(|request| request.request_tracker.clone());
+    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
+    let mut output_tokens = 0;
+    let stream = stream.map(move |response| {
+        if let Some(output) = response.data.as_ref() {
+            super::record_backend_finish_reason_metadata(
+                finish_reason_metadata.as_ref(),
+                Some(output.index.unwrap_or(0)),
+                output.finish_reason.as_ref(),
+                output.stop_reason.as_ref(),
+            );
+            output_tokens += output.token_ids.len();
+            let usage = output.completion_usage.as_ref();
+            super::record_llm_metric_tokens(
+                tracker.as_deref(),
+                usage.map(|usage| usage.prompt_tokens as usize),
+                output_tokens,
+                usage
+                    .and_then(|usage| usage.prompt_tokens_details.as_ref())
+                    .and_then(|details| details.cached_tokens)
+                    .map(|tokens| tokens as usize),
+            );
+        }
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state)
@@ -445,6 +486,17 @@ mod tests {
                 request.request_received_ms.unwrap() + total.round() as u64
             );
         }
+    }
+
+    #[test]
+    fn engine_output_stream_is_unchanged_without_trace_state() {
+        let stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> =
+            Box::pin(futures::stream::iter(Vec::new()));
+        let before = &*stream as *const _ as *const ();
+
+        let stream = wrap_engine_output_request_end_stream(stream, None);
+
+        assert_eq!(&*stream as *const _ as *const (), before);
     }
 
     #[test]

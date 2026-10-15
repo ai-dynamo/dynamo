@@ -28,6 +28,7 @@ use super::disconnect::{
     ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
 };
 use super::error::SanitizedError;
+use super::generate::GenerateMetricCollector;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
     check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
@@ -44,6 +45,7 @@ use crate::protocols::response_merge::{
 use crate::protocols::sglang::generate::SglangGenerateRequest;
 use crate::protocols::sglang::merge::merger;
 use crate::protocols::sglang::stream::SglangGenerateStream;
+use crate::request_trace::{RequestEndTraceState, wrap_engine_output_request_end_stream};
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -311,11 +313,11 @@ async fn handler(
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return adapt_openai_error(response);
     }
-    let engine = match state
+    let selection = match state
         .manager()
-        .get_generate_engine_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
+        .get_generate_engine_for_capability_with_routing(&model, SGLANG_GENERATE_CAPABILITY)
     {
-        Ok(engine) => engine,
+        Ok(selection) => selection,
         Err(error) => {
             let status = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
@@ -344,6 +346,14 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
+    let (request, unit_context) = context.into_parts();
+    let trace_state = crate::request_trace::build_request_end_trace_state(
+        &request,
+        &request.tracker,
+        &unit_context,
+        selection.kv_cache_block_size as usize,
+    );
+    let context = Context::rejoin(request, unit_context);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
@@ -357,20 +367,19 @@ async fn handler(
     )
     .await;
 
-    let dispatch_span = tracing::info_span!(
-        target: "request_span",
-        "generate",
-        request_id = %request_id
+    let dispatch_span = super::generate::generate_dispatch_span(
+        &request_id,
+        state.manager().metric_model_for(&model),
     );
     let response = match tokio::spawn(
         dispatch(
-            engine,
+            selection.engine,
             context,
             request_id,
-            model,
             state.clone(),
             stream_handle,
             streaming,
+            trace_state,
         )
         .instrument(dispatch_span),
     )
@@ -391,16 +400,24 @@ async fn dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
     request_id: String,
-    model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
     streaming: bool,
+    trace_state: Option<RequestEndTraceState>,
 ) -> Response {
+    let model = context.model.clone();
+    let metric_model = state.manager().metric_model_for(&model);
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        state.manager().metric_model_for(&model),
+        metric_model,
         super::metrics::Endpoint::Generate,
         streaming,
         &request_id,
+    );
+    let mut metric_collector = GenerateMetricCollector::new(
+        state.metrics_clone(),
+        metric_model,
+        context.tracker.clone().unwrap_or_default(),
+        context.token_ids.len(),
     );
     let request_context = context.context();
     let generate_result =
@@ -473,6 +490,11 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    let stream =
+        wrap_engine_output_request_end_stream(stream, trace_state).map(move |mut output| {
+            metric_collector.observe(&mut output);
+            output
+        });
     if !streaming {
         let fold = SglangGenerateStream::fold(stream, merger());
         return match run_until_killed(request_context.as_ref(), fold).await {
@@ -572,10 +594,10 @@ mod tests {
             engine,
             dispatch_test_context(),
             "req-sglang-worker-unavailable".to_string(),
-            "test-model".to_string(),
             state.clone(),
             ConnectionHandle::create_disabled(tx),
             true,
+            None,
         )
         .await;
 
@@ -759,10 +781,10 @@ mod tests {
             engine,
             context,
             "req-deadline".to_string(),
-            "test-model".to_string(),
             state.clone(),
             stream_handle,
             true,
+            None,
         )
         .await;
         connection_handle.disarm();
@@ -802,12 +824,332 @@ mod tests {
             dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
             dynamo_runtime::pipeline::Error,
         > {
-            let stream = Box::pin(futures::stream::iter(self.0.clone()));
+            // Pace chunks so TTFT and ITL observe distinct arrival times.
+            let stream = Box::pin(futures::stream::iter(self.0.clone()).then(|output| async {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                output
+            }));
             Ok(dynamo_runtime::engine::ResponseStream::new(
                 stream,
                 request.context(),
             ))
         }
+    }
+
+    struct FirstChunkThenPendingEngine;
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for FirstChunkThenPendingEngine
+    {
+        async fn generate(
+            &self,
+            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            let stream =
+                futures::stream::iter([sglang_chunk(vec![5])]).chain(futures::stream::pending());
+            Ok(dynamo_runtime::engine::ResponseStream::new(
+                Box::pin(stream),
+                request.context(),
+            ))
+        }
+    }
+
+    fn sglang_chunk(token_ids: Vec<u32>) -> crate::protocols::Annotated<LLMEngineOutput> {
+        crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": token_ids}})),
+            token_ids,
+            index: Some(0),
+            ..Default::default()
+        })
+    }
+
+    /// A P/D stream: prefill's output item, then two decode chunks with
+    /// terminal finish reason and usage.
+    fn observed_outputs() -> Vec<crate::protocols::Annotated<LLMEngineOutput>> {
+        let prefill = crate::protocols::Annotated {
+            event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
+            ..crate::protocols::Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(serde_json::json!({"sglang_response": {"meta_info": {}}})),
+                ..Default::default()
+            })
+        };
+        let mut last = sglang_chunk(vec![6]);
+        let output = last.data.as_mut().unwrap();
+        output.finish_reason = Some(crate::protocols::common::FinishReason::Stop);
+        output.completion_usage = Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+            prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                cached_tokens: Some(2),
+                ..Default::default()
+            }),
+            completion_tokens_details: None,
+        });
+        vec![prefill, sglang_chunk(vec![5]), last]
+    }
+
+    fn observed_context(request_id: &str, streaming: bool) -> Context<PreprocessedRequest> {
+        let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+            "input_ids": [1, 2, 3],
+            "stream": streaming,
+        }))
+        .unwrap();
+        let request = preprocessed_request(request, "test-model", None, request_id).unwrap();
+        Context::with_id_and_metadata(request, request_id.to_string(), Default::default())
+    }
+
+    /// Attach agent context and x-request-id as the handler's header parsing
+    /// does, then build trace state through the policy seam.
+    fn traced_context(
+        mut context: Context<PreprocessedRequest>,
+        trace_enabled: bool,
+    ) -> (Context<PreprocessedRequest>, Option<RequestEndTraceState>) {
+        context.agent_context = Some(crate::protocols::common::extensions::AgentContext {
+            session_id: "sglang-session".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            agent_headers: Default::default(),
+            input_trigger: None,
+        });
+        context.insert(
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+            "client-x-request-id".to_string(),
+        );
+        let (request, unit_context) = context.into_parts();
+        let trace_state = crate::request_trace::build_request_end_trace_state_for_policy(
+            &request,
+            &request.tracker,
+            &unit_context,
+            2,
+            trace_enabled,
+        );
+        (Context::rejoin(request, unit_context), trace_state)
+    }
+
+    async fn request_end_records(
+        receiver: &mut tokio::sync::broadcast::Receiver<crate::request_trace::RequestTraceRecord>,
+        request_id: &str,
+    ) -> Vec<crate::request_trace::RequestTraceRecord> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut records = Vec::new();
+        while let Ok(result) = tokio::time::timeout_at(deadline, receiver.recv()).await {
+            match result {
+                Ok(record)
+                    if record
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.request_id == request_id) =>
+                {
+                    records.push(record);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        records
+    }
+
+    #[tokio::test]
+    async fn dispatch_records_frontend_metrics() {
+        use crate::http::service::generate::tests::metric_value;
+
+        for (streaming, worker_id) in [(false, 7_654_321_001_u64), (true, 7_654_321_002)] {
+            let state = service_v2::HttpService::builder()
+                .build()
+                .unwrap()
+                .state_clone();
+            let registry = prometheus::Registry::new();
+            state.metrics_clone().register(&registry).unwrap();
+            let context = observed_context("req-sglang-metrics", streaming);
+            context.tracker.as_ref().unwrap().record_worker(
+                worker_id,
+                Some(0),
+                crate::discovery::WORKER_TYPE_DECODE,
+            );
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let response = dispatch(
+                Arc::new(ReplayEngine(observed_outputs())),
+                context,
+                "req-sglang-metrics".to_string(),
+                state.clone(),
+                ConnectionHandle::create_disabled(tx),
+                streaming,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+
+            let metric_model = state.manager().metric_model_for("test-model");
+            let request_type = if streaming {
+                RequestType::Stream
+            } else {
+                RequestType::Unary
+            };
+            assert_eq!(state.metrics_clone().get_inflight_count(metric_model), 0);
+            assert_eq!(
+                state.metrics_clone().get_request_counter(
+                    metric_model,
+                    &Endpoint::Generate,
+                    &request_type,
+                    &Status::Success,
+                    &ErrorType::None,
+                ),
+                1
+            );
+            let families = registry.gather();
+            let labels = [("model", metric_model)];
+            let histogram = |name| metric_value(&families, name, &labels).get_histogram();
+            assert_eq!(
+                histogram("dynamo_frontend_input_sequence_tokens").get_sample_sum(),
+                3.0
+            );
+            assert_eq!(
+                histogram("dynamo_frontend_output_sequence_tokens").get_sample_sum(),
+                2.0
+            );
+            assert_eq!(
+                histogram("dynamo_frontend_cached_tokens").get_sample_sum(),
+                2.0
+            );
+            assert_eq!(
+                histogram("dynamo_frontend_time_to_first_token_seconds").get_sample_count(),
+                1
+            );
+            assert_eq!(
+                histogram("dynamo_frontend_inter_token_latency_seconds").get_sample_count(),
+                1
+            );
+            assert_eq!(
+                metric_value(&families, "dynamo_frontend_output_tokens_total", &labels)
+                    .get_counter()
+                    .value(),
+                2.0
+            );
+            let worker_id = worker_id.to_string();
+            let worker_labels = [
+                worker_id.as_str(),
+                "0",
+                crate::discovery::WORKER_TYPE_DECODE,
+            ];
+            assert_eq!(
+                crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                    .with_label_values(&worker_labels)
+                    .get(),
+                3
+            );
+            assert!(
+                crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                    .with_label_values(&worker_labels)
+                    .get()
+                    > 0.0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_emits_request_end_trace_once() {
+        crate::request_trace::init_bus_for_test(64);
+        let mut receiver = crate::request_trace::subscribe();
+        for (streaming, trace_enabled) in [(false, true), (true, true), (false, false)] {
+            let request_id = format!("req-sglang-trace-{streaming}-{trace_enabled}");
+            let (context, trace_state) =
+                traced_context(observed_context(&request_id, streaming), trace_enabled);
+            assert_eq!(trace_state.is_some(), trace_enabled);
+            let state = service_v2::HttpService::builder()
+                .build()
+                .unwrap()
+                .state_clone();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let response = dispatch(
+                Arc::new(ReplayEngine(observed_outputs())),
+                context,
+                request_id.clone(),
+                state,
+                ConnectionHandle::create_disabled(tx),
+                streaming,
+                trace_state,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+
+            let records = request_end_records(&mut receiver, &request_id).await;
+            if !trace_enabled {
+                assert!(records.is_empty());
+                continue;
+            }
+            assert_eq!(records.len(), 1, "streaming={streaming}");
+            let record = &records[0];
+            assert_eq!(
+                record.agent_context.as_ref().unwrap().session_id,
+                "sglang-session"
+            );
+            let request = record.request.as_ref().unwrap();
+            assert_eq!(request.x_request_id.as_deref(), Some("client-x-request-id"));
+            assert_eq!(request.model.as_deref(), Some("test-model"));
+            assert_eq!(request.input_tokens, Some(3));
+            assert_eq!(request.output_tokens, Some(2));
+            assert_eq!(request.cached_tokens, Some(2));
+            assert_eq!(request.replay.as_ref().unwrap().input_length, 3);
+            let finish = request.finish_reason_metadata.as_ref().unwrap();
+            assert_eq!(finish.backend_finish_reason.as_deref(), Some("stop"));
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_cancellation_emits_request_end_trace_once() {
+        crate::request_trace::init_bus_for_test(64);
+        let mut receiver = crate::request_trace::subscribe();
+        let request_id = "req-sglang-trace-cancel";
+        let (context, trace_state) = traced_context(observed_context(request_id, true), true);
+        let request_context = context.context();
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(FirstChunkThenPendingEngine),
+            context,
+            request_id.to_string(),
+            state.clone(),
+            ConnectionHandle::create_disabled(tx),
+            true,
+            trace_state,
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        assert!(body.next().await.unwrap().is_ok());
+        request_context.kill();
+        while body.next().await.is_some() {}
+
+        let records = request_end_records(&mut receiver, request_id).await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].request.as_ref().unwrap().output_tokens, Some(1));
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                state.manager().metric_model_for("test-model"),
+                &Endpoint::Generate,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            1
+        );
     }
 
     #[tokio::test]
@@ -844,10 +1186,10 @@ mod tests {
                 Arc::new(ReplayEngine(outputs)),
                 dispatch_test_context(),
                 "req-unary".to_string(),
-                "test-model".to_string(),
                 state,
                 ConnectionHandle::create_disabled(tx),
                 false,
+                None,
             )
             .await;
             assert_eq!(response.status(), status);

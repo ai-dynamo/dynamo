@@ -152,7 +152,7 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
 }
 
-fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+pub(super) fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
     tracing::info_span!(
         target: "request_span",
         "generate",
@@ -721,7 +721,7 @@ fn preprocessed_from_generate_with_tracker(
 /// tokenizer/postprocessor pipeline that emits `LLMMetricAnnotation`. Its
 /// token IDs are already rendered, so observe the same response metrics from
 /// the raw token deltas while leaving tokenizer and media metrics untouched.
-struct GenerateMetricCollector {
+pub(super) struct GenerateMetricCollector {
     response: ResponseMetricCollector,
     http_queue: Option<HttpQueueGuard>,
     tracker: Arc<RequestTracker>,
@@ -763,7 +763,7 @@ impl GenerateMetricLifecycle {
 }
 
 impl GenerateMetricCollector {
-    fn new(
+    pub(super) fn new(
         metrics: Arc<super::metrics::Metrics>,
         model: &str,
         tracker: Arc<RequestTracker>,
@@ -799,7 +799,7 @@ impl GenerateMetricCollector {
         self.worker_info_observed = true;
     }
 
-    fn observe(&mut self, annotated: &mut Annotated<LLMEngineOutput>) {
+    pub(super) fn observe(&mut self, annotated: &mut Annotated<LLMEngineOutput>) {
         let Some(output) = annotated.data.as_mut() else {
             return;
         };
@@ -2592,7 +2592,7 @@ pub(crate) mod tests {
         .await
     }
 
-    fn metric_value<'a>(
+    pub(crate) fn metric_value<'a>(
         families: &'a [prometheus::proto::MetricFamily],
         name: &str,
         labels: &[(&str, &str)],
