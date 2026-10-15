@@ -16,11 +16,12 @@
 use dashmap::{DashMap, DashSet};
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher};
 use futures::StreamExt;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -35,6 +36,39 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
+
+struct TrackedFpm {
+    payload: Vec<u8>,
+    received_at: Instant,
+}
+
+type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
+
+fn fresh_fpm_snapshot(
+    latest: &DashMap<(String, i64), TrackedFpm>,
+    known: &DashSet<String>,
+    now: Instant,
+    max_age: Duration,
+) -> (FpmSnapshot, Vec<String>, usize) {
+    let mut snapshot = HashMap::new();
+    let mut unjoined = HashSet::new();
+    let mut stale = 0;
+    for entry in latest {
+        let expired = now.saturating_duration_since(entry.value().received_at) > max_age;
+        if !known.contains(&entry.key().0) {
+            if !expired {
+                unjoined.insert(entry.key().0.clone());
+            }
+        } else if expired {
+            stale += 1;
+        } else {
+            snapshot.insert(entry.key().clone(), entry.value().payload.clone());
+        }
+    }
+    let mut unjoined: Vec<_> = unjoined.into_iter().collect();
+    unjoined.sort_unstable();
+    (snapshot, unjoined, stale)
+}
 
 // ---------------------------------------------------------------------------
 // Relay: raw ZMQ (child process) -> event plane
@@ -428,7 +462,7 @@ pub(crate) struct FpmEventSubscriber {
 
     // tracking mode state
     tracking_started: Arc<AtomicBool>,
-    latest_stats: Arc<DashMap<(String, i64), Vec<u8>>>,
+    latest_stats: Arc<DashMap<(String, i64), TrackedFpm>>,
     // Worker IDs currently registered in MDC.  Maintained by Task 2
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
@@ -730,7 +764,10 @@ impl FpmEventSubscriber {
                                 Some(Ok(envelope)) => {
                                     let payload = envelope.payload.to_vec();
                                     if let Some(key) = extract_fpm_key(&payload) {
-                                        stats.insert(key, payload);
+                                        stats.insert(key, TrackedFpm {
+                                            payload,
+                                            received_at: Instant::now(),
+                                        });
                                     } else {
                                         tracing::warn!(
                                             "FPM tracker: failed to extract key from payload ({} bytes)",
@@ -909,10 +946,34 @@ impl FpmEventSubscriber {
             .latest_stats
             .iter()
             .filter(|entry| self.known_workers.contains(&entry.key().0))
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| (entry.key().clone(), entry.value().payload.clone()))
             .collect();
 
         Ok(snapshot)
+    }
+
+    /// Return fresh samples, worker IDs absent from discovery, and stale rank count.
+    /// Freshness uses local receive time, including idle heartbeats, rather than
+    /// publisher clocks. The legacy get_recent_stats method retains its semantics.
+    fn get_recent_stats_with_health(
+        &self,
+        max_age_seconds: f64,
+    ) -> PyResult<(FpmSnapshot, Vec<String>, usize)> {
+        if !self.tracking_started.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "start_tracking() has not been called",
+            ));
+        }
+        let max_age = Duration::try_from_secs_f64(max_age_seconds)
+            .ok()
+            .filter(|age| !age.is_zero())
+            .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))?;
+        Ok(fresh_fpm_snapshot(
+            &self.latest_stats,
+            &self.known_workers,
+            Instant::now(),
+            max_age,
+        ))
     }
 
     /// Snapshot of model deployment cards keyed by worker id.
@@ -961,6 +1022,45 @@ impl Drop for FpmEventSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_separates_missing_identity_and_stale_samples() {
+        let now = Instant::now();
+        let latest = DashMap::new();
+        let known = DashSet::new();
+        known.insert("fresh".to_string());
+        known.insert("stale".to_string());
+        for (worker, age) in [("fresh", 0), ("stale", 2), ("orphan", 0), ("removed", 2)] {
+            latest.insert(
+                (worker.to_string(), 0),
+                TrackedFpm {
+                    payload: vec![1],
+                    received_at: now - Duration::from_secs(age),
+                },
+            );
+        }
+        let (snapshot, unjoined, stale) =
+            fresh_fpm_snapshot(&latest, &known, now, Duration::from_secs(1));
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.contains_key(&("fresh".to_string(), 0)));
+        assert_eq!(unjoined, ["orphan"]);
+        assert_eq!(stale, 1);
+
+        // An identical idle heartbeat is fresh when it was received again.
+        latest.insert(
+            ("stale".to_string(), 0),
+            TrackedFpm {
+                payload: vec![1],
+                received_at: now,
+            },
+        );
+        known.insert("orphan".to_string());
+        let (snapshot, unjoined, stale) =
+            fresh_fpm_snapshot(&latest, &known, now, Duration::from_secs(1));
+        assert_eq!(snapshot.len(), 3);
+        assert!(unjoined.is_empty());
+        assert_eq!(stale, 0);
+    }
 
     fn card_id(instance_id: u64, model_suffix: Option<&str>) -> ModelCardInstanceId {
         ModelCardInstanceId {

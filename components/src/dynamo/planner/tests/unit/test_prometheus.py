@@ -790,7 +790,7 @@ class TestPrometheusAPIClientRouterSource:
             "started query failed" in record.message for record in caplog.records
         )
 
-    def test_router_request_count_returns_zero_when_completed_query_fails(
+    def test_router_request_count_is_unavailable_when_completed_query_fails(
         self, router_client
     ):
         router_client.prom.custom_query.side_effect = [
@@ -800,7 +800,7 @@ class TestPrometheusAPIClientRouterSource:
 
         result = router_client.get_avg_request_count("60s", "mymodel")
 
-        assert result == 0
+        assert result is None
 
     def test_router_request_count_reraises_malformed_response(
         self, router_client, caplog
@@ -897,20 +897,21 @@ class TestPrometheusAPIClientRouterSource:
         result = router_client.get_avg_inter_token_latency("60s", "mymodel")
         assert result == 0
 
-    def test_router_request_count_returns_zero_on_empty_result(self, router_client):
-        """Router request count returns 0 when neither counter has data."""
+    def test_router_request_count_is_unavailable_on_empty_result(self, router_client):
+        """Missing counters must not masquerade as an idle pool."""
         router_client.prom.custom_query.return_value = []
         result = router_client.get_avg_request_count("60s", "mymodel")
-        assert result == 0
+        assert result is None
 
-    def test_router_request_count_returns_zero_when_both_counters_are_nan(
-        self, router_client
+    @pytest.mark.parametrize("value", ["NaN", "Inf"])
+    def test_router_request_count_is_unavailable_when_both_counters_are_nonfinite(
+        self, router_client, value
     ):
-        router_client.prom.custom_query.return_value = [{"value": [0, "NaN"]}]
+        router_client.prom.custom_query.return_value = [{"value": [0, value]}]
 
         result = router_client.get_avg_request_count("60s", "mymodel")
 
-        assert result == 0
+        assert result is None
 
     def test_router_histogram_returns_zero_on_nan(self, router_client):
         """_get_router_average_histogram returns 0 when value is NaN."""

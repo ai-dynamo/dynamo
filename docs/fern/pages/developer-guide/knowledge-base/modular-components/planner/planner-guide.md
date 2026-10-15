@@ -238,6 +238,32 @@ The same diagnostic signals surfaced in these reports are also exported as Prome
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
 
+### Unavailable Scaling Inputs
+
+`dynamo_planner_signal_unavailable{component,signal}` reports missing inputs on
+their most recent scheduled observation. After three consecutive unavailable
+observations, the Planner logs `Planner degraded signal` and increments
+`dynamo_planner_degraded_signals_total{component,signal}` once for that episode.
+A successful observation clears the gauge and allows a later outage to produce
+a new alert. Ticks that do not request a signal do not count as missing samples.
+
+The signals distinguish missing FPM, stale FPM, worker discovery join failures,
+missing engine capacity, missing speculative accept length, and unavailable
+traffic observations. Runtime FPM samples expire after three load-adjustment
+intervals measured from local receipt. Idle heartbeats refresh that receipt
+time. Samples from workers absent from discovery are excluded and logged with
+their worker IDs.
+
+Missing, non-finite, or failed router request-counter queries produce unavailable
+demand, matching the frontend collection behavior. An explicit counter value of
+zero remains a valid idle observation.
+
+Fresh idle FPM can reduce an SLA pool without waiting for a cold performance
+model. A valid zero-demand throughput prediction can also reduce a pool without
+a capacity estimate. Missing observations do not count as idle. Replica floors,
+GPU budgets, pending rollout checks, and downstream actuation constraints still
+apply. A restarted Planner uses observed deployment counts to resume decisions.
+
 ### Scheduling / plugin pipeline
 
 The planner runs through the builtin plugin pipeline by default. The base

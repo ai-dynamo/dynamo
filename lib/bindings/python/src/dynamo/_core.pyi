@@ -1444,6 +1444,17 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_recent_stats_with_health(
+        self, max_age_seconds: float
+    ) -> tuple[dict[tuple[str, int], bytes], list[str], int]:
+        """Return fresh samples, unjoined worker IDs, and stale rank count.
+
+        Age is measured from local receive time, including idle heartbeats.
+        ``max_age_seconds`` must be finite and positive. Tracking must have
+        been started with ``start_tracking()``.
+        """
+        ...
+
     def get_model_cards(self) -> dict[str, str]:
         """
         Snapshot of model deployment cards keyed by worker id.

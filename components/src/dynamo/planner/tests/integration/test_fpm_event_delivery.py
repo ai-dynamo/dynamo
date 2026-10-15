@@ -8,6 +8,7 @@ import sys
 from contextlib import AsyncExitStack
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from dynamo.llm import (
     FpmDirectPublisher,
@@ -29,6 +30,8 @@ from dynamo.planner.environment.metrics_provider.runtime_provider import (
     RuntimeFpmProvider,
 )
 from dynamo.planner.environment.state import DeploymentState
+from dynamo.planner.monitoring.planner_metrics import PluginFrameworkMetrics
+from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 from dynamo.runtime import DistributedRuntime
 
@@ -65,6 +68,7 @@ class _DecodePlanner(NativePlannerBase):
     require_decode = True
 
 
+@pytest.mark.timeout(45)
 def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path):
     # Keep binding runtimes out of pytest's process without pytest-forked, whose parent setup
     # stack is not advanced when a forked item is the last test in its module.
@@ -225,6 +229,56 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
         assert decision is not None
         assert decision.num_decode is not None
         assert decision.num_decode > 1
+
+        metrics = PluginFrameworkMetrics(registry=CollectorRegistry())
+        health = PlannerSignalHealth(config, metrics)
+        requested = ScheduledTick(at_s=0, need_worker_fpm=True)
+        caps = WorkerCapabilities(
+            decode=EngineCapabilities(num_gpu=1, max_kv_tokens=100)
+        )
+        health.observe(requested, tick_input, caps)
+
+        publisher.shutdown()
+        provider.max_fpm_age_seconds = 0.05
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            stale = provider.collect_fpm()
+            if stale.unavailable_reasons.get("decode") == "stale_fpm":
+                break
+        assert not stale.decode
+        assert stale.unavailable_reasons == {"decode": "stale_fpm"}
+        tick_input.fpm_observations = stale
+        for _ in range(3):
+            health.observe(requested, tick_input, caps)
+        assert (
+            metrics.degraded_signals_total.labels(
+                component="decode", signal="stale_fpm"
+            )._value.get()
+            == 1
+        )
+
+        unjoined = FpmDirectPublisher(worker_endpoint, "unknown-worker", dp_size=1)
+        stack.callback(unjoined.shutdown)
+        for _ in range(100):
+            unjoined.publish(
+                dp_rank=0,
+                scheduled_num_prefill_requests=0,
+                scheduled_sum_prefill_tokens=0,
+                scheduled_sum_prefill_kv_tokens=0,
+                scheduled_num_decode_requests=0,
+                scheduled_sum_decode_kv_tokens=0,
+                queued_num_prefill_requests=0,
+                queued_sum_prefill_tokens=0,
+                queued_num_decode_requests=0,
+                queued_sum_decode_kv_tokens=0,
+                wall_time_secs=0.0,
+            )
+            await asyncio.sleep(0.01)
+            rejected = provider.collect_fpm()
+            if rejected.unavailable_reasons.get("decode") == "worker_join_failure":
+                break
+        assert rejected.unavailable_reasons == {"decode": "worker_join_failure"}
+        assert not rejected.decode
 
 
 if __name__ == "__main__":

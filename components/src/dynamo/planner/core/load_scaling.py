@@ -45,6 +45,32 @@ class LoadScalingMixin:
     _diag_load_reason_prefill: Optional[str]
     _diag_load_reason_decode: Optional[str]
 
+    def _idle_sla_target(
+        self,
+        fpm_stats: dict[tuple[str, int], ForwardPassMetrics],
+        num_workers: int,
+        component: Literal["prefill", "decode"],
+    ) -> Optional[int]:
+        if self._config.optimization_target != "sla" or not fpm_stats:
+            return None
+        for fpm in fpm_stats.values():
+            scheduled, queued = fpm.scheduled_requests, fpm.queued_requests
+            if any(
+                (
+                    scheduled.num_prefill_requests,
+                    scheduled.sum_prefill_tokens,
+                    scheduled.sum_prefill_kv_tokens,
+                    scheduled.num_decode_requests,
+                    scheduled.sum_decode_kv_tokens,
+                    queued.num_prefill_requests,
+                    queued.sum_prefill_tokens,
+                    queued.num_decode_requests,
+                    queued.sum_decode_kv_tokens,
+                )
+            ):
+                return None
+        return max(resolve_min_endpoint(self._config, component), num_workers - 1)
+
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
             self._diag_load_reason = "disabled"
@@ -321,8 +347,13 @@ class LoadScalingMixin:
             return None
 
         easy = self._config.optimization_target != "sla"
-        if easy:
-            desired = self._agg_easy_decision(fpm_stats, num_workers)
+        idle_target = self._idle_sla_target(fpm_stats, num_workers, "decode")
+        if easy or idle_target is not None:
+            desired = (
+                idle_target
+                if idle_target is not None
+                else self._agg_easy_decision(fpm_stats, num_workers)
+            )
             # For agg easy mode, we directly get a single decision
             # _agg_easy_decision already sets _diag_load_reason before returning None
             if desired is None:
@@ -351,6 +382,12 @@ class LoadScalingMixin:
             if budget_reason is not None:
                 self._diag_load_reason = budget_reason
 
+            if (
+                idle_target is not None
+                and desired == num_workers
+                and not self._pending_num_d
+            ):
+                return None
             logger.info(f"Agg easy-mode scaling: {num_workers} -> {desired}")
             return ScalingDecision(num_decode=desired)
 
@@ -459,6 +496,9 @@ class LoadScalingMixin:
     def _prefill_load_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
+        idle_target = self._idle_sla_target(fpm_stats, num_workers, "prefill")
+        if idle_target is not None:
+            return idle_target
         if not self._prefill_regression.has_sufficient_data():
             logger.info(
                 f"TTFT perf model: insufficient data "
@@ -556,6 +596,9 @@ class LoadScalingMixin:
     def _decode_load_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
+        idle_target = self._idle_sla_target(fpm_stats, num_workers, "decode")
+        if idle_target is not None:
+            return idle_target
         if not self._decode_regression.has_sufficient_data():
             logger.info(
                 f"ITL perf model: insufficient data "

@@ -222,7 +222,7 @@ class ThroughputScalingMixin:
         d_caps = self._capabilities.decode
         max_tokens = d_caps.max_num_batched_tokens if d_caps else None
         max_tokens_available = bool(max_tokens and max_tokens > 0)
-        if not max_tokens_available:
+        if not max_tokens_available and demand_rps != 0:
             logger.warning("max_num_batched_tokens not available for agg throughput")
         capacity = (
             self._agg_regression.find_engine_capacity_rps(
@@ -233,12 +233,14 @@ class ThroughputScalingMixin:
                 kv_hit_rate=kv_hit_rate,
                 accept_length=self._current_decode_accept_length(),
             )
-            if max_tokens_available
+            if max_tokens_available and demand_rps != 0
             else None
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
-        model_not_ready = capacity is None or engine_rps <= 0
-        if capacity is None or engine_rps <= 0:
+        model_not_ready = demand_rps != 0 and (capacity is None or engine_rps <= 0)
+        if demand_rps == 0:
+            desired = resolve_min_endpoint(self._config, "decode")
+        elif capacity is None or engine_rps <= 0:
             # No capacity estimate, so the demand division below cannot run;
             # hold at the current count so the endpoint floor still applies.
             logger.warning(
@@ -321,6 +323,8 @@ class ThroughputScalingMixin:
         osl: float,
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[int]:
+        if demand_rps == 0:
+            return resolve_min_endpoint(self._config, "prefill")
         capacity = self._prefill_regression.find_engine_capacity_rps(
             isl=isl,
             osl=osl,
@@ -357,6 +361,8 @@ class ThroughputScalingMixin:
     def _compute_decode_replicas(
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
+        if demand_rps == 0:
+            return resolve_min_endpoint(self._config, "decode")
         accept_length = self._current_decode_accept_length()
         capacity = self._decode_regression.find_engine_capacity_rps(
             isl=isl,

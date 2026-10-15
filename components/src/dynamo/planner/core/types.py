@@ -87,6 +87,7 @@ class FpmObservations:
 
     prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None
     decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None
+    unavailable_reasons: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
