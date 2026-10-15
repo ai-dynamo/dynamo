@@ -62,6 +62,93 @@ def test_init_device_forwards_ro_connect_timeout(monkeypatch, tmp_path):
     assert manager_factory.call_args.kwargs["timeout_ms"] == 4200
 
 
+class _FakeDevice:
+    """Device memory seen by one engine of a shadow-failover pair."""
+
+    def __init__(self, total: int, peer_used: int):
+        self.total = total
+        self.used = peer_used
+        self.reserved = 0
+        self.peak_allocated = 0
+
+    def mem_get_info(self):
+        return self.total - self.used, self.total
+
+    def memory_reserved(self):
+        return self.reserved
+
+    def max_memory_allocated(self):
+        return self.peak_allocated
+
+    def reset_peak_memory_stats(self):
+        self.peak_allocated = 0
+
+    def synchronize(self):
+        pass
+
+
+def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
+    # A100 80 GB at vLLM's default gpu_memory_utilization (DYN-4950).
+    gib = 1 << 30
+    total = 85_093_777_408
+    requested = int(total * 0.92)
+    weights = int(1.18 * gib)  # imported read-only from GMS, shared by both
+    torch_peak = int(0.5 * gib)
+    non_torch = 2 * gib  # CUDA context, NCCL and NIXL buffers
+    cudagraph = int(0.43 * gib)
+    # The peer engine is already resident on the device.
+    device = _FakeDevice(total, peer_used=weights + torch_peak + non_torch)
+
+    def base_init_device(_worker):
+        device.used += non_torch
+
+    def profile_run():
+        device.peak_allocated = torch_peak
+
+    monkeypatch.setattr(gms_worker, "torch_device", lambda: device)
+    monkeypatch.setattr(gms_worker, "is_scratch_kv_enabled", lambda: True)
+    monkeypatch.setattr(gms_worker, "has_pending_gms_write", lambda: False)
+    monkeypatch.setattr(gms_worker, "get_imported_weights_bytes", lambda: weights)
+    monkeypatch.setattr(gms_worker, "get_or_create_gms_client_memory_manager", Mock())
+    monkeypatch.setattr(gms_worker, "_get_dp_adjusted_local_rank", lambda *_: 0)
+    monkeypatch.setattr(
+        gms_worker, "get_vmm_device_type", lambda: SimpleNamespace(value="cuda")
+    )
+    monkeypatch.setattr(
+        gms_worker, "get_socket_path", lambda *_: str(tmp_path / "weights.sock")
+    )
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform",
+        SimpleNamespace(set_device=lambda _: None, is_cuda=lambda: True),
+    )
+    monkeypatch.setattr(gms_worker._BaseWorker, "init_device", base_init_device)
+    monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1")
+
+    from vllm.config import CUDAGraphMode
+
+    worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
+    worker.local_rank = 0
+    worker.parallel_config = None
+    worker.vllm_config = SimpleNamespace(
+        load_config=SimpleNamespace(model_loader_extra_config={}),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
+    )
+    worker.model_runner = SimpleNamespace(
+        profile_run=profile_run, profile_cudagraph_memory=lambda: cudagraph
+    )
+    worker.requested_memory = requested
+
+    worker.init_device()
+    kv_budget = worker._determine_available_memory_before_gms_publish()
+
+    # The KV cache is one allocation made at wake while the peer stays
+    # resident; both engines' non-KV memory and the shared weights must fit
+    # beside it within the requested share of the device.
+    engine_non_kv = torch_peak + non_torch + cudagraph
+    assert kv_budget + weights + 2 * engine_non_kv <= requested
+    assert kv_budget > 0
+
+
 def test_v1_worker_uses_upstream_sleep_backend_accessor(monkeypatch):
     monkeypatch.setattr(gms_v1_worker.Worker, "init_device", lambda _: None)
     backend = Mock()

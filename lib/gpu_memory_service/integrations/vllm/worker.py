@@ -182,8 +182,26 @@ class GMSWorker(_BaseWorker):
             tag="weights",
             timeout_ms=self.gms_ro_connect_timeout_ms,
         )
+
+        # Shadow-mode KV sizing cannot read this engine's non-torch memory
+        # (NCCL, workspaces) from device-wide free memory at profile time: the
+        # co-located engine allocates on the same device. Measure it over the
+        # parent's init only. The window starts after the RO connect above,
+        # which can block while the peer profiles.
+        measure_non_torch = is_scratch_kv_enabled()
+        if measure_non_torch:
+            free_before, _ = torch_device().mem_get_info()
+            reserved_before = torch_device().memory_reserved()
+
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
+
+        if measure_non_torch:
+            free_after, _ = torch_device().mem_get_info()
+            reserved_delta = torch_device().memory_reserved() - reserved_before
+            self._gms_non_torch_init_bytes = max(
+                0, free_before - free_after - reserved_delta
+            )
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -191,7 +209,9 @@ class GMSWorker(_BaseWorker):
         Determine actual available memory for the engine.
 
         During a failover scenario, this function may be called while there is an active engine colocated on the same device.
-        We want our assessment to ignore the kv cache allocation of the active engine if there is one.
+        We want our assessment to ignore the kv cache allocation of the active engine if there is one,
+        but not the rest of its footprint: in scratch-KV mode the budget also reserves room for the
+        co-located engine's non-KV memory.
 
         A first writer defers its GMS commit until profiling completes here:
         waiting RO consumers (snapshot saver, peer engines) would otherwise
@@ -242,28 +262,39 @@ class GMSWorker(_BaseWorker):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        invisible_weights_memory = (
-            0 if has_pending_write else get_imported_weights_bytes()
+        weights_memory = get_imported_weights_bytes()
+        invisible_weights_memory = 0 if has_pending_write else weights_memory
+        non_torch_memory = getattr(self, "_gms_non_torch_init_bytes", 0)
+        non_kv_cache_memory = (
+            torch_peak
+            + invisible_weights_memory
+            + non_torch_memory
+            + cudagraph_memory_estimate_applied
         )
-        non_kv_cache_memory = torch_peak + invisible_weights_memory
+        # The KV tensors are one cuMemCreate at wake, made while the other
+        # engine of the failover pair stays resident on this device. Both
+        # engines run the same model and arguments, so reserve this engine's
+        # non-KV footprint again for the peer, minus the weights they share.
+        peer_non_kv_cache_memory = max(0, non_kv_cache_memory - weights_memory)
 
         projected_available = (
-            self.requested_memory
-            - non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            self.requested_memory - non_kv_cache_memory - peer_non_kv_cache_memory
         )
         self.available_kv_cache_memory_bytes = int(projected_available)
 
         logger.info(
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
+            "peer_non_kv=%.2f GiB, torch_peak=%.2f GiB, "
+            "invisible_weights=%.2f GiB, non_torch=%.2f GiB, "
             "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
             projected_available / (1 << 30),
             self.requested_memory / (1 << 30),
             non_kv_cache_memory / (1 << 30),
+            peer_non_kv_cache_memory / (1 << 30),
             torch_peak / (1 << 30),
             invisible_weights_memory / (1 << 30),
+            non_torch_memory / (1 << 30),
             cudagraph_memory_estimate / (1 << 30),
             cudagraph_memory_estimate_applied / (1 << 30),
         )
