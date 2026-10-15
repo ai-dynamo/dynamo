@@ -75,6 +75,7 @@ class KubernetesCapacityManager(CapacityManager):
         self._replica_retry_states: ContextVar[
             dict[str, ReplicaUpdateRetryState] | None
         ] = ContextVar("global_planner_replica_retry_states", default=None)
+        self._replica_uids: dict[str, str] = {}
 
     # ------------------------------------------------------------------ #
     # Discovery / registration                                           #
@@ -196,6 +197,7 @@ class KubernetesCapacityManager(CapacityManager):
             del self.connectors[participant_id]
             self._component_roles.pop(participant_id, None)
             self._missing_participants.discard(participant_id)
+            self._replica_uids.pop(participant_id, None)
 
     def _get_inventory_api(self) -> KubernetesAPI:
         if self._inventory_api is None:
@@ -293,6 +295,17 @@ class KubernetesCapacityManager(CapacityManager):
                         RuntimeError(
                             f"DGD for {key} is missing while {active_pods} "
                             "nonterminal labeled Pods remain"
+                        ),
+                        require_complete,
+                    )
+                elif require_complete:
+                    self._record_observation_failure(
+                        all_pools,
+                        key,
+                        RuntimeError(
+                            f"DGD for {key} is missing; a Pod snapshot without "
+                            "nonterminal Pods does not prove that workload descendants "
+                            "have drained"
                         ),
                         require_complete,
                     )
@@ -597,6 +610,15 @@ class KubernetesCapacityManager(CapacityManager):
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
+    ) -> None:
+        """Apply desired targets while preserving the CapacityManager contract."""
+        await self.scale_with_result(participant_id, targets, blocking)
+
+    async def scale_with_result(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
     ) -> ReplicaUpdateResult:
         """Apply desired replica targets to one participant.
 
@@ -607,27 +629,22 @@ class KubernetesCapacityManager(CapacityManager):
         connector = self.connectors[participant_id]
         retry_states = self._replica_retry_states.get()
         if retry_states is None:
-            result = await connector.set_component_replicas(targets, blocking=blocking)
+            retry_state = ReplicaUpdateRetryState()
         else:
             retry_state = retry_states.setdefault(
                 participant_id, ReplicaUpdateRetryState()
             )
-            result = await connector.set_component_replicas(
-                targets,
-                blocking=blocking,
-                retry_state=retry_state,
-            )
-        if isinstance(result, ReplicaUpdateResult):
-            return result
+        result = await connector.set_component_replicas_with_result(
+            targets,
+            blocking=blocking,
+            retry_state=retry_state,
+        )
+        if retry_state.dgd_uid is not None:
+            self._replica_uids[participant_id] = retry_state.dgd_uid
+        return result
 
-        # A legacy clean return was the success contract and may have written.
-        if result is None:
-            return ReplicaUpdateResult(accepted=True, applied=True)
-
-        # Keep explicit legacy booleans conservative: a true result may have
-        # written and therefore blocks replay.
-        accepted = bool(result)
-        return ReplicaUpdateResult(accepted=accepted, applied=accepted)
+    def supports_split_readiness(self) -> bool:
+        return True
 
     async def wait_for_ready(self, participant_id: str) -> None:
         """Wait for one participant without repeating its accepted write."""
@@ -655,14 +672,22 @@ class KubernetesCapacityManager(CapacityManager):
     ) -> Callable[[], dict[str, int]]:
         connector = self.connectors[participant_id]
         role_hints = dict(self._component_roles.get(participant_id, {}))
-        return partial(self._current_replicas, connector, role_hints)
+        expected_uid = self._replica_uids.get(participant_id)
+        return partial(self._current_replicas, connector, role_hints, expected_uid)
 
     def _current_replicas(
-        self, connector: KubernetesConnector, role_hints: dict[str, str]
+        self,
+        connector: KubernetesConnector,
+        role_hints: dict[str, str],
+        expected_uid: str | None = None,
     ) -> dict[str, int]:
         current_replicas: dict[str, int] = {}
         components_by_pool: dict[str, str] = {}
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+        if expected_uid is not None:
+            current_uid = (deployment.get("metadata", {}) or {}).get("uid")
+            if current_uid != expected_uid:
+                raise RuntimeError("DGD identity changed before replica readback")
         for component_name, component in get_components_by_name(deployment).items():
             sub_type = self._component_role(component_name, component, role_hints)
             if sub_type:

@@ -211,6 +211,9 @@ class FakeCapacityManager(CapacityManager):
     async def wait_for_ready(self, participant_id):
         return None
 
+    def supports_split_readiness(self):
+        return True
+
     def current_replicas(self, participant_id):
         return {st: r for st, (r, _g) in self.pools[participant_id].items()}
 
@@ -243,6 +246,38 @@ async def test_submit_approves_and_actuates(use_lock):
     assert out.status == ScaleStatus.SUCCESS
     assert cm.pools["default/a"]["prefill"][0] == 3  # actuated
     assert out.current_replicas == {"prefill": 3, "decode": 1}
+
+
+@pytest.mark.asyncio
+async def test_submit_preserves_legacy_blocking_scale_contract():
+    class LegacyCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.blocking = None
+
+        async def scale(self, participant_id, targets, blocking):
+            self.blocking = blocking
+            await super().scale(participant_id, targets, blocking)
+            return None
+
+        def supports_split_readiness(self):
+            return False
+
+        async def wait_for_ready(self, participant_id):
+            raise AssertionError("legacy backend owns its blocking wait")
+
+    cm = LegacyCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    outcome = await _orch(cm).submit(
+        "default/a",
+        _targets(prefill=2),
+        blocking=True,
+        deployment_name="default/a",
+        caller_name="default/a",
+    )
+
+    assert outcome.status == ScaleStatus.SUCCESS
+    assert cm.blocking is True
 
 
 @pytest.mark.asyncio
@@ -848,23 +883,75 @@ async def test_post_write_readback_releases_scale_lock():
 
     cm = BlockingFirstReadbackCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
+    cm.add("default/b", prefill=1, decode=1)
     orch = _orch(cm)
     first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
     assert await asyncio.to_thread(cm.readback_started.wait, 1)
 
-    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
+    second = asyncio.create_task(_submit(orch, "default/b", _targets(prefill=3)))
     try:
         for _ in range(100):
             if cm.scale_calls == 2:
                 break
             await asyncio.sleep(0)
         assert cm.scale_calls == 2
+        assert (await asyncio.wait_for(second, 1)).status == ScaleStatus.SUCCESS
+        assert not first.done()
     finally:
         cm.release_readback.set()
 
     assert (await asyncio.wait_for(first, 1)).status == ScaleStatus.SUCCESS
-    assert (await asyncio.wait_for(second, 1)).status == ScaleStatus.SUCCESS
     assert cm.scale_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_post_write_readback_serializes_same_participant():
+    class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.readback_started = Event()
+            self.release_readback = Event()
+            self.readback_calls = 0
+            self.scale_calls = 0
+            self.observe_calls = 0
+
+        def observe(self, require_complete=False):
+            self.observe_calls += 1
+            return super().observe(require_complete)
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            return await super().scale(participant_id, targets, blocking)
+
+        def current_replicas(self, participant_id):
+            self.readback_calls += 1
+            if self.readback_calls == 1:
+                self.readback_started.set()
+                self.release_readback.wait()
+            return super().current_replicas(participant_id)
+
+    cm = BlockingFirstReadbackCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm, max_gpus=10)
+    first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
+    assert await asyncio.to_thread(cm.readback_started.wait, 1)
+
+    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
+    try:
+        for _ in range(100):
+            if cm.observe_calls == 2:
+                break
+            await asyncio.sleep(0)
+        assert cm.observe_calls == 2
+        assert cm.scale_calls == 1
+        assert not second.done()
+    finally:
+        cm.release_readback.set()
+
+    first_result = await asyncio.wait_for(first, 1)
+    second_result = await asyncio.wait_for(second, 1)
+    assert first_result.current_replicas["prefill"] == 2
+    assert second_result.current_replicas["prefill"] == 3
 
 
 @pytest.mark.asyncio

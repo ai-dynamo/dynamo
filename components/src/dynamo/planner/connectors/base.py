@@ -36,10 +36,6 @@ class ReplicaUpdateResult:
     accepted: bool
     applied: bool
 
-    def __bool__(self) -> bool:
-        """Preserve the historical truth test for connector callers."""
-        return self.accepted
-
 
 class WorkerInfoProvider(Protocol):
     def get_worker_info(
@@ -133,7 +129,7 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
-    ) -> ReplicaUpdateResult | None:
+    ) -> None:
         pass
 
 

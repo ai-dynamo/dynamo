@@ -68,3 +68,5 @@ def test_nemotron_recipe_uses_selected_wheel_kubernetes_requirement() -> None:
 
     assert "from importlib.metadata import requires" in dockerfile
     assert '"${KUBERNETES_REQUIREMENT}"' in dockerfile
+    assert 'requires("kubernetes")' in dockerfile
+    assert '"${PYDANTIC_REQUIREMENT}"' in dockerfile

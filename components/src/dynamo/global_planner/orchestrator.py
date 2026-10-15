@@ -28,6 +28,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
+from weakref import WeakValueDictionary
 
 from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
@@ -96,6 +97,17 @@ class ScaleOutcome:
     current_replicas: dict = field(default_factory=dict)
 
 
+class _ParticipantMutationBusy(Exception):
+    """Signal that a prior response still owns one participant readback."""
+
+    def __init__(self, lock: asyncio.Lock):
+        self.lock = lock
+
+    async def wait(self) -> None:
+        await self.lock.acquire()
+        self.lock.release()
+
+
 class Orchestrator:
     """Coordinates GPU-budget arbitration and execution across participants.
 
@@ -160,6 +172,9 @@ class Orchestrator:
         # different pools cannot both pass against the same pre-scale state.
         # Toggleable: a single-threaded replay coordinator can disable it.
         self._scale_lock: Optional[asyncio.Lock] = asyncio.Lock() if use_lock else None
+        self._participant_mutation_locks: WeakValueDictionary[
+            str, asyncio.Lock
+        ] = WeakValueDictionary()
 
     # ------------------------------------------------------------------ #
     # Participant registry / authorization                               #
@@ -264,6 +279,7 @@ class Orchestrator:
 
         admitted = asyncio.Event()
         committed_participants: list[str] = []
+        held_participant_locks: dict[str, asyncio.Lock] = {}
 
         def complete_after_cancel() -> bool:
             return admitted.is_set()
@@ -277,6 +293,7 @@ class Orchestrator:
                 caller_name,
                 admitted,
                 committed_participants,
+                held_participant_locks,
             )
 
         async def transaction() -> Optional[ScaleOutcome]:
@@ -304,25 +321,55 @@ class Orchestrator:
             # hold the global lock across the potentially unbounded read GET.
             return None, self.capacity_manager.capture_current_replicas(participant_id)
 
-        if self._scale_lock is not None:
-            async with self._scale_lock:
-                terminal, readback = await execute_transaction()
-        else:
-            terminal, readback = await execute_transaction()
+        try:
+            while True:
+                try:
+                    if self._scale_lock is not None:
+                        async with self._scale_lock:
+                            terminal, readback = await execute_transaction()
+                    else:
+                        terminal, readback = await execute_transaction()
+                    break
+                except _ParticipantMutationBusy as busy:
+                    await busy.wait()
 
-        if terminal is not None:
-            return terminal
-        assert readback is not None
+            if terminal is not None:
+                return terminal
+            assert readback is not None
 
-        # Preserve the response contract: current_replicas is an observed
-        # post-transaction snapshot, not the requested desired state.
-        current_replicas = await run_sync_in_thread(readback)
-        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
-        return ScaleOutcome(
-            status=ScaleStatus.SUCCESS,
-            message=f"Scaled {deployment_name} successfully",
-            current_replicas=current_replicas,
-        )
+            # Preserve the response contract: current_replicas is an observed
+            # post-transaction snapshot, not the requested desired state.
+            current_replicas = await run_sync_in_thread(readback)
+            logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
+            return ScaleOutcome(
+                status=ScaleStatus.SUCCESS,
+                message=f"Scaled {deployment_name} successfully",
+                current_replicas=current_replicas,
+            )
+        finally:
+            for participant_lock in reversed(held_participant_locks.values()):
+                participant_lock.release()
+
+    async def _reserve_participant_mutations(
+        self,
+        participant_ids: list[str],
+        held_participant_locks: dict[str, asyncio.Lock],
+    ) -> None:
+        """Reserve every participant through the request readback."""
+        pending: list[tuple[str, asyncio.Lock]] = []
+        for participant_id in sorted(set(participant_ids)):
+            if participant_id in held_participant_locks:
+                continue
+            participant_lock = self._participant_mutation_locks.setdefault(
+                participant_id, asyncio.Lock()
+            )
+            if participant_lock.locked():
+                raise _ParticipantMutationBusy(participant_lock)
+            pending.append((participant_id, participant_lock))
+
+        for participant_id, participant_lock in pending:
+            await participant_lock.acquire()
+            held_participant_locks[participant_id] = participant_lock
 
     async def _observe_decide_apply(
         self,
@@ -333,6 +380,7 @@ class Orchestrator:
         caller_name: str,
         admitted: asyncio.Event,
         committed_participants: list[str],
+        held_participant_locks: dict[str, asyncio.Lock],
     ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
 
@@ -418,6 +466,7 @@ class Orchestrator:
             ordered_participants,
             blocking=blocking,
             committed_participants=committed_participants,
+            held_participant_locks=held_participant_locks,
         )
         if terminal is not None:
             return terminal
@@ -430,8 +479,13 @@ class Orchestrator:
         *,
         blocking: bool,
         committed_participants: list[str],
+        held_participant_locks: dict[str, asyncio.Lock],
     ) -> tuple[Optional[ScaleOutcome], list[str]]:
         """Apply an admitted plan, settling each blocking step before the next."""
+
+        await self._reserve_participant_mutations(
+            ordered_participants, held_participant_locks
+        )
 
         # TODO(global-planner): Persist enough state to repair or roll back a
         # plan that still becomes partial because a later participant fails.
@@ -460,7 +514,12 @@ class Orchestrator:
                     pid, committed_participants, "participant is unknown"
                 )
             try:
-                result = await self.capacity_manager.scale(pid, tgts, blocking=False)
+                split_readiness = self.capacity_manager.supports_split_readiness()
+                result = await self.capacity_manager.scale_with_result(
+                    pid,
+                    tgts,
+                    blocking=blocking and not split_readiness,
+                )
             except DynamoGraphDeploymentNotReadyError as patch_err:
                 if not committed_participants:
                     raise
@@ -516,7 +575,7 @@ class Orchestrator:
             completed.append(pid)
             if result.applied and pid not in committed_participants:
                 committed_participants.append(pid)
-            if blocking:
+            if blocking and split_readiness:
                 try:
                     await self.capacity_manager.wait_for_ready(pid)
                 except Exception as readiness_error:

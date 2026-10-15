@@ -1013,9 +1013,10 @@ async def test_set_component_replicas(kubernetes_connector, mock_kube_api):
     mock_kube_api.wait_for_graph_deployment_ready.return_value = None
 
     # Act
-    await kubernetes_connector.set_component_replicas(target_replicas)
+    result = await kubernetes_connector.set_component_replicas(target_replicas)
 
     # Assert
+    assert result is None
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
     mock_kube_api.update_dgd_replica_targets.assert_called_once_with(
@@ -1108,13 +1109,13 @@ async def test_delegated_conflict_retry_rejects_replacement_dgd(
     ]
 
     with pytest.raises(client.ApiException):
-        await kubernetes_connector.set_component_replicas(
+        await kubernetes_connector.set_component_replicas_with_result(
             targets,
             blocking=False,
             retry_state=retry_state,
         )
     with pytest.raises(RuntimeError, match="DGD identity changed"):
-        await kubernetes_connector.set_component_replicas(
+        await kubernetes_connector.set_component_replicas_with_result(
             targets,
             blocking=False,
             retry_state=retry_state,
@@ -1150,13 +1151,13 @@ async def test_delegated_conflict_retry_rejects_replacement_adapter(
     ]
 
     with pytest.raises(client.ApiException):
-        await kubernetes_connector.set_component_replicas(
+        await kubernetes_connector.set_component_replicas_with_result(
             targets,
             blocking=False,
             retry_state=retry_state,
         )
     with pytest.raises(RuntimeError, match="replica authority changed"):
-        await kubernetes_connector.set_component_replicas(
+        await kubernetes_connector.set_component_replicas_with_result(
             targets,
             blocking=False,
             retry_state=retry_state,
@@ -1191,12 +1192,12 @@ async def test_delegated_conflict_retry_allows_reordered_targets(
     ]
 
     with pytest.raises(client.ApiException):
-        await kubernetes_connector.set_component_replicas(
+        await kubernetes_connector.set_component_replicas_with_result(
             targets,
             blocking=False,
             retry_state=retry_state,
         )
-    result = await kubernetes_connector.set_component_replicas(
+    result = await kubernetes_connector.set_component_replicas_with_result(
         list(reversed(targets)),
         blocking=False,
         retry_state=retry_state,
@@ -1233,12 +1234,12 @@ async def test_delegated_conflict_retry_allows_reduced_target_set(
     ]
 
     with pytest.raises(client.ApiException):
-        await kubernetes_connector.set_component_replicas(
+        await kubernetes_connector.set_component_replicas_with_result(
             targets,
             blocking=False,
             retry_state=retry_state,
         )
-    result = await kubernetes_connector.set_component_replicas(
+    result = await kubernetes_connector.set_component_replicas_with_result(
         targets[:1],
         blocking=False,
         retry_state=retry_state,
@@ -1810,7 +1811,9 @@ async def test_set_component_replicas_component_already_at_desired_replicas(
     mock_kube_api.wait_for_graph_deployment_ready.return_value = None
 
     # Act
-    result = await kubernetes_connector.set_component_replicas(target_replicas)
+    result = await kubernetes_connector.set_component_replicas_with_result(
+        target_replicas
+    )
 
     # Assert
     assert result.accepted
@@ -1836,7 +1839,7 @@ async def test_set_component_replicas_reports_ready_noop_without_write(
     mock_kube_api.get_graph_deployment.return_value = deployment
     mock_kube_api.is_deployment_ready.return_value = True
 
-    result = await kubernetes_connector.set_component_replicas(
+    result = await kubernetes_connector.set_component_replicas_with_result(
         target_replicas, blocking=False
     )
 
@@ -1893,10 +1896,10 @@ async def test_set_component_replicas_deployment_not_ready_skips_by_default(
     mock_kube_api.is_deployment_ready.return_value = False
 
     # Act
-    accepted = await kubernetes_connector.set_component_replicas(target_replicas)
+    result = await kubernetes_connector.set_component_replicas(target_replicas)
 
     # Assert
-    assert not accepted
+    assert result is None
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
     mock_kube_api.update_graph_replicas.assert_not_called()

@@ -1131,10 +1131,21 @@ class KubernetesConnector(PlannerConnector):
         self,
         target_replicas: list[TargetReplica],
         blocking: bool = True,
+    ) -> None:
+        """Set replicas while preserving the public connector return contract."""
+        await self.set_component_replicas_with_result(
+            target_replicas,
+            blocking=blocking,
+        )
+
+    async def set_component_replicas_with_result(
+        self,
+        target_replicas: list[TargetReplica],
+        blocking: bool = True,
         *,
         retry_state: ReplicaUpdateRetryState | None = None,
     ) -> ReplicaUpdateResult:
-        """Set the replicas for multiple components at once"""
+        """Set replicas and return transaction bookkeeping for GlobalPlanner."""
         if not target_replicas:
             raise EmptyTargetReplicasError()
 

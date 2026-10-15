@@ -6,11 +6,8 @@
 :class:`CapacityManager` is the infrastructure-facing base class the
 :class:`~dynamo.global_planner.orchestrator.Orchestrator` drives to **observe**
 current pool state and **scale** replicas. It defines a neutral,
-infrastructure-agnostic surface (``observe`` / ``scale`` / ``wait_for_ready`` /
-``discover`` / ``ensure_participant`` / ``participant_exists`` /
-``remember_roles`` / ``current_replicas`` / ``capture_current_replicas``) keyed
-by opaque ``participant_id``;
-the orchestrator never sees Kubernetes concepts.
+infrastructure-agnostic surface keyed by opaque ``participant_id``; the
+orchestrator never sees Kubernetes concepts.
 
 The concrete Kubernetes backend is
 :class:`~dynamo.global_planner.kubernetes_capacity_manager.KubernetesCapacityManager`.
@@ -103,9 +100,28 @@ class CapacityManager:
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
-    ) -> ReplicaUpdateResult:
-        """Apply desired targets and report acceptance and committed writes."""
+    ) -> None:
+        """Apply desired replica targets to one participant."""
         raise NotImplementedError
+
+    async def scale_with_result(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
+    ) -> ReplicaUpdateResult:
+        """Adapt the historical scale contract for transactional orchestration."""
+        result = await self.scale(participant_id, targets, blocking)
+        if isinstance(result, ReplicaUpdateResult):
+            return result
+        if result is None:
+            return ReplicaUpdateResult(accepted=True, applied=True)
+        accepted = bool(result)
+        return ReplicaUpdateResult(accepted=accepted, applied=accepted)
+
+    def supports_split_readiness(self) -> bool:
+        """Whether scale can apply without waiting and settle separately."""
+        return False
 
     async def wait_for_ready(self, participant_id: str) -> None:
         """Wait until one participant has settled after an accepted scale."""

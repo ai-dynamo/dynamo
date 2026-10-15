@@ -102,7 +102,8 @@ def _pod(phase, dgd_name="missing"):
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
     connector = MagicMock()
     connector.parent_dgd_name = parent_dgd_name
-    connector.set_component_replicas = AsyncMock(
+    connector.set_component_replicas = AsyncMock(return_value=None)
+    connector.set_component_replicas_with_result = AsyncMock(
         return_value=ReplicaUpdateResult(accepted=True, applied=True)
     )
     connector.wait_for_deployment_ready = AsyncMock()
@@ -314,28 +315,38 @@ def test_ensure_participant_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_scale_calls_connector():
+async def test_scale_with_result_calls_connector():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+
+    async def scale_with_identity(_targets, *, blocking, retry_state):
+        assert blocking
+        retry_state.dgd_uid = "dgd-uid"
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = scale_with_identity
     targets = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3)
     ]
-    result = await cm.scale("default/my-dgd", targets, blocking=True)
+    result = await cm.scale_with_result("default/my-dgd", targets, blocking=True)
 
     assert result.accepted
     assert result.applied
-    connector.set_component_replicas.assert_awaited_once_with(targets, blocking=True)
+    connector.set_component_replicas_with_result.assert_awaited_once()
+    assert connector.set_component_replicas_with_result.await_args.args == (targets,)
+    assert connector.set_component_replicas_with_result.await_args.kwargs["blocking"]
+    assert cm._replica_uids["default/my-dgd"] == "dgd-uid"
 
 
 @pytest.mark.asyncio
 async def test_scale_preserves_accepted_noop_result():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
-    connector.set_component_replicas.return_value = ReplicaUpdateResult(
+    connector.set_component_replicas_with_result.return_value = ReplicaUpdateResult(
         accepted=True, applied=False
     )
 
-    result = await cm.scale(
+    result = await cm.scale_with_result(
         "default/my-dgd",
         [
             TargetReplica(
@@ -351,11 +362,9 @@ async def test_scale_preserves_accepted_noop_result():
 
 
 @pytest.mark.asyncio
-async def test_scale_treats_legacy_none_result_as_applied():
+async def test_scale_preserves_public_none_return():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
-    connector.set_component_replicas.return_value = None
-
     result = await cm.scale(
         "default/my-dgd",
         [
@@ -367,30 +376,8 @@ async def test_scale_treats_legacy_none_result_as_applied():
         blocking=True,
     )
 
-    assert result.accepted
-    assert result.applied
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("legacy_result", [True, False])
-async def test_scale_treats_legacy_bool_result_conservatively(legacy_result):
-    cm = KubernetesCapacityManager("default")
-    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
-    connector.set_component_replicas.return_value = legacy_result
-
-    result = await cm.scale(
-        "default/my-dgd",
-        [
-            TargetReplica(
-                sub_component_type=SubComponentType.PREFILL,
-                desired_replicas=3,
-            )
-        ],
-        blocking=True,
-    )
-
-    assert result.accepted is legacy_result
-    assert result.applied is legacy_result
+    assert result is None
+    connector.set_component_replicas_with_result.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -413,7 +400,7 @@ async def test_run_with_conflict_retry_restarts_complete_operation():
 async def test_run_with_conflict_retry_reuses_replica_identity_state():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
-    connector.set_component_replicas.side_effect = [
+    connector.set_component_replicas_with_result.side_effect = [
         client.ApiException(status=409),
         ReplicaUpdateResult(accepted=True, applied=True),
     ]
@@ -425,17 +412,17 @@ async def test_run_with_conflict_retry_reuses_replica_identity_state():
     ]
 
     async def operation():
-        return await cm.scale("default/my-dgd", targets, blocking=False)
+        return await cm.scale_with_result("default/my-dgd", targets, blocking=False)
 
     result = await cm.run_with_conflict_retry(operation)
 
     assert result.applied
-    first_state = connector.set_component_replicas.await_args_list[0].kwargs[
-        "retry_state"
-    ]
-    second_state = connector.set_component_replicas.await_args_list[1].kwargs[
-        "retry_state"
-    ]
+    first_state = connector.set_component_replicas_with_result.await_args_list[
+        0
+    ].kwargs["retry_state"]
+    second_state = connector.set_component_replicas_with_result.await_args_list[
+        1
+    ].kwargs["retry_state"]
     assert first_state is second_state
 
 
@@ -619,7 +606,7 @@ def test_observe_require_complete_raises_on_read_failure():
         cm.observe(require_complete=True)
 
 
-def test_observe_managed_deployment_not_found_tombstones_without_failing():
+def test_observe_managed_deployment_not_found_fails_complete_snapshot():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
@@ -628,7 +615,8 @@ def test_observe_managed_deployment_not_found_tombstones_without_failing():
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
 
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
     assert not cm.participant_exists("default/missing")
 
     missing = _install_connector(
@@ -641,7 +629,7 @@ def test_observe_managed_deployment_not_found_tombstones_without_failing():
     assert not cm.participant_exists("default/missing")
 
 
-def test_observe_missing_deployment_waits_for_labeled_pods_to_drain():
+def test_observe_missing_deployment_never_uses_pod_absence_as_drain_proof():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
@@ -655,11 +643,12 @@ def test_observe_missing_deployment_waits_for_labeled_pods_to_drain():
         cm.observe(require_complete=True)
     assert not cm.participant_exists("default/missing")
 
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
     assert not cm.participant_exists("default/missing")
 
 
-def test_observe_missing_deployment_ignores_terminal_labeled_pods():
+def test_observe_missing_deployment_terminal_pods_do_not_prove_drain():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
@@ -672,7 +661,8 @@ def test_observe_missing_deployment_ignores_terminal_labeled_pods():
         _pod("Failed"),
     ]
 
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
     assert not cm.participant_exists("default/missing")
 
 
@@ -701,7 +691,8 @@ def test_observe_explicit_mode_rediscovers_recreated_deployment():
         deployment,
     ]
 
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
     assert "default/model" in cm.connectors
     assert not cm.participant_exists("default/model")
     assert cm._missing_participants == {"default/model"}
@@ -731,8 +722,10 @@ def test_observe_explicit_mode_rechecks_missing_names_with_one_list_per_pass():
         DynamoGraphDeploymentNotFoundError("second", "default")
     )
 
-    assert cm.observe(require_complete=True) == {}
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
 
     assert first.kube_api.get_graph_deployment.call_count == 2
     assert second.kube_api.get_graph_deployment.call_count == 2
@@ -752,7 +745,8 @@ def test_observe_explicit_mode_detects_pods_appearing_after_tombstone():
     )
     connector.kube_api.list_graph_pods.side_effect = [[], [_pod("Running", "model")]]
 
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
     assert not cm.participant_exists("default/model")
 
     with pytest.raises(RuntimeError, match="nonterminal labeled Pods remain"):
@@ -836,7 +830,7 @@ def test_observe_implicit_mode_fails_closed_for_orphan_active_pods():
     assert not cm.participant_exists("default/model")
 
 
-def test_observe_implicit_mode_ignores_orphan_terminal_pods():
+def test_observe_implicit_mode_terminal_orphans_do_not_prove_drain():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
     connector = _install_connector(
@@ -849,8 +843,9 @@ def test_observe_implicit_mode_ignores_orphan_terminal_pods():
     ]
     cm._inventory_api = connector.kube_api
 
-    assert cm.observe(require_complete=True) == {}
-    assert "default/model" not in cm.connectors
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
+    assert cm.connectors["default/model"] is connector
 
 
 def test_observe_implicit_mode_rejects_malformed_dgd_metadata():
@@ -888,9 +883,9 @@ def test_observe_implicit_mode_groups_missing_remote_pods_by_namespace():
         DynamoGraphDeploymentNotFoundError("second", "tenant")
     )
 
-    snapshot = cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="does not prove"):
+        cm.observe(require_complete=True)
 
-    assert snapshot["default/local"]["prefill"].current_replicas == 1
     first.kube_api.list_graph_pods.assert_called_once_with()
     second.kube_api.list_graph_pods.assert_not_called()
     assert not cm.participant_exists("tenant/first")
@@ -946,3 +941,18 @@ def test_capture_current_replicas_freezes_connector_and_role_hints():
 
     assert readback() == {"prefill": 2}
     old.kube_api.get_graph_deployment.assert_called_once_with("my-dgd")
+
+
+def test_capture_current_replicas_rejects_recreated_dgd():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(prefill_replicas=2, decode_replicas=5)
+    deployment.setdefault("metadata", {})["uid"] = "original"
+    connector = _install_connector(cm, "default/my-dgd", deployment)
+    cm._replica_uids["default/my-dgd"] = "original"
+    readback = cm.capture_current_replicas("default/my-dgd")
+    recreated = deepcopy(deployment)
+    recreated["metadata"]["uid"] = "replacement"
+    connector.kube_api.get_graph_deployment.return_value = recreated
+
+    with pytest.raises(RuntimeError, match="identity changed"):
+        readback()
