@@ -157,12 +157,12 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
 
 
 # A URL embedded in free text: a scheme, then everything up to whitespace, a
-# quote or an angle bracket (how exception messages delimit a URL). Square
-# brackets and parentheses are part of the match: an IPv6 host is bracketed,
-# and a path can contain either, so stopping at them would leave the rest of
-# the URL, query included, unredacted. Anything the match over-captures is
-# itself only rendered as a bounded label.
-_URL_IN_TEXT: Final = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+# double quote or an angle bracket (how exception messages delimit a URL).
+# Apostrophes, square brackets and parentheses are part of the match: an IPv6
+# host is bracketed and a path or query can contain any of them, so stopping
+# there would leave the rest of the URL, query included, unredacted. Anything
+# the match over-captures (a closing quote, say) only ends up in a bounded label.
+_URL_IN_TEXT: Final = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
 
 
 def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:

@@ -726,12 +726,13 @@ def test_describe_error_detail_redacts_a_presigned_url_in_the_text() -> None:
     [
         "https://[2606:4700::1111]/img.png",
         "https://bucket.s3.amazonaws.com/a(1)/img.png",
+        "https://bucket.example/o'reilly/img.png",
     ],
-    ids=["ipv6_host", "parenthesis_in_path"],
+    ids=["ipv6_host", "parenthesis_in_path", "apostrophe_in_path"],
 )
 def test_presigned_url_with_brackets_stays_out_of_http_errors(url) -> None:
-    """A bracketed IPv6 host or a parenthesis in the path must not end the
-    match early and leave the query unredacted."""
+    """A bracketed IPv6 host, a parenthesis or an apostrophe in the path must
+    not end the match early and leave the query unredacted."""
     signed = f"{url}?X-Amz-Expires=900&X-Amz-Signature={'0123456789abcdef' * 16}"
     error = HttpStatusError(400, f"Connection error loading image: '{signed}'", signed)
 

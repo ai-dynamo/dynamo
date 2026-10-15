@@ -225,9 +225,11 @@ class AudioLoader:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 audio_futures.append(self.load_audio(url))
-                logger.debug(
-                    "Preparing to load audio from URL: %s", describe_media_source(url)
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load audio from URL: %s",
+                        describe_media_source(url),
+                    )
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]

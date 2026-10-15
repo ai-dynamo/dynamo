@@ -643,5 +643,8 @@ async def test_load_video_batch_failure_keeps_signed_url_out(caplog):
     with caplog.at_level(logging.DEBUG), pytest.raises(Exception) as exc_info:
         await loader.load_video_batch([{"Url": url}])
 
-    assert _SIGNATURE not in str(exc_info.value)
-    assert _SIGNATURE not in caplog.text
+    # The old batch line cut the URL at 80 characters, which kept the start of
+    # the query; the signature itself sits further along.
+    for text in (str(exc_info.value), caplog.text):
+        assert _SIGNATURE not in text
+        assert "X-Amz-" not in text

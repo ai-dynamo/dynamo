@@ -373,9 +373,11 @@ class VideoLoader:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 video_futures.append(self.load_video(url, media_io_kwargs))
-                logger.debug(
-                    "Preparing to load video from URL: %s", describe_media_source(url)
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load video from URL: %s",
+                        describe_media_source(url),
+                    )
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]

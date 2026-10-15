@@ -187,23 +187,25 @@ class AiohttpClient(HttpClient):
                     response.content.iter_chunked(_READ_CHUNK), url, max_bytes
                 )
         except aiohttp.ClientResponseError as e:
-            raise HttpStatusError(e.status, e.message or "", url) from e
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
+            raise HttpStatusError(e.status, e.message or "", url) from None
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError):
             raise HttpTimeoutError(
                 f"Timeout loading {describe_media_source(url)}"
-            ) from e
+            ) from None
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
             raise HttpConnectionError(
-                f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"Connection error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from None
         except aiohttp.ClientError as e:
             raise HttpConnectionError(
-                f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"HTTP error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from None
 
     async def _fetch_body_or_redirect(
         self,
@@ -240,29 +242,31 @@ class AiohttpClient(HttpClient):
                 try:
                     response.raise_for_status()
                 except aiohttp.ClientResponseError as e:
-                    raise HttpStatusError(e.status, e.message or "", url) from e
+                    raise HttpStatusError(e.status, e.message or "", url) from None
                 return (
                     await collect_capped(
                         response.content.iter_chunked(_READ_CHUNK), url, max_bytes
                     ),
                     None,
                 )
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError):
             raise HttpTimeoutError(
                 f"Timeout loading {describe_media_source(url)}"
-            ) from e
+            ) from None
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
             raise HttpConnectionError(
-                f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"Connection error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from None
         except aiohttp.ClientError as e:
             raise HttpConnectionError(
-                f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"HTTP error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from None
 
     async def close(self) -> None:
         async with self._lock:
