@@ -359,7 +359,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
+# IMAGEIO_FFMPEG_EXE, plus the LGPL ffprobe that `vllm-rs` video decode needs (the
+# codec purge removed the distro one). This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
 # required shared libraries and CLI available.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -369,6 +370,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -nL /tmp/usr/local/bin/ffprobe /usr/local/bin/ffprobe && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
@@ -385,7 +387,14 @@ RUN set -eu; \
          | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
-    fi
+    fi; \
+    # vllm-rs decodes video with `ffprobe` plus `ffmpeg -f image2pipe -vcodec ppm`.
+    "$ff" -hide_banner -muxers 2>/dev/null | grep -qE '^ *E +image2pipe ' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no image2pipe muxer" >&2; exit 1; }; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qE '^ *V[^ ]* +ppm ' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no ppm encoder" >&2; exit 1; }; \
+    /usr/local/bin/ffprobe -hide_banner -version >/dev/null \
+      || { echo "ERROR: shipped ffprobe is missing or cannot start" >&2; exit 1; }
 
 {% if device == "cuda" %}
 # Delete the base image's PyNvVideoCodec before the install below replaces it.
