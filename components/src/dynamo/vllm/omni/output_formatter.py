@@ -57,6 +57,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import soundfile as sf
 import torch
+from PIL import Image
 
 try:
     from vllm_omni.diffusion.utils.media_utils import mux_video_audio_bytes
@@ -80,6 +81,66 @@ from dynamo.vllm.omni.utils import is_empty_payload
 logger = logging.getLogger(__name__)
 
 DEFAULT_AUDIO_SAMPLE_RATE = 24000
+
+_IMAGE_OUTPUT_FORMATS = {
+    "png": ("PNG", "png", "image/png"),
+    "jpeg": ("JPEG", "jpg", "image/jpeg"),
+    "webp": ("WEBP", "webp", "image/webp"),
+}
+
+
+def _normalize_image_output_options(
+    output_format: str | None,
+    response_format: str | None,
+    *,
+    quality: str | None = None,
+    background: str | None = None,
+) -> str:
+    if response_format not in (None, "url", "b64_json"):
+        raise ValueError(
+            f"Unsupported response_format: {response_format!r}; "
+            "expected 'url' or 'b64_json'"
+        )
+    if quality is not None:
+        raise ValueError(
+            "quality is not supported by the Dynamo vLLM-Omni image handler"
+        )
+    if background is not None:
+        raise ValueError(
+            "background is not supported by the Dynamo vLLM-Omni image handler"
+        )
+
+    if output_format is None:
+        return "png"
+    if not isinstance(output_format, str):
+        raise ValueError("output_format must be 'png', 'jpeg', or 'webp'")
+
+    normalized = output_format.lower()
+    if normalized not in _IMAGE_OUTPUT_FORMATS:
+        raise ValueError(
+            f"Unsupported output_format: {output_format!r}; "
+            "expected 'png', 'jpeg', or 'webp'"
+        )
+    return normalized
+
+
+def _resolved_image_size(images: list) -> str | None:
+    dimensions = []
+    for image in images:
+        size = getattr(image, "size", None)
+        if (
+            not isinstance(size, tuple)
+            or len(size) != 2
+            or any(type(value) is not int or value <= 0 for value in size)
+        ):
+            return None
+        dimensions.append(size)
+
+    if not dimensions or any(size != dimensions[0] for size in dimensions[1:]):
+        return None
+
+    width, height = dimensions[0]
+    return f"{width}x{height}"
 
 
 @dataclass
@@ -190,6 +251,7 @@ class DiffusionFormatter:
         media_fs: Any,
         media_http_url: Optional[str],
         default_fps: int = 16,
+        image_png_compression_level: int = 6,
     ) -> None:
         """Initialize a diffusion formatter.
 
@@ -198,6 +260,7 @@ class DiffusionFormatter:
             media_fs: Storage backend used for URL responses.
             media_http_url: Public base URL for stored media.
             default_fps: Frame rate used when output metadata omits one.
+            image_png_compression_level: Lossless PNG compression level (0-9).
 
         Returns:
             None.
@@ -206,6 +269,7 @@ class DiffusionFormatter:
         self._media_fs = media_fs
         self._media_http_url = media_http_url
         self._default_fps = default_fps
+        self._image_png_compression_level = image_png_compression_level
 
     async def format(
         self, stage_output: Any, request_id: str, *, request_type: Any, **ctx: Any
@@ -244,6 +308,7 @@ class DiffusionFormatter:
             request_id,
             request_type=request_type,
             response_format=ctx.get("response_format"),
+            output_format=ctx.get("output_format"),
         )
 
     async def _encode_video(
@@ -692,6 +757,7 @@ class DiffusionFormatter:
         *,
         request_type: Any,
         response_format: Optional[str] = None,
+        output_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
         """Encode generated images for chat or image-generation responses.
 
@@ -700,6 +766,7 @@ class DiffusionFormatter:
             request_id: Identifier included in the response and storage path.
             request_type: Request kind selecting the response schema.
             response_format: ``"url"`` or ``"b64_json"`` output representation.
+            output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
 
         Returns:
             Dict[str, Any] | None: Formatted response or ``None`` for other request kinds.
@@ -708,10 +775,13 @@ class DiffusionFormatter:
             ValueError: If the response format is unsupported.
             OSError: If an image cannot be encoded or uploaded.
         """
+        output_format = _normalize_image_output_options(output_format, response_format)
         if is_empty_payload(images):
             return _error_chunk(request_id, self._model_name, "No images generated")
 
-        data_urls = await self._prepare_images(images, request_id, response_format)
+        data_urls = await self._prepare_images(
+            images, request_id, response_format, output_format
+        )
 
         if request_type == RequestType.CHAT_COMPLETION:
             return {
@@ -749,20 +819,28 @@ class DiffusionFormatter:
                 else:
                     raise ValueError(f"Invalid response format: {response_format}")
             return NvImagesResponse(
-                created=int(time.time()), data=image_data_list
-            ).model_dump()
+                created=int(time.time()),
+                data=image_data_list,
+                output_format=output_format,
+                size=_resolved_image_size(images),
+            ).model_dump(exclude_none=True)
 
         return None
 
     async def _prepare_images(
-        self, images: list, request_id: str, response_format: Optional[str] = None
+        self,
+        images: list,
+        request_id: str,
+        response_format: Optional[str] = None,
+        output_format: Optional[str] = None,
     ) -> list:
         """Serialize images as data URLs or upload-backed URLs.
 
         Args:
-            images: Generated image objects supporting PNG serialization.
+            images: Generated image objects supporting image serialization.
             request_id: Identifier used to construct storage paths.
             response_format: ``"url"`` or ``"b64_json"`` output representation.
+            output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
 
         Returns:
             list: Encoded data URLs or uploaded media URLs.
@@ -771,22 +849,39 @@ class DiffusionFormatter:
             ValueError: If the response format is unsupported.
             OSError: If an image cannot be encoded or uploaded.
         """
+        output_format = _normalize_image_output_options(output_format, response_format)
+        image_encoder, file_extension, mime_type = _IMAGE_OUTPUT_FORMATS[output_format]
+        save_kwargs = (
+            {"compress_level": self._image_png_compression_level}
+            if image_encoder == "PNG"
+            else {}
+        )
         outlist = []
         for img in images:
             buf = BytesIO()
-            img.save(buf, format="PNG")
+            encoded_image = img
+            if image_encoder == "JPEG":
+                has_transparency = "transparency" in img.info
+                if img.mode not in ("L", "RGB") or has_transparency:
+                    if "A" in img.getbands() or has_transparency:
+                        rgba = img.convert("RGBA")
+                        encoded_image = Image.new("RGB", rgba.size, "white")
+                        encoded_image.paste(rgba, mask=rgba.getchannel("A"))
+                    else:
+                        encoded_image = img.convert("RGB")
+            encoded_image.save(buf, format=image_encoder, **save_kwargs)
             image_bytes = buf.getvalue()
             if response_format == "url":
                 url = await upload_to_fs(
                     self._media_fs,
-                    f"images/{request_id}/{uuid.uuid4()}.png",
+                    f"images/{request_id}/{uuid.uuid4()}.{file_extension}",
                     image_bytes,
                     self._media_http_url,
                 )
                 outlist.append(url)
             elif response_format == "b64_json" or response_format is None:
                 outlist.append(
-                    f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+                    f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
                 )
             else:
                 raise ValueError(f"Invalid response format: {response_format}")
@@ -1446,6 +1541,7 @@ class OutputFormatter:
         media_fs: Any = None,
         media_http_url: Optional[str] = None,
         default_fps: int = 16,
+        image_png_compression_level: int = 6,
     ) -> None:
         """Initialize modality-specific output formatters.
 
@@ -1454,12 +1550,17 @@ class OutputFormatter:
             media_fs: Storage backend used for URL responses.
             media_http_url: Public base URL for stored media.
             default_fps: Frame rate used when video metadata omits one.
+            image_png_compression_level: Lossless PNG compression level (0-9).
 
         Returns:
             None.
         """
         diffusion_formatter = DiffusionFormatter(
-            model_name, media_fs, media_http_url, default_fps
+            model_name,
+            media_fs,
+            media_http_url,
+            default_fps,
+            image_png_compression_level=image_png_compression_level,
         )
         self._formatters: Dict[str, Any] = {
             "text": TextFormatter(model_name),

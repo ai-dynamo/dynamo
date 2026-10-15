@@ -18,6 +18,7 @@ from dynamo.sglang.health_check import (
     SglangRerankHealthCheckPayload,
 )
 from dynamo.sglang.publisher import (
+    finish_worker_teardown,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -66,6 +67,7 @@ async def _init_pooling(
     engine = sgl.Engine(server_args=server_args)
     handler: EmbeddingWorkerHandler | RerankWorkerHandler | None = None
     metrics_task = None
+    body_failed = True
     try:
         server_args = config.use_resolved_server_args(engine.server_args)
 
@@ -134,17 +136,15 @@ async def _init_pooling(
     except Exception as e:
         logging.error("Failed to serve pooling endpoint: %s", e)
         raise
+    else:
+        body_failed = False
     finally:
+        cleanup = handler.cleanup if handler is not None else engine.shutdown
         if metrics_task is not None:
-            metrics_task.cancel()
-            try:
-                await metrics_task
-            except asyncio.CancelledError:
-                logging.info("Metrics task successfully cancelled")
-        if handler is not None:
-            handler.cleanup()
+            await finish_worker_teardown(
+                metrics_task, cleanup, run_deferred_handlers, body_failed=body_failed
+            )
         else:
-            engine.shutdown()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+            cleanup()
+            if run_deferred_handlers is not None:
+                await run_deferred_handlers()

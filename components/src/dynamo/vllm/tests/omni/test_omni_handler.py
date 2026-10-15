@@ -109,6 +109,35 @@ def _make_handler(stage_types=("diffusion",)):
     return handler
 
 
+def test_handler_passes_png_compression_to_formatter():
+    config = SimpleNamespace(
+        model="test-model",
+        served_model_name=None,
+        default_video_fps=16,
+        image_png_compression_level=0,
+    )
+    handler = OmniHandler.__new__(OmniHandler)
+    handler.engine_client = MagicMock()
+    with (
+        patch(
+            "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
+        ),
+        patch("dynamo.vllm.omni.omni_handler.AudioGenerationHandler"),
+        patch("dynamo.vllm.omni.omni_handler.OutputFormatter") as formatter,
+    ):
+        OmniHandler.__init__(
+            handler, runtime=None, config=config, default_sampling_params={}
+        )
+
+    formatter.assert_called_once_with(
+        model_name="test-model",
+        media_fs=None,
+        media_http_url=None,
+        default_fps=16,
+        image_png_compression_level=0,
+    )
+
+
 class TestEngineInputs:
     def test_defaults(self):
         """EngineInputs uses CHAT_COMPLETION, fps=0, and None optionals by default."""
@@ -182,6 +211,34 @@ class TestBuildEngineInputs:
         sp = inputs.sampling_params_list[0]
         assert sp.height == 512
         assert sp.width == 512
+
+    @pytest.mark.asyncio
+    async def test_image_generation_normalizes_output_format(self):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="a cat", size="512x512", output_format="JPEG")
+
+        inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
+
+        assert inputs.output_format == "jpeg"
+
+    @pytest.mark.parametrize(
+        ("request_overrides", "error"),
+        [
+            ({"output_format": "gif"}, "Unsupported output_format"),
+            ({"quality": "high"}, "quality is not supported"),
+            ({"background": "transparent"}, "background is not supported"),
+            ({"response_format": "file"}, "Unsupported response_format"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_image_generation_rejects_unsupported_image_options(
+        self, request_overrides, error
+    ):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="a cat", **request_overrides)
+
+        with pytest.raises(ValueError, match=error):
+            await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
 
     @pytest.mark.asyncio
     async def test_image_chat_completion_uses_multimodal_prompt(self):

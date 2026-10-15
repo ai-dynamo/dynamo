@@ -49,7 +49,7 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
 These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list, except where a field is marked DGD-only. In a DGD, prefix them with `spec.components[*]`. Container paths below use the standalone DCD layout; replace the leading `spec.podTemplate` with `spec.components[*].podTemplate` for DGD components.
 
 <ParamField path="providerOverride" type="ProviderOverride">
-  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` accepts `topologyConstraint` and, at component scope, native `spec.minAvailable` for a standalone clique or `minAvailable` for a scaling group. LPX conductor components support the native minimum but not topology overrides. See [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
+  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` accepts `topologyConstraint`, the native component minimum (`spec.minAvailable` for standalone cliques or `minAvailable` for scaling groups), and `rollingUpdate.maxUnavailable`, separately or together. LPX conductor components support availability settings but not topology overrides. Omit `target` to let admission resolve it from the component shape. See [Grove rollout budget overrides](dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) and [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
 </ParamField>
 
 <ParamField path="name" type="string" required={true}>
@@ -117,6 +117,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   Under Coherent updates, this value also defines the component's minimum viable replacement unit. With no surge capacity, replacing that unit can make this many replicas unavailable together. Both minimum forms use RollingRecreate unless the DGD strategy annotation explicitly selects Coherent. Migrating component minima to provider overrides leaves the update strategy unchanged. See [Configure native minimum availability](dynamo-graph-deployment.mdx#configure-native-minimum-availability) and [Coherent capacity and disruption](dynamo-graph-deployment.mdx#coherent-capacity-and-disruption).
 
+  Under Coherent updates, this value also defines the component's minimum viable replacement unit. With no surge capacity, replacing that unit can make this many replicas unavailable together. Start with `1` for new deployments unless a larger viable unit is required. See [Coherent capacity and disruption](dynamo-graph-deployment.mdx#coherent-capacity-and-disruption).
+
   For LPX components with omitted `replicas`, `minAvailable` sets the initial Grove scaling-group size; subsequent capacity is externally managed.
 </ParamField>
 
@@ -124,6 +126,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[*].podTemplate`. Every component must include `spec.podTemplate.spec.containers[name=main]` with a non-empty `image`. By default the operator injects command, environment, port, probe, resource, and volume-mount defaults into `spec.podTemplate.spec.containers[name=main]`, merging your overrides by name. Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates [Dynamo Sidecar Mode](#dynamo-sidecar-mode). Existing standard-mode components created without `spec.podTemplate.spec.containers[name=main].image` may retain that omission on unrelated updates. For DGD components whose runtime image has no parseable semantic-version tag, set `runtimeVersionOverride`. Other containers are user-managed and must specify their required fields, including `image`; `frontendSidecar` can explicitly select a regular container for frontend defaults. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
   For `type: lpx`, omit this field and use `roles[].podTemplate`. Every LPX role requires its own template with an explicit `main` container image.
+
+  For runtime 1.6.0 and later, frontend containers receive a startup probe that allows five minutes for NATS and etcd connections and initialization. The same default applies to a designated frontend sidecar, using its own image version independently of the parent component's runtime version and `runtimeVersionOverride`. Older or unknown runtime versions do not receive this default.
+
+  Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` is a complete value that replaces the applicable default. It must include exactly one handler (`exec`, `httpGet`, `tcpSocket`, or `grpc`). In both `v1alpha1` and `v1beta1`, the DGD and DCD APIs reject probes that only change timing or define multiple handlers, including probes in role templates and sidecars. To change timing, include the handler and the desired timing settings. Omit a probe to retain the applicable operator default. See [Health Probes](../../kubernetes/operations/observability.mdx#check-and-customize-health-probes) for probe settings and timeout adjustments.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
@@ -176,7 +182,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="globalDynamoNamespace" type="boolean" default="false">
-  Places the component in the global Dynamo namespace rather than the per-deployment namespace derived from the DGD name.
+  Places the component in the global Dynamo namespace (`dynamo`) rather than the per-deployment namespace. By default, the operator combines the Kubernetes namespace and DGD name with a hyphen and replaces dots in the DGD name with hyphens. If the result exceeds 63 characters, the operator shortens it and appends a 16-character hash derived from the original namespace/name pair. Values of 63 characters or fewer remain unchanged.
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">

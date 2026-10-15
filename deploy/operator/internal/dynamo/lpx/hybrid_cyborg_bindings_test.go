@@ -91,7 +91,6 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			fixture := newV2CompilerFixture()
 			partition := fixture.partitions[0]
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = uint32(2 * test.partitions)
 			fixture.selectedPropSyncChains = test.chains
 			fixture.partitions = make([]testV3CapnpPartition, test.partitions)
 			for index := range fixture.partitions {
@@ -156,7 +155,6 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			t.Log("Create a hybrid HX build with partitions 1-4, a selected chain 2-3, and one CUDA artifact")
 			fixture := newV3CompilerFixture()
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = 4
 			for id := uint32(2); id <= 4; id++ {
 				partition := fixture.partitions[0]
 				partition.id = id

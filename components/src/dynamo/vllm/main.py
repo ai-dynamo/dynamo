@@ -62,6 +62,7 @@ from .args import (
     configure_rl_logprobs_mode,
     parse_args_with_model_fetch,
 )
+from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -106,6 +107,26 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
+
+
+async def close_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import close_configured_artifact_runtime as close
+
+    await close()
+
+
+async def initialize_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import (
+        initialize_configured_artifact_runtime as initialize,
+    )
+
+    await initialize()
+
+
+async def _close_worker_resources(
+    state_agent_lifecycle: StateAgentLifecycle,
+) -> None:
+    await state_agent_lifecycle.close()
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -170,6 +191,8 @@ async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     config = await parse_args_with_model_fetch(argv)
+    if config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(config.artifact_router_profile)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
@@ -231,9 +254,16 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        await initialize_configured_artifact_runtime()
+
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
     state_agent_lifecycle = StateAgentLifecycle()
+
+    async def close_worker_resources() -> None:
+        await _close_worker_resources(state_agent_lifecycle)
+
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
@@ -251,7 +281,12 @@ async def worker(argv: list[str] | None = None) -> None:
         shutdown_endpoints,
         shutdown_event,
         prefill=config.disaggregation_mode == DisaggregationMode.PREFILL,
-        pre_shutdown=state_agent_lifecycle.close,
+        pre_shutdown=close_worker_resources,
+        post_shutdown=(
+            close_configured_artifact_runtime
+            if os.environ.get("DYNAMO_ARTIFACT_CONFIG")
+            else None
+        ),
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
