@@ -72,17 +72,30 @@ BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 _MAX_ABORT_MESSAGE_LENGTH = 8192
 
 
+def _sglang_abort_error_message(finish_reason: Mapping[str, Any]) -> str | None:
+    """Return the message of an error-bearing SGLang abort, or None otherwise."""
+    if finish_reason.get("type") != "abort":
+        return None
+    if (
+        finish_reason.get("status_code") is None
+        and finish_reason.get("err_type") is None
+    ):
+        # SGLang also uses FINISH_ABORT for ordinary cancellation. Its default
+        # message is "Aborted", but both error metadata fields are absent/null.
+        return None
+    message = finish_reason.get("message")
+    if not isinstance(message, str) or not message:
+        return "SGLang aborted the request with an error"
+    return message
+
+
 def _raise_if_sglang_error(finish_reason: dict[str, Any]) -> None:
     """Propagate error-bearing aborts before their placeholder output is emitted."""
-    if finish_reason.get("type") != "abort":
+    message = _sglang_abort_error_message(finish_reason)
+    if message is None:
         return
 
     status_code = finish_reason.get("status_code")
-    if status_code is None and finish_reason.get("err_type") is None:
-        # SGLang also uses FINISH_ABORT for ordinary cancellation. Its default
-        # message is "Aborted", but both error metadata fields are absent/null.
-        return
-
     if (
         isinstance(status_code, bool)
         or not isinstance(status_code, int)
@@ -90,9 +103,6 @@ def _raise_if_sglang_error(finish_reason: dict[str, Any]) -> None:
     ):
         status_code = 500
 
-    message = finish_reason.get("message")
-    if not isinstance(message, str) or not message:
-        message = "SGLang aborted the request with an error"
     message = message[:_MAX_ABORT_MESSAGE_LENGTH]
 
     if status_code == 400:
@@ -194,6 +204,48 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
         "prompt_tokens": prompt_tokens,
         "reused_tokens": meta_info.get("cached_tokens") or 0,
     }
+
+
+def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | None:
+    """Build Dynamo's completion_usage from SGLang's terminal meta_info."""
+    prompt_tokens = meta_info.get("prompt_tokens")
+    completion_tokens = meta_info.get("completion_tokens")
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    usage: Dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    cached_tokens = meta_info.get("cached_tokens")
+    if cached_tokens is not None and cached_tokens > 0:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+    return usage
+
+
+def _native_terminal_fields(
+    finish_reason: Mapping[str, Any],
+    meta_info: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Typed terminal fields for Dynamo's router and request tracking.
+
+    Unlike the token path, error aborts are reported rather than raised so the
+    native client still receives SGLang's own response.
+    """
+    finish_type = finish_reason.get("type")
+    if finish_type in ("stop", "length"):
+        fields: Dict[str, Any] = {"finish_reason": finish_type}
+    elif finish_type == "abort":
+        message = _sglang_abort_error_message(finish_reason)
+        fields = {
+            "finish_reason": "cancelled" if message is None else f"error: {message}"
+        }
+    else:
+        fields = {"finish_reason": "stop"}
+    completion_usage = _sglang_completion_usage(meta_info)
+    if completion_usage is not None:
+        fields["completion_usage"] = completion_usage
+    return fields
 
 
 def _has_parallel_prefix_warmup(sampling_params: Any) -> bool:
@@ -651,9 +703,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             context.id(),
         )
         if native_payload is not None:
+            native_sampling_params = native_payload.get("sampling_params")
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
-                native_payload.get("sampling_params"),
+                native_sampling_params,
                 supported=(
                     getattr(self, "_supports_ordered_cancellation", False)
                     # Session node IDs are caller-visible. Waiting for SGLang's
@@ -678,7 +731,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
                 report_kv_cache_hit=not _has_parallel_prefix_warmup(
-                    native_payload.get("sampling_params")
+                    native_sampling_params
                 ),
             ):
                 yield output
@@ -950,12 +1003,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "sglang_response": public_response,
                             },
                         }
-                if (
-                    report_kv_cache_hit
-                    and self._reports_kv_cache_hit
-                    and isinstance(meta_info, dict)
-                    and meta_info.get("finish_reason")
-                ):
+                finish_reason = (
+                    meta_info.get("finish_reason")
+                    if isinstance(meta_info, dict)
+                    else None
+                )
+                if isinstance(finish_reason, dict):
+                    output = {
+                        **output,
+                        **_native_terminal_fields(finish_reason, meta_info),
+                    }
+                if report_kv_cache_hit and self._reports_kv_cache_hit and finish_reason:
                     # Native Generate is routed too; the frontend forwards only
                     # sglang_response, so this sibling key stays router-only.
                     kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
@@ -1092,22 +1150,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if kv_cache_hit:
                         engine_data["kv_cache_hit"] = kv_cache_hit
-                    input_tokens = meta_info.get("prompt_tokens")
-                    completion_tokens = meta_info.get("completion_tokens")
-                    cached_tokens = meta_info.get("cached_tokens")
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    if input_tokens is not None and completion_tokens is not None:
-                        completion_usage = {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
-                        }
-                        if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                    completion_usage = _sglang_completion_usage(meta_info)
+                    if completion_usage is not None:
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:

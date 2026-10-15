@@ -14,9 +14,12 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import json
 import logging
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from threading import Lock
 from typing import Optional
 
@@ -27,6 +30,7 @@ from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
+    PLANNER_WRITER_FENCE_ANNOTATION,
     KubernetesAPI,
 )
 from dynamo.planner.connectors.mdc import (
@@ -70,6 +74,16 @@ WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
 
+@dataclass(frozen=True)
+class _ReplicaUpdatePlan:
+    """One fully resolved replica target from a single DGD snapshot."""
+
+    target: TargetReplica
+    service: Service
+    current_replicas: int
+    scaling_adapter: dict | None
+
+
 class KubernetesConnector(PlannerConnector):
     def __init__(
         self,
@@ -107,6 +121,7 @@ class KubernetesConnector(PlannerConnector):
         self._startup_scale_down_lock = Lock()
         self._startup_scale_down_targets: dict[str, int] = {}
         self._startup_read_warnings: set[str] = set()
+        self._batch_writer_id: str | None = None
 
     async def async_init(self):
         """No-op asynchronous lifecycle hook."""
@@ -189,10 +204,11 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = get_component_from_type_or_name(deployment, sub_component_type)
-        self.kube_api.update_graph_replicas(
-            self.graph_deployment_name,
-            service.name,
-            service.number_replicas() + 1,
+        current_replicas, scaling_adapter = self._authoritative_replica_state(
+            deployment, service
+        )
+        self._write_preflighted_replica_target(
+            service, current_replicas + 1, scaling_adapter
         )
         if blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
@@ -207,11 +223,12 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = get_component_from_type_or_name(deployment, sub_component_type)
-        if service.number_replicas() > 0:
-            self.kube_api.update_graph_replicas(
-                self.graph_deployment_name,
-                service.name,
-                service.number_replicas() - 1,
+        current_replicas, scaling_adapter = self._authoritative_replica_state(
+            deployment, service
+        )
+        if current_replicas > 0:
+            self._write_preflighted_replica_target(
+                service, current_replicas - 1, scaling_adapter
             )
             if blocking:
                 await self.kube_api.wait_for_graph_deployment_ready(
@@ -598,8 +615,6 @@ class KubernetesConnector(PlannerConnector):
         Other API errors (RBAC, connectivity) are re-raised so callers can
         handle them explicitly.
         """
-        from kubernetes.client import ApiException
-
         try:
             result = self.kube_api.custom_api.list_namespaced_custom_object(
                 group=NVIDIA_API_GROUP,
@@ -795,7 +810,7 @@ class KubernetesConnector(PlannerConnector):
             return None
         with self._startup_scale_down_lock:
             self._startup_read_warnings.discard("pods")
-        return KubernetesAPI.exclude_checkpoint_capture_pods(pods)
+        return self.kube_api.exclude_checkpoint_capture_pods(pods)
 
     def _startup_scale_down_in_progress(self, deployment: dict, pods: list) -> bool:
         # Snapshot under the lock, then do Kubernetes I/O without holding it.
@@ -816,34 +831,38 @@ class KubernetesConnector(PlannerConnector):
         startup = self.kube_api.pending_startup_replicas(deployment, pods)
         remaining: dict[str, int] = {}
         for name, target in targets.items():
-            desired = Service(
-                name=name, service=components.get(name, {})
-            ).number_replicas()
+            service = Service(name=name, service=components.get(name, {}))
+            desired = service.number_replicas()
             _, stable = self.kube_api.get_service_replica_status(deployment, name)
             if desired != target:
-                try:
-                    authoritative_target = self.kube_api.get_service_replica_target(
-                        self.graph_deployment_name, name
-                    )
-                except ApiException as exc:
-                    if exc.status != 403:
-                        raise
-                    # GET may be revoked after admission. Retain this request
-                    # until its DGD target arrives; do not guess that an
-                    # unobserved write was superseded or drop the latch.
-                    with self._startup_scale_down_lock:
-                        warn = "scale" not in self._startup_read_warnings
-                        self._startup_read_warnings.add("scale")
-                    if warn:
-                        logger.warning(
-                            "Scale get forbidden for %s; holding startup scale-down "
-                            "until its DGD target is observed",
-                            self.graph_deployment_name,
+                if "scalingAdapter" not in service.service:
+                    # A direct DGD write is authoritative for an unmarked
+                    # component. Ignore any convention-named stray DGDSA.
+                    authoritative_target = desired
+                else:
+                    try:
+                        authoritative_target, _ = self._authoritative_replica_state(
+                            deployment, service
                         )
-                    remaining[name] = target
-                    continue
-                with self._startup_scale_down_lock:
-                    self._startup_read_warnings.discard("scale")
+                    except ApiException as exc:
+                        if exc.status != 403:
+                            raise
+                        # GET may be revoked after admission. Retain this request
+                        # until its DGD target arrives; do not guess that an
+                        # unobserved write was superseded or drop the latch.
+                        with self._startup_scale_down_lock:
+                            warn = "scale" not in self._startup_read_warnings
+                            self._startup_read_warnings.add("scale")
+                        if warn:
+                            logger.warning(
+                                "DGDSA get forbidden for %s; holding startup "
+                                "scale-down until its DGD target is observed",
+                                self.graph_deployment_name,
+                            )
+                        remaining[name] = target
+                        continue
+                    with self._startup_scale_down_lock:
+                        self._startup_read_warnings.discard("scale")
                 if authoritative_target == target or desired != authoritative_target:
                     remaining[name] = target
                 # A superseding DGDSA target has reached the observed DGD spec.
@@ -880,7 +899,12 @@ class KubernetesConnector(PlannerConnector):
         prefill_component_name: Optional[str],
         decode_component_name: Optional[str],
     ) -> Optional[WorkerCounts]:
-        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        observed_deployment = self.kube_api.get_graph_deployment(
+            self.graph_deployment_name
+        )
+        deployment = self.kube_api.fetch_authoritative_replica_targets(
+            observed_deployment
+        )
         pods = self._list_startup_pods()
         if pods is None:
             return None
@@ -897,7 +921,10 @@ class KubernetesConnector(PlannerConnector):
             and self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods)
         )
         pending = self.kube_api.pending_startup_replicas(deployment, pods)
-        if self._startup_scale_down_in_progress(deployment, pods):
+        # Latch settlement needs both snapshots: authoritative targets drive
+        # counts, while the unmodified DGD shows whether a superseding adapter
+        # target has propagated into the operator-observed spec yet.
+        if self._startup_scale_down_in_progress(observed_deployment, pods):
             stable, pending = False, {}
         return WorkerCounts(
             ready_num_prefill=p,
@@ -915,8 +942,20 @@ class KubernetesConnector(PlannerConnector):
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
     ) -> tuple[int, int, bool]:
-        """Get ready worker counts from DGD status without listing Pods."""
+        """Get worker counts without blocking the Planner event loop."""
+        return await asyncio.to_thread(
+            self._get_actual_worker_counts_sync,
+            prefill_component_name,
+            decode_component_name,
+        )
+
+    def _get_actual_worker_counts_sync(
+        self,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+    ) -> tuple[int, int, bool]:
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        deployment = self.kube_api.fetch_authoritative_replica_targets(deployment)
         return self._worker_counts_from_snapshot(
             deployment,
             prefill_component_name=prefill_component_name,
@@ -949,6 +988,7 @@ class KubernetesConnector(PlannerConnector):
         dgd_name = deployment.get("metadata", {}).get("name", "")
         pods = self.kube_api.list_pods_for_graph(dgd_name) if dgd_name else []
         pods_by_component = self.kube_api.partition_pods_by_component(pods)
+        deployment = self.kube_api.fetch_authoritative_replica_targets(deployment)
         return self._worker_counts_from_snapshot(
             deployment,
             prefill_component_name=prefill_component_name,
@@ -1043,23 +1083,44 @@ class KubernetesConnector(PlannerConnector):
             raise EmptyTargetReplicasError()
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        deployment_ready = self.kube_api.is_deployment_ready(deployment)
+        ready = deployment_ready
 
-        ready = self.kube_api.is_deployment_ready(deployment)
+        # Validate the DGD snapshot before reading an authoritative adapter on
+        # either narrow unready path (startup cancellation or batch bootstrap).
+        if not deployment_ready:
+            rejection = self._unready_recovery_dgd_rejection(deployment)
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
+
+        # Resolve every component and authoritative desired state before the
+        # first mutation. Besides avoiding partial multi-component writes on a
+        # bad target, this is required for the narrow unready-DGD recovery path.
+        try:
+            plans = self._preflight_replica_updates(deployment, target_replicas)
+        except Exception as exc:
+            if not deployment_ready:
+                return self._reject_not_ready_scaling(
+                    f"replica-target preflight failed: {type(exc).__name__}: {exc}"
+                )
+            raise
+
+        mutations = [
+            plan
+            for plan in plans
+            if plan.current_replicas != plan.target.desired_replicas
+        ]
+
         startup_reduction = False
         reducing = any(
-            target.desired_replicas
-            < get_component_from_type_or_name(
-                deployment,
-                target.sub_component_type,
-                component_name=target.component_name,
-            ).number_replicas()
-            for target in target_replicas
+            plan.target.desired_replicas < plan.current_replicas for plan in plans
         )
+        startup_pods: Optional[list] = None
         with self._startup_scale_down_lock:
             scale_down_pending = bool(self._startup_scale_down_targets)
         if not ready or scale_down_pending or reducing:
-            pods = self._list_startup_pods()
-            if pods is None:
+            startup_pods = self._list_startup_pods()
+            if startup_pods is None:
                 # Keep ordinary Ready-deployment scaling working with old RBAC.
                 # Never release an accepted startup reversal without observing
                 # its drain, or use the startup exception to scale an unready DGD.
@@ -1069,10 +1130,12 @@ class KubernetesConnector(PlannerConnector):
                     and self.kube_api.non_planner_components_stable(deployment)[0]
                 )
             else:
-                if self._startup_scale_down_in_progress(deployment, pods):
+                if self._startup_scale_down_in_progress(deployment, startup_pods):
                     logger.info("Startup scale-down still converging, ignoring scaling")
                     return
-                pending = self.kube_api.pending_startup_replicas(deployment, pods)
+                pending = self.kube_api.pending_startup_replicas(
+                    deployment, startup_pods
+                )
                 # Ready can still describe the state before a Pod deletion or the
                 # latest spec change. Recheck lifecycle before issuing a reduction.
                 phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get(
@@ -1081,50 +1144,36 @@ class KubernetesConnector(PlannerConnector):
                 ready = (
                     ready
                     and self.kube_api.is_spec_generation_observed(deployment)
-                    and not self.kube_api.has_terminating_pods(pods)
+                    and not self.kube_api.has_terminating_pods(startup_pods)
                     and self.kube_api.pcsg_pods_within_desired_replicas(
-                        deployment, pods
+                        deployment, startup_pods
                     )
                     and self.kube_api.non_planner_components_stable(deployment)[0]
                     and phase in (None, "", "Completed")
                     and not pending
                 )
-                startup_reduction = bool(pending)
-                any_reduction = False
-                for target in target_replicas:
+                startup_reduction = bool(pending) and bool(mutations)
+                for plan in mutations:
                     if not startup_reduction:
                         break
-                    service = get_component_from_type_or_name(
-                        deployment,
-                        target.sub_component_type,
-                        component_name=target.component_name,
-                    )
                     serving, _ = self.kube_api.get_service_replica_status(
-                        deployment, service.name
+                        deployment, plan.service.name
                     )
-                    desired = service.number_replicas()
-                    if target.desired_replicas != desired:
-                        startup_reduction &= (
-                            0 <= target.desired_replicas <= serving
-                            and target.desired_replicas < desired
-                        )
-                        any_reduction = True
-                startup_reduction &= any_reduction
+                    startup_reduction &= (
+                        0 <= plan.target.desired_replicas <= serving
+                        and plan.target.desired_replicas < plan.current_replicas
+                    )
 
         if startup_reduction:
             # Reconciliation needs Scale GET to recognize superseding writers.
-            # Check every changed component before the first PATCH, so partial
-            # RBAC cannot admit a cancellation we cannot subsequently track.
+            # Check every declared adapter before the first PATCH, so partial
+            # RBAC cannot admit an asynchronous write we cannot track. Direct
+            # DGD writes have no separate replica authority to read.
             try:
-                for target in target_replicas:
-                    service = get_component_from_type_or_name(
-                        deployment,
-                        target.sub_component_type,
-                        component_name=target.component_name,
-                    )
-                    if service.number_replicas() != target.desired_replicas:
+                for plan in mutations:
+                    if plan.scaling_adapter is not None:
                         self.kube_api.get_service_replica_target(
-                            self.graph_deployment_name, service.name
+                            self.graph_deployment_name, plan.service.name
                         )
             except ApiException as exc:
                 if exc.status != 403:
@@ -1144,57 +1193,504 @@ class KubernetesConnector(PlannerConnector):
                     self._startup_read_warnings.discard("scale")
 
         if not ready and not startup_reduction:
-            if self.raise_not_ready:
-                logger.warning(
-                    "Deployment %s is not ready, rejecting this scaling",
-                    self.graph_deployment_name,
+            if deployment_ready:
+                return self._reject_not_ready_scaling(
+                    "deployment lifecycle is not settled"
                 )
-                raise DynamoGraphDeploymentNotReadyError(
-                    deployment_name=self.graph_deployment_name,
-                    namespace=getattr(self.kube_api, "current_namespace", None),
-                )
-            logger.warning(
-                "Deployment %s is not ready, ignoring this scaling",
-                self.graph_deployment_name,
-            )
-            return
+            rejection = self._unready_recovery_target_rejection(deployment, plans)
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
 
-        for target_replica in target_replicas:
-            service = get_component_from_type_or_name(
-                deployment,
-                target_replica.sub_component_type,
-                component_name=target_replica.component_name,
+        if not ready and not startup_reduction and mutations:
+            if len(mutations) != 1:
+                return self._reject_not_ready_scaling(
+                    "unready recovery requires exactly one replica mutation"
+                )
+            rejection = self._unready_recovery_pod_rejection(
+                deployment, mutations[0], startup_pods
             )
-            current_replicas = service.number_replicas()
-            if current_replicas != target_replica.desired_replicas:
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
+            rejection = self._unready_recovery_settlement_rejection(
+                deployment, mutations[0]
+            )
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
+            try:
+                plans, rejection = self._refresh_unready_recovery_plans(
+                    deployment, target_replicas
+                )
+            except Exception as exc:
+                return self._reject_not_ready_scaling(
+                    f"replica-target revalidation failed: {type(exc).__name__}: {exc}"
+                )
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
+            mutations = [
+                plan
+                for plan in plans
+                if plan.current_replicas != plan.target.desired_replicas
+            ]
+            if len(mutations) > 1:
+                return self._reject_not_ready_scaling(
+                    "unready recovery requires exactly one replica mutation"
+                )
+
+        for plan in mutations:
+            logger.info(
+                "Updating %s component %s from %s to desired replica count %s",
+                plan.target.sub_component_type.value,
+                plan.service.name,
+                plan.current_replicas,
+                plan.target.desired_replicas,
+            )
+            self._write_preflighted_replica_target(
+                plan.service,
+                plan.target.desired_replicas,
+                plan.scaling_adapter,
+            )
+            if startup_reduction:
+                with self._startup_scale_down_lock:
+                    self._startup_scale_down_targets = {
+                        **self._startup_scale_down_targets,
+                        plan.service.name: plan.target.desired_replicas,
+                    }
+
+        for plan in plans:
+            if plan.current_replicas == plan.target.desired_replicas:
                 logger.info(
-                    f"Updating {target_replica.sub_component_type.value} component {service.name} to desired replica count {target_replica.desired_replicas}"
+                    "%s component %s already at desired replica count %s, skipping",
+                    plan.target.sub_component_type.value,
+                    plan.service.name,
+                    plan.target.desired_replicas,
                 )
-                self.kube_api.update_graph_replicas(
-                    self.graph_deployment_name,
-                    service.name,
-                    target_replica.desired_replicas,
-                )
-                if startup_reduction:
-                    with self._startup_scale_down_lock:
-                        self._startup_scale_down_targets = {
-                            **self._startup_scale_down_targets,
-                            service.name: target_replica.desired_replicas,
-                        }
-            else:
-                logger.info(
-                    f"{target_replica.sub_component_type.value} component {service.name} already at desired replica count {target_replica.desired_replicas}, skipping"
-                )
+
+        # An unready no-op is safe but cannot make the graph become Ready; keep
+        # the historical nonblocking skip behavior instead of waiting forever.
+        if not deployment_ready and not mutations:
+            return
 
         if blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )
 
+    async def acquire_batch_writer_fence(self, writer_id: str) -> None:
+        """Fence native batch actuation against an overlapping old Planner.
+
+        The POC supports one aggregate worker with an owned DGDSA. Its separate
+        Planner deployment uses ``Recreate`` so a replacement cannot overlap an
+        old process. This CAS annotation then orders any Scale PATCH already
+        fetched by that old process: it either commits before the fence (and is
+        visible to the refresh below) or conflicts afterward.
+        """
+        if not isinstance(writer_id, str) or not writer_id:
+            raise ValueError("batch writer_id must be a non-empty string")
+        self._batch_writer_id = None
+
+        expected_dgd_uid: str | None = None
+        component_name: str | None = None
+        for attempt in range(3):
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            rejection = self._unready_recovery_dgd_rejection(deployment)
+            if rejection is not None:
+                raise RuntimeError(f"cannot acquire batch writer fence: {rejection}")
+            dgd_uid = deployment["metadata"]["uid"]
+            if expected_dgd_uid is None:
+                expected_dgd_uid = dgd_uid
+            elif dgd_uid != expected_dgd_uid:
+                raise RuntimeError(
+                    "cannot acquire batch writer fence: DGD identity changed"
+                )
+
+            workers = [
+                Service(name=name, service=component)
+                for name, component in get_components_by_name(deployment).items()
+                if self._is_worker_component(name, component)
+            ]
+            if len(workers) != 1:
+                raise RuntimeError(
+                    "native batch writer fencing requires exactly one aggregate "
+                    f"worker component; found {len(workers)}"
+                )
+            service = workers[0]
+            component_name = service.name
+            if "scalingAdapter" not in service.service:
+                raise RuntimeError(
+                    "native batch writer fencing requires a declared scalingAdapter"
+                )
+            adapter = self.kube_api.get_service_scaling_adapter(
+                self.graph_deployment_name, component_name
+            )
+            adapter_rejection = self._scaling_adapter_rejection(
+                deployment, component_name, adapter
+            )
+            if adapter_rejection is not None:
+                raise RuntimeError(
+                    f"cannot acquire batch writer fence: {adapter_rejection}"
+                )
+
+            try:
+                self.kube_api.patch_scaling_adapter_writer_fence(
+                    self.graph_deployment_name,
+                    component_name,
+                    writer_id,
+                    adapter=adapter,
+                )
+            except ApiException as error:
+                if error.status == 409 and attempt < 2:
+                    continue
+                raise
+            break
+        else:
+            raise RuntimeError("failed to acquire batch writer fence after retries")
+
+        refreshed_deployment = self.kube_api.get_graph_deployment(
+            self.graph_deployment_name
+        )
+        if refreshed_deployment.get("metadata", {}).get("uid") != expected_dgd_uid:
+            raise RuntimeError(
+                "cannot acquire batch writer fence: DGD identity changed after CAS"
+            )
+        refreshed_adapter = self.kube_api.get_service_scaling_adapter(
+            self.graph_deployment_name, component_name
+        )
+        adapter_rejection = self._scaling_adapter_rejection(
+            refreshed_deployment, component_name, refreshed_adapter
+        )
+        if adapter_rejection is not None:
+            raise RuntimeError(f"cannot verify batch writer fence: {adapter_rejection}")
+        annotations = refreshed_adapter.get("metadata", {}).get("annotations") or {}
+        if annotations.get(PLANNER_WRITER_FENCE_ANNOTATION) != writer_id:
+            raise RuntimeError("batch writer fence annotation was not retained")
+
+        # Refresh the authoritative target and rollout state after the CAS.
+        # An in-progress result is allowed, but the next policy tick will see it
+        # as unknown capacity and keep the already-published zero lease.
+        await self.get_actual_worker_counts(
+            prefill_component_name=None,
+            decode_component_name=component_name,
+        )
+        self._batch_writer_id = writer_id
+
+    def _preflight_replica_updates(
+        self, deployment: dict, target_replicas: list[TargetReplica]
+    ) -> list[_ReplicaUpdatePlan]:
+        """Resolve all targets and authoritative desired counts without writes."""
+        plans: list[_ReplicaUpdatePlan] = []
+        seen_components: set[str] = set()
+        for target in target_replicas:
+            service = get_component_from_type_or_name(
+                deployment,
+                target.sub_component_type,
+                component_name=target.component_name,
+            )
+            if service.name in seen_components:
+                raise ValueError(
+                    f"duplicate replica target for component {service.name!r}"
+                )
+            seen_components.add(service.name)
+            current_replicas, scaling_adapter = self._authoritative_replica_state(
+                deployment, service
+            )
+            plans.append(
+                _ReplicaUpdatePlan(
+                    target=target,
+                    service=service,
+                    current_replicas=current_replicas,
+                    scaling_adapter=scaling_adapter,
+                )
+            )
+        return plans
+
+    def _authoritative_replica_state(
+        self, deployment: dict, service: Service
+    ) -> tuple[int, dict | None]:
+        """Resolve desired replicas from the authority declared by the DGD."""
+        if "scalingAdapter" not in service.service:
+            return service.number_replicas(), None
+        scaling_adapter = self.kube_api.get_service_scaling_adapter(
+            self.graph_deployment_name, service.name
+        )
+        adapter_rejection = self._scaling_adapter_rejection(
+            deployment, service.name, scaling_adapter
+        )
+        if adapter_rejection is not None:
+            raise ValueError(adapter_rejection)
+        writer_rejection = self._batch_writer_annotation_rejection(scaling_adapter)
+        if writer_rejection is not None:
+            raise ValueError(writer_rejection)
+        current_replicas = self.kube_api.get_scaling_adapter_desired_replicas(
+            scaling_adapter
+        )
+        return current_replicas, scaling_adapter
+
+    def _batch_writer_annotation_rejection(self, adapter: dict) -> str | None:
+        """Require this process's writer claim before a fenced Scale PATCH."""
+        if self._batch_writer_id is None:
+            return None
+        metadata = adapter.get("metadata", {}) or {}
+        annotations = metadata.get("annotations") or {}
+        if not isinstance(annotations, Mapping):
+            return "DGDSA annotations are malformed"
+        if annotations.get(PLANNER_WRITER_FENCE_ANNOTATION) != self._batch_writer_id:
+            return "DGDSA Planner writer fence is missing or owned by another writer"
+        return None
+
+    def _write_preflighted_replica_target(
+        self, service: Service, replicas: int, scaling_adapter: dict | None
+    ) -> None:
+        """Write through the same replica authority selected during preflight."""
+        if scaling_adapter is None:
+            self.kube_api.update_dgd_replicas_directly(
+                self.graph_deployment_name, service.name, replicas
+            )
+            return
+        self.kube_api.update_scaling_adapter_replicas(
+            self.graph_deployment_name,
+            service.name,
+            replicas,
+            resource_version=scaling_adapter["metadata"]["resourceVersion"],
+        )
+
+    def _unready_recovery_dgd_rejection(self, deployment: dict) -> str | None:
+        """Reject unsafe parent snapshots before reading any DGDSA target."""
+        metadata = deployment.get("metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            return "DGD metadata is malformed"
+        if metadata.get("name") != self.graph_deployment_name:
+            return "DGD metadata.name does not match the connector target"
+        if metadata.get("deletionTimestamp") is not None:
+            return "DGD is being deleted"
+        dgd_uid = metadata.get("uid")
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            return "DGD metadata.uid is unavailable"
+        if not self.kube_api.is_spec_generation_observed(deployment):
+            return "DGD status has not observed the current spec generation"
+
+        status = deployment.get("status", {}) or {}
+        if not isinstance(status, Mapping):
+            return "DGD status is malformed"
+        state = status.get("state")
+        if isinstance(state, str) and state.lower() == "failed":
+            return "DGD status.state is failed"
+        rolling = status.get("rollingUpdate") or {}
+        if not isinstance(rolling, Mapping):
+            return "DGD rolling-update status is malformed"
+        phase = rolling.get("phase") or ""
+        if phase not in ("", "Completed"):
+            return f"DGD rolling update phase is {phase!r}"
+        return None
+
+    def _unready_recovery_target_rejection(
+        self, deployment: dict, plans: list[_ReplicaUpdatePlan]
+    ) -> str | None:
+        """Allow only owned DGDSA no-ops or strict zero-to-positive recovery."""
+        for plan in plans:
+            if plan.scaling_adapter is None:
+                return f"component {plan.service.name!r} has no declared DGDSA"
+
+            desired = plan.target.desired_replicas
+            current = plan.current_replicas
+            if current == desired:
+                continue
+            if current != 0 or desired <= 0:
+                return (
+                    f"component {plan.service.name!r} is not a zero-to-positive "
+                    f"recovery (current={current}, target={desired})"
+                )
+        return None
+
+    def _refresh_unready_recovery_plans(
+        self,
+        initial_deployment: dict,
+        target_replicas: list[TargetReplica],
+    ) -> tuple[list[_ReplicaUpdatePlan], str | None]:
+        """Fence an unready recovery against DGD replacement before writing."""
+        current_deployment = self.kube_api.get_graph_deployment(
+            self.graph_deployment_name
+        )
+        rejection = self._unready_recovery_dgd_rejection(current_deployment)
+        if rejection is not None:
+            return [], rejection
+
+        initial_uid = initial_deployment.get("metadata", {}).get("uid")
+        current_uid = current_deployment.get("metadata", {}).get("uid")
+        if current_uid != initial_uid:
+            return [], "DGD metadata.uid changed during unready recovery"
+
+        plans = self._preflight_replica_updates(current_deployment, target_replicas)
+        rejection = self._unready_recovery_target_rejection(current_deployment, plans)
+        if rejection is not None:
+            return plans, rejection
+        mutations = [
+            plan
+            for plan in plans
+            if plan.current_replicas != plan.target.desired_replicas
+        ]
+        if len(mutations) == 1:
+            pods = self._list_startup_pods()
+            rejection = self._unready_recovery_pod_rejection(
+                current_deployment, mutations[0], pods
+            )
+            if rejection is not None:
+                return plans, rejection
+            return plans, self._unready_recovery_settlement_rejection(
+                current_deployment, mutations[0]
+            )
+        return plans, None
+
+    def _unready_recovery_pod_rejection(
+        self,
+        deployment: dict,
+        mutation: _ReplicaUpdatePlan,
+        pods: Optional[list],
+    ) -> str | None:
+        """Require a trustworthy zero-Pod lifecycle snapshot for bootstrap."""
+        if pods is None:
+            return "Pod snapshot is unavailable before unready recovery"
+        if not self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods):
+            return "PodCliqueScalingGroup Pods exceed the desired replica range"
+
+        target_pods = self.kube_api.partition_pods_by_component(pods).get(
+            mutation.service.name, []
+        )
+        for pod in target_pods:
+            metadata = getattr(pod, "metadata", None)
+            status = getattr(pod, "status", None)
+            phase = getattr(status, "phase", None)
+            deletion_timestamp = getattr(metadata, "deletion_timestamp", None)
+            if deletion_timestamp is not None or phase not in ("Succeeded", "Failed"):
+                pod_name = getattr(metadata, "name", "<unknown>")
+                return (
+                    f"component {mutation.service.name!r} still has terminating or "
+                    f"nonterminal Pod {pod_name!r}"
+                )
+        return None
+
+    def _unready_recovery_settlement_rejection(
+        self,
+        deployment: dict,
+        mutation: _ReplicaUpdatePlan,
+    ) -> str | None:
+        """Require a settled-zero target and stable peers before bootstrap."""
+        status = deployment.get("status")
+        if not isinstance(status, Mapping):
+            return "DGD status is unavailable before unready recovery"
+        component_statuses = status.get("components")
+        if not isinstance(component_statuses, Mapping):
+            return "DGD component status is unavailable before unready recovery"
+        target_status = component_statuses.get(mutation.service.name)
+        if not isinstance(target_status, Mapping):
+            return (
+                f"component {mutation.service.name!r} status is unavailable "
+                "before unready recovery"
+            )
+
+        for field_name in ("replicas", "updatedReplicas"):
+            value = target_status.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                return (
+                    f"component {mutation.service.name!r} status.{field_name} "
+                    "is unavailable before unready recovery"
+                )
+            if value != 0:
+                return (
+                    f"component {mutation.service.name!r} is not settled at zero "
+                    f"({field_name}={value})"
+                )
+        serving_fields = ("readyReplicas", "availableReplicas")
+        present_serving_fields = [
+            field_name for field_name in serving_fields if field_name in target_status
+        ]
+        if not present_serving_fields:
+            return (
+                f"component {mutation.service.name!r} serving status is "
+                "unavailable before unready recovery"
+            )
+        for field_name in present_serving_fields:
+            value = target_status[field_name]
+            if isinstance(value, bool) or not isinstance(value, int):
+                return (
+                    f"component {mutation.service.name!r} "
+                    f"status.{field_name} is invalid"
+                )
+            if value != 0:
+                return (
+                    f"component {mutation.service.name!r} is not settled at zero "
+                    f"({field_name}={value})"
+                )
+
+        # DGD spec replicas are only a seed when a component declares a
+        # scalingAdapter. Resolve every peer's authoritative DGDSA desired
+        # value before judging settlement, otherwise stale DGD propagation can
+        # make a genuinely stable peer look unstable (or an in-flight peer look
+        # settled).
+        settlement_deployment = copy.deepcopy(deployment)
+        settlement_components = get_components_by_name(settlement_deployment)
+        for component_name, component_spec in get_components_by_name(
+            deployment
+        ).items():
+            if (
+                component_name == mutation.service.name
+                or get_component_type(component_spec) == "planner"
+                or "scalingAdapter" not in component_spec
+            ):
+                continue
+            peer_adapter = self.kube_api.get_service_scaling_adapter(
+                self.graph_deployment_name, component_name
+            )
+            adapter_rejection = self._scaling_adapter_rejection(
+                deployment, component_name, peer_adapter
+            )
+            if adapter_rejection is not None:
+                return adapter_rejection
+            settlement_components[component_name][
+                "replicas"
+            ] = self.kube_api.get_scaling_adapter_desired_replicas(peer_adapter)
+
+        _, unstable_names = self.kube_api.non_planner_components_stable(
+            settlement_deployment
+        )
+        unstable_peers = sorted(
+            name for name in unstable_names if name != mutation.service.name
+        )
+        if unstable_peers:
+            return "non-target components are unstable: " + ", ".join(unstable_peers)
+        return None
+
+    def _scaling_adapter_rejection(
+        self, deployment: dict, component_name: str, adapter: dict
+    ) -> str | None:
+        """Delegate canonical DGDSA validation to the Kubernetes API layer."""
+        return self.kube_api.scaling_adapter_identity_rejection(
+            deployment,
+            component_name,
+            adapter,
+            require_resource_version=True,
+        )
+
+    def _reject_not_ready_scaling(self, reason: str) -> None:
+        """Preserve the connector's existing skip-versus-raise contract."""
+        if self.raise_not_ready:
+            logger.warning(
+                "Deployment %s is not ready, rejecting this scaling: %s",
+                self.graph_deployment_name,
+                reason,
+            )
+            raise DynamoGraphDeploymentNotReadyError(
+                deployment_name=self.graph_deployment_name,
+                namespace=self.kube_api.current_namespace,
+            )
+        logger.warning(
+            "Deployment %s is not ready, ignoring this scaling: %s",
+            self.graph_deployment_name,
+            reason,
+        )
+
 
 if __name__ == "__main__":
     import argparse
-    import asyncio
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--dynamo_namespace", type=str, default="dynamo")

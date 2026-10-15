@@ -34,6 +34,9 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
+    protocols::response_merge::{
+        PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
+    },
     session_affinity::{AffinityTarget, SessionAffinityMode},
 };
 
@@ -272,11 +275,58 @@ struct PrefillBuildContext {
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
+    /// Returns `None` when this router does not target the group, and an empty
+    /// set when it targets the endpoint but its binding is not yet available.
+    fn available_worker_ids_for(
+        &self,
+        group_id: &str,
+        endpoint: &EndpointId,
+    ) -> Option<std::collections::HashSet<u64>>;
 }
 
 impl PrefillRouterLifecycle for PrefillRouter {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
+    }
+
+    fn available_worker_ids_for(
+        &self,
+        group_id: &str,
+        endpoint: &EndpointId,
+    ) -> Option<std::collections::HashSet<u64>> {
+        // Target changes and activation publish binding/lifecycle under this same lock.
+        let target_id = self.target.lock();
+        let binding = self.binding.load();
+        let binding_matches = binding.as_ref().is_some_and(|binding| {
+            &binding.endpoint_id == endpoint && binding.target_id.matches_group(group_id, endpoint)
+        });
+        let target_matches = self.target_tx.as_ref().map(|target_tx| {
+            target_tx.borrow().as_ref().is_some_and(|target| {
+                &target.endpoint().id() == endpoint
+                    && target_id
+                        .as_ref()
+                        .is_some_and(|id| id.matches_group(group_id, endpoint))
+            })
+        });
+        if !target_matches.unwrap_or(binding_matches) {
+            return None;
+        }
+        Some(
+            if self.cancel_token.is_cancelled()
+                || self.lifecycle_state() != PrefillLifecycleState::Active
+            {
+                std::collections::HashSet::new()
+            } else {
+                binding
+                    .as_ref()
+                    .filter(|binding| {
+                        &binding.endpoint_id == endpoint
+                            && binding.target_id.matches_group(group_id, endpoint)
+                    })
+                    .map(|binding| binding.router.available_worker_ids())
+                    .unwrap_or_default()
+            },
+        )
     }
 }
 
@@ -565,9 +615,18 @@ impl
             self.conditional_disagg_policy.is_enabled(),
         ));
 
+        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
+        let output = match (
+            annotated(PREFILL_OUTPUT_ANNOTATION),
+            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
+        ) {
+            (false, _) => PrefillNeed::None,
+            (true, false) => PrefillNeed::BeforeLast,
+            (true, true) => PrefillNeed::BeforeFirst,
+        };
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
-            Some(completion) => completion.forward_decode(decode, engine_ctx).await,
+            Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
             None => decode.await,
         }
     }
@@ -851,7 +910,11 @@ mod tests {
             // Decode can enter its phase even though prefill is still observed.
             let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
             let error = task
-                .forward_decode(std::future::pending(), Context::new(()).context())
+                .forward_decode(
+                    std::future::pending(),
+                    Context::new(()).context(),
+                    PrefillNeed::None,
+                )
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("prefill connection lost"));

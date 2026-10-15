@@ -134,6 +134,7 @@ define_dynamo_exceptions!(
     (Cancelled, BackendError::Cancelled),
     (EngineShutdown, BackendError::EngineShutdown),
     (StreamIncomplete, BackendError::StreamIncomplete),
+    (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
 
 // Keep existing EngineShutdown handlers working while identifying an explicit

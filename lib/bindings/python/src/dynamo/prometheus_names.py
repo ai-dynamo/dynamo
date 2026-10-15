@@ -93,6 +93,10 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Whether the frontend can route at least one inference request for a model
     MODEL_READY = "model_ready"
+    # Number of discovered physical workers by router admission state
+    ROUTER_WORKERS = "router_workers"
+    # Current router admission state and reason for a discovered worker
+    ROUTER_WORKER_STATE = "router_worker_state"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
