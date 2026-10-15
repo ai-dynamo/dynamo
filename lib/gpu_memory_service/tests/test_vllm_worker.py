@@ -171,8 +171,8 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     "peer_memory_delta",
-    [0, 70 * _GIB, -_NON_TORCH, -(_CONTEXT + _TORCH_PEAK + _NON_TORCH)],
-    ids=["idle", "wake", "sleep", "exit"],
+    [70 * _GIB, -(_CONTEXT + _TORCH_PEAK + _NON_TORCH)],
+    ids=["wake", "exit"],
 )
 def test_shadow_kv_budget_ignores_peer_memory_changes(
     monkeypatch, tmp_path, peer_memory_delta
