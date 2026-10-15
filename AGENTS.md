@@ -238,13 +238,14 @@ cargo fmt --all && cargo clippy --workspace
   `Configuration.client_go_retries` directly.
 - Wrap synchronous patch, update, and replace read-modify-write operations in
   `retry_kubernetes_write()`. Its closure must re-read the object on every
-  attempt and send that read's `metadata.resourceVersion`; never retry a stale
-  write body unchanged. If the resource version also fences ownership, use
-  `retry_kubernetes_request()` for 429/5xx and handle 409 at the layer that can
-  re-read and revalidate ownership before retrying.
+  attempt and send that read's `metadata.resourceVersion`; it handles 409 by
+  restarting that complete closure. Wrap the concrete write request inside the
+  closure with `retry_kubernetes_request()` for 429/5xx; never retry a stale
+  write body after a conflict.
 - Do not add ad hoc Kubernetes retry loops. The shared write helper retries
-  conflicts, honors `Retry-After` for throttling and server errors, and uses
-  the client-go default exponential backoff when no valid header is present.
+  conflicts. The request helper honors `Retry-After` for throttling and server
+  errors and uses the client-go default exponential backoff when no valid
+  header is present.
 - A deadline-bound client may opt out on a dedicated configuration copy. Set
   `Configuration.retries = 0` and document why retries violate its deadline.
 

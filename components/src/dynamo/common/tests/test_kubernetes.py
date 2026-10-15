@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from kubernetes import client
+from kubernetes.client import rest
 
 from dynamo.common import kubernetes
 
@@ -34,3 +35,23 @@ def test_transient_api_errors_are_retryable(status) -> None:
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
 def test_non_transient_api_errors_are_not_retryable(status) -> None:
     assert not kubernetes.is_transient_api_error(client.ApiException(status=status))
+
+
+def test_transport_errors_are_retryable() -> None:
+    assert kubernetes.is_transient_api_error(
+        rest.urllib3.exceptions.ProtocolError("connection reset", OSError("reset"))
+    )
+
+
+def test_write_retry_does_not_multiply_transient_request_retries() -> None:
+    attempts = 0
+
+    def write() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise client.ApiException(status=429)
+
+    with pytest.raises(client.ApiException):
+        kubernetes.retry_kubernetes_write(write)
+
+    assert attempts == 1

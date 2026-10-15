@@ -353,7 +353,11 @@ def _with_operator_gpu_status(components):
             "gpusPerReplica": total_gpu,
         }
     return {
-        "metadata": {"generation": 1},
+        "metadata": {
+            "uid": "test-dgd-uid",
+            "resourceVersion": "1",
+            "generation": 1,
+        },
         "spec": {"components": components},
         "status": {"observedGeneration": 1, "components": statuses},
     }
@@ -1690,7 +1694,10 @@ async def test_generic_worker_partner_keeps_component_name(mock_runtime):
     connector_a.set_component_replicas.assert_called_once()
     # The partner's component name rides through to the actual scale call.
     connector_b.kube_api.update_dgd_replicas_directly.assert_called_once_with(
-        "dgd-b", "worker-svc", 4
+        "dgd-b",
+        "worker-svc",
+        4,
+        deployment=connector_b.kube_api.get_graph_deployment.return_value,
     )
 
 

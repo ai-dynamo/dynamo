@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from kubernetes import client
+from kubernetes.client import rest
 from kubernetes.utils.retry import (
     DEFAULT_BACKOFF,
     on_retry_after_error,
@@ -25,6 +26,8 @@ def client_go_api_client() -> client.ApiClient:
 
 
 def is_transient_api_error(error: Exception) -> bool:
+    if isinstance(error, rest.urllib3.exceptions.HTTPError):
+        return True
     status = getattr(error, "status", None)
     return status == 0 or status == 429 or (isinstance(status, int) and status >= 500)
 
@@ -36,12 +39,13 @@ def retry_kubernetes_request(fn: Callable[[], T]) -> T:
 
 
 def retry_kubernetes_write(fn: Callable[[], T]) -> T:
-    """Retry a read-modify-write closure using Kubernetes API semantics.
+    """Restart a complete read-modify-write closure after conflicts.
 
     ``fn`` must re-read the object before every write and submit that read's
-    resource version. Conflicts restart the complete closure. Throttling and
-    server errors honor Retry-After when present and otherwise use the
-    client-go ``DefaultBackoff`` schedule.
+    resource version. The write request inside ``fn`` must use
+    :func:`retry_kubernetes_request` for throttling and server errors. Keeping
+    request retries at the write prevents automatic GET retries from being
+    multiplied by retries of the complete closure.
     """
 
-    return retry_on_conflict(lambda: retry_kubernetes_request(fn))
+    return retry_on_conflict(fn)
