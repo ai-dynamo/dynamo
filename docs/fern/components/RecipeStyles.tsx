@@ -2185,12 +2185,15 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 /* Variant visibility: hide blocks that do not match the checked framework/sku/usecase */
 body:has(input[name="recipe-framework"][value="vllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="vllm"]),
+body:has(input[name="recipe-framework"][value="trtllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="trtllm"]),
 body:has(input[name="recipe-framework"][value="sglang"]:checked) [data-recipe-framework]:not([data-recipe-framework~="sglang"]),
 body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sku~="b200"]),
+body:has(input[name="recipe-sku"][value="b300"]:checked) [data-sku]:not([data-sku~="b300"]),
 body:has(input[name="recipe-sku"][value="h200"]:checked) [data-sku]:not([data-sku~="h200"]),
 body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sku~="h100"]),
 body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-sku]:not([data-sku~="gb200"]),
 body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-sku]:not([data-sku~="gb300"]),
+body:has(input[name="recipe-sku"][value="vr200"]:checked) [data-sku]:not([data-sku~="vr200"]),
 body:has(input[name="recipe-usecase"][value="chat"]:checked) [data-usecase]:not([data-usecase~="chat"]),
 body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]) {
     display: none;
