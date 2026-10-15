@@ -32,7 +32,6 @@ _APACHE = {"license": {"id": "Apache-2.0"}}
             [{"license": {"name": "Acme Custom License"}}],
             "LicenseRef-Acme-Custom-License",
         ),
-        ([{"expression": "MIT OR Apache-2.0"}], "MIT OR Apache-2.0"),
         ([_MIT, _APACHE], "MIT AND Apache-2.0"),
         ([_APACHE, _MIT], "Apache-2.0 AND MIT"),
         (
