@@ -56,7 +56,7 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
-<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
+<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="45">
   Maximum HTTP request body size in MB. This is the client-facing ingress cap.
   After preprocessing, the frontend sends the worker-bound frame over the request
   plane. On the default TCP plane that frame is independently limited by
