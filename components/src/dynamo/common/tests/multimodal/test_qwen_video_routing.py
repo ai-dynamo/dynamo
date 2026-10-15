@@ -33,6 +33,7 @@ EXPECTED_PROBE_KWARGS = {
 
 
 def _resolve(smart_resize, prefix=VLLM_PREFIX):
+    """Run the shared probe with the test logger and a backend warning prefix."""
     return resolve_qwen_video_resize_mode(
         smart_resize,
         logger=logging.getLogger(LOGGER_NAME),
@@ -41,6 +42,7 @@ def _resolve(smart_resize, prefix=VLLM_PREFIX):
 
 
 def _warnings(caplog):
+    """Return warning messages emitted by the test logger."""
     return [
         record.getMessage()
         for record in caplog.records
@@ -49,6 +51,7 @@ def _warnings(caplog):
 
 
 def test_probe_calls_smart_resize_once_with_exact_arguments():
+    """Check that the probe calls smart_resize once with the fixed arguments."""
     smart_resize = Mock(return_value=(1216, 4096))
 
     _resolve(smart_resize)
@@ -64,6 +67,7 @@ def test_probe_calls_smart_resize_once_with_exact_arguments():
     ],
 )
 def test_recognized_results_map_to_resize_mode(caplog, result, expected):
+    """Recognized dimensions select the matching resize mode without a warning."""
     caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
 
     assert _resolve(Mock(return_value=result)) == expected
@@ -86,6 +90,7 @@ def test_recognized_results_map_to_resize_mode(caplog, result, expected):
     ],
 )
 def test_unknown_result_returns_none_and_warns(caplog, prefix, expected):
+    """Unknown dimensions disable routing with the calling backend's warning."""
     caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
 
     assert _resolve(Mock(return_value=(999, 999)), prefix) is None
@@ -108,6 +113,7 @@ def test_unknown_result_returns_none_and_warns(caplog, prefix, expected):
     ],
 )
 def test_absent_smart_resize_returns_none_and_warns(caplog, prefix, expected):
+    """A missing callable disables routing with the calling backend's warning."""
     caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
 
     assert _resolve(None, prefix) is None
@@ -133,6 +139,7 @@ def test_absent_smart_resize_returns_none_and_warns(caplog, prefix, expected):
 def test_unsupported_api_returns_none_and_warns(
     caplog, error_type, prefix, expected_start
 ):
+    """Unsupported API errors disable routing and appear in the backend warning."""
     caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
     smart_resize = Mock(side_effect=error_type("bad probe"))
 
@@ -141,6 +148,7 @@ def test_unsupported_api_returns_none_and_warns(
 
 
 def test_other_exceptions_propagate():
+    """Unexpected errors propagate instead of silently disabling video routing."""
     smart_resize = Mock(side_effect=RuntimeError("unexpected"))
 
     with pytest.raises(RuntimeError, match="unexpected"):
