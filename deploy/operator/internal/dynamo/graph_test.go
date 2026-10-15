@@ -6561,7 +6561,6 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			},
 		},
 		{
-			// An authored command owns the argv, so the default args must not be appended.
 			name: "frontend with authored command and nil args",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
@@ -6800,8 +6799,6 @@ func TestGenerateBasePodSpec_EmptyMainContainerPortsOverrideWorkerDefaults(t *te
 	require.Empty(t, podSpec.Containers[0].Ports)
 }
 
-// A legacy Go EPP main container that authors its own command owns the argv,
-// so the default --pool-name flags must not be appended to it.
 func TestGenerateBasePodSpec_LegacyEPPAuthoredCommandDropsDefaultArgs(t *testing.T) {
 	podSpec, err := GenerateBasePodSpec(
 		&v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -10509,9 +10506,6 @@ func TestFrontendSidecarRuntimeDefaults(t *testing.T) {
 	}
 }
 
-// assertFrontendSidecarArgv checks the sidecar command and args. An authored
-// command must keep exactly its authored args; otherwise the default command is
-// python3 and args are checked only when the case sets them.
 func assertFrontendSidecarArgv(t *testing.T, sidecar corev1.Container, wantCommand, wantArgs []string) {
 	t.Helper()
 	if wantCommand != nil {
@@ -10632,7 +10626,6 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarPorts:   true,
 		},
 		{
-			// An authored sidecar command owns the argv, so the default args must not be appended.
 			name: "frontendSidecar with authored command and no args",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:   commonconsts.ComponentTypeWorker,
