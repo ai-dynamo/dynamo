@@ -339,7 +339,7 @@ if __name__ == "__main__":
                 async def shutdown_engine_routes(self):
                     pass
 
-                async def shutdown_and_wait(self):
+                async def shutdown_and_wait(self, timeout_secs=None):
                     print("RUNTIME_FINISHED", flush=True)
 
             async def failed_worker():

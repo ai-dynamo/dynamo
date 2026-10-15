@@ -325,10 +325,11 @@ class WorkerShutdown:
         self.shutdown_event.set()
         cleanup_budget = max(0.0, self._hard_deadline - time.monotonic())
         clean = await self._stage("cleanup", self._cleanup_worker(), cleanup_budget)
+        runtime_budget = max(0.0, self._hard_deadline - time.monotonic())
         runtime_clean = await self._stage(
             "runtime",
-            self.runtime.shutdown_and_wait(),
-            max(0.0, self._hard_deadline - time.monotonic()),
+            self.runtime.shutdown_and_wait(timeout_secs=runtime_budget),
+            runtime_budget,
         )
         if clean and runtime_clean and self.post_shutdown is not None:
             runtime_clean = (

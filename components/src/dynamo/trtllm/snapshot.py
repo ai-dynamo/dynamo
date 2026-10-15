@@ -160,9 +160,9 @@ class _SnapshotRuntimeProxy:
         if self._runtime is not None:
             self._runtime.shutdown()
 
-    async def shutdown_and_wait(self) -> None:
+    async def shutdown_and_wait(self, timeout_secs: float | None = None) -> None:
         if self._runtime is not None:
-            await self._runtime.shutdown_and_wait()
+            await self._runtime.shutdown_and_wait(timeout_secs=timeout_secs)
 
     async def shutdown_engine_routes(self) -> None:
         if self._runtime is not None:

@@ -54,8 +54,9 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
             async def shutdown_engine_routes(self):
                 pass
 
-            async def shutdown_and_wait(self):
+            async def shutdown_and_wait(self, timeout_secs=None):
                 assert events[-1] == "engine"
+                assert 0 < timeout_secs <= 0.5
                 events.append("runtime")
 
         class Endpoint:
@@ -146,7 +147,7 @@ def test_prefill_reserves_cleanup_inside_total(shutdown_env, monkeypatch):
             async def shutdown_engine_routes(self):
                 pass
 
-            async def shutdown_and_wait(self):
+            async def shutdown_and_wait(self, timeout_secs=None):
                 assert cleaned.is_set()
 
         shutdown = ws.WorkerShutdown(Runtime(), [], asyncio.Event(), prefill=True)
@@ -188,7 +189,7 @@ def test_cleanup_timeout_is_failure_and_does_not_extend_stage(
             async def shutdown_engine_routes(self):
                 pass
 
-            async def shutdown_and_wait(self):
+            async def shutdown_and_wait(self, timeout_secs=None):
                 pass
 
         shutdown = ws.WorkerShutdown(Runtime(), [], asyncio.Event())
@@ -282,7 +283,7 @@ def test_unregister_failure_is_observed_without_stopping_teardown(
             async def shutdown_engine_routes(self):
                 pass
 
-            async def shutdown_and_wait(self):
+            async def shutdown_and_wait(self, timeout_secs=None):
                 if runtime_fails:
                     raise RuntimeError("runtime teardown incomplete")
 
@@ -343,7 +344,7 @@ def test_sglang_deferred_signals_run_after_runtime_teardown(shutdown_env):
             async def shutdown_engine_routes(self):
                 pass
 
-            async def shutdown_and_wait(self):
+            async def shutdown_and_wait(self, timeout_secs=None):
                 events.append("runtime")
 
         shutdown = ws.WorkerShutdown(Runtime(), [], asyncio.Event())
