@@ -179,8 +179,8 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 	}{
 		{name: "XT Single GCS", family: BuildFamilyXT, pipeline: PipelineSingle},
 		{name: "HX Single local", family: BuildFamilyHX, pipeline: PipelineSingle, local: true},
-		{name: "XT hybrid local", family: BuildFamilyXT, pipeline: PipelineLPX, local: true},
-		{name: "HX hybrid GCS", family: BuildFamilyHX, pipeline: PipelineLPX},
+		{name: "XT hybrid local", family: BuildFamilyXT, pipeline: PipelineHybrid, local: true},
+		{name: "HX hybrid GCS", family: BuildFamilyHX, pipeline: PipelineHybrid},
 		{name: "XT multiple drafts local", family: BuildFamilyXT, pipeline: PipelineSpecDecode, local: true},
 		{name: "HX multiple drafts GCS", family: BuildFamilyHX, pipeline: PipelineSpecDecode},
 	} {
@@ -215,7 +215,7 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 
 			t.Log("Author dependent values before duplicate forged bindings")
 			runtimeVariable := "A_RUNTIME_MODEL"
-			if test.pipeline == PipelineLPX {
+			if test.pipeline == PipelineHybrid {
 				runtimeVariable = "GAS_DIR"
 			}
 			authored := []corev1.EnvVar{
@@ -246,7 +246,7 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 		name     string
 	}{
 		{pipeline: PipelineSingle, name: "LPX_MODEL_PATH"},
-		{pipeline: PipelineLPX, name: "LPX_MODEL_PATH"},
+		{pipeline: PipelineHybrid, name: "LPX_MODEL_PATH"},
 		{pipeline: PipelineSpecDecode, name: "LPX_TARGET_MODEL_PATH"},
 	} {
 		t.Run(string(test.pipeline)+"/"+test.name, func(t *testing.T) {

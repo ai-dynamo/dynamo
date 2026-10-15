@@ -266,7 +266,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	t.Log("Project two complete hybrid replicas")
 	xt, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
-	require.Equal(t, PipelineLPX, xt.Pipeline())
+	require.Equal(t, PipelineHybrid, xt.Pipeline())
 	xtRequest := xt.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
 	require.Equal(t, lpxv1alpha1.TargetFamilyXt8888, xtRequest.TargetFamily)
 	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xtRequest.WorkloadMode)
@@ -285,7 +285,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	}
 	localWorkload, err := ResolveWorkload(t.Context(), reader, local, singleGroupComponents(t, local), source)
 	require.NoError(t, err)
-	require.Equal(t, PipelineLPX, localWorkload.Pipeline())
+	require.Equal(t, PipelineHybrid, localWorkload.Pipeline())
 	require.Zero(t, localWorkload.modelProjections[0].AgentReplicas())
 
 	t.Log("A scheduling deadline does not change hybrid launch")
