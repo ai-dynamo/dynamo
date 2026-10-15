@@ -30,7 +30,7 @@ const DEFAULT_GROUP_TOKEN_WEIGHT: f64 = 0.0;
 const DEFAULT_GROUP_LOAD_TOLERANCE: f64 = 0.1;
 const DEFAULT_INCOMPLETE_GROUP_WEIGHT: f64 = 1.0;
 const DEFAULT_CACHE_AFFINITY_MIN_FRACTION: f64 = 0.5;
-const DEFAULT_AFFINITY_MAX_CONTEXT_EXCESS: f64 = 0.1;
+const DEFAULT_AFFINITY_MIN_IMBALANCE_REDUCTION: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -49,12 +49,15 @@ struct Parameters {
     /// Ranks holding at least this fraction of the prompt in device cache keep the request
     /// (sticky sessions); balancing only decides among them. Values above 1.0 disable the gate.
     cache_affinity_min_fraction: f64,
-    /// A session bound to a rank (the host's advisory affinity target) stays there while that
-    /// rank's projected context exceeds its EP group's mean by at most this fraction; above it
-    /// the turn is re-placed like a fresh request. Sticking saves the KV re-transfer a decode
-    /// rank with a radix cache would otherwise need; moving evens the attention barrier. Use a
-    /// large value (e.g. 1e9) for hard stickiness, 0 to move whenever the rank is above mean.
-    affinity_max_context_excess: f64,
+    /// A session bound to a rank (the host's advisory affinity target) moves only to the rank
+    /// that most lowers the attention-barrier wait, and only if that lowers the slowest rank's
+    /// context by more than this fraction of the request's own context (see [`barrier_increase`]).
+    /// The saving lasts as long as the request and the re-transfer grows with its context, so
+    /// the ratio is benefit over cost; 1.0 means the move removes the whole request from the max.
+    /// Sticking saves the KV re-transfer a decode rank with a radix cache would otherwise need;
+    /// moving evens the barrier. Use a large value (e.g. 1e9) for hard stickiness, 0 to move
+    /// whenever any other rank gives a lower wait.
+    affinity_min_imbalance_reduction: f64,
 }
 
 impl Default for Parameters {
@@ -67,7 +70,7 @@ impl Default for Parameters {
             group_load_tolerance: DEFAULT_GROUP_LOAD_TOLERANCE,
             incomplete_group_weight: DEFAULT_INCOMPLETE_GROUP_WEIGHT,
             cache_affinity_min_fraction: DEFAULT_CACHE_AFFINITY_MIN_FRACTION,
-            affinity_max_context_excess: DEFAULT_AFFINITY_MAX_CONTEXT_EXCESS,
+            affinity_min_imbalance_reduction: DEFAULT_AFFINITY_MIN_IMBALANCE_REDUCTION,
         }
     }
 }
@@ -86,8 +89,8 @@ impl Parameters {
                 self.cache_affinity_min_fraction,
             ),
             (
-                "affinity_max_context_excess",
-                self.affinity_max_context_excess,
+                "affinity_min_imbalance_reduction",
+                self.affinity_min_imbalance_reduction,
             ),
         ] {
             if !value.is_finite() || value < 0.0 {
@@ -163,6 +166,69 @@ fn within_group_cost(
         + parameters.token_imbalance_weight * blocks as f64 / (global_mean_blocks + 1.0)
 }
 
+/// Rise in Σ_groups size·max-rank-context when the request lands on `row`. With attention time
+/// linear in context, a group's barrier wait Σ_r(max − att_r) is size·max − Σ_r att_r, and the
+/// sum does not depend on placement, so this is the change in total wait.
+fn barrier_increase(
+    candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
+    blocks: &[usize],
+    groups: &[(u64, usize, usize)],
+    row: usize,
+    request_blocks: usize,
+) -> f64 {
+    let worker_id = candidates[row].worker().worker_id;
+    let Some(&(_, size, max_blocks)) = groups.iter().find(|(id, _, _)| *id == worker_id) else {
+        return f64::INFINITY;
+    };
+    size as f64 * (blocks[row] + request_blocks).saturating_sub(max_blocks) as f64
+}
+
+/// For a session bound to `bound_row`: the bound row, or the row with the lowest barrier wait if
+/// moving there saves more than the threshold. A huge request makes any destination the new
+/// straggler, so it saves little and stays.
+fn affinity_row(
+    parameters: &Parameters,
+    candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
+    load: &[WorkerLoadInput],
+    bound_row: usize,
+    request_blocks: usize,
+) -> usize {
+    let blocks: Vec<usize> = (0..load.len())
+        .map(|row| projected_load(&load[row], row, usize::MAX, 0).1)
+        .collect();
+    let mut groups: Vec<(u64, usize, usize)> = Vec::new();
+    for (row, candidate) in candidates.iter().enumerate() {
+        let worker_id = candidate.worker().worker_id;
+        match groups.iter_mut().find(|(id, _, _)| *id == worker_id) {
+            Some(group) => {
+                group.1 += 1;
+                group.2 = group.2.max(blocks[row]);
+            }
+            None => groups.push((worker_id, 1, blocks[row])),
+        }
+    }
+    let increase = |row| barrier_increase(candidates, &blocks, &groups, row, request_blocks);
+    let Some((best_row, best_increase)) = (0..candidates.len())
+        .filter(|row| *row != bound_row)
+        .map(|row| (row, increase(row)))
+        .min_by(|(lr, li), (rr, ri)| li.total_cmp(ri).then_with(|| blocks[*lr].cmp(&blocks[*rr])))
+    else {
+        return bound_row;
+    };
+    let bound_worker = candidates[bound_row].worker().worker_id;
+    let bound_size = groups
+        .iter()
+        .find(|(id, _, _)| *id == bound_worker)
+        .map_or(1, |(_, size, _)| *size);
+    let saved =
+        (increase(bound_row) - best_increase) / (bound_size as f64 * request_blocks.max(1) as f64);
+    if saved > parameters.affinity_min_imbalance_reduction {
+        best_row
+    } else {
+        bound_row
+    }
+}
+
 fn group_load(
     parameters: &Parameters,
     group: &GroupStats,
@@ -178,7 +244,7 @@ fn group_load(
         + parameters.incomplete_group_weight * max_group_size.saturating_sub(group.size) as f64
 }
 
-/// Bound session rank while it is not too far above its group's mean, then sticky cached
+/// Bound session rank unless moving lowers the attention barrier enough, then sticky cached
 /// prefixes, then the least-loaded EP group (within tolerance), then the rank that leaves that
 /// group's DP ranks most even.
 fn pick_row(
@@ -229,19 +295,19 @@ fn pick_row(
         group.has_allowed_row |= allowed(row);
     }
     if let Some(target) = affinity_target
-        && let Some(row) = candidates.iter().position(|candidate| {
+        && let Some(bound_row) = candidates.iter().position(|candidate| {
             let worker = candidate.worker();
             worker.worker_id == target.worker_id
                 && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank)
         })
-        && let Some(group) = groups.iter().find(|g| g.worker_id == target.worker_id)
     {
-        let (_, projected_blocks) = projected_load(&load[row], row, row, request_blocks as usize);
-        let group_mean = (group.sum_blocks + request_blocks as usize) as f64 / group.size as f64;
-        let excess = (projected_blocks as f64 - group_mean) / (group_mean + 1.0);
-        if excess <= parameters.affinity_max_context_excess {
-            return Some(row);
-        }
+        return Some(affinity_row(
+            parameters,
+            candidates,
+            load,
+            bound_row,
+            request_blocks as usize,
+        ));
     }
 
     let global_mean_requests = sum_requests as f64 / candidates.len() as f64;
@@ -398,19 +464,20 @@ mod tests {
         device_overlap: &[(u64, u32, usize)],
         parameters: Parameters,
     ) -> WorkerWithDpRank {
-        select_with_affinity(groups, device_overlap, None, parameters)
+        select_with_affinity(groups, device_overlap, None, 1, parameters)
     }
 
     fn select_with_affinity(
         groups: &[[(usize, usize, usize); 2]],
         device_overlap: &[(u64, u32, usize)],
         affinity_target: Option<(u64, u32)>,
+        request_blocks: usize,
         parameters: Parameters,
     ) -> WorkerWithDpRank {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
-            isl_tokens: BLOCK_SIZE as usize,
+            isl_tokens: request_blocks * BLOCK_SIZE as usize,
             lora_name: None,
             expected_output_tokens: None,
             affinity_target: affinity_target
@@ -530,27 +597,33 @@ mod tests {
     }
 
     #[test]
-    fn bound_session_stays_while_its_rank_is_near_the_group_mean() {
-        // Equal loads: free placement would take row 0; the binding keeps rank 1.
-        let groups = [[(4, 40, 1), (4, 40, 1)], [(4, 40, 1), (4, 40, 1)]];
+    fn bound_session_moves_only_when_that_lowers_the_barrier() {
+        let near_even = [[(4, 40, 1), (4, 40, 1)], [(4, 40, 1), (4, 40, 1)]];
         assert_eq!(
-            select_with_affinity(&groups, &[], Some((0, 1)), Parameters::default()),
+            select_with_affinity(&near_even, &[], Some((0, 1)), 8, Parameters::default()),
             WorkerWithDpRank::new(0, 1)
         );
-        // Bound rank 50% above its group mean: beyond the 10% default, so the turn moves.
-        let skewed = [[(4, 40, 1), (4, 120, 1)], [(4, 40, 1), (4, 40, 1)]];
-        assert_ne!(
-            select_with_affinity(&skewed, &[], Some((0, 1)), Parameters::default()),
-            WorkerWithDpRank::new(0, 1)
+        // Bound rank is the straggler; the other rank in its group absorbs the turn.
+        let skewed = [[(4, 40, 1), (4, 120, 1)], [(4, 100, 1), (4, 100, 1)]];
+        assert_eq!(
+            select_with_affinity(&skewed, &[], Some((0, 1)), 40, Parameters::default()),
+            WorkerWithDpRank::new(0, 0)
         );
-        // A large allowance restores hard stickiness.
+        // A huge request makes any destination the new straggler: moving saves ~nothing.
+        let huge = [[(4, 60, 1), (4, 40, 1)], [(4, 60, 1), (4, 60, 1)]];
+        assert_eq!(
+            select_with_affinity(&huge, &[], Some((0, 0)), 1000, Parameters::default()),
+            WorkerWithDpRank::new(0, 0)
+        );
+        // A large threshold restores hard stickiness.
         assert_eq!(
             select_with_affinity(
                 &skewed,
                 &[],
                 Some((0, 1)),
+                40,
                 Parameters {
-                    affinity_max_context_excess: 1e9,
+                    affinity_min_imbalance_reduction: 1e9,
                     ..Parameters::default()
                 }
             ),

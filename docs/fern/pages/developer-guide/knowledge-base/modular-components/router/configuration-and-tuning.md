@@ -255,11 +255,15 @@ least-loaded one to stay a candidate, `incomplete_group_weight` (1.0) to penaliz
 ranks were partly filtered out, and `cache_affinity_min_fraction` (0.5) for the device-cache
 share that keeps a request on its rank; a value above 1.0 disables that sticky step. When the
 host supplies a session-affinity target (a previous turn's worker and DP rank), the policy keeps
-the session there while that rank's projected context is at most `affinity_max_context_excess`
-(0.1, relative) above its EP group's mean, and re-places the turn otherwise. Staying avoids
-re-sending the session's KV to a decode rank that already caches it (SGLang
-`--disaggregation-decode-enable-radix-cache`); moving evens the attention barrier. A large value
-(for example `1e9`) gives hard stickiness, `0` moves whenever the rank is above the mean. The
+the session there unless another rank would lower the attention-barrier wait (how long the other
+DP ranks of an EP group wait for the rank with the most context): the move must lower the slowest
+rank's context by more than `affinity_min_imbalance_reduction` (0.5) times the request's own
+context, the size of the KV re-transfer it costs; then the turn moves to that rank. A long request that would make any destination the new slowest rank stays. Staying
+avoids re-sending the session's KV to a decode rank that already caches it (SGLang
+`--disaggregation-decode-enable-radix-cache`); moving evens the barrier. A large value (for
+example `1e9`) gives hard stickiness, `0` moves whenever another rank gives a lower wait. With
+`--router-session-affinity-mode hard` the host pins the session before the policy runs; use
+`soft` so the policy can apply this rule. The
 within-group token term uses each rank's per-request context (`active_sequence_blocks`) rather
 than its deduplicated KV footprint, because attention time scales with the context every
 request reads, not with the blocks that are physically resident.
