@@ -201,6 +201,54 @@ targets:
   expected_performance:
     available: true
     summary: 564.80 output tok/s, 141.20 output tok/s/GPU, 28.84 user output tok/s P50, TTFT P50 292.90 ms at concurrency 24 over 500 requests [functional validation]
+- id: trtllm-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: First 500 requests from the Mooncake trace at concurrency 24
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/trtllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: >-
+      Preliminary result from an earlier image. Retest pending.
+      75.99 output tok/s, 19.00 output tok/s/GPU, 4.99 user output tok/s P50, TTFT P50 26,218.26 ms at concurrency 24 over 500 requests
+- id: trtllm-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: First 500 requests from the Mooncake trace at concurrency 24 [functional validation]
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/trtllm/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 582.10 output tok/s, 145.53 output tok/s/GPU, 31.25 user output tok/s P50, TTFT P50 601.70 ms at concurrency 24 over 500 requests [functional validation]
 related_benchmarks: []
 maintainer: null
 gaps:
