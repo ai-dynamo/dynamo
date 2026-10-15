@@ -1475,13 +1475,23 @@ impl DistributedRuntime {
     }
 
     /// Awaitable runtime teardown: resolves once the transports have actually
-    /// been torn down. Phase 2 (the wait for in-flight requests) is bounded by
-    /// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`; Phase 3 always runs.
-    fn shutdown_and_wait<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    /// been torn down. The caller's remaining budget bounds the entire wait,
+    /// reserving time for transport teardown after draining requests.
+    #[pyo3(signature = (timeout_secs=None))]
+    fn shutdown_and_wait<'p>(
+        &self,
+        py: Python<'p>,
+        timeout_secs: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let budget = timeout_secs
+            .map(std::time::Duration::try_from_secs_f64)
+            .transpose()
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+            .unwrap_or_else(dynamo_runtime::worker::graceful_shutdown_timeout);
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
-                .shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout()))
+                .shutdown_with_budget(budget)
                 .await
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             Ok(())
