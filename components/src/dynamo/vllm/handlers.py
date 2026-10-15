@@ -879,8 +879,6 @@ def build_sampling_params(
     if reps is not None and (
         isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
     ):
-        from dynamo.common.metadata_upload import _backend_metadata_upload_settings
-
         artifact = _backend_metadata_upload_settings(request)
         if artifact is not None and "kind" in artifact:
             raise InvalidArgument("invalid artifact route token start")
@@ -3752,8 +3750,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, request, context):
         normalize_request_token_ids(request)
-        from dynamo.common.metadata_upload import _backend_metadata_upload_settings
-
         settings = _backend_metadata_upload_settings(request)
         if settings is not None and "kind" in settings and self.use_vllm_tokenizer:
             raise InvalidArgument("artifact capture requires token-in/token-out mode")
@@ -4423,8 +4419,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def generate(self, request, context):
         normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation with decode phase
-        from dynamo.common.metadata_upload import _backend_metadata_upload_settings
-
         settings = _backend_metadata_upload_settings(request)
         if settings is not None and "kind" in settings:
             raise InvalidArgument(
