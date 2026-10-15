@@ -1318,7 +1318,6 @@ jobs:
         id: setup
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1345,7 +1344,6 @@ jobs:
        needs.changed-files.outputs.operator == 'true')
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
-      vcluster_host_priority_class: ci-pre-merge
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -1368,7 +1366,6 @@ jobs:
        needs.changed-files.outputs.operator == 'true')
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
-      vcluster_host_priority_class: ci-pre-merge
       framework: sglang
       profiles: '["agg", "agg_router", "agg_embed"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
@@ -1391,7 +1388,6 @@ jobs:
        needs.changed-files.outputs.operator == 'true')
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
-      vcluster_host_priority_class: ci-pre-merge
       framework: trtllm
       profiles: '["agg", "agg_router"]'
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
@@ -1412,7 +1408,6 @@ jobs:
        needs.changed-files.outputs.dgdr == 'true')
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
     with:
-      vcluster_host_priority_class: ci-pre-merge
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1446,7 +1441,6 @@ jobs:
         id: setup
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
@@ -1484,7 +1478,6 @@ jobs:
         id: setup
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
@@ -1522,7 +1515,6 @@ jobs:
         id: setup
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
@@ -1564,7 +1556,6 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1618,7 +1609,6 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1672,7 +1662,6 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1728,7 +1717,6 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1804,7 +1792,6 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1880,7 +1867,6 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
-          vcluster_host_priority_class: ci-pre-merge
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
