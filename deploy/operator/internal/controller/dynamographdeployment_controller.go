@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -49,6 +50,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -334,6 +336,17 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Restore owned pools after deletion or spec drift without requiring GAIE on every cluster.
+	_, poolMappingErr := mgr.GetRESTMapper().RESTMapping(epp.InferencePoolGVK.GroupKind(), epp.InferencePoolGVK.Version)
+	if poolMappingErr != nil && !meta.IsNoMatchError(poolMappingErr) {
+		return fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
+	}
+	if poolMappingErr == nil {
+		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
+			predicate.GenerationChangedPredicate{},
+		))
+	}
 
 	// Watch standalone Snapshot resources only when their external APIs were detected.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
