@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 id: muse-spark-open-816b-a42b
-title: Muse-Spark-open-816B-A42B
+title: Muse-Spark-Open-816B-A42B
 page: pages/recipes/model-recipes/Muse-Spark-Open.mdx
 provider: meta
 model:
-  name: Muse-Spark-open-816B-A42B
+  name: Muse-Spark-Open-816B-A42B
   hf_id: meta-models/Muse-Spark-Open-816B-A42B-NVFP4
   precision: NVFP4 with FP8 KV cache
 status: experimental
