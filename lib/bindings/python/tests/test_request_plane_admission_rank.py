@@ -49,7 +49,10 @@ import collections.abc
 import contextlib
 import os
 import re
+import subprocess
+import sys
 import time
+import xml.etree.ElementTree as ET
 
 import aiohttp
 import pytest
@@ -86,6 +89,75 @@ RANK_COUNT = 4
 SERVED = range(START_RANK, START_RANK + RANK_COUNT)
 
 TIMEOUT_S = 10
+
+# A fork can inherit an initialized Rust runtime without its worker threads.
+# Execute each case in a fresh interpreter, even when pytest itself uses --forked.
+_CHILD_CASE = "DYNAMO_ADMISSION_TEST_CHILD"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def nats_and_etcd():
+    """These file-discovery/TCP tests use ZMQ events and need no shared services."""
+
+
+def _run_in_fresh_process(request, tmp_path) -> bool:
+    """Run the selected case in a child; return False only inside that child."""
+    __tracebackhide__ = True
+    nodeid = request.node.nodeid
+    if os.environ.get(_CHILD_CASE) == nodeid:
+        return False
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "PYTEST_ADDOPTS" and not key.startswith("PYTEST_XDIST_")
+    }
+    env[_CHILD_CASE] = nodeid
+    report = tmp_path / "child-results.xml"
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:pytest_forked",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "no:codeblocks",
+        "-n",
+        "0",
+        "-v",
+        "--tb=short",
+        "-ra",
+        f"--basetemp={tmp_path / 'child'}",
+        f"--junitxml={report}",
+        nodeid,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=request.config.rootpath,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,  # Leave time for diagnostics before the outer 120s timeout.
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"Admission child timed out: {nodeid}\n{exc.stdout!r}\n{exc.stderr!r}",
+            pytrace=False,
+        )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    cases = ET.parse(report).findall(".//testcase")
+    assert len(cases) == 1 and not any(
+        case.find(tag) is not None
+        for case in cases
+        for tag in ("failure", "error", "skipped")
+    ), output
+    return True
 
 
 class Entries:
@@ -311,7 +383,9 @@ async def _runtime(tmp_path, codec: str):
         os.environ["DYN_SYSTEM_PORT"] = str(port)
         os.environ["DYN_FILE_KV"] = str(tmp_path)
         os.environ["DYN_REQUEST_PLANE_CODEC"] = codec
-        runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
+        runtime = DistributedRuntime(
+            asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+        )
         servers: list = []
         try:
             async with aiohttp.ClientSession() as session:
@@ -374,13 +448,15 @@ async def _admitted_under(client, handlers, gate, body) -> tuple[object, str]:
     return received, next(iter(counted))
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("codec", ["msgpack", "json"])
 async def test_the_gate_admits_python_requests_under_the_rank_their_body_names(
-    tmp_path, codec
+    request, tmp_path, codec
 ):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, codec) as (runtime, servers, gate):
         handlers = Handlers()
         endpoints = {}
@@ -557,7 +633,6 @@ async def _next(stream):
     return (await asyncio.wait_for(stream.__anext__(), TIMEOUT_S)).data()
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("codec", ["msgpack", "json"])
@@ -566,8 +641,11 @@ async def _next(stream):
     "case,worker_type,script,occupancy", SCRIPTS, ids=[case for case, *_ in SCRIPTS]
 )
 async def test_the_response_that_ends_the_wait(
-    tmp_path, codec, path, case, worker_type, script, occupancy
+    request, tmp_path, codec, path, case, worker_type, script, occupancy
 ):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, codec) as (runtime, servers, gate):
         scripted = Scripted(script)
         endpoint, client = await _serve(runtime, servers, path, getattr(scripted, path))
@@ -590,13 +668,15 @@ async def test_the_response_that_ends_the_wait(
         assert sum((await gate.by_rank(ADMITTED)).values()) == 1
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("path", ["pull", "push"])
 async def test_a_handler_failing_after_metadata_releases_both_kinds_once(
-    tmp_path, path
+    request, tmp_path, path
 ):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
         failing = Scripted(
             [
@@ -728,7 +808,6 @@ CLASSIFIED = [
 ]
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("path", ["pull", "push"])
@@ -738,8 +817,11 @@ CLASSIFIED = [
     ids=[case for case, *_ in CLASSIFIED],
 )
 async def test_responses_are_classified_only_until_one_ends_the_wait(
-    tmp_path, path, case, worker_type, responses, decisive
+    request, tmp_path, path, case, worker_type, responses, decisive
 ):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
         sent = [as_sent(response) for response in responses]
         scripted = Scripted(sent)
@@ -799,10 +881,14 @@ class FailingToken:
         yield  # an async generator, as push handlers are
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_a_token_that_fails_to_encode_leaves_the_wait_to_the_next(tmp_path):
+async def test_a_token_that_fails_to_encode_leaves_the_wait_to_the_next(
+    request, tmp_path
+):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
         handler = FailingToken()
         endpoint, client = await _serve(runtime, servers, "push", handler.push)
@@ -853,10 +939,14 @@ class Ahead:
         yield  # an async generator, as push handlers are
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_a_push_handler_ahead_of_the_gate_keeps_the_decisive_frame(tmp_path):
+async def test_a_push_handler_ahead_of_the_gate_keeps_the_decisive_frame(
+    request, tmp_path
+):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
         responses = [
             {"token_ids": [], "disaggregated_params": BOOTSTRAP},
@@ -917,10 +1007,12 @@ class ReenteringHandler:
         yield  # an async generator, as push handlers are
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_a_send_reentered_while_a_token_is_classified(tmp_path):
+async def test_a_send_reentered_while_a_token_is_classified(request, tmp_path):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
         handler = ReenteringHandler()
         endpoint, client = await _serve(runtime, servers, "push", handler.push)
@@ -943,13 +1035,15 @@ async def test_a_send_reentered_while_a_token_is_classified(tmp_path):
         await gate.occupancy_reaches((0, 0))
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("path", ["pull", "push"])
 async def test_a_request_keeps_the_role_its_endpoint_had_when_it_arrived(
-    tmp_path, path
+    request, tmp_path, path
 ):
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
     async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
         responses = [
             {"token_ids": []},
