@@ -134,17 +134,6 @@ func buildHXPartition[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](subject,
 	return partition, nil
 }
 
-func buildCompilationMode(filename, mode string) (BuildCompilationMode, error) {
-	switch mode {
-	case string(BuildCompilationModeLPUOnly):
-		return BuildCompilationModeLPUOnly, nil
-	case string(BuildCompilationModeHybrid):
-		return BuildCompilationModeHybrid, nil
-	default:
-		return BuildCompilationModeUnknown, fmt.Errorf("%s deployment.compilationMode %q is not supported", filename, mode)
-	}
-}
-
 // decodePropSyncChain normalizes one selected-chain list from the compiler manifest.
 func decodePropSyncChain(rawIDs capnp.UInt32List, chainPath string) ([]int, error) {
 	if rawIDs.Len() < 2 {

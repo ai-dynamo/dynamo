@@ -78,15 +78,19 @@ impl PrefillRouter {
         } else {
             Some(PrefillTask::spawn(async move {
                 let _task_guard = task_guard;
+                let mut prefill_output = None;
                 while let Some(output) = prefill_response.next().await {
                     PrefillTask::check_output(&output)?;
+                    if let Some(engine_data) = output.data.and_then(|data| data.engine_data) {
+                        prefill_output = Some(engine_data);
+                    }
                 }
                 // Bootstrap details unblock decode, but do not mean prefill is
                 // complete. Record completion only after its stream finishes.
                 if let Some(tracker) = tracker {
                     tracker.record_prefill_complete();
                 }
-                Ok(())
+                Ok(prefill_output)
             }))
         };
 
@@ -161,8 +165,10 @@ impl PrefillRouter {
                     completion: Some(task),
                     ..
                 } => task.wait().await,
-                PrefillCompletion::Terminal { output } => PrefillTask::check_output(&output),
-                _ => Ok(()),
+                PrefillCompletion::Terminal { output } => {
+                    PrefillTask::check_output(&output).map(|()| None)
+                }
+                _ => Ok(None),
             }
         })
     }
@@ -170,6 +176,7 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocols::response_merge::PrefillNeed;
     use futures::stream;
     use serde_json::json;
 
@@ -227,7 +234,7 @@ mod tests {
             let decode: ManyOut<Annotated<LLMEngineOutput>> =
                 ResponseStream::new(Box::pin(stream::pending()), context.clone());
             match completion
-                .forward_decode(async { Ok(decode) }, context)
+                .forward_decode(async { Ok(decode) }, context, PrefillNeed::None)
                 .await
             {
                 Err(error) => assert!(error.to_string().contains("Prefill")),
