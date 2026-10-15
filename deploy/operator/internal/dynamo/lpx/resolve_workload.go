@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 
@@ -35,6 +37,34 @@ var ErrUnsupportedRuntime = errors.New("unsupported LPX runtime")
 // ErrBuildSnapshotAcquisition identifies retryable failures while reading the
 // immutable build snapshot from its backing store.
 var ErrBuildSnapshotAcquisition = errors.New("acquiring immutable LPX build snapshot")
+
+// ResolveWorkloads resolves and names every admitted component group before rendering.
+// Workloads are returned in serving-component order; inputs are not mutated.
+func ResolveWorkloads(ctx context.Context, reader client.Reader, dgd *dynamov1beta1.DynamoGraphDeployment, pcsName string, registry ModelRegistry) ([]*Workload, error) {
+	groups := ComponentGroups(dgd)
+	workloads := make([]*Workload, 0, len(groups))
+	for _, name := range slices.Sorted(maps.Keys(groups)) {
+		workload, err := ResolveWorkload(ctx, reader, dgd, groups[name], registry)
+		if err != nil {
+			return nil, err
+		}
+		group := ""
+		if len(groups) > 1 {
+			group = name
+		}
+		workload, err = workload.WithNames(pcsName, group)
+		if err != nil {
+			return nil, err
+		}
+		for _, previous := range workloads {
+			if previous.ScalingGroup() == workload.ScalingGroup() || previous.ResourcePrefix() == workload.ResourcePrefix() {
+				return nil, fmt.Errorf("LPX components %q and %q resolve to conflicting resource names; rename one component", previous.ServingComponentName(), name)
+			}
+		}
+		workloads = append(workloads, workload)
+	}
+	return workloads, nil
+}
 
 // ResolveWorkload projects one admitted component group against immutable builds.
 // reader, dgd and registry must be non-nil. componentNames must contain exactly the members
@@ -141,11 +171,20 @@ func ResolveWorkload(
 	if err != nil {
 		return nil, err
 	}
-	return &Workload{
+	workload := &Workload{
+		conductorReplicas:    1,
 		modelProjections:     projections,
 		digest:               digest,
 		scalingGroupReplicas: scalingGroupReplicas,
-	}, nil
+	}
+	if pipeline == PipelineHybrid {
+		minimum, err := workload.MinimumCyborgReplicas()
+		if err != nil {
+			return nil, err
+		}
+		workload.conductorReplicas = ptr.Deref(conductor.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor).Replicas, minimum)
+	}
+	return workload, nil
 }
 
 // validateWorkloadConductor checks role requirements that depend on the immutable build.

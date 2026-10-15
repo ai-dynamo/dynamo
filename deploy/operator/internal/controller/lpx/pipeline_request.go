@@ -54,30 +54,29 @@ func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1a
 // Pointer inputs are non-nil; deployment has a validated DGD controller owner.
 // currentRequests contains owned observations indexed by name and may be nil.
 // Inputs are not mutated; owner references are added only on publication.
-func resolvePipelineRequests(
+func resolveNamedPipelineRequests(
 	deployment *v1alpha1.LPXGraphDeployment,
 	currentRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	workload *lpx.Workload,
-	plan *lpx.MaterializationPlan,
+	replicas int32,
+	grouped bool,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, []*lpxv1alpha1.LPUPipelineRequest) {
 	// The reconcile boundary already validated the DGD owner; rendering uses that identity.
 	dgdOwner := metav1.GetControllerOf(deployment)
 
 	// Only multiple workloads need a group identity; sole workloads retain existing LPR names.
 	groupName := ""
-	if plan.ResourcePrefix != plan.PodCliqueSetName {
+	if grouped {
 		groupName = workload.ServingComponentName()
 	}
 
 	// Model projections are already ordered (default, or draft0..draft7 then target).
 	projections := workload.ModelProjections()
-	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(projections)*int(plan.Replicas))
+	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(projections)*int(replicas))
 	var missing []*lpxv1alpha1.LPUPipelineRequest
 
-	for replica := range plan.Replicas {
-		replicaPlan := plan.ForReplica(replica)
-
-		for index, projection := range projections {
+	for replica := range replicas {
+		for _, projection := range projections {
 			if projection.AgentReplicas() == 0 {
 				continue
 			}
@@ -93,7 +92,7 @@ func resolvePipelineRequests(
 						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 					},
 				},
-				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
+				Spec: workload.RequestSpec(projection, replica),
 			}
 
 			if currentRequest := currentRequests[request.Name]; currentRequest != nil && pipelineRequestMatches(currentRequest, request) {
