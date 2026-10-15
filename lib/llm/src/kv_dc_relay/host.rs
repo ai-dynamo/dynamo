@@ -2275,8 +2275,8 @@ async fn run_load_collector(
 }
 
 /// Feeds router scheduler views of the endpoint's ranks into the pool registry.
-/// Undecodable reports are skipped; the generation's views are cleared whenever
-/// the subscription fails, since reports may have been lost.
+/// Undecodable reports are skipped. Accepted batches keep their freshness deadline
+/// across resubscription, so a brief disconnect does not erase a recent report.
 async fn run_scheduler_load_collector(
     component: Component,
     endpoint: EndpointId,
@@ -2308,30 +2308,29 @@ async fn run_scheduler_load_collector(
                 if let Some(failures) = failures.recover() {
                     tracing::info!(%endpoint, %pool_id, layout_generation, failures, "KV DC Relay scheduler-load stream recovered");
                 }
-                match Codec::default().decode_payload::<SchedulerLoad>(&envelope.payload) {
-                    Ok(load) => {
+                match Codec::default().decode_payload::<Vec<SchedulerLoad>>(&envelope.payload) {
+                    Ok(loads) => {
                         decode_failures.recover();
                         if !pools.observe_scheduler_load(
                             pool_id,
                             layout_generation,
                             &envelope,
-                            load,
+                            loads,
                             Instant::now(),
                         ) {
-                            tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring scheduler load outside the pool generation's declared ranks");
+                            tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignored scheduler-load data for a retired generation or undeclared ranks");
                         }
                     }
                     Err(error) if decode_failures.fail() => {
-                        tracing::warn!(%endpoint, %pool_id, publisher_id = envelope.publisher_id, %error, "Skipping undecodable KV DC Relay scheduler-load reports");
+                        tracing::warn!(%endpoint, %pool_id, layout_generation, publisher_id = envelope.publisher_id, %error, "Skipping undecodable KV DC Relay scheduler-load reports");
                     }
                     Err(error) => {
-                        tracing::debug!(%endpoint, %pool_id, publisher_id = envelope.publisher_id, %error, "Skipping undecodable KV DC Relay scheduler-load report");
+                        tracing::debug!(%endpoint, %pool_id, layout_generation, publisher_id = envelope.publisher_id, %error, "Skipping undecodable KV DC Relay scheduler-load report");
                     }
                 }
             },
             Err(error) => error,
         };
-        pools.clear_scheduler_load(pool_id, layout_generation);
         let delay = retry.next_delay();
         if failures.fail() {
             tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = delay.as_millis(), "KV DC Relay scheduler-load stream failed; resubscribing");

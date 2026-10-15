@@ -266,9 +266,9 @@ pub(super) struct SchedulerLoadSnapshot {
     pub(super) source_observed_ms: u64,
 }
 
-#[derive(Debug, Clone)]
-struct SchedulerView {
-    load: SchedulerLoad,
+#[derive(Debug)]
+struct SchedulerBatch {
+    loads: HashMap<WorkerWithDpRank, SchedulerLoad>,
     published_at_ms: u64,
     received_at: Instant,
 }
@@ -284,20 +284,20 @@ struct PublisherProgress {
 /// view each publish interval, so a lost report is repaired by the next one.
 #[derive(Debug, Default)]
 pub(super) struct SchedulerLoadState {
-    /// Latest view per rank and publishing router.
-    views: HashMap<(WorkerWithDpRank, u64), SchedulerView>,
+    /// Latest complete batch per publishing router.
+    batches: HashMap<u64, SchedulerBatch>,
     /// Kept for [`SOURCE_RETENTION`] so duplicate or reordered deliveries from a
     /// briefly silent router are still recognized.
     publishers: HashMap<u64, PublisherProgress>,
 }
 
 impl SchedulerLoadState {
-    /// Records one view. Duplicate and out-of-order deliveries from a publisher
+    /// Replaces one publisher's complete rank batch. Duplicate and reordered batches
     /// are ignored; gaps are accepted.
     pub(super) fn observe(
         &mut self,
         envelope: &EventEnvelope,
-        load: SchedulerLoad,
+        loads: Vec<SchedulerLoad>,
         received_at: Instant,
     ) {
         let progress = PublisherProgress {
@@ -313,28 +313,32 @@ impl SchedulerLoadState {
                 entry.insert(progress);
             }
         }
-        let rank = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
-        self.views.insert(
-            (rank, envelope.publisher_id),
-            SchedulerView {
-                load,
+        let mut ranks = HashMap::with_capacity(loads.len());
+        for load in loads {
+            if matches!(load.group, SchedulerGroup::Unknown) {
+                tracing::debug!(
+                    publisher_id = envelope.publisher_id,
+                    "Ignoring unknown scheduler load aggregation kind"
+                );
+                continue;
+            }
+            let rank = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
+            ranks.insert(rank, load);
+        }
+        self.batches.insert(
+            envelope.publisher_id,
+            SchedulerBatch {
+                loads: ranks,
                 published_at_ms: envelope.published_at,
                 received_at,
             },
         );
     }
 
-    /// Forgets every view, e.g. after the subscription failed and reports may
-    /// have been lost. Publisher progress is kept: publisher ids belong to one
-    /// publisher incarnation, so resubscribing never rewinds a sequence.
-    pub(super) fn clear(&mut self) {
-        self.views.clear();
-    }
-
     /// Drops expired views and publishers silent for [`SOURCE_RETENTION`].
     pub(super) fn prune(&mut self, now: Instant) {
-        self.views
-            .retain(|_, view| is_fresh(view.received_at, SCHEDULER_FRESHNESS, now));
+        self.batches
+            .retain(|_, batch| is_fresh(batch.received_at, SCHEDULER_FRESHNESS, now));
         self.publishers
             .retain(|_, progress| is_fresh(progress.last_seen, SOURCE_RETENTION, now));
     }
@@ -357,25 +361,36 @@ impl SchedulerLoadState {
             HashMap::<(WorkerWithDpRank, &SchedulerGroup), (SchedulerTotals, u64)>::new();
         let mut ranks_per_publisher = HashMap::<u64, usize>::new();
         let mut oldest = None::<u64>;
-        for ((rank, publisher), view) in &self.views {
-            if !declared.declares(rank) || !is_fresh(view.received_at, SCHEDULER_FRESHNESS, now) {
+        for (publisher, batch) in &self.batches {
+            if !is_fresh(batch.received_at, SCHEDULER_FRESHNESS, now) {
                 continue;
             }
-            *ranks_per_publisher.entry(*publisher).or_default() += 1;
-            oldest = Some(oldest.map_or(view.published_at_ms, |at| at.min(view.published_at_ms)));
-            let load = SchedulerTotals::of(&view.load);
-            let group = &view.load.group;
-            per_group
-                .entry((*rank, group))
-                .and_modify(|(total, latest)| match group {
-                    SchedulerGroup::ReplicaGroup { .. } => *total = total.max(load),
-                    SchedulerGroup::Standalone { .. } => {
-                        if view.published_at_ms > *latest {
-                            (*total, *latest) = (load, view.published_at_ms);
+            let mut observed_ranks = 0;
+            for (rank, report) in &batch.loads {
+                if !declared.declares(rank) {
+                    continue;
+                }
+                observed_ranks += 1;
+                let load = SchedulerTotals::of(report);
+                let group = &report.group;
+                per_group
+                    .entry((*rank, group))
+                    .and_modify(|(total, latest)| match group {
+                        SchedulerGroup::Unknown => {} // Filtered by observe().
+                        SchedulerGroup::ReplicaGroup { .. } => *total = total.max(load),
+                        SchedulerGroup::Standalone { .. } => {
+                            if batch.published_at_ms > *latest {
+                                (*total, *latest) = (load, batch.published_at_ms);
+                            }
                         }
-                    }
-                })
-                .or_insert((load, view.published_at_ms));
+                    })
+                    .or_insert((load, batch.published_at_ms));
+            }
+            ranks_per_publisher.insert(*publisher, observed_ranks);
+            if observed_ranks > 0 {
+                oldest =
+                    Some(oldest.map_or(batch.published_at_ms, |at| at.min(batch.published_at_ms)));
+            }
         }
         let Some(source_observed_ms) = oldest else {
             return SchedulerLoadSnapshot {
@@ -688,16 +703,18 @@ mod tests {
         }
     }
 
-    /// Delivers `views` from `publisher`, one sequence each, starting at 1.
+    /// Delivers a complete rank batch at sequence 1.
     fn publish(
         state: &mut SchedulerLoadState,
         publisher: u64,
         views: impl IntoIterator<Item = SchedulerLoad>,
         now: Instant,
     ) {
-        for (sequence, load) in (1..).zip(views) {
-            state.observe(&envelope(publisher, sequence, publisher * 10), load, now);
-        }
+        state.observe(
+            &envelope(publisher, 1, publisher * 10),
+            views.into_iter().collect(),
+            now,
+        );
     }
 
     fn ranks(rank_count: u32) -> PoolLoadState {
@@ -744,6 +761,81 @@ mod tests {
         let snapshot = state.snapshot(&declared, Some(&HashSet::from([1, 2, 3])), now);
         assert_eq!(snapshot.coverage, totals(12 + 6 + 1 + 3, 34 + 7 + 2 + 4));
         assert_eq!(snapshot.source_observed_ms, 10);
+    }
+
+    #[test]
+    fn scheduler_batches_replace_all_ranks_and_ignore_reordered_deliveries() {
+        let now = Instant::now();
+        let declared = ranks(2);
+        let discovered = HashSet::from([1]);
+        let mut state = SchedulerLoadState::default();
+        let batch = vec![
+            view(0, standalone(1), 99, 99),
+            view(0, standalone(1), 3, 5),
+            view(1, standalone(1), 7, 11),
+        ];
+        state.observe(&envelope(1, 2, 20), batch, now);
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            totals(10, 16)
+        );
+        for sequence in [2, 1] {
+            state.observe(
+                &envelope(1, sequence, 30),
+                vec![view(0, standalone(1), 99, 99)],
+                now,
+            );
+            assert_eq!(
+                state.snapshot(&declared, Some(&discovered), now).coverage,
+                totals(10, 16)
+            );
+        }
+        state.observe(&envelope(1, 3, 40), vec![view(0, standalone(1), 2, 4)], now);
+        assert_eq!(
+            state.snapshot(&declared, Some(&discovered), now).coverage,
+            Coverage::Partial
+        );
+        assert_eq!(
+            state.snapshot(&ranks(1), Some(&discovered), now).coverage,
+            totals(2, 4)
+        );
+        state.observe(&envelope(1, 4, 50), Vec::new(), now);
+        assert_eq!(
+            state.snapshot(&ranks(1), Some(&discovered), now).coverage,
+            Coverage::Missing
+        );
+        state.observe(&envelope(2, 1, 60), vec![view(0, standalone(2), 1, 1)], now);
+        assert_eq!(
+            state
+                .snapshot(&ranks(1), Some(&HashSet::new()), now)
+                .coverage,
+            Coverage::Partial,
+            "a fresh empty batch still advertises a router in broker mode",
+        );
+    }
+
+    #[test]
+    fn scheduler_batch_keeps_known_ranks_when_an_aggregation_kind_is_unknown() {
+        let now = Instant::now();
+        let encoded = rmp_serde::to_vec_named(&serde_json::json!([
+            {"worker_id": 9, "dp_rank": 0, "active_decode_blocks": 3, "active_prefill_tokens": 5,
+             "group": {"kind": "standalone", "scheduler_id": 1}},
+            {"worker_id": 9, "dp_rank": 1, "active_decode_blocks": 99, "active_prefill_tokens": 99,
+             "group": {"kind": "future_group", "new_field": "ignored"}}
+        ]))
+        .unwrap();
+        let batch = rmp_serde::from_slice::<Vec<SchedulerLoad>>(&encoded).unwrap();
+        let mut state = SchedulerLoadState::default();
+        state.observe(&envelope(1, 1, 10), batch, now);
+        let discovered = HashSet::from([1]);
+        assert_eq!(
+            state.snapshot(&ranks(1), Some(&discovered), now).coverage,
+            totals(3, 5)
+        );
+        assert_eq!(
+            state.snapshot(&ranks(2), Some(&discovered), now).coverage,
+            Coverage::Partial
+        );
     }
 
     #[test]
@@ -795,7 +887,11 @@ mod tests {
             state.snapshot(&declared, Some(&discovered), now).coverage,
             Coverage::Partial
         );
-        state.observe(&envelope(2, 2, 20), view(1, standalone(2), 1, 1), now);
+        state.observe(
+            &envelope(2, 2, 20),
+            vec![view(0, standalone(2), 1, 1), view(1, standalone(2), 1, 1)],
+            now,
+        );
         assert_eq!(
             state.snapshot(&declared, Some(&discovered), now).coverage,
             totals(4, 4)
@@ -823,7 +919,11 @@ mod tests {
 
         // A router that stops publishing ages out of the expected set.
         let later = now + SCHEDULER_FRESHNESS + Duration::from_millis(1);
-        state.observe(&envelope(1, 2, 30), view(0, standalone(1), 12, 34), later);
+        state.observe(
+            &envelope(1, 2, 30),
+            vec![view(0, standalone(1), 12, 34)],
+            later,
+        );
         assert_eq!(
             state.snapshot(&declared, Some(&nobody), later).coverage,
             totals(12, 34)
@@ -862,20 +962,13 @@ mod tests {
         // sequence space is accepted again.
         let retired = now + SOURCE_RETENTION + Duration::from_secs(1);
         state.prune(retired);
-        assert!(state.views.is_empty() && state.publishers.is_empty());
+        assert!(state.batches.is_empty() && state.publishers.is_empty());
         publish(&mut state, 1, [view(0, standalone(1), 1, 1)], retired);
         assert_eq!(
             state
                 .snapshot(&ranks(1), Some(&discovered), retired)
                 .coverage,
             totals(1, 1)
-        );
-        state.clear();
-        assert_eq!(
-            state
-                .snapshot(&ranks(1), Some(&discovered), retired)
-                .coverage,
-            Coverage::Missing
         );
     }
 

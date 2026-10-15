@@ -1139,10 +1139,11 @@ pub struct SelectionTrace {
 /// One router scheduler's view of a worker rank's in-flight load.
 ///
 /// Routers publish this on the scheduler-load subject; workers never do.
+/// Fields added after the first release must be `#[serde(default)]`, and `Option`
+/// when absent does not mean zero.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchedulerLoad {
     pub worker_id: WorkerId,
-    #[serde(default)]
     pub dp_rank: DpRank,
     pub active_decode_blocks: u64,
     pub active_prefill_tokens: u64,
@@ -1160,6 +1161,9 @@ pub enum SchedulerGroup {
     Standalone { scheduler_id: u64 },
     /// Schedulers that replicate request state, so each reports the group's full load.
     ReplicaGroup { group_id: String },
+    /// Future aggregation kinds are decoded but cannot contribute to load totals.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Active load metrics for a worker, used for overload detection.
@@ -2923,34 +2927,42 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_load_round_trips_json_and_event_plane_msgpack() {
-        let load = |group| SchedulerLoad {
-            worker_id: 7,
-            dp_rank: 2,
-            active_decode_blocks: 10,
-            active_prefill_tokens: 20,
-            group,
-        };
-        let cases = [
-            (
-                load(SchedulerGroup::Standalone { scheduler_id: 42 }),
-                r#"{"worker_id":7,"dp_rank":2,"active_decode_blocks":10,"active_prefill_tokens":20,"group":{"kind":"standalone","scheduler_id":42}}"#,
-            ),
-            (
-                load(SchedulerGroup::ReplicaGroup {
-                    group_id: "ns/backend/generate".to_string(),
-                }),
-                r#"{"worker_id":7,"dp_rank":2,"active_decode_blocks":10,"active_prefill_tokens":20,"group":{"kind":"replica_group","group_id":"ns/backend/generate"}}"#,
-            ),
-        ];
-
-        for (load, json) in cases {
-            assert_eq!(serde_json::to_string(&load).unwrap(), json);
-            assert_eq!(serde_json::from_str::<SchedulerLoad>(json).unwrap(), load);
-            let msgpack = rmp_serde::to_vec_named(&load).unwrap();
-            assert_eq!(
-                rmp_serde::from_slice::<SchedulerLoad>(&msgpack).unwrap(),
-                load
+    fn scheduler_load_accepts_unknown_fields_but_requires_identity_and_measurements() {
+        let frame = serde_json::json!({
+            "worker_id": 7,
+            "dp_rank": 2,
+            "active_decode_blocks": 10,
+            "active_prefill_tokens": 20,
+            "group": {"kind": "standalone", "scheduler_id": 42, "future_group_field": true},
+            "future_measurement": 99
+        });
+        let batch: Vec<SchedulerLoad> =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&vec![frame.clone()]).unwrap()).unwrap();
+        assert_eq!(
+            batch,
+            [SchedulerLoad {
+                worker_id: 7,
+                dp_rank: 2,
+                active_decode_blocks: 10,
+                active_prefill_tokens: 20,
+                group: SchedulerGroup::Standalone { scheduler_id: 42 },
+            }]
+        );
+        for required in [
+            "worker_id",
+            "dp_rank",
+            "group",
+            "active_decode_blocks",
+            "active_prefill_tokens",
+        ] {
+            let mut incomplete = frame.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            assert!(
+                rmp_serde::from_slice::<Vec<SchedulerLoad>>(
+                    &rmp_serde::to_vec_named(&vec![incomplete]).unwrap(),
+                )
+                .is_err(),
+                "missing {required} must not become a valid zero-load report"
             );
         }
     }

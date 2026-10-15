@@ -1025,34 +1025,29 @@ impl PoolRegistry {
         true
     }
 
-    /// Records one router scheduler's view of a rank. Returns false for a
-    /// retired generation or a rank the pool does not declare.
+    /// Records a router's complete rank batch. Undeclared ranks are ignored.
+    /// Returns false for a retired generation or a batch containing undeclared ranks.
     pub(super) fn observe_scheduler_load(
         &self,
         pool_id: PoolId,
         layout_generation: u64,
         envelope: &EventEnvelope,
-        load: SchedulerLoad,
+        mut loads: Vec<SchedulerLoad>,
         received_at: Instant,
     ) -> bool {
         let mut state = self.state.lock();
         let Some(serving) = active_serving(&mut state, pool_id, layout_generation) else {
             return false;
         };
-        if !serving
-            .load
-            .declares(&WorkerWithDpRank::new(load.worker_id, load.dp_rank))
-        {
-            return false;
-        }
-        serving.scheduler.observe(envelope, load, received_at);
-        true
-    }
-
-    pub(super) fn clear_scheduler_load(&self, pool_id: PoolId, layout_generation: u64) {
-        if let Some(serving) = active_serving(&mut self.state.lock(), pool_id, layout_generation) {
-            serving.scheduler.clear();
-        }
+        let reported_ranks = loads.len();
+        loads.retain(|load| {
+            serving
+                .load
+                .declares(&WorkerWithDpRank::new(load.worker_id, load.dp_rank))
+        });
+        let all_declared = loads.len() == reported_ranks;
+        serving.scheduler.observe(envelope, loads, received_at);
+        all_declared
     }
 
     /// Serving load of every active pool, which is exactly the catalog's pool
@@ -3384,21 +3379,21 @@ mod tests {
             served.pool_id,
             served.layout_generation,
             &envelope(1),
-            view(1),
+            vec![view(1)],
             now,
         ));
         assert!(!registry.observe_scheduler_load(
             served.pool_id,
             served.layout_generation + 1,
             &envelope(1),
-            view(0),
+            vec![view(0)],
             now,
         ));
         assert!(registry.observe_scheduler_load(
             served.pool_id,
             served.layout_generation,
-            &envelope(1),
-            view(0),
+            &envelope(2),
+            vec![view(0)],
             now,
         ));
         // Scheduler views never touch the KV-usage plane.
@@ -3434,14 +3429,6 @@ mod tests {
                 .coverage,
             Coverage::Partial
         );
-        registry.clear_scheduler_load(served.pool_id, served.layout_generation);
-        assert_eq!(
-            registry.serving_pool_loads(&discovered, now)[0]
-                .scheduler
-                .coverage,
-            Coverage::Missing
-        );
-
         registry
             .replace_load_capacity(
                 served.pool_id,

@@ -2203,8 +2203,8 @@ mod worker_metrics_tests {
         }
     }
 
-    #[tokio::test]
-    async fn publish_debounces_updates_independently_per_rank() {
+    #[tokio::test(start_paused = true)]
+    async fn publish_debounces_per_rank_without_replay_when_disabled() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         publisher.start_metrics_publishing_with(ChannelSink(tx), 42, false);
@@ -2232,10 +2232,10 @@ mod worker_metrics_tests {
         assert_eq!(published[1].kv_used_blocks, Some(200));
 
         assert!(
-            tokio::time::timeout(Duration::from_millis(10), rx.recv())
+            tokio::time::timeout(Duration::from_secs(20), rx.recv())
                 .await
                 .is_err(),
-            "same-rank updates should be coalesced"
+            "unchanged metrics must not replay when serving-load publication is disabled"
         );
     }
 
