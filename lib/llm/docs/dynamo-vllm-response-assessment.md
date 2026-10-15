@@ -16,29 +16,26 @@ response-schema change, update the profile to that release's exact source revisi
 and wheel. Refresh the wheel checksum, dependency snapshot and schema capture;
 verify the SSE selectors against that release before using it for assessments.
 
-The selected source registers unary JSON and SSE contracts for
-`/v1/chat/completions` and `/v1/completions`. Its OpenAPI 3.1 SSE `schema` describes
-a parsed event envelope: string `data` contains a JSON chunk, JSON error or literal
-`[DONE]`; optional `event`, `id` and `retry` fields remain part of the declaration.
-Select `event-schema` explicitly. Do not treat this as the OpenAPI 3.2
-`itemSchema` representation or as a decoded-chunk-only contract.
+## How SSE schemas become comparable
+
+For `/v1/chat/completions` and `/v1/completions`, vLLM declares parsed SSE events
+under OpenAPI 3.1 `schema`; Dynamo uses OpenAPI 3.2 `itemSchema`. The profile's
+explicit `event-schema` adapter tells the comparator how to interpret vLLM's
+declaration. The comparator projects both into the same decoded-event
+representation, preserving envelope fields, JSON chunks, errors and literal
+`[DONE]`. It does not change either raw export or either server's behavior.
+
+See [source-qualified SSE adapters](../../../scripts/protocol_compatibility/README.md#source-qualified-sse-adapters)
+for selection rules and the [streaming comparison model](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#streaming-responses)
+for projection details and coverage limits.
 
 ## Qualification boundary
 
-The upstream nightly wheel produced a fresh HTTP 200 capture through the production
-app's in-process `/openapi.json` route, without entering lifespan. The document has
-400 component schemas, 23 paths and 642 locally resolved reference occurrences.
-Both unary responses and SSE event envelopes were checked. CUDA remained
-uninitialized; no engine or model was started. The profile records the raw-byte
-checksum and immutable wheel URL/hash. Loaded Python source was checked against
-the pinned checkout, excluding generated `_version.py` (438 matching modules).
-
-Upstream runtime tests, paired inference and a new full assessment remain **not
-run**. Importing native libraries does not establish kernel execution coverage.
-
-The recipe's synthetic integration tests exercise these selectors through the
-generic adapter and comparator. They do not validate the current vLLM app or prove
-that a particular installation produces the expected schema.
+The pinned wheel supports production-app schema export without starting an engine
+or loading a model. The profile records source identity, wheel checksum and capture
+details. This establishes schema-export availability, not inference compatibility
+or stream lifecycle behavior. Upstream runtime tests, paired inference and a new
+full assessment have **not been run** for this pin.
 
 ## Prepare inputs
 
@@ -47,15 +44,11 @@ that a particular installation produces the expected schema.
    records the capture environment; it is not a serving compatibility guarantee.
    Do not let an installer silently substitute another commit's wheel. Retain
    source identity, install commands, wheel hashes and the resulting package freeze.
-2. Obtain its complete OpenAPI document. A production-app ASGI capture without
-   lifespan can collect declarations without loading a model; label it as such,
-   not as a running inference-server capture. An HTTP capture from a deployment
-   must retain that deployment's configuration and scope. Record source identity
-   and capture method separately; a byte hash does not attest their truth.
-3. Save the exact bytes as `vllm-openapi.json`. Check both unary schemas, both SSE
-   pointers from the profile, and local reference closure before comparison.
-   Unexpected dialects or shapes require review, not a rewrite to fit this recipe.
-4. Generate the Dynamo full-surface input from the selected Dynamo checkout using
+2. Run the capture helper below from the Dynamo checkout. It produces only
+   `vllm-openapi.json` and `response-adapters.json` in a new directory. A successful
+   exit is required before using the pair; do not use partial outputs after an
+   error. Unexpected installation identities or declarations require review.
+3. Generate the Dynamo full-surface input from the selected Dynamo checkout using
    the [generic instructions](../../../scripts/protocol_compatibility/README.md).
    Retain its exact source independently. Schema-only comparison does not establish
    that Dynamo can serve with this vLLM revision.
@@ -71,41 +64,46 @@ uv pip install --python .venv-vllm-schema/bin/python --torch-backend=cu130 \
 uv pip check --python .venv-vllm-schema/bin/python
 ```
 
-For schema-only capture, use the pinned upstream
-[production-app schema test](https://github.com/vllm-project/vllm/blob/338dab077c187e1bd421c4624af1169f95f60e06/tests/entrypoints/openai/test_openai_schema.py#L32-L63)
-as the app configuration: `build_app(args, supported_tasks=("generate",))`, then
-`TestClient(app).get("/openapi.json")`. Do not enter the client's context manager;
-that starts lifespan. Close the client afterward. Keep `CUDA_VISIBLE_DEVICES` and
-`VLLM_PLUGINS` empty and set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
-Import from the installed wheel, not an uninstalled source checkout. Dependencies
-and enabled routes affect the document, so verify each new capture independently.
-
-## Select the source-qualified SSE interpretation
-
-On the Linux validation host, create an adapter from the actual raw input bytes
-and the profile's selectors. JSON is accepted by the YAML adapter loader:
+The [capture helper](../../../scripts/protocol_compatibility/frameworks/capture_vllm_openapi.py)
+uses the pinned upstream [production-app schema test](https://github.com/vllm-project/vllm/blob/338dab077c187e1bd421c4624af1169f95f60e06/tests/entrypoints/openai/test_openai_schema.py#L32-L63)
+configuration. It requests `/openapi.json` in-process without entering lifespan,
+disables GPU visibility and plugins, and enables offline model access. This is a
+schema-only capture, not a running inference-server capture.
 
 ```sh
-PROFILE=scripts/protocol_compatibility/frameworks/vllm-response-openapi.json
-RAW_SHA256=$(sha256sum vllm-openapi.json | cut -d ' ' -f 1)
-jq -n --slurpfile profile "$PROFILE" --arg sha256 "$RAW_SHA256" '
-  {version: 1, sources: {framework: {
-    sha256: $sha256,
-    source: "vllm-project/vllm",
-    revision: $profile[0].source.revision,
-    streams: $profile[0].response_contract.streams
-  }}}' > vllm-response-adapters.json
+.venv-vllm-schema/bin/python \
+  scripts/protocol_compatibility/frameworks/capture_vllm_openapi.py \
+  --profile "$PROFILE" --output-dir inputs/vllm
+```
+
+The helper checks the installed version and direct wheel URL, rejects a shadowing
+source checkout, and checks imported vLLM Python files against the installation's
+`RECORD`. These are consistency checks, not independent source attestation; the
+install command above enforces the archive checksum. It also checks both unary
+and SSE declarations and local reference closure, then preserves the HTTP bytes
+unchanged. Dependencies and enabled routes can affect those bytes.
+
+The reviewed profile owns SSE interpretation and selectors. The helper copies
+them into `response-adapters.json` with the actual capture hash and profile source
+revision. Agents need not infer SSE semantics or hand-write adapter JSON. The
+generic comparator remains responsible for projection and coverage analysis.
+
+## Run the comparison
+
+Use the comparison environment from the generic instructions, not necessarily
+the vLLM capture environment:
+
+```sh
 python -m scripts.protocol_compatibility assess \
-  --dynamo docs/frontends/openapi.json --framework vllm-openapi.json \
-  --framework-name vllm --response-adapters vllm-response-adapters.json \
+  --dynamo docs/frontends/openapi.json --framework inputs/vllm/vllm-openapi.json \
+  --framework-name vllm --response-adapters inputs/vllm/response-adapters.json \
   --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
   --output-dir assessment-vllm-current
 ```
 
 Use a new output directory. The tool verifies the input hash and selector syntax,
-not the supplied source/revision labels. Supply independently reviewed provenance
-through `--framework-metadata` and `--dynamo-metadata` when available. Preserve
-native errors, terminators and optional event fields; do not replace missing
+not the supplied source/revision labels. Preserve native errors, terminators and
+optional event fields; do not replace missing
 declarations with an assumed universal error model.
 
 Read `assessment-vllm-current/assessment/report.md` together with its retained
