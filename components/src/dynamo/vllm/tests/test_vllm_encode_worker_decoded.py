@@ -655,29 +655,28 @@ def test_failed_coalesced_forward_fails_only_the_bad_request(monkeypatch):
     assert torch.equal(results[2], expected[1])
 
 
-async def test_requests_queued_behind_a_forward_share_the_next_one(monkeypatch):
+async def test_cancelled_request_holds_its_slot_until_its_forward_ends(monkeypatch):
     handler, encoder = _micro_batch_handler(monkeypatch)
-    batcher = ThreadedMicroBatcher(handler._encode_qwen_batch, name="test-encode-vit")
-    batcher.start()
+    handler._vit_batcher = ThreadedMicroBatcher(
+        handler._encode_qwen_batch, name="test-encode-vit"
+    )
+    handler._vit_batcher_started = False
+    slot = asyncio.Semaphore(1)
+    await slot.acquire()
+    encoder.release.clear()
     try:
-        encoder.release.clear()
-        first = asyncio.create_task(batcher.submit([_qwen_request((1, 2, 4))]))
+        request = asyncio.create_task(
+            handler._encode_releasing_slot(_qwen_request((1, 2, 4)), slot)
+        )
         await asyncio.to_thread(encoder.started.wait, 5)
-        queued = [
-            asyncio.create_task(batcher.submit([_qwen_request((1, 2, 2))]))
-            for _ in range(3)
-        ]
-        await asyncio.sleep(0.05)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        # The cancelled request's images are still in the running forward.
+        assert slot.locked()
         encoder.release.set()
-
-        results = await asyncio.wait_for(asyncio.gather(first, *queued), 5)
+        await asyncio.wait_for(slot.acquire(), 5)
     finally:
-        batcher.shutdown()
-
-    assert encoder.batch_sizes == [1, 3]
-    assert [tuple(result.shape) for (result,) in results] == [
-        (1, 2, 4),
-        (1, 1, 4),
-        (1, 1, 4),
-        (1, 1, 4),
-    ]
+        encoder.release.set()
+        handler._vit_batcher.shutdown()

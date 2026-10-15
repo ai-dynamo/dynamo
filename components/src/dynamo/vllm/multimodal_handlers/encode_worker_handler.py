@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
 import logging
 import os
 import time
@@ -65,6 +66,13 @@ ENCODE_MAX_BATCH_PATCHES = int(os.getenv("DYN_ENCODE_MAX_BATCH_PATCHES", 65536))
 # its decoded images and float32 pixel_values (~34 MB per 1600x900 image), so an
 # unbounded backlog grows host memory with the number of in-flight requests.
 ENCODE_MAX_INFLIGHT = int(os.getenv("DYN_ENCODE_MAX_INFLIGHT", 64))
+
+
+def _release_after(slot: asyncio.Semaphore, forward: asyncio.Future) -> None:
+    slot.release()
+    if not forward.cancelled():
+        # Nobody awaits the forward of a cancelled request; mark its error seen.
+        forward.exception()
 
 
 def _load_image_processor(engine_args: AsyncEngineArgs):
@@ -195,6 +203,10 @@ class EncodeWorkerHandler:
             asyncio.Semaphore(ENCODE_MAX_INFLIGHT) if ENCODE_MAX_INFLIGHT > 0 else None
         )
         self._vit_batcher: ThreadedMicroBatcher | None = None
+        # Started on first use: the worker factory calls cleanup() only once the
+        # endpoint is serving, and this non-daemon thread would otherwise keep the
+        # process alive after a failed startup.
+        self._vit_batcher_started = False
         if (
             ENCODE_MICRO_BATCH
             and resolve_model_family(self.model) is ModelFamily.QWEN_VL
@@ -204,7 +216,6 @@ class EncodeWorkerHandler:
                 max_batch_cost=ENCODE_MAX_BATCH_PATCHES,
                 name="encode-vit",
             )
-            self._vit_batcher.start()
             logger.info(
                 "Encode worker vision micro-batching enabled (max %d patches/batch)",
                 ENCODE_MAX_BATCH_PATCHES,
@@ -250,6 +261,39 @@ class EncodeWorkerHandler:
         )  # Send sentinel value to stop the checker
         if self._vit_batcher is not None:
             self._vit_batcher.shutdown()
+
+    async def _encode_releasing_slot(
+        self, image_embeds: dict[str, Any], slot: asyncio.Semaphore | None
+    ) -> torch.Tensor:
+        """Run one request's vision forward, then release the held ``slot``.
+
+        The forward is shielded from the request's cancellation: once handed to
+        the encoder thread it keeps running, and holding the request's images,
+        until it returns. The slot therefore follows the forward, not the request.
+        """
+        forward = asyncio.ensure_future(self._vision_forward(image_embeds))
+        if slot is not None:
+            forward.add_done_callback(functools.partial(_release_after, slot))
+        return await asyncio.shield(forward)
+
+    async def _vision_forward(self, image_embeds: dict[str, Any]) -> torch.Tensor:
+        if self._vit_batcher is None:
+            return await asyncio.to_thread(
+                encode_image_embeddings,
+                model_name=self.model,
+                image_embeds=image_embeds,
+                vision_encoder=self.vision_encoder,
+                projector=self.projector,
+            )
+        if not self._vit_batcher_started:
+            self._vit_batcher.start()
+            self._vit_batcher_started = True
+        # An oversized request still runs, alone in its own batch.
+        cost = min(int(image_embeds["pixel_values"].shape[0]), ENCODE_MAX_BATCH_PATCHES)
+        (embeddings,) = await self._vit_batcher.submit([image_embeds], costs=[cost])
+        if isinstance(embeddings, BaseException):
+            raise embeddings
+        return embeddings
 
     def _encode_qwen_batch(
         self, items: list[Any]
@@ -512,33 +556,13 @@ class EncodeWorkerHandler:
                     f"[ENCODE] request: {request_id} encoding"
                 ):
                     # Encode the image embeddings using model-specific encoder
-                    if self._vit_batcher is not None:
-                        # An oversized request still runs, alone in its own batch.
-                        cost = min(
-                            int(image_embeds["pixel_values"].shape[0]),
-                            ENCODE_MAX_BATCH_PATCHES,
-                        )
-                        (embeddings,) = await self._vit_batcher.submit(
-                            [image_embeds], costs=[cost]
-                        )
-                        if isinstance(embeddings, BaseException):
-                            raise embeddings
-                    else:
-                        embeddings = await asyncio.to_thread(
-                            encode_image_embeddings,
-                            model_name=self.model,
-                            image_embeds=image_embeds,
-                            vision_encoder=self.vision_encoder,
-                            projector=self.projector,
-                        )
+                    slot = self._encode_slots if holding_slot else None
+                    holding_slot = False
+                    embeddings = await self._encode_releasing_slot(image_embeds, slot)
                     encoded_embeddings = embeddings
                     # Sync XPU to ensure kernels complete before NIXL transfer.
                     if embeddings.device.type == "xpu":
                         torch.xpu.synchronize()
-
-                if holding_slot:
-                    self._encode_slots.release()
-                    holding_slot = False
 
                 with _nvtx.annotate("mm:enc:split_embeddings", color="orange"):
                     # [gluo FIXME] This is specific to qwen vision processing..
