@@ -1340,10 +1340,10 @@ from dynamo.common.metadata_upload import MetadataUploader
 ```
 
 ```python
-MetadataUploader(url: str) -> None
+MetadataUploader(url: str, fallback_url: str | None = None) -> None
 ```
 
-[`components/src/dynamo/common/metadata_upload.py#L141`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L141)
+[`components/src/dynamo/common/metadata_upload.py#L144`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L144)
 
 **Public methods**
 
@@ -1355,7 +1355,7 @@ from_settings(cls, settings: dict[str, Any] | None) -> MetadataUploader | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L153)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L165)
 
 <h4 id="api-dynamo-common-metadata-upload-metadatauploader-from-backend-request">from_backend_request</h4>
 
@@ -1365,7 +1365,7 @@ from_backend_request(cls, request: dict[str, Any]) -> MetadataUploader | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L165)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L177)
 
 <h4 id="api-dynamo-common-metadata-upload-metadatauploader-upload-choice">upload_choice</h4>
 
@@ -1375,12 +1375,12 @@ upload_choice(choice_index: int, metadata: dict[str, Any]) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L169)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L181)
 
 <h4 id="api-dynamo-common-metadata-upload-metadatauploader-init">__init__</h4>
 
 ```python
-__init__(url: str) -> None
+__init__(url: str, fallback_url: str | None = None) -> None
 ```
 
 No summary available.
