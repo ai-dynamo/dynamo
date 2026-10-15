@@ -27,7 +27,7 @@ mod process;
 #[allow(dead_code)]
 mod support;
 
-use process::{Environment, Gate, outputs};
+use process::{Environment, Frontend, Gate, outputs};
 use support::{FixtureConfig, HandoffFixture, ProcessFixture, SidecarFixture, sglang, vllm};
 
 async fn healthy<F: ProcessFixture>(
@@ -189,6 +189,159 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
     child.shutdown().await;
     env.withdrawn("backend", &router).await;
     peer.shutdown().await;
+}
+
+fn sse_events(body: &str) -> impl Iterator<Item = Value> + '_ {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+}
+
+async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let frontend = Frontend::start(&env).await;
+    for (index, is_streaming) in [false, true].into_iter().enumerate() {
+        let id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 1);
+        let handle = control.request(
+            &id,
+            if is_streaming {
+                RequestPlan {
+                    stream: Some(StreamFault {
+                        at: StreamPoint::TokenResponse(1),
+                        action: StreamAction::Fail,
+                        pause: true,
+                    }),
+                    ..Default::default()
+                }
+            } else {
+                RequestPlan {
+                    open: OpenAction::Reject,
+                    ..Default::default()
+                }
+            },
+        );
+        let mut response = bounded(
+            "HTTP native failure response",
+            frontend.generate(&env.model, &id, is_streaming).send(),
+        )
+        .await
+        .unwrap();
+        if is_streaming {
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let mut body = String::new();
+            bounded("HTTP client receives native token before failure", async {
+                loop {
+                    let chunk = response.chunk().await.unwrap().expect("token chunk");
+                    body.push_str(&String::from_utf8_lossy(&chunk));
+                    if sse_events(&body).any(|event| {
+                        event["nvext"]["completion_token_ids"]
+                            .as_array()
+                            .is_some_and(|tokens| !tokens.is_empty())
+                    }) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            bounded("native failure checkpoint", handle.wait(Event::Checkpoint)).await;
+            assert_eq!(handle.tokens().len(), 1);
+            handle.release();
+            body.push_str(
+                &bounded("HTTP failed stream body", response.text())
+                    .await
+                    .unwrap(),
+            );
+            let events: Vec<_> = sse_events(&body).collect();
+            let errors: Vec<_> = events
+                .iter()
+                .filter_map(|event| event.get("error"))
+                .collect();
+            assert_eq!(errors.len(), 1, "{body}");
+            assert_eq!(errors[0]["code"], 503, "{body}");
+            assert!(!body.contains("injected read failure"), "{body}");
+            assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
+            assert!(
+                events
+                    .iter()
+                    .all(
+                        |event| event["choices"].as_array().is_none_or(|choices| choices
+                            .iter()
+                            .all(|choice| choice["finish_reason"].is_null()))
+                    ),
+                "failed stream reported a successful finish: {body}"
+            );
+        } else {
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["code"], 400, "{body}");
+            assert_eq!(body["message"], "Invalid request", "{body}");
+            assert!(
+                handle.reached(Event::Received),
+                "frontend rejected before native RPC"
+            );
+        }
+        bounded(
+            "failed native request released",
+            handle.wait(Event::Dropped),
+        )
+        .await;
+        peer.scheduler_idle().await;
+
+        let recovery_id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 2);
+        let recovered = control.request(&recovery_id, RequestPlan::default());
+        let response = bounded(
+            "HTTP recovery response",
+            frontend.generate(&env.model, &recovery_id, false).send(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["choices"][0]["finish_reason"], "length", "{body}");
+        assert_eq!(body["usage"]["completion_tokens"], 3, "{body}");
+        assert_eq!(recovered.tokens().len(), 3);
+        bounded(
+            "HTTP recovery request released",
+            recovered.wait(Event::Dropped),
+        )
+        .await;
+        peer.scheduler_idle().await;
+    }
+    frontend.shutdown().await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn vllm_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<vllm::Fixture>(),
+    )
+    .await
+    .expect("HTTP error scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<sglang::Fixture>(),
+    )
+    .await
+    .expect("HTTP error scenario exceeded its overall deadline");
 }
 
 #[tokio::test]
