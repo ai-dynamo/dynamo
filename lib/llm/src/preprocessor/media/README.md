@@ -3,6 +3,8 @@
 
 This component performs media download, base64 decoding, media decoding and NIXL registration. Today, this is used in the OpenAI preprocessor, to transform multimodal inputs (image_url, video_url, audio_url) into fully decoded data (pixel values, ...) accessible to the backends via NIXL.
 
+Media that cannot be fetched or decoded (an unreachable URL, a timeout, bad base64, an empty `data:` URL, or bytes that are not a valid image or video) is rejected with HTTP 400 and a short reason. The full cause is logged at debug level. A NIXL registration failure is a server fault and returns 500.
+
 ## Usage
 
 Media decoding is enabled when registering the MDC:

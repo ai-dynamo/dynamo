@@ -28,6 +28,16 @@ const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
+// Client-visible texts for media the frontend could not fetch or decode.
+const IMAGE_FETCH_FAILED: &str = "Failed to fetch the image_url media";
+const IMAGE_DECODE_FAILED: &str =
+    "Failed to decode the image_url data: it is not a valid or supported image";
+#[cfg(feature = "media-ffmpeg")]
+const VIDEO_FETCH_FAILED: &str = "Failed to fetch the video_url media";
+#[cfg(feature = "media-ffmpeg")]
+const VIDEO_DECODE_FAILED: &str =
+    "Failed to decode the video_url data: it is not a valid or supported video";
+
 // Size cap for a `data:` URL, which carries its whole payload inline. Keep the
 // name and default in sync with the Python counterpart
 // (components/src/dynamo/common/http/url_validator.py::max_data_url_bytes).
@@ -128,6 +138,24 @@ fn policy_rejection(message: impl Into<String>) -> DynamoError {
         .error_type(ErrorType::InvalidArgument)
         .message(message.into())
         .build()
+}
+
+/// Classify a fetch or decode failure caused by the client's media as a 400.
+///
+/// Policy rejections pass through unchanged so they keep their own message.
+/// The full cause stays in the private diagnostic for the frontend log; the
+/// client sees only the fixed `public` text, because the cause can carry the
+/// URL (with any presigned signature) or decoder output.
+fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Error {
+    if MediaFetcher::is_policy_rejection(&error) {
+        return error;
+    }
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(format!("{public}: {error:#}"))
+        .public_message(public)
+        .build()
+        .into()
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -594,17 +622,23 @@ impl MediaLoader {
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
                 let url = require_image_url(image_part)?;
+                // Fetch and decode failures come from the client's media: 400, not 500.
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
-                    .await?;
+                    .await
+                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
                 let data = EncodedMediaData::from_url(url, &self.http_client)
                     .await
-                    .map_err(MediaFetcher::map_fetch_error)?;
+                    .map_err(MediaFetcher::map_fetch_error)
+                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
                     mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
-                decoder.decode_async(data).await?
+                decoder
+                    .decode_async(data)
+                    .await
+                    .map_err(|e| media_input_error(IMAGE_DECODE_FAILED, e))?
             }
             #[allow(unused_variables)]
             ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
@@ -627,17 +661,22 @@ impl MediaLoader {
                         })?;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
-                        .await?;
+                        .await
+                        .map_err(|e| media_input_error(VIDEO_FETCH_FAILED, e))?;
                     let data = EncodedMediaData::from_url(url, &self.http_client)
                         .await
-                        .map_err(MediaFetcher::map_fetch_error)?;
+                        .map_err(MediaFetcher::map_fetch_error)
+                        .map_err(|e| media_input_error(VIDEO_FETCH_FAILED, e))?;
 
                     // Use runtime decoder if provided, with MDC limits enforced
                     let decoder =
                         mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
+                    // Also classifies the decoder's rare in-memory file I/O
+                    // errors as 400; they cannot be told apart here.
                     decoder
                         .decode_async_with_video_hash(data, _hash_video)
-                        .await?
+                        .await
+                        .map_err(|e| media_input_error(VIDEO_DECODE_FAILED, e))?
                 }
             }
             ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
@@ -646,6 +685,7 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
+        // A NIXL registration failure is a server fault and stays a 500.
         let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
 
         // Insert into the cache on the way out. We only cache image inputs
@@ -761,6 +801,97 @@ mod tests {
             descriptor.source_storage.unwrap().is_registered(),
             "Source storage should be registered with NIXL"
         );
+    }
+
+    /// Media the frontend cannot fetch or decode is the client's fault: the
+    /// error must be `InvalidArgument` (HTTP 400) with a fixed public message
+    /// that leaks neither the URL nor the payload.
+    #[tokio::test]
+    async fn test_bad_media_is_invalid_argument() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let png = include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
+        let truncated_png = b64(&png[..png.len() / 2]);
+        let closed_port = {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.local_addr().unwrap().port()
+        };
+
+        let mut cases = vec![
+            ("image_url", "data:image/png;base64,".to_string()),
+            (
+                "image_url",
+                "data:image/png;base64,!!!not-base64".to_string(),
+            ),
+            (
+                "image_url",
+                format!("data:image/png;base64,{}", b64(b"hello")),
+            ),
+            (
+                "image_url",
+                format!("data:image/png;base64,{truncated_png}"),
+            ),
+            ("image_url", format!("http://127.0.0.1:{closed_port}/x.png")),
+        ];
+        if cfg!(feature = "media-ffmpeg") {
+            cases.push(("video_url", "data:video/mp4;base64,".to_string()));
+            cases.push((
+                "video_url",
+                format!("data:video/mp4;base64,{}", b64(b"not a video")),
+            ));
+        }
+
+        let media_decoder = MediaDecoder {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: Some(Default::default()),
+        };
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        let loader = match MediaLoader::new(media_decoder, Some(fetcher)) {
+            Ok(l) => l,
+            Err(e) => {
+                println!(
+                    "test test_bad_media_is_invalid_argument ... ignored (NIXL/UCX not available: {e})"
+                );
+                return;
+            }
+        };
+
+        for (modality, url) in cases {
+            let content_part: ChatCompletionRequestUserMessageContentPart =
+                serde_json::from_value(serde_json::json!({
+                    "type": modality,
+                    modality: {"url": url},
+                }))
+                .unwrap();
+            let error = loader
+                .fetch_and_decode_media_part(&content_part, None)
+                .await
+                .expect_err("bad media must be rejected");
+            let dynamo_error = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>())
+                .unwrap_or_else(|| panic!("{modality} {url:.60}: unclassified error: {error:#}"));
+            assert_eq!(
+                dynamo_error.error_type(),
+                ErrorType::InvalidArgument,
+                "{modality} {url:.60}: {error:#}"
+            );
+            let public = dynamo_error
+                .public_message()
+                .unwrap_or_else(|| panic!("{modality} {url:.60}: no public message"));
+            assert!(public.contains(modality), "{public}");
+            assert!(
+                !public.contains("http://") && !public.contains("base64"),
+                "{public}"
+            );
+        }
     }
 
     /// With the cache enabled, a second fetch of the same URL must be served
