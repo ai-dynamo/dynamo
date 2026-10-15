@@ -2319,6 +2319,92 @@ mod tests {
         (queue, slots, cfg_tx)
     }
 
+    #[tokio::test]
+    async fn request_capacity_routes_same_prefix_to_idle_worker() {
+        let (queue, slots, configs) = make_queue_with_sender(2, 16, 65536, None, None);
+        configs.send_modify(|workers| {
+            for config in workers.values_mut() {
+                config.engine_request_limit = Some(1);
+            }
+        });
+        let cached_worker = WorkerWithDpRank::new(0, 0);
+        for (id, expected) in [("first", 0), ("second", 1)] {
+            let (mut request, rx) = make_request(id, 4096);
+            request
+                .overlap
+                .effective_overlap_blocks
+                .insert(cached_worker, 256.0);
+            request
+                .overlap
+                .effective_cached_tokens
+                .insert(cached_worker, 4096);
+            queue.enqueue(request).await;
+            assert_eq!(
+                rx.await.unwrap().unwrap().best_worker.worker_id,
+                expected,
+                "a cached but full worker must not beat an idle worker"
+            );
+        }
+        let (full, full_rx) = make_request("full", 1);
+        queue.enqueue(full).await;
+        assert!(matches!(
+            full_rx.await.unwrap(),
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        slots.free(&"first".to_owned(), decay_now()).unwrap();
+        let (released, released_rx) = make_request("released", 1);
+        queue.enqueue(released).await;
+        assert_eq!(released_rx.await.unwrap().unwrap().best_worker.worker_id, 0);
+        slots.free(&"released".to_owned(), decay_now()).unwrap();
+        slots.free(&"second".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn request_capacity_cancellation_releases_decode_and_prefill_slots() {
+        for track_prefill_tokens in [false, true] {
+            let (queue, slots, configs) = make_queue_with_sender(1, 16, 65536, None, None);
+            configs
+                .send_modify(|workers| workers.get_mut(&0).unwrap().engine_request_limit = Some(1));
+            let (mut request, rx) = make_request("cancelled", 4096);
+            request.mode = ScheduleMode::TrackedWithLifecycle {
+                request_id: "cancelled".into(),
+            };
+            request.track_prefill_tokens = track_prefill_tokens;
+            let lease = queue
+                .new_request_lifecycle_lease(Some("cancelled"))
+                .unwrap();
+            let lease = queue
+                .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
+                .await
+                .unwrap();
+            rx.await.unwrap().unwrap();
+            let (blocked, blocked_rx) = make_request("blocked", 1);
+            queue.enqueue(blocked).await;
+            assert!(matches!(
+                blocked_rx.await.unwrap(),
+                Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+            ));
+            drop(lease);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while slots
+                    .project_worker_loads(None, decay_now())
+                    .values()
+                    .any(|load| load.active_requests != 0)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let (recovered, recovered_rx) = make_request("recovered", 1);
+            queue.enqueue(recovered).await;
+            recovered_rx.await.unwrap().unwrap();
+            slots.free(&"recovered".to_owned(), decay_now()).unwrap();
+            slots.assert_completely_drained(decay_now());
+        }
+    }
+
     fn policy_profile(yaml: &str) -> PolicyProfile {
         RouterPolicyConfig::from_yaml(yaml)
             .unwrap()

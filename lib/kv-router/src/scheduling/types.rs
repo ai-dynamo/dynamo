@@ -532,6 +532,7 @@ impl SchedulingRequest {
             self.pinned_worker,
             &self.routing_constraints,
         )
+        .with_worker_loads(&self.worker_loads)
     }
 
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {

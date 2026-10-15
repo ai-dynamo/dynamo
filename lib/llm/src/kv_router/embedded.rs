@@ -484,6 +484,7 @@ pub(crate) fn worker_request_from_runtime_config(
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
         ),
         total_kv_blocks: config.total_kv_blocks,
+        engine_request_limit: dynamo_kv_router::WorkerConfigLike::engine_request_limit(config),
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),
         taints: config.taints().clone(),

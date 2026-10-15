@@ -368,6 +368,7 @@ pub fn assert_overlap_scores_eq(left: &OverlapScores, right: &OverlapScores, ctx
 /// Minimal [`WorkerConfigLike`] for scheduler/queue tests and benchmarks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleWorkerConfig {
+    pub engine_request_limit: Option<u64>,
     pub data_parallel_start_rank: u32,
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
@@ -378,6 +379,7 @@ pub struct SimpleWorkerConfig {
 impl Default for SimpleWorkerConfig {
     fn default() -> Self {
         Self {
+            engine_request_limit: None,
             data_parallel_start_rank: 0,
             data_parallel_size: 1,
             max_num_batched_tokens: None,
@@ -388,6 +390,10 @@ impl Default for SimpleWorkerConfig {
 }
 
 impl WorkerConfigLike for SimpleWorkerConfig {
+    fn engine_request_limit(&self) -> Option<u64> {
+        self.engine_request_limit
+    }
+
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }

@@ -279,6 +279,10 @@ pub struct ModelRuntimeConfig {
 
     pub max_num_seqs: Option<u64>,
 
+    /// Effective concurrent request limit per DP rank, including an explicit worker override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_request_limit: Option<u64>,
+
     pub max_num_batched_tokens: Option<u64>,
 
     pub tool_call_parser: Option<String>,
@@ -442,6 +446,7 @@ impl Default for ModelRuntimeConfig {
             context_length: None,
             total_kv_blocks: None,
             max_num_seqs: None,
+            engine_request_limit: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
@@ -528,6 +533,12 @@ impl ModelRuntimeConfig {
 }
 
 impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+    fn engine_request_limit(&self) -> Option<u64> {
+        self.engine_request_limit
+            .or(self.max_num_seqs)
+            .filter(|limit| *limit > 0)
+    }
+
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -879,6 +890,31 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+
+    #[test]
+    fn request_capacity_override_and_legacy_cards_round_trip() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let config = ModelRuntimeConfig {
+            max_num_seqs: Some(8),
+            engine_request_limit: Some(2),
+            ..Default::default()
+        };
+        let mut wire = serde_json::to_value(config).unwrap();
+        let decoded: ModelRuntimeConfig = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.engine_request_limit(), Some(2));
+        wire.as_object_mut().unwrap().remove("engine_request_limit");
+        let legacy: ModelRuntimeConfig = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.engine_request_limit(), Some(8));
+        let unknown = ModelRuntimeConfig::default();
+        assert_eq!(unknown.engine_request_limit(), None);
+        assert!(
+            serde_json::to_value(unknown)
+                .unwrap()
+                .get("engine_request_limit")
+                .is_none()
+        );
+    }
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {

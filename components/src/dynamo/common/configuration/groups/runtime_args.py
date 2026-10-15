@@ -141,6 +141,9 @@ class DynamoRuntimeConfig(ConfigBase):
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
 
+        if self.engine_request_limit is not None:
+            os.environ["DYN_ENGINE_REQUEST_LIMIT"] = str(self.engine_request_limit)
+
         os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
         # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
