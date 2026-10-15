@@ -375,13 +375,13 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_session_affinity_decisions_total" type="counter">
-  Dispatched requests that have a session ID when [session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity) is enabled. The router counts each routing attempt one time, after the binding commits. The labels are `phase` (`aggregated`, `prefill`, `decode`) and `outcome`:
+  Dispatched requests that have a session ID when [session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity) is enabled. The labels are `phase` (`aggregated`, `prefill`, `decode`) and `outcome`:
 
-  - `new`: The session had no live binding. This is the first request, or the binding expired or became invalid. The router selected a worker, and the session binds to that worker.
-  - `followed`: The request went to the bound worker. If the binding has a DP rank, the request also went to that DP rank.
-  - `rerouted`: Only in `soft` mode. The router sent the request to a different worker or DP rank than the binding. The binding moves to the new worker. The binding does not move if a different request changed it first, or if the binding has a DP rank and the dispatch has no DP rank.
+  - `new`: The session had no live binding, so the router selected a worker.
+  - `followed`: The request went to the bound worker, and to the bound DP rank if there is one.
+  - `rerouted`: Only in `soft` mode. The request went to a different worker or DP rank than the binding.
 
-  The `new` and `rerouted` outcomes show new routing decisions. The `followed` outcome shows reuse of a binding. The counter does not count requests without a session ID, query-only requests, or failed dispatches. A request with an explicit worker target counts as `new` or `followed`. In disaggregated serving, the prefill leg and the decode leg each count one time. A migrated request counts again for each retry.
+  Requests without a session ID, query-only requests, and failed dispatches do not count. Prefill legs, decode legs, and migration retries each count separately.
 </ParamField>
 
 ### KV-cache reuse telemetry

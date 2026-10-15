@@ -40,8 +40,9 @@ use crate::{
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityCoordinator, AffinityDecision, AffinityTarget, Hold, SessionAffinityMode,
-        affinity_id, explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
+        affinity_outcome, explicit_target, from_table, invalid_argument,
+        subagent_group_affinity_id,
     },
 };
 
@@ -625,10 +626,12 @@ impl RoutingHost {
         let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
             return Ok(stream);
         };
-        let decision = AffinityDecision::classify(&hold, dispatched_target);
+        let outcome = affinity_outcome(&hold, dispatched_target);
         let stream = affinity.commit_to_stream(hold, dispatched_target, stream)?;
         self.request_metrics
-            .observe_session_affinity_decision(phase, decision);
+            .session_affinity_decisions_total
+            .with_label_values(&[phase.as_str(), outcome])
+            .inc();
         Ok(stream)
     }
 

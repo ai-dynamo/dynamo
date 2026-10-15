@@ -16,7 +16,7 @@ use std::{
 
 use dynamo_kv_router::services::selection::affinity::{
     AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
-    dispatch_follows,
+    validate_dispatch_target,
 };
 use dynamo_runtime::{
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
@@ -53,37 +53,18 @@ pub(crate) fn from_table(target: TableTarget) -> AffinityTarget {
     AffinityTarget::new(target.worker_id, target.dp_rank)
 }
 
-/// How a dispatched request used its session binding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AffinityDecision {
-    /// The session had no live binding. The router selected a worker, and the
-    /// session binds to that worker.
-    New,
-    /// The request went to the bound worker.
-    Followed,
-    /// Soft mode only. The router sent the request to a different worker or
-    /// DP rank than the binding.
-    Rerouted,
-}
-
-impl AffinityDecision {
-    /// Classify a dispatch against the held binding with `dispatch_follows`.
-    pub(crate) fn classify(hold: &Hold, dispatched: AffinityTarget) -> Self {
-        match hold {
-            Hold::Initialize(_) => Self::New,
-            Hold::Bound { target, .. } if dispatch_follows(*target, to_table(dispatched)) => {
-                Self::Followed
-            }
-            Hold::Bound { .. } => Self::Rerouted,
+/// The `outcome` label for a dispatch of `hold` to `dispatched`. Only soft
+/// mode commits `rerouted`, because hard mode rejects that dispatch.
+pub(crate) fn affinity_outcome(hold: &Hold, dispatched: AffinityTarget) -> &'static str {
+    match hold {
+        Hold::Initialize(_) => "new",
+        Hold::Bound { target, lease }
+            if validate_dispatch_target(lease.session_id(), *target, to_table(dispatched))
+                .is_ok() =>
+        {
+            "followed"
         }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::New => "new",
-            Self::Followed => "followed",
-            Self::Rerouted => "rerouted",
-        }
+        Hold::Bound { .. } => "rerouted",
     }
 }
 

@@ -65,7 +65,6 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
-use crate::session_affinity::AffinityDecision;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
@@ -1063,7 +1062,6 @@ pub struct RouterRequestMetrics {
 }
 
 const KV_PHASE_LABEL: &str = "phase";
-const AFFINITY_OUTCOME_LABEL: &str = "outcome";
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
@@ -1217,7 +1215,7 @@ impl RouterRequestMetrics {
             .create_intcountervec(
                 &router_metric(frontend_service::SESSION_AFFINITY_DECISIONS_TOTAL),
                 "Dispatched session-affinity requests by outcome: new binding, followed binding, or rerouted from binding",
-                &[KV_PHASE_LABEL, AFFINITY_OUTCOME_LABEL],
+                &[KV_PHASE_LABEL, "outcome"],
                 extra_labels,
             )
             .expect("failed to create router_session_affinity_decisions_total");
@@ -1289,17 +1287,6 @@ impl RouterRequestMetrics {
             .with_label_values(labels)
             .inc_by(selected_tokens);
         self.kv_worker_reused_tokens.with_label_values(labels)
-    }
-
-    /// Count one dispatched session-affinity request.
-    pub(crate) fn observe_session_affinity_decision(
-        &self,
-        phase: RequestPhase,
-        decision: AffinityDecision,
-    ) {
-        self.session_affinity_decisions_total
-            .with_label_values(&[phase.as_str(), decision.as_str()])
-            .inc();
     }
 }
 
@@ -1610,7 +1597,9 @@ mod tests {
         let registry = dynamo_runtime::MetricsRegistry::new();
         let metrics = RouterRequestMetrics::for_test(&registry);
         metrics
-            .observe_session_affinity_decision(RequestPhase::Prefill, AffinityDecision::Rerouted);
+            .session_affinity_decisions_total
+            .with_label_values(&["prefill", "rerouted"])
+            .inc();
         let output = registry.prometheus_expfmt_combined().unwrap();
         assert!(
             output.contains(

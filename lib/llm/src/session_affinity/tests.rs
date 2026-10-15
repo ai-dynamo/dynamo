@@ -13,7 +13,7 @@ use futures::{StreamExt, stream};
 
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
-    AffinityCoordinator, AffinityDecision, AffinityTarget, Hold, LlmResponse, affinity_id,
+    AffinityCoordinator, AffinityTarget, Hold, LlmResponse, affinity_id, affinity_outcome,
     coordinator::{ReplicaApplyOutcome, tracked_stream},
     explicit_target, subagent_group_affinity_id, to_table,
 };
@@ -650,45 +650,26 @@ async fn session_affinity_republishes_the_stored_replica_version() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn affinity_decision_distinguishes_new_followed_and_rerouted_dispatches() {
-    use AffinityDecision::{Followed, New, Rerouted};
+async fn affinity_outcome_distinguishes_new_followed_and_rerouted_dispatches() {
+    let initialization = soft_coordinator()
+        .acquire(&session_id(), None)
+        .await
+        .unwrap();
+    assert_eq!(affinity_outcome(&initialization, target(7, Some(2))), "new");
 
-    let coordinator = soft_coordinator();
-    let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
-    assert_eq!(
-        AffinityDecision::classify(&initialization, target(7, Some(2))),
-        New
-    );
-    drop(initialization);
-
-    bind(&coordinator, target(7, Some(2))).await;
-    let ranked = coordinator.acquire(&session_id(), None).await.unwrap();
-    for (dispatched, expected) in [
-        (target(7, Some(2)), Followed),
-        (target(7, Some(3)), Rerouted),
-        (target(7, None), Rerouted),
-        (target(8, Some(2)), Rerouted),
+    for (binding, dispatched, expected) in [
+        (target(7, Some(2)), target(7, Some(2)), "followed"),
+        (target(7, Some(2)), target(7, None), "rerouted"),
+        (target(7, None), target(7, Some(3)), "followed"),
+        (target(7, None), target(8, None), "rerouted"),
     ] {
+        let coordinator = soft_coordinator();
+        bind(&coordinator, binding).await;
+        let hold = coordinator.acquire(&session_id(), None).await.unwrap();
         assert_eq!(
-            AffinityDecision::classify(&ranked, dispatched),
+            affinity_outcome(&hold, dispatched),
             expected,
-            "ranked binding dispatched to {dispatched:?}"
-        );
-    }
-    drop(ranked);
-
-    let coordinator = soft_coordinator();
-    bind(&coordinator, target(7, None)).await;
-    let worker_only = coordinator.acquire(&session_id(), None).await.unwrap();
-    for (dispatched, expected) in [
-        (target(7, None), Followed),
-        (target(7, Some(3)), Followed),
-        (target(8, None), Rerouted),
-    ] {
-        assert_eq!(
-            AffinityDecision::classify(&worker_only, dispatched),
-            expected,
-            "worker-only binding dispatched to {dispatched:?}"
+            "{binding:?} dispatched to {dispatched:?}"
         );
     }
 }

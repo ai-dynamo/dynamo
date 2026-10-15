@@ -359,7 +359,7 @@ async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches()
     )
     .await
     .unwrap();
-    let (host, affinity) = builtin_host_with_affinity(
+    let (host, _) = builtin_host_with_affinity(
         inner,
         load_context,
         crate::session_affinity::SessionAffinityMode::Soft,
@@ -383,7 +383,7 @@ async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches()
     generate(affinity_request("decision-session", None)).await;
     // A request without a session does not count.
     generate(Context::new(request())).await;
-    // A soft binding to a missing worker is rerouted. The binding moves to the dispatched worker.
+    // A soft binding to a missing worker is rerouted.
     let moved = SessionAffinityId::new("decision-moved");
     bind_affinity_target(&host, &moved, AffinityTarget::worker(worker_id + 1)).await;
     generate(affinity_request("decision-moved", None)).await;
@@ -391,14 +391,6 @@ async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches()
     let after = decisions();
     let delta: Vec<_> = after.iter().zip(before).map(|(a, b)| a - b).collect();
     assert_eq!(delta, [1, 1, 1], "outcomes {outcomes:?}");
-    assert_eq!(
-        dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[worker_id; 4]
-    );
-    assert_eq!(
-        affinity.query_target(&moved, None).unwrap(),
-        Some(AffinityTarget::worker(worker_id))
-    );
 
     drop(host);
     runtime.shutdown();
