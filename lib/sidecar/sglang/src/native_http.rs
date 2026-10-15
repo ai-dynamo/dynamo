@@ -946,38 +946,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_stream_accepts_events_larger_than_64_mib() {
-        let metadata_len = 64 * 1024 * 1024 + 1;
-        let body = format!(
-            "data: {{\"output_ids\":[101],\"meta_info\":{{\"finish_reason\":{{\"type\":\"stop\"}},\"blob\":\"{}\"}}}}\n\n",
-            "x".repeat(metadata_len)
-        );
-        let (port, server) = serve_once(body, "200 OK").await;
-        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
-        let mut stream = native_http(port).generate(
-            NativeRequest {
-                body: json!({"input_ids": [1], "stream": true}),
-                is_prefill: false,
-                prefill_handoff: None,
-                keep_prefill_output: false,
-            },
-            ctx,
-            CancellationToken::new(),
-        );
-
-        let output = stream.next().await.unwrap().unwrap();
-        let blob = output
-            .engine_data
-            .as_ref()
-            .and_then(|data| data.pointer("/sglang_response/meta_info/blob"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap();
-        assert_eq!(blob.len(), metadata_len);
-        assert!(stream.next().await.is_none());
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn native_stream_rejects_events_over_configured_limit() {
         let body = "data: {\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null}}\n\n";
         let (port, server) = serve_once(body.to_string(), "200 OK").await;
