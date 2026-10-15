@@ -1432,6 +1432,73 @@ async def test_artifact_authority_unavailable_returns_typed_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("code", "client_error"),
+    [
+        ("destination_denied", True),
+        ("invalid_target", True),
+        ("expired", True),
+        ("unsupported", False),
+    ],
+)
+async def test_artifact_destination_rejection_is_invalid_argument(
+    monkeypatch, code, client_error
+):
+    from dynamo.artifacts.storage import ArtifactStorageError
+    from dynamo.artifacts.vllm import capture as artifact_capture
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = SimpleNamespace(
+        validate=MagicMock(side_effect=ArtifactStorageError(code, "policy says no")),
+        submit=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    budget = artifact_capture.CaptureBudget(1 << 20)
+    monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
+    handler.engine_client = SimpleNamespace(generate=MagicMock(), tokenizer=None)
+
+    expected = mod.InvalidArgument if client_error else ArtifactStorageError
+    with pytest.raises(expected, match="policy says no"):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+    handler.engine_client.generate.assert_not_called()
+    authority.submit.assert_not_awaited()
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("worker_mode", "message"),
     [
         ("text", "token-in/token-out"),
