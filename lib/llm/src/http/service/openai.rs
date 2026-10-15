@@ -237,7 +237,7 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, utoipa::ToSchema)]
 pub(crate) struct ErrorMessage {
     message: String,
     #[serde(rename = "type")]
@@ -3261,14 +3261,14 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     response
 }
 
-#[derive(Serialize)]
-struct ToolCallDispatchPayload<'a> {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ToolCallDispatchPayload<'a> {
     choice_index: u32,
     tool_call: &'a ChatCompletionMessageToolCallChunk,
 }
 
-#[derive(Serialize)]
-struct ReasoningDispatchPayload<'a> {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ReasoningDispatchPayload<'a> {
     index: u32,
     reasoning_content: &'a str,
 }
@@ -4775,7 +4775,8 @@ pub fn completions_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/completions".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_openapi_kind(super::OpenApiRouteKind::Completions);
     let router = Router::new()
         .route(&path, post(handler_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -4792,7 +4793,8 @@ pub fn chat_completions_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_openapi_kind(super::OpenApiRouteKind::ChatCompletions);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -4808,7 +4810,8 @@ pub fn embeddings_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/embeddings".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_openapi_kind(super::OpenApiRouteKind::Embeddings);
     let router = Router::new()
         .route(&path, post(embeddings))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -5077,6 +5080,7 @@ pub fn responses_router(
     // derived path and leaves existing configurations behaving as they do now.
     let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = doc.with_openapi_kind(super::OpenApiRouteKind::Responses);
     let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
@@ -8332,7 +8336,6 @@ mod tests {
     // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
     // "response_format": { "type": "invalid_format" } : Not Done
-    // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
     fn test_bad_base_request_for_completion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {

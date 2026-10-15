@@ -123,7 +123,7 @@ strip every wheel command.
 A ledger row is written only for a night whose `ai-dynamo` and
 `ai-dynamo-runtime` wheels both published, because `ai-dynamo` pins the runtime
 wheel to the same version. `kvbm` is reported when that night published it and is
-never required: it is deprecated with removal targeted for v1.6.0. The ledger and
+never required: it is deprecated with removal targeted for v1.7.0. The ledger and
 the selectors' `latest` rows resolve from that same installable wheel set, so the
 ledger is never older than they are; it can be newer, because a `latest` row
 falls back to the wheel of its own container-tag night when a backend pin moved
