@@ -3,8 +3,10 @@
 
 """Unit tests for encode-worker multimodal helpers."""
 
+import asyncio
 import importlib.util
 import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +22,7 @@ from dynamo.vllm.multimodal_handlers.encode_worker_handler import (
     EmbeddingItem,
     EncodeWorkerHandler,
 )
+from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
 from dynamo.vllm.multimodal_utils.encode_utils import get_embedding_hash
 from dynamo.vllm.multimodal_utils.protocol import MultiModalInput
 
@@ -570,3 +573,111 @@ def test_non_contiguous_embedding_is_stored():
     item = handler._lookup_embedding_item("k")
     assert item is not None
     assert torch.equal(item.embeddings, view)
+
+
+_MERGE_SIZE = 2
+
+
+class _StubQwenEncoder:
+    """Stands in for ``encode_image_embeddings`` on a Qwen-VL vision tower.
+
+    Like the real tower it merges every ``merge_size**2`` patches into one
+    visual token and returns ``[1, tokens, hidden]``; it raises on NaN input.
+    """
+
+    def __init__(self):
+        self.batch_sizes: list[int] = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+
+    def __call__(self, *, model_name, image_embeds, vision_encoder, projector):
+        self.batch_sizes.append(int(image_embeds["image_grid_thw"].shape[0]))
+        self.started.set()
+        self.release.wait()
+        pixels = image_embeds["pixel_values"]
+        if torch.isnan(pixels).any():
+            raise ValueError("bad pixel_values")
+        merge = vision_encoder.spatial_merge_size
+        tokens = pixels.reshape(-1, merge * merge, pixels.shape[-1]).sum(1)
+        return tokens.unsqueeze(0)
+
+
+def _qwen_request(*grids: tuple[int, int, int], hidden: int = 4) -> dict:
+    grid_thw = torch.tensor(grids)
+    patches = int(grid_thw.prod(-1).sum())
+    return {
+        "pixel_values": torch.randn(patches, hidden),
+        "image_grid_thw": grid_thw,
+    }
+
+
+def _micro_batch_handler(monkeypatch) -> tuple[EncodeWorkerHandler, _StubQwenEncoder]:
+    encoder = _StubQwenEncoder()
+    monkeypatch.setattr(encode_worker_handler, "encode_image_embeddings", encoder)
+    handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
+    handler.model = "Qwen/Qwen2.5-VL-7B-Instruct"
+    handler.vision_encoder = SimpleNamespace(spatial_merge_size=_MERGE_SIZE)
+    handler.projector = None
+    return handler, encoder
+
+
+def test_coalesced_vision_forward_matches_per_request_forward(monkeypatch):
+    handler, encoder = _micro_batch_handler(monkeypatch)
+    requests = [
+        _qwen_request((1, 2, 4)),
+        _qwen_request((1, 2, 2), (1, 4, 4)),
+        _qwen_request((1, 4, 2)),
+    ]
+    expected = [handler._encode_qwen([request])[0] for request in requests]
+    encoder.batch_sizes.clear()
+
+    results = handler._encode_qwen_batch(requests)
+
+    assert encoder.batch_sizes == [4]
+    for result, want in zip(results, expected, strict=True):
+        assert torch.equal(result, want)
+        # A sent tensor stays alive until the receiver pulls it, so a view into
+        # the batch output would pin the other requests' embeddings with it.
+        assert result.untyped_storage().nbytes() == result.nbytes
+
+
+def test_failed_coalesced_forward_fails_only_the_bad_request(monkeypatch):
+    handler, encoder = _micro_batch_handler(monkeypatch)
+    good, bad, other = (_qwen_request((1, 2, 4)) for _ in range(3))
+    bad["pixel_values"][0, 0] = float("nan")
+    expected = [handler._encode_qwen([request])[0] for request in (good, other)]
+
+    results = handler._encode_qwen_batch([good, bad, other])
+
+    assert isinstance(results[1], ValueError)
+    assert torch.equal(results[0], expected[0])
+    assert torch.equal(results[2], expected[1])
+
+
+async def test_requests_queued_behind_a_forward_share_the_next_one(monkeypatch):
+    handler, encoder = _micro_batch_handler(monkeypatch)
+    batcher = ThreadedMicroBatcher(handler._encode_qwen_batch, name="test-encode-vit")
+    batcher.start()
+    try:
+        encoder.release.clear()
+        first = asyncio.create_task(batcher.submit([_qwen_request((1, 2, 4))]))
+        await asyncio.to_thread(encoder.started.wait, 5)
+        queued = [
+            asyncio.create_task(batcher.submit([_qwen_request((1, 2, 2))]))
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0.05)
+        encoder.release.set()
+
+        results = await asyncio.wait_for(asyncio.gather(first, *queued), 5)
+    finally:
+        batcher.shutdown()
+
+    assert encoder.batch_sizes == [1, 3]
+    assert [tuple(result.shape) for (result,) in results] == [
+        (1, 2, 4),
+        (1, 1, 4),
+        (1, 1, 4),
+        (1, 1, 4),
+    ]
