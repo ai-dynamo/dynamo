@@ -13,18 +13,12 @@ status: experimental  # Day-0
 artifacts:
   recipe_specific_images:
   - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1-kimi-k3-post.1
-  - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1
   - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-kimi-k3-dev.1
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1-kimi-k3-post.1
     source_revision: 22031aba1fb33524370a26150e9fd7a7751d9fef
     source_kind: github-release
     release_tag: v1.5.1-kimi-k3-post.1
-    release_state: prerelease
-  - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1
-    source_revision: f7f0c719e57aebffa3d386ff14b387c94fdaedad
-    source_kind: github-release
-    release_tag: v1.5.0-kimi-k3-dev.1
     release_state: prerelease
   - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-kimi-k3-dev.1
     source_revision: f7f0c719e57aebffa3d386ff14b387c94fdaedad
@@ -198,7 +192,7 @@ targets:
   - dspark-speculative-decoding
   workload:
     type: agentic-trace-replay
-    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 28
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 36
     sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
     asset: recipes/kimi-k3/sglang/agg-gb200-agentic/deploy.yaml
@@ -207,7 +201,7 @@ targets:
     asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 32.9 output tok/s/GPU, 56.1 user tok/s P50, TTFT P50 828 ms at concurrency 28 over 2 workers (15% agentic trace subset, synthetic acc_len=4.05)
+    summary: 47.3 output tok/s/GPU, 55.8 user tok/s P50, TTFT P50 522 ms at concurrency 36 over 2 workers (15% agentic trace subset, synthetic acc_len=4.05)
 - id: sglang-disagg-gb200
   recommended: false
   hardware:
@@ -225,7 +219,7 @@ targets:
   - pd-kv-transfer
   workload:
     type: agentic-trace-replay
-    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 44
     sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
     asset: recipes/kimi-k3/sglang/disagg-gb200-agentic/deploy.yaml
@@ -234,6 +228,6 @@ targets:
     asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 29.3 output tok/s/GPU, 77.9 user tok/s P50, TTFT P50 3090 ms at concurrency 24 (2P1D, 15% agentic trace subset, synthetic acc_len=4.05)
+    summary: 43.5 output tok/s/GPU, 60.1 user tok/s P50, TTFT P50 4258 ms at concurrency 44 (2P1D, 15% agentic trace subset, synthetic acc_len=4.05)
 related_benchmarks: []
 maintainer: null
