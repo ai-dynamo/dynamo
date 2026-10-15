@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Drive scaling decisions with fresh idle observations and acknowledged inventory."""
-
 from unittest.mock import MagicMock
 
 import pytest

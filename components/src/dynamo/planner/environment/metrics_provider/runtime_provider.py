@@ -192,15 +192,24 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
     def _decode_fpm_bytes(
         self, subscriber, component: str
     ) -> tuple[dict[tuple[str, int], ForwardPassMetrics], Optional[str]]:
-        snapshot, unjoined, stale_count = subscriber.get_recent_stats_with_health(
-            self.max_fpm_age_seconds
-        )
+        (
+            snapshot,
+            unjoined,
+            stale_count,
+            missing_count,
+        ) = subscriber.get_recent_stats_with_health(self.max_fpm_age_seconds)
         identities = tuple(unjoined)
         if identities and identities != self._unjoined_workers.get(component):
             logger.warning("FPM worker join failure for %s: %s", component, identities)
         self._unjoined_workers[component] = identities
         reason = (
-            "worker_join_failure" if unjoined else "stale_fpm" if stale_count else None
+            "worker_join_failure"
+            if unjoined
+            else "stale_fpm"
+            if stale_count
+            else "missing_fpm"
+            if missing_count
+            else None
         )
         if reason:
             # A fresh subset, especially one DP rank, cannot prove the pool is idle.

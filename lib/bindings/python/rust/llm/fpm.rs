@@ -19,6 +19,7 @@ use futures::StreamExt;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -34,6 +35,7 @@ use dynamo_runtime::discovery::{
 };
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
+use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RuntimeConfig;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 
@@ -46,16 +48,22 @@ type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
 
 fn fresh_fpm_snapshot(
     latest: &DashMap<(String, i64), TrackedFpm>,
-    known: &DashSet<String>,
+    expected: &HashMap<String, Option<Range<u32>>>,
     now: Instant,
     max_age: Duration,
-) -> (FpmSnapshot, Vec<String>, usize) {
+) -> (FpmSnapshot, Vec<String>, usize, usize) {
     let mut snapshot = HashMap::new();
     let mut unjoined = HashSet::new();
     let mut stale = 0;
     for entry in latest {
         let expired = now.saturating_duration_since(entry.value().received_at) > max_age;
-        if !known.contains(&entry.key().0) {
+        let rank_is_expected = expected
+            .get(&entry.key().0)
+            .and_then(Option::as_ref)
+            .is_some_and(|ranks| {
+                u32::try_from(entry.key().1).is_ok_and(|rank| ranks.contains(&rank))
+            });
+        if !rank_is_expected {
             if !expired {
                 unjoined.insert(entry.key().0.clone());
             }
@@ -67,7 +75,21 @@ fn fresh_fpm_snapshot(
     }
     let mut unjoined: Vec<_> = unjoined.into_iter().collect();
     unjoined.sort_unstable();
-    (snapshot, unjoined, stale)
+    let mut fresh_counts = HashMap::new();
+    for (worker, _) in snapshot.keys() {
+        *fresh_counts.entry(worker.as_str()).or_insert(0usize) += 1;
+    }
+    let missing = expected
+        .iter()
+        .map(|(worker, ranks)| {
+            ranks.as_ref().map_or(1, |ranks| {
+                ranks
+                    .len()
+                    .saturating_sub(fresh_counts.get(worker.as_str()).copied().unwrap_or(0))
+            })
+        })
+        .sum();
+    (snapshot, unjoined, stale, missing)
 }
 
 // ---------------------------------------------------------------------------
@@ -483,12 +505,52 @@ struct WorkerModelCards {
 struct IndexedModelCard {
     card: String,
     index: usize,
+    dp_ranks: Option<Range<u32>>,
+}
+
+#[derive(serde::Deserialize)]
+struct FpmCardConfig {
+    #[serde(default)]
+    runtime_config: FpmDpConfig,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct FpmDpConfig {
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+}
+
+impl Default for FpmDpConfig {
+    fn default() -> Self {
+        let defaults = RuntimeConfig::default();
+        Self {
+            data_parallel_start_rank: defaults.data_parallel_start_rank,
+            data_parallel_size: defaults.data_parallel_size,
+        }
+    }
+}
+
+fn expected_fpm_ranks(card: &str) -> Option<Range<u32>> {
+    serde_json::from_str::<FpmCardConfig>(card)
+        .ok()
+        .and_then(|card| {
+            RuntimeConfig {
+                data_parallel_start_rank: card.runtime_config.data_parallel_start_rank,
+                data_parallel_size: card.runtime_config.data_parallel_size,
+                ..Default::default()
+            }
+            .data_parallel_rank_range()
+            .ok()
+        })
 }
 
 impl WorkerModelCards {
     fn insert(&mut self, card_id: ModelCardInstanceId, card: String) {
+        let dp_ranks = expected_fpm_ranks(&card);
         if let Some(existing) = self.cards.get_mut(&card_id) {
             existing.card = card;
+            existing.dp_ranks = dp_ranks;
             return;
         }
 
@@ -497,7 +559,14 @@ impl WorkerModelCards {
         }
         let index = self.card_ids.len();
         self.card_ids.push(card_id.clone());
-        self.cards.insert(card_id, IndexedModelCard { card, index });
+        self.cards.insert(
+            card_id,
+            IndexedModelCard {
+                card,
+                index,
+                dp_ranks,
+            },
+        );
     }
 
     fn remove(&mut self, card_id: &ModelCardInstanceId) {
@@ -523,11 +592,15 @@ impl WorkerModelCards {
     }
 
     fn selected_card(&self) -> Option<&str> {
+        self.selected_entry().map(|entry| entry.card.as_str())
+    }
+
+    fn selected_entry(&self) -> Option<&IndexedModelCard> {
         let card_id = self
             .base_card_id
             .as_ref()
             .or_else(|| self.card_ids.first())?;
-        self.cards.get(card_id).map(|entry| entry.card.as_str())
+        self.cards.get(card_id)
     }
 
     fn is_empty(&self) -> bool {
@@ -952,13 +1025,13 @@ impl FpmEventSubscriber {
         Ok(snapshot)
     }
 
-    /// Return fresh samples, worker IDs absent from discovery, and stale rank count.
+    /// Return fresh samples, unjoined IDs, stale rank count, and missing rank count.
     /// Freshness uses local receive time, including idle heartbeats, rather than
     /// publisher clocks. The legacy get_recent_stats method retains its semantics.
     fn get_recent_stats_with_health(
         &self,
         max_age_seconds: f64,
-    ) -> PyResult<(FpmSnapshot, Vec<String>, usize)> {
+    ) -> PyResult<(FpmSnapshot, Vec<String>, usize, usize)> {
         if !self.tracking_started.load(Ordering::SeqCst) {
             return Err(PyRuntimeError::new_err(
                 "start_tracking() has not been called",
@@ -968,9 +1041,21 @@ impl FpmEventSubscriber {
             .ok()
             .filter(|age| !age.is_zero())
             .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))?;
+        let expected = self
+            .known_workers
+            .iter()
+            .map(|worker| {
+                let ranks = self.worker_model_cards.get(worker.key()).and_then(|cards| {
+                    cards
+                        .selected_entry()
+                        .and_then(|entry| entry.dp_ranks.clone())
+                });
+                (worker.key().clone(), ranks)
+            })
+            .collect();
         Ok(fresh_fpm_snapshot(
             &self.latest_stats,
-            &self.known_workers,
+            &expected,
             Instant::now(),
             max_age,
         ))
@@ -1027,9 +1112,9 @@ mod tests {
     fn snapshot_separates_missing_identity_and_stale_samples() {
         let now = Instant::now();
         let latest = DashMap::new();
-        let known = DashSet::new();
-        known.insert("fresh".to_string());
-        known.insert("stale".to_string());
+        let mut expected = HashMap::new();
+        expected.insert("fresh".to_string(), Some(0..1));
+        expected.insert("stale".to_string(), Some(0..1));
         for (worker, age) in [("fresh", 0), ("stale", 2), ("orphan", 0), ("removed", 2)] {
             latest.insert(
                 (worker.to_string(), 0),
@@ -1039,12 +1124,13 @@ mod tests {
                 },
             );
         }
-        let (snapshot, unjoined, stale) =
-            fresh_fpm_snapshot(&latest, &known, now, Duration::from_secs(1));
+        let (snapshot, unjoined, stale, missing) =
+            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1));
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains_key(&("fresh".to_string(), 0)));
         assert_eq!(unjoined, ["orphan"]);
         assert_eq!(stale, 1);
+        assert_eq!(missing, 1);
 
         // An identical idle heartbeat is fresh when it was received again.
         latest.insert(
@@ -1054,12 +1140,101 @@ mod tests {
                 received_at: now,
             },
         );
-        known.insert("orphan".to_string());
-        let (snapshot, unjoined, stale) =
-            fresh_fpm_snapshot(&latest, &known, now, Duration::from_secs(1));
+        expected.insert("orphan".to_string(), Some(0..1));
+        let (snapshot, unjoined, stale, missing) =
+            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1));
         assert_eq!(snapshot.len(), 3);
         assert!(unjoined.is_empty());
         assert_eq!(stale, 0);
+        assert_eq!(missing, 0);
+    }
+
+    #[test]
+    fn snapshot_reports_workers_and_offset_ranks_that_never_published() {
+        let now = Instant::now();
+        let latest = DashMap::new();
+        let expected = HashMap::from([
+            ("42".to_string(), Some(4..6)),
+            ("99".to_string(), Some(0..1)),
+        ]);
+        latest.insert(
+            ("42".to_string(), 4),
+            TrackedFpm {
+                payload: vec![1],
+                received_at: now,
+            },
+        );
+        let (_, unjoined, stale, missing) =
+            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1));
+        assert!(unjoined.is_empty());
+        assert_eq!(stale, 0);
+        assert_eq!(missing, 2);
+
+        latest.insert(
+            ("42".to_string(), 5),
+            TrackedFpm {
+                payload: vec![1],
+                received_at: now,
+            },
+        );
+        assert_eq!(
+            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1)).3,
+            1
+        );
+        latest.insert(
+            ("99".to_string(), 0),
+            TrackedFpm {
+                payload: vec![1],
+                received_at: now,
+            },
+        );
+        assert_eq!(
+            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1)).3,
+            0
+        );
+    }
+
+    #[test]
+    fn expected_ranks_accept_legacy_defaults_and_validate_explicit_layout() {
+        assert_eq!(expected_fpm_ranks("{}"), Some(0..1));
+        assert_eq!(
+            expected_fpm_ranks(r#"{"runtime_config":{"unknown_future_field":true}}"#),
+            Some(0..1)
+        );
+        assert_eq!(
+            expected_fpm_ranks(
+                r#"{"runtime_config":{"data_parallel_start_rank":4,"data_parallel_size":2}}"#
+            ),
+            Some(4..6)
+        );
+        for invalid in [0, 4097, u32::MAX] {
+            assert_eq!(
+                expected_fpm_ranks(
+                    &serde_json::json!({"runtime_config":{"data_parallel_size":invalid}})
+                        .to_string()
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn selected_card_rank_range_follows_base_updates_and_removal() {
+        let mut cards = WorkerModelCards::default();
+        let base = card_id(42, None);
+        let card = |start, size| {
+            serde_json::json!({
+                "runtime_config": {"data_parallel_start_rank": start, "data_parallel_size": size}
+            })
+            .to_string()
+        };
+        cards.insert(card_id(42, Some("adapter")), card(99, 2));
+        cards.insert(base.clone(), card(4, 2));
+        assert_eq!(cards.selected_entry().unwrap().dp_ranks, Some(4..6));
+        cards.insert(base.clone(), card(8, 2));
+        assert_eq!(cards.selected_entry().unwrap().dp_ranks, Some(8..10));
+        cards.remove(&base);
+        assert_eq!(cards.selected_entry().unwrap().dp_ranks, Some(99..101));
     }
 
     fn card_id(instance_id: u64, model_suffix: Option<&str>) -> ModelCardInstanceId {

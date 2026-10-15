@@ -63,7 +63,7 @@ def test_missing_fpm_alarms_once_after_three_observations_and_recovers(caplog):
     assert counter._value.get() == 2
 
 
-@pytest.mark.parametrize("reason", ["stale_fpm", "worker_join_failure"])
+@pytest.mark.parametrize("reason", ["stale_fpm", "worker_join_failure", "missing_fpm"])
 def test_provider_reports_filtered_fpm_and_does_not_reuse_previous_sample(
     reason, caplog
 ):
@@ -80,12 +80,14 @@ def test_provider_reports_filtered_fpm_and_does_not_reuse_previous_sample(
         {("w", 0): encode(ForwardPassMetrics(worker_id="w"))},
         [],
         0,
+        0,
     )
     assert provider.collect_fpm().decode
     subscriber.get_recent_stats_with_health.return_value = (
         {("w", 0): encode(ForwardPassMetrics(worker_id="w"))},
         ["orphan"] if reason == "worker_join_failure" else [],
         1 if reason == "stale_fpm" else 0,
+        1 if reason == "missing_fpm" else 0,
     )
     observation = provider.collect_fpm()
     assert observation.decode is None

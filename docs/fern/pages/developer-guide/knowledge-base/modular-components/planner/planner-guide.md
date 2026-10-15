@@ -253,6 +253,9 @@ traffic observations. Runtime FPM samples expire after three load-adjustment
 intervals measured from local receipt. Idle heartbeats refresh that receipt
 time. Samples from workers absent from discovery are excluded and logged with
 their worker IDs.
+Each discovered worker must provide a fresh sample for every DP rank declared
+in its model card. A worker or rank that has never published is unavailable;
+the Planner does not use a partial component snapshot to infer idle capacity.
 
 Missing, non-finite, or failed router request-counter queries produce unavailable
 demand, matching the frontend collection behavior. An explicit counter value of
