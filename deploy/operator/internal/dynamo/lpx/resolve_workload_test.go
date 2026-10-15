@@ -78,7 +78,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 
 	t.Log("Resolve an LPU-only workload without selecting the conventional decode")
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
-	hx, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": hxSnapshot})
+	hx, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": hxSnapshot})
 	require.NoError(t, err)
 	require.Equal(t, PipelineSingle, hx.Pipeline())
 	hxRequest := hx.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
@@ -94,7 +94,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	t.Log("Scale Nova workloads without changing their model or workload digest")
 	for _, replicas := range []int32{2, 10, 12, 123} {
 		dgd.Spec.Components[0].Replicas = ptr.To(replicas)
-		scaled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": hxSnapshot})
+		scaled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": hxSnapshot})
 		require.NoError(t, err)
 		require.Equal(t, hx.Digest(), scaled.Digest())
 		require.Equal(t, replicas, scaled.scalingGroupReplicas)
@@ -107,11 +107,11 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 		fixture.selectedPropSyncChains = nil
 		fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 0, deviceType: manifestcapnp.DeviceType_cpu})
 		snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-		source := staticBuildSnapshotSource{"build": snapshot}
+		source := staticModelRegistry{"build": snapshot}
 		workload, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 		require.NoError(t, err)
 		require.Equal(t, PipelineSingle, workload.Pipeline())
-		require.False(t, workload.modelProjections[0].configuredBuild.HasCUDAPartitions)
+		require.False(t, workload.modelProjections[0].configuredBuild.hasCUDAPartitions)
 
 		t.Log("Authored GPU resources do not make an LPU-only build hybrid")
 		candidate := dgd.DeepCopy()
@@ -136,7 +136,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	fixture.selectedPropSyncChains = nil
 	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	source := staticBuildSnapshotSource{"build": snapshot}
+	source := staticModelRegistry{"build": snapshot}
 	_, err = ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
@@ -203,7 +203,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	xtRequest := xt.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
 	require.Equal(t, lpxv1alpha1.TargetFamilyXt8888, xtRequest.TargetFamily)
 	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xtRequest.WorkloadMode)
-	require.Len(t, xt.modelProjections[0].configuredBuild.Partitions, 2)
+	require.Len(t, xt.modelProjections[0].configuredBuild.partitions, 2)
 	plan, err = xt.PlanNodeLocalMaterialization("test-pcs")
 	require.NoError(t, err)
 	require.Equal(t, "cond", plan.CyborgTemplate)
@@ -252,7 +252,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Acquire draft and target fixtures with independently selected packing")
-			var snapshots [2]*BuildSnapshot
+			var snapshots [2]*Build
 			agentCounts, requestCounts := [2]int32{4, 4}, [2]int{2, 2}
 			for index, packed := range test.packed {
 				fixture := newV2CompilerFixture()
@@ -280,7 +280,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			)
 			dgd.Spec.Components[1].Replicas = ptr.To(int32(2))
 			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(agentCounts[0])
-			source := staticBuildSnapshotSource{
+			source := staticModelRegistry{
 				"draft-build":  snapshots[0],
 				"target-build": snapshots[1],
 			}
@@ -345,23 +345,23 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			require.NotEqual(t, WorkloadDigest{}, selected.Digest())
 			require.NotEqual(t, projections[0].Digest(), selected.Digest())
 			mixedFamily := *projections[2]
-			mixedFamily.configuredBuild.Family = BuildFamily("other")
+			mixedFamily.configuredBuild.family = BuildFamily("other")
 			_, err = workloadSetDigest([]*ModelProjection{projections[0], &mixedFamily})
 			require.ErrorContains(t, err, "mixed target families")
 
 			t.Log("Preserve compiled placement without repeating runtime-derived model settings")
 			for index, projection := range projections {
-				original := snapshots[index/2].build.Partitions
+				original := snapshots[index/2].partitions
 				require.EqualValues(t, agentCounts[index/2], projection.agentReplicas)
 				require.EqualValues(t, agentCounts[index/2], plan.Agents[index].Replicas)
 				request := projection.RequestSpec(plan, plan.Agents[index].TemplateName)
 				require.Len(t, request.Partitions, requestCounts[index/2])
-				require.EqualValues(t, original[0].SourcePartitionID, request.Partitions[0].CompilerPartitionID)
+				require.EqualValues(t, original[0].sourcePartitionID, request.Partitions[0].CompilerPartitionID)
 				require.Equal(t, projection.Model(), request.NodeLocal.Model)
 				if test.packed[index/2] {
 					require.Empty(t, request.PropSyncConnectors)
 				}
-				require.Equal(t, original, projection.configuredBuild.Partitions)
+				require.Equal(t, original, projection.configuredBuild.partitions)
 			}
 
 			for _, expansion := range []struct {
@@ -429,7 +429,7 @@ func TestResolveWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	before := dgd.DeepCopy()
 
 	t.Log("Validate placement and role ownership without parsing either command line")
-	_, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": snapshot})
+	_, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": snapshot})
 	require.NoError(t, err)
 	require.Equal(t, before, dgd)
 }
@@ -453,7 +453,7 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	t.Log("Resolve each group using only its own build, replicas and component identity")
 	groups := ComponentGroups(dgd)
 	for index, name := range []string{"first", "second"} {
-		workload, err := ResolveWorkload(t.Context(), dgd, groups[name], staticBuildSnapshotSource{name + "-build": snapshot})
+		workload, err := ResolveWorkload(t.Context(), dgd, groups[name], staticModelRegistry{name + "-build": snapshot})
 		require.NoError(t, err)
 		require.Equal(t, PipelineSingle, workload.Pipeline())
 		require.Equal(t, name, workload.ServingComponentName())
@@ -467,7 +467,7 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	t.Log("Require a singleton conductor independently of component replica counts")
 	conductor := dgd.GetComponentByName("second").ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.Replicas = ptr.To(int32(2))
-	_, err := ResolveWorkload(t.Context(), dgd, groups["second"], staticBuildSnapshotSource{"second-build": snapshot})
+	_, err := ResolveWorkload(t.Context(), dgd, groups["second"], staticModelRegistry{"second-build": snapshot})
 	require.ErrorContains(t, err, `component "second" conductor replicas must be one`)
 }
 

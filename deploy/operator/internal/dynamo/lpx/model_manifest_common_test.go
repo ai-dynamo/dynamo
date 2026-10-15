@@ -85,18 +85,18 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 			partition, err := buildPartitionFromManifestV2(raw)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
-				require.Equal(t, BuildPartition{}, partition)
+				require.Equal(t, buildPartition{}, partition)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, 7, partition.SourcePartitionID)
-			require.Equal(t, "part-0", partition.PartPath)
+			require.Equal(t, 7, partition.sourcePartitionID)
+			require.Equal(t, "part-0", partition.partPath)
 			require.Equal(t, test.topology, partition.topology)
-			require.EqualValues(t, test.numChips, partition.NumChips)
-			require.EqualValues(t, test.devicesPerNode, partition.DevicesPerNode)
-			require.Len(t, partition.HXExtent, len(test.wantExtent))
+			require.EqualValues(t, test.numChips, partition.numChips)
+			require.EqualValues(t, test.devicesPerNode, partition.devicesPerNode)
+			require.Len(t, partition.hxExtent, len(test.wantExtent))
 			for index, value := range test.wantExtent {
-				require.EqualValues(t, value, partition.HXExtent[index])
+				require.EqualValues(t, value, partition.hxExtent[index])
 			}
 		})
 	}
@@ -121,13 +121,13 @@ func TestManifestPartitionsRequireUniformDeviceCounts(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Build partitions with different chip counts and manifest node widths")
-			partitions := []BuildPartition{
-				{SourcePartitionID: 7, NumChips: test.nodeWidths[0], DevicesPerNode: test.nodeWidths[0]},
-				{SourcePartitionID: 3, NumChips: 2 * test.nodeWidths[1], DevicesPerNode: test.nodeWidths[1]},
+			partitions := []buildPartition{
+				{sourcePartitionID: 7, numChips: test.nodeWidths[0], devicesPerNode: test.nodeWidths[0]},
+				{sourcePartitionID: 3, numChips: 2 * test.nodeWidths[1], devicesPerNode: test.nodeWidths[1]},
 			}
 			if test.family == BuildFamilyHX {
-				partitions[0].HXExtent = []int64{int64(test.nodeWidths[0]), 1, 1, 1}
-				partitions[1].HXExtent = []int64{int64(test.nodeWidths[1]), 2, 1, 1}
+				partitions[0].hxExtent = []int64{int64(test.nodeWidths[0]), 1, 1, 1}
+				partitions[1].hxExtent = []int64{int64(test.nodeWidths[1]), 2, 1, 1}
 			}
 
 			t.Log("Reject mixed device counts before deriving runtime projections")
@@ -145,22 +145,22 @@ func TestManifestPartitionsRequireUniformDeviceCounts(t *testing.T) {
 
 func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	t.Log("Classify HX partitions while preserving manifest order")
-	hx := []BuildPartition{
-		{SourcePartitionID: 7, NumChips: 16, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
-		{SourcePartitionID: 3, NumChips: 16, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
+	hx := []buildPartition{
+		{sourcePartitionID: 7, numChips: 16, devicesPerNode: 16, hxExtent: []int64{16, 1, 1, 1}},
+		{sourcePartitionID: 3, numChips: 16, devicesPerNode: 16, hxExtent: []int64{16, 1, 1, 1}},
 	}
 	family, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, hx, false)
 	require.NoError(t, err)
 	require.Equal(t, BuildFamilyHX, family)
-	require.Equal(t, []int{7, 3}, []int{hx[0].SourcePartitionID, hx[1].SourcePartitionID})
+	require.Equal(t, []int{7, 3}, []int{hx[0].sourcePartitionID, hx[1].sourcePartitionID})
 
 	t.Log("Classify XT partitions while sorting by source partition identity")
-	xt := []BuildPartition{
-		{SourcePartitionID: 7, NumChips: 8, DevicesPerNode: 8},
-		{SourcePartitionID: 3, NumChips: 8, DevicesPerNode: 8},
+	xt := []buildPartition{
+		{sourcePartitionID: 7, numChips: 8, devicesPerNode: 8},
+		{sourcePartitionID: 3, numChips: 8, devicesPerNode: 8},
 	}
 	family, err = classifyManifestPartitions(gbuildManifestV2CapnpFile, xt, false)
 	require.NoError(t, err)
 	require.Equal(t, BuildFamilyXT, family)
-	require.Equal(t, []int{3, 7}, []int{xt[0].SourcePartitionID, xt[1].SourcePartitionID})
+	require.Equal(t, []int{3, 7}, []int{xt[0].sourcePartitionID, xt[1].sourcePartitionID})
 }

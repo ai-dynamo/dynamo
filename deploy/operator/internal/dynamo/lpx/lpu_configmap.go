@@ -90,11 +90,11 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	for _, projection := range projections {
 		// Render runtime partitions, including XT's collapsed prop-sync chains.
 		offset := int64(0)
-		for index, partition := range projection.configuredBuild.Partitions {
+		for index, partition := range projection.configuredBuild.partitions {
 			endpointCount := int64(partition.effectiveNodeCount())
 			row := [len(keys)]string{strconv.FormatInt(endpointCount, 10), strconv.Itoa(index),
-				strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10), projection.model,
-				strconv.FormatInt(offset, 10), partition.PartPath}
+				strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10), projection.model,
+				strconv.FormatInt(offset, 10), partition.partPath}
 
 			// Preserve compiler order across the parallel runtime columns.
 			for column := range row {
