@@ -144,7 +144,7 @@ def test_dynamo_tensor_to_numpy_float32_preserves_shape():
 
 # The Rust `half::f16` / `half::bf16` types serialize as their u16 bit
 # patterns, so half-precision values arrive as ints that must be reinterpreted.
-_HALF_DECODED = [1.5, -2.25, 3.125, -4.0]
+_HALF_DECODED = (1.5, -2.25, 3.125, -4.0)
 
 
 def test_dynamo_tensor_to_numpy_float16_reinterprets_bit_patterns():
@@ -161,9 +161,9 @@ def test_dynamo_tensor_to_numpy_float16_reinterprets_bit_patterns():
 
 def test_dynamo_tensor_to_numpy_bfloat16_reinterprets_bit_patterns():
     """BFloat16 values are u16 bit patterns and become an ml_dtypes.bfloat16
-    array. NumPy has no native bfloat16, but
-    tritonclient.utils.triton_to_np_dtype('BF16') returns ml_dtypes.bfloat16,
-    which is what tritonserver's Python bindings expect for a BF16 input."""
+    array, the dtype tritonclient.utils.triton_to_np_dtype('BF16') returns.
+    tritonserver cannot take this array as an input directly; the handler wraps
+    its bytes in a tritonserver.Tensor(DataType.BF16, ...)."""
     bits = [0x3FC0, 0xC010, 0x4048, 0xC080]
     arr = dynamo_tensor_to_numpy(_tensor("IN", "BFloat16", [2, 2], bits))
     assert arr.dtype == ml_dtypes.bfloat16
