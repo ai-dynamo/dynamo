@@ -16,7 +16,7 @@ import (
 func TestProjectModelV2UsesManifestPropSync(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Acquire a V2 build with compiler-selected prop-sync metadata")
+	t.Log("Acquire a XT build with compiler-selected prop-sync metadata")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized
 	require.Equal(t, [][]int{{7, 8}}, build.selectedPropSyncChains)
@@ -49,7 +49,7 @@ func TestProjectModelV2SingleEmbeddingPlacementFromManifest(t *testing.T) {
 		{name: "partition zero is runnable", cpuSupported: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Prepare a selected V2 chain with explicit embedding placement capabilities")
+			t.Log("Prepare a selected XT chain with explicit embedding placement capabilities")
 			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 			build := normalized
 			build.partitions[0].sourcePartitionID = 0
@@ -77,7 +77,7 @@ func TestProjectModelV2SingleEmbeddingPlacementFromManifest(t *testing.T) {
 }
 
 func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
-	t.Log("Prepare a hybrid V2 build with a standalone embedding partition")
+	t.Log("Prepare a hybrid XT build with a standalone embedding partition")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized
 	build.partitions[0].sourcePartitionID = 0
@@ -167,7 +167,7 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	fourth.sourcePartitionID = 13
 	build.partitions = append(build.partitions, fourth)
 	build.selectedPropSyncChains = [][]int{{11, 13}, {7, 8}}
-	connectors, err := v2Connectors(build, build.partitions)
+	connectors, err := xtConnectors(build, build.partitions)
 	require.NoError(t, err)
 	require.Len(t, connectors, 2)
 	require.Equal(t, "partition-000", connectors[0].FromPartitionID)
@@ -218,7 +218,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Prepare two selected V2 sub-host partitions")
+	t.Log("Prepare two selected XT sub-host partitions")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized
 

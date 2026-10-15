@@ -14,23 +14,22 @@ import (
 )
 
 const (
-	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
-	v3ProjectionVersion      = "v3-hx-capnp/v1"
-	v3LPUDevice              = "lpu"
+	hxProjectionVersion = "hx-node-local/v1"
+	hxLPUDevice         = "lpu"
 )
 
-func projectV3Component(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
+func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
 	runtimeBuild := *intent.Build
 	manifestPartitions := runtimeBuild.partitions
 
 	ioFPGACount, ioFanoutFactor := runtimeBuild.ioFPGACount, runtimeBuild.ioFanoutFactor
 
-	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, runtimeBuild.selectedPropSyncChains, "selected V3 prop-sync chain")
+	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, runtimeBuild.selectedPropSyncChains, "selected HX prop-sync chain")
 	if err != nil {
 		return ModelProjection{}, err
 	}
 	if intent.Pipeline != PipelineHybrid && len(edgePositions) != len(manifestPartitions)-1 {
-		return ModelProjection{}, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
+		return ModelProjection{}, fmt.Errorf("HX LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 
 	partitions := manifestPartitions
@@ -75,13 +74,12 @@ func projectV3Component(intent ModelProjectionInput, transcript digestTranscript
 
 	// Selected chains are represented by the allocation metadata and connectors below.
 	runtimeBuild.selectedPropSyncChains = nil
-	allocationMetadata, connectors, err := projectV3PropSync(partitions, edgePositions)
+	allocationMetadata, connectors, err := projectHXPropSync(partitions, edgePositions)
 	if err != nil {
 		return ModelProjection{}, err
 	}
 
 	// Record identity fields after validating the shared component geometry.
-	transcript.field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
 	if len(localPartitionIDs) > 0 {
 		encoded, _ := json.Marshal(localPartitionIDs)
 		transcript.field("local-partition-ids", encoded)
@@ -130,14 +128,14 @@ func retainedPropSyncEdges(partitions, remote []buildPartition, edgePositions []
 }
 
 // Each edgePositions entry is a source index whose destination is position+1.
-func projectV3PropSync(partitions []buildPartition, edgePositions []int) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
-	// Project each physical partition into the V3 allocation metadata envelope.
+func projectHXPropSync(partitions []buildPartition, edgePositions []int) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
+	// Project each physical partition into the HX allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
 	partitionInfo["num_partitions"] = len(partitions)
 	for _, partition := range partitions {
 		compilerID := uint32(partition.sourcePartitionID)
 		partitionInfo[strconv.FormatUint(uint64(compilerID), 10)] = map[string]any{
-			"device":     v3LPUDevice,
+			"device":     hxLPUDevice,
 			"allocation": partition.hxExtent,
 		}
 	}

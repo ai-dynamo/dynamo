@@ -17,8 +17,8 @@ import (
 const (
 	// Digest domain strings and field tags are part of workload identity; changing
 	// them changes every projected digest.
-	modelProjectionDigestVersion = "dynamo-node-local-compilation/v1"
-	workloadSetDigestVersion     = "dynamo-lpx-compilation-set/v1"
+	modelProjectionDigestVersion = "dynamo-lpx-model-projection/v1"
+	workloadSetDigestVersion     = "dynamo-lpx-workload/v1"
 	maxLPXPartitions             = 256
 )
 
@@ -37,11 +37,11 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	)
 	switch intent.Build.family {
 	case BuildFamilyXT:
-		projectionVersion = v2ProjectionVersion
-		component, err = projectV2Component(intent, digestTranscript{&fields})
+		projectionVersion = xtProjectionVersion
+		component, err = projectXTComponent(intent, digestTranscript{&fields})
 	case BuildFamilyHX:
-		projectionVersion = v3ProjectionVersion
-		component, err = projectV3Component(intent, digestTranscript{&fields})
+		projectionVersion = hxProjectionVersion
+		component, err = projectHXComponent(intent, digestTranscript{&fields})
 	default:
 		return nil, fmt.Errorf("unsupported LPX target family %q", intent.Build.family)
 	}
@@ -90,7 +90,7 @@ func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
 			)
 		}
 		transcript.field("model", []byte(projection.model))
-		transcript.field("compilation-digest", projection.digest[:])
+		transcript.field("model-projection-digest", projection.digest[:])
 	}
 	return sumDigest(hash), nil
 }
@@ -101,7 +101,7 @@ func modelProjectionDigest(intent ModelProjectionInput, projectionVersion, model
 	hash := sha256.New()
 	transcript := digestTranscript{hash}
 	transcript.field("schema", []byte(modelProjectionDigestVersion))
-	transcript.field("lowerer", []byte(projectionVersion))
+	transcript.field("projection-version", []byte(projectionVersion))
 	// Ref is an acquisition locator, not build content. In particular, a
 	// file-backed snapshot's ref contains its absolute checkout path.
 	transcript.field("build-content-id", []byte(intent.Build.contentID))
