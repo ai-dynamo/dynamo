@@ -11,7 +11,7 @@ suite-specific part -- which models the run needs, and which environment
 
 Environment:
     GITHUB_WORKSPACE: set under GitHub Actions; artifacts go to the
-        ``test-results/logs`` tree that .github/actions/pytest-local uploads.
+        ``test-results/logs`` tree that .github/workflows/shared-test.yml uploads.
         Off CI they go to a temp directory.
 """
 
@@ -127,7 +127,7 @@ def artifact_dir(name: str) -> Path:
     """Create and return a directory for diagnostics that outlive the run.
 
     Under GitHub Actions this is the ``test-results/logs`` tree that
-    .github/actions/pytest-local uploads. Off CI it is a temp directory, which
+    .github/workflows/shared-test.yml uploads. Off CI it is a temp directory, which
     keeps output out of the working tree.
     """
     workspace = os.environ.get("GITHUB_WORKSPACE")
