@@ -11,6 +11,11 @@ the source of the latest cu130 nightly wheel observed on 2026-10-15, rather than
 the moving `nightly` alias. This revision includes the merged response-schema change
 [#60926](https://github.com/vllm-project/vllm/pull/60926).
 
+Use this nightly pin temporarily. Once a stable vLLM release includes the
+response-schema change, update the profile to that release's exact source revision
+and wheel. Refresh the wheel checksum, dependency snapshot and schema capture;
+verify the SSE selectors against that release before using it for assessments.
+
 The selected source registers unary JSON and SSE contracts for
 `/v1/chat/completions` and `/v1/completions`. Its OpenAPI 3.1 SSE `schema` describes
 a parsed event envelope: string `data` contains a JSON chunk, JSON error or literal
