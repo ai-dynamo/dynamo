@@ -8,6 +8,7 @@
 
 pub mod frontend_perf;
 pub mod otlp_export;
+pub mod prom_text;
 pub mod prom_typed;
 pub mod prometheus_names;
 pub mod quic_response;
@@ -884,14 +885,10 @@ impl MetricsRegistry {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
 
-        let merged = FamilyMerger::from_gathered(&registries)?.into_sorted();
-
-        let encoder = prometheus::TextEncoder::new();
-        let mut buffer = Vec::new();
-        encoder.encode(&merged, &mut buffer)?;
-        let mut result = String::from_utf8(buffer)?;
-
-        // Append expfmt callbacks deterministically in registry order.
+        // Run the expfmt callbacks before gathering, deterministically in
+        // registry order. A callback may update registry metrics as a side
+        // effect, such as the success gauge of a fetch it performs, and those
+        // values belong to this render rather than the next one.
         let mut expfmt = String::new();
         for registry in &registries {
             let text = registry.execute_expfmt_callbacks();
@@ -902,6 +899,13 @@ impl MetricsRegistry {
                 expfmt.push_str(&text);
             }
         }
+
+        let merged = FamilyMerger::from_gathered(&registries)?.into_sorted();
+
+        let encoder = prometheus::TextEncoder::new();
+        let mut buffer = Vec::new();
+        encoder.encode(&merged, &mut buffer)?;
+        let mut result = String::from_utf8(buffer)?;
 
         if !expfmt.is_empty() {
             if !result.ends_with('\n') {
@@ -926,35 +930,42 @@ impl MetricsRegistry {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
 
+        // Collect the typed callbacks before gathering, for the same reason
+        // the text path does: a callback's side effects on registry metrics
+        // belong to this collection. The gathered families still enter the
+        // merger first, so they keep precedence on a name conflict.
+        let typed: Vec<crate::metrics::prom_typed::BuiltFamily> = registries
+            .iter()
+            .flat_map(|registry| registry.execute_typed_callbacks())
+            .collect();
+
         let mut merger = FamilyMerger::from_gathered(&registries)?;
 
         // The unit travels beside the family, keyed by name: the proto model
         // has no unit field, so it would otherwise be dropped here.
         let mut units: HashMap<String, String> = HashMap::new();
         let mut prom_types: HashMap<String, String> = HashMap::new();
-        for registry in &registries {
-            for built in registry.execute_typed_callbacks() {
-                let name = built.family.name().to_string();
-                // Publish the side metadata only once the family is accepted.
-                // The maps are keyed by name, so metadata from a family the
-                // merger rejects would otherwise be applied to the family that
-                // did survive under that name -- a rejected `info` could make a
-                // surviving gauge encode as a non-monotonic Sum.
-                if let Err(error) = merger.add_family(built.family) {
-                    tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
-                    continue;
-                }
-                // First writer wins, matching how the merger itself resolves a
-                // conflict: the first family fixes help and type, and later
-                // ones must agree. A later family can be accepted and still
-                // have every sample dropped as a duplicate series, so letting
-                // it overwrite the unit would label the surviving data with a
-                // unit from a source that contributed none of it.
-                if !built.unit.is_empty() {
-                    units.entry(name.clone()).or_insert(built.unit);
-                }
-                prom_types.entry(name).or_insert(built.prom_type);
+        for built in typed {
+            let name = built.family.name().to_string();
+            // Publish the side metadata only once the family is accepted.
+            // The maps are keyed by name, so metadata from a family the
+            // merger rejects would otherwise be applied to the family that
+            // did survive under that name -- a rejected `info` could make a
+            // surviving gauge encode as a non-monotonic Sum.
+            if let Err(error) = merger.add_family(built.family) {
+                tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
+                continue;
             }
+            // First writer wins, matching how the merger itself resolves a
+            // conflict: the first family fixes help and type, and later
+            // ones must agree. A later family can be accepted and still
+            // have every sample dropped as a duplicate series, so letting
+            // it overwrite the unit would label the surviving data with a
+            // unit from a source that contributed none of it.
+            if !built.unit.is_empty() {
+                units.entry(name.clone()).or_insert(built.unit);
+            }
+            prom_types.entry(name).or_insert(built.prom_type);
         }
 
         Ok(CollectedFamilies {

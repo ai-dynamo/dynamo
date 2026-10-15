@@ -5,6 +5,7 @@
 
 mod args;
 mod endpoint;
+mod engine_metrics;
 mod error;
 mod json;
 mod run;
@@ -22,6 +23,10 @@ pub mod v14 {
 
 pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
+pub use engine_metrics::{
+    ENGINE_METRICS_CONNECT_TIMEOUT, ENGINE_METRICS_FETCH_TIMEOUT, ENGINE_METRICS_MAX_BODY_BYTES,
+    EngineMetricsArgs, EngineMetricsEndpoint, FetchBounds, register_engine_metrics,
+};
 pub use error::{
     SidecarStartupError, cancelled, cannot_connect, connection_timeout, engine_shutdown,
     invalid_argument, protocol_error, status_to_dynamo,

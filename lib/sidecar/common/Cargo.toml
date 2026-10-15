@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 prost-types = { workspace = true }
 prost-types-v14 = { workspace = true, optional = true }
+reqwest = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -36,6 +37,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+axum = { workspace = true }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tokio = { workspace = true, features = ["test-util"] }
 

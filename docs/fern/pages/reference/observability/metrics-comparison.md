@@ -47,6 +47,8 @@ For Dynamo frontend and router metrics (`dynamo_frontend_*`, `dynamo_component_r
 
 These are **pass-through metrics from the engines themselves** — Dynamo exposes them on its `/metrics` endpoint but does not generate them. Metric names are shown **without prefix**. Actual metrics use `vllm:`, `sglang:`, or `trtllm_` prefix respectively.
 
+In sidecar mode the vLLM and SGLang sidecars fetch these families from the engine's `/metrics` on each scrape and re-export them with the same Dynamo labels; the TensorRT-LLM sidecar does not yet, because its engine serves no HTTP metrics endpoint in gRPC mode. `lmcache:*` and `vllm:cache_config_info` come from vLLM's Python worker processes and are not served by `vllm-rs`, so they are absent from the sidecar's output. See [Sidecar Backends](../../developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md#metrics).
+
 | Category | Metric | vLLM | SGLang | TensorRT-LLM |
 |----------|--------|------|--------|---------------|
 | **REQUEST STATE & QUEUE** | | | | |

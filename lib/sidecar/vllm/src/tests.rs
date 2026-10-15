@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+use dynamo_backend_common::exposition::ExpositionOutputs;
 use dynamo_backend_common::{
     BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine,
     MultimodalData, OutputOptions, PrefillResult, PreprocessedRequest, RlAdminBaseUrl,
@@ -21,7 +22,7 @@ use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, HttpEndpoint};
 use futures::{Stream, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -31,7 +32,7 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::engine::VllmSidecarEngine;
+use crate::engine::{VllmSidecarEngine, resolve_engine_metrics};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 use crate::test_fixtures::*;
@@ -655,15 +656,40 @@ fn engine_with_server_info(
     model: pb::ModelInfo,
     server: pb::ServerInfo,
 ) -> VllmSidecarEngine {
+    engine_with_metrics(endpoint, mode, connections, model, server, None)
+}
+
+fn engine_with_metrics(
+    endpoint: &str,
+    mode: DisaggregationMode,
+    connections: usize,
+    model: pb::ModelInfo,
+    server: pb::ServerInfo,
+    http_endpoint: Option<&str>,
+) -> VllmSidecarEngine {
     let transport = GrpcTransportConfig {
         connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
         ..Default::default()
     };
+    let grpc_endpoint =
+        GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint");
+    let http_endpoint = http_endpoint
+        .map(|endpoint| HttpEndpoint::parse(endpoint, "--vllm-http-endpoint").expect("valid HTTP"));
+    let engine_metrics = resolve_engine_metrics(
+        &grpc_endpoint,
+        http_endpoint.as_ref(),
+        ExpositionOutputs {
+            prometheus: true,
+            otlp: false,
+        },
+    )
+    .expect("engine metrics config");
     VllmSidecarEngine::new(
-        GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
+        grpc_endpoint,
         DiscoveredModel::from_proto(model, server).expect("valid discovery"),
         mode,
         transport,
+        engine_metrics,
     )
 }
 
@@ -2816,4 +2842,129 @@ async fn unsupported_features_fail_before_rpc_submission() {
         assert!(result.is_err());
     }
     assert!(server.service.requests.lock().await.is_empty());
+}
+
+#[test]
+fn engine_metrics_url_follows_the_http_flag_or_the_grpc_host() {
+    let outputs = ExpositionOutputs {
+        prometheus: true,
+        otlp: false,
+    };
+    let grpc = GrpcEndpoint::parse("127.0.0.1:50051", "--grpc-endpoint").unwrap();
+    let default = resolve_engine_metrics(&grpc, None, outputs).unwrap();
+    assert_eq!(default.url(), "http://127.0.0.1:8000/metrics");
+    assert!(!default.is_explicit());
+
+    let ipv6 = GrpcEndpoint::parse("http://[2001:db8::1]:50051", "--grpc-endpoint").unwrap();
+    assert_eq!(
+        resolve_engine_metrics(&ipv6, None, outputs).unwrap().url(),
+        "http://[2001:db8::1]:8000/metrics"
+    );
+
+    let http = HttpEndpoint::parse(
+        "https://worker.example.com/admin/v1",
+        "--vllm-http-endpoint",
+    )
+    .unwrap();
+    let explicit = resolve_engine_metrics(&grpc, Some(&http), outputs).unwrap();
+    assert_eq!(
+        explicit.url(),
+        "https://worker.example.com/admin/v1/metrics"
+    );
+    assert!(explicit.is_explicit());
+}
+
+/// Lines captured from `vllm-rs serve`, which renders OpenMetrics text.
+const VLLM_OPENMETRICS: &str = "\
+# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name=\"Qwen/Qwen3-0.6B\",engine=\"0\"} 0
+# HELP vllm:prompt_tokens Number of prefill tokens processed.
+# TYPE vllm:prompt_tokens counter
+vllm:prompt_tokens_total{model_name=\"Qwen/Qwen3-0.6B\",engine=\"0\"} 19132
+# HELP http_requests Total HTTP requests.
+# TYPE http_requests counter
+http_requests_total{handler=\"/metrics\",method=\"GET\",status=\"2xx\"} 5
+# EOF
+";
+
+async fn serve_engine_metrics(body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let router = axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(move || async move {
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                )],
+                body,
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve engine metrics");
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_metrics_reexports_vllm_families_with_worker_identity() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let metrics_base = serve_engine_metrics(VLLM_OPENMETRICS).await;
+    let engine = engine_with_metrics(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+        server_info(),
+        Some(&metrics_base),
+    );
+    let config = engine.start(0).await.expect("start");
+    let engine_metrics = dynamo_backend_common::EngineMetrics::with_engine_config(
+        dynamo_backend_common::metrics::TestHierarchy::new(),
+        &config,
+    );
+    let bindings = engine
+        .setup_metrics(dynamo_backend_common::MetricsCtx {
+            model: &config.model,
+            component: "backend",
+            model_load_time_seconds: 0.0,
+            metrics: &engine_metrics,
+        })
+        .await
+        .expect("setup_metrics");
+    assert!(bindings.dp_ranks.is_empty());
+
+    // Callbacks run on the blocking pool in production; mirror that here.
+    let registry = engine_metrics.hierarchy().get_metrics_registry().clone();
+    let text = tokio::task::spawn_blocking(move || registry.prometheus_expfmt_combined())
+        .await
+        .expect("render task")
+        .expect("render");
+    let counter = text
+        .lines()
+        .find(|line| line.starts_with("vllm:prompt_tokens_total{"))
+        .unwrap_or_else(|| panic!("counter missing from:\n{text}"));
+    // The served model name fills `model`; vLLM's own `model_name` is kept.
+    assert_eq!(
+        counter,
+        "vllm:prompt_tokens_total{engine=\"0\",model=\"served-model\",model_name=\"Qwen/Qwen3-0.6B\"} 19132"
+    );
+    assert!(
+        text.contains("# TYPE vllm:prompt_tokens_total counter"),
+        "{text}"
+    );
+    assert!(text.contains("vllm:num_requests_running{"), "{text}");
+    assert!(!text.contains("http_requests"), "{text}");
+    assert!(
+        text.lines().any(|line| {
+            line.starts_with("dynamo_component_engine_metrics_scrape_success")
+                && line.ends_with(" 1")
+        }),
+        "{text}"
+    );
 }
