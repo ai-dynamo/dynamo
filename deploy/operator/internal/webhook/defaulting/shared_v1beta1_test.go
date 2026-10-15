@@ -24,7 +24,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func TestDefaultMultinodeRoleReplicas(t *testing.T) {
+func TestDefaultDynamoComponentDeploymentSharedSpec(t *testing.T) {
 	tests := []struct {
 		name       string
 		component  nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
@@ -59,7 +59,10 @@ func TestDefaultMultinodeRoleReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaultMultinodeRoleReplicas(&tt.component)
+			defaultDynamoComponentDeploymentSharedSpec(
+				&tt.component,
+				dynamoComponentDeploymentSharedSpecDefaultOptions{},
+			)
 
 			if got := tt.component.Roles[0].Replicas; !ptr.Equal(got, tt.wantLeader) {
 				t.Fatalf("leader replicas = %v, want %v", got, tt.wantLeader)

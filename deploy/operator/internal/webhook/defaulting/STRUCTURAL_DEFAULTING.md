@@ -17,6 +17,10 @@ each default, and leaves the webhook handler as a narrow request boundary.
   exception for information that conversion cannot represent.
 - Preserve explicit user values. Fill only absence defined by the API and never
   rewrite an explicit value to make it valid.
+- Keep authoritative server-owned overwrites in the resource-root
+  `default<Type>` function. Document why the server owns the field, when it
+  replaces a submitted value, and cover that overwrite through the production
+  admission chain.
 - Do not infer or track value provenance. Treat the decoded object as authoritative:
   a user-supplied value and the same value applied by CRD schema defaulting are
   indistinguishable. Do not inspect the raw admission request, compare against a
@@ -102,7 +106,7 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error
 func defaultDynamoGraphDeployment(
     dgd *nvidiacomv1beta1.DynamoGraphDeployment,
     opts dynamoGraphDeploymentDefaultOptions,
-) error
+)
 
 func defaultDynamoGraphDeploymentSpec(
     spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
@@ -113,7 +117,7 @@ func defaultDynamoGraphDeploymentSpec(
 func defaultDynamoGraphDeploymentV1alpha1(
     dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
     opts dynamoGraphDeploymentV1alpha1DefaultOptions,
-) error
+)
 
 func defaultDynamoGraphDeploymentSpecV1alpha1(
     spec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
