@@ -72,8 +72,8 @@ impl<'a> WorkerCandidate<'a> {
     /// Blocks the router's indexer holds for this worker rank as of the last event it applied, only
     /// when this component declared RESIDENT_BLOCKS: device blocks from KV events, or the router's
     /// prediction in approximate modes. Unweighted and not clamped to capacity. None means access
-    /// was not requested, the host has no local indexer, or the indexer has not seen the rank or
-    /// has removed it.
+    /// was not requested, the host has no local indexer, or the indexer has held no blocks for the
+    /// rank while counting or has removed it.
     pub fn resident_blocks(self) -> Option<u64> {
         if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
             return None;

@@ -801,19 +801,10 @@ async fn declaring_policy_reads_live_resident_blocks() {
         ))
         .await
         .unwrap();
+    entry.indexer.flush().await;
 
-    // The store applies on the indexer's own thread, so select until the count arrives.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            core.select(select_request()).await.expect("select");
-            if observed.lock().last() == Some(&Some(3)) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("a declaring policy should read the live count");
+    core.select(select_request()).await.expect("select");
+    assert_eq!(observed.lock().last(), Some(&Some(3)));
 }
 
 #[tokio::test]

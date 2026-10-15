@@ -773,7 +773,8 @@ impl RadixTree {
         }
     }
 
-    /// Drops `worker`'s blocks without forgetting the rank, as a clear does.
+    /// Drops `worker`'s blocks and lookup entry. Callers decide the rank's resident block counter:
+    /// a clear leaves it at 0, a removal withdraws it.
     fn drop_rank(&mut self, worker: WorkerWithDpRank) {
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;

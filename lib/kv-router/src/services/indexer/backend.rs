@@ -468,9 +468,7 @@ impl Indexer {
             } => {
                 if is_clear {
                     if targets_primary {
-                        primary
-                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
-                            .await?;
+                        primary.apply_event_and_wait(event.clone()).await?;
                     }
                     for indexer in lower_tier.all() {
                         indexer.apply_event_and_wait(event.clone()).await?;
@@ -1645,10 +1643,12 @@ mod tests {
                 "{num_threads} indexer thread(s)"
             );
 
-            // A cleared rank stays known and empty; a removed rank is gone.
+            // A cleared rank stays known and empty; a removed rank is gone. The clear takes the
+            // path the frontend admits live engine events through.
             indexer
-                .apply_event(make_clear_event_with_dp_rank(2, 0))
-                .await;
+                .try_apply_event(make_clear_event_with_dp_rank(2, 0))
+                .await
+                .unwrap();
             indexer.remove_worker_dp_rank(1, 1).await;
             flush(&indexer).await;
             assert_eq!(
@@ -1666,6 +1666,9 @@ mod tests {
                     .get(WorkerWithDpRank::new(1, 0)),
                 Some(2)
             );
+            indexer.remove_worker(1).await;
+            flush(&indexer).await;
+            assert_eq!(held(1, 0), None, "{num_threads} indexer thread(s)");
         }
     }
 
@@ -1682,7 +1685,8 @@ mod tests {
                 ))
                 .await;
             let worker = WorkerWithDpRank::new(1, 0);
-            wait_until(|| counts.load().get(worker) == Some(2)).await;
+            flush(&indexer).await;
+            assert_eq!(counts.load().get(worker), Some(2));
             match &indexer {
                 Indexer::Single { primary, .. } => primary.shutdown(),
                 Indexer::Concurrent { primary, .. } => primary.shutdown(),

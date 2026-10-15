@@ -31,8 +31,8 @@ pub(crate) struct ResidentBlockCounts {
 }
 
 impl ResidentBlockCounts {
-    /// Blocks held for `worker` as of the last event applied to it; `None` for a rank the indexer
-    /// has not seen or has removed.
+    /// Blocks held for `worker` as of the last event applied to it; `None` for a rank that has held
+    /// no blocks while tracked, or that the indexer removed.
     pub(crate) fn get(&self, worker: WorkerWithDpRank) -> Option<u64> {
         self.counters
             .get(&worker)
@@ -121,13 +121,14 @@ pub(crate) struct ResidentBlockTracker {
 }
 
 impl ResidentBlockTracker {
-    /// Starts tracking, with counters for the ranks the thread already holds.
+    /// Starts tracking, with counters for the ranks the thread already holds blocks for.
     pub(crate) fn new(
         counts: ResidentBlockCountsHandle,
         ranks: impl IntoIterator<Item = (WorkerWithDpRank, usize)>,
     ) -> Self {
         let owned: FxHashMap<_, _> = ranks
             .into_iter()
+            .filter(|&(_, blocks)| blocks > 0)
             .map(|(worker, blocks)| (worker, counter(blocks)))
             .collect();
         let added: Vec<_> = owned
@@ -138,12 +139,13 @@ impl ResidentBlockTracker {
         Self { counts, owned }
     }
 
-    /// Records `worker`'s block count after an event. `None` means the thread holds no blocks
-    /// for it, as after a clear; a rank already counted then reads 0.
+    /// Records `worker`'s block count after an event. A rank is counted from its first block on;
+    /// `None` means the thread holds no blocks for it, as after a clear, and a counted rank then
+    /// reads 0.
     pub(crate) fn update(&mut self, worker: WorkerWithDpRank, blocks: Option<usize>) {
         if let Some(counter) = self.owned.get(&worker) {
             counter.store(blocks.unwrap_or(0) as u64, Ordering::Relaxed);
-        } else if let Some(blocks) = blocks {
+        } else if let Some(blocks) = blocks.filter(|&blocks| blocks > 0) {
             let counter = counter(blocks);
             self.owned.insert(worker, counter.clone());
             self.counts.publish(&[(worker, counter)]);
@@ -186,10 +188,13 @@ mod tests {
             WorkerWithDpRank::new(2, 0),
             WorkerWithDpRank::new(3, 0),
         );
-        let mut tracker = ResidentBlockTracker::new(counts.clone(), [(held, 4), (emptied, 2)]);
+        // Empty block maps, as a remove for an unknown rank can leave, start no count.
+        let mut tracker =
+            ResidentBlockTracker::new(counts.clone(), [(held, 4), (emptied, 2), (unseen, 0)]);
         tracker.update(held, Some(5));
         tracker.update(emptied, None);
         tracker.update(removed, Some(7));
+        tracker.update(unseen, Some(0));
         let read = |worker| counts.load().get(worker);
         assert_eq!(
             [read(held), read(emptied), read(removed), read(unseen)],

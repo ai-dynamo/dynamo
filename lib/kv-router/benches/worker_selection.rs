@@ -15,7 +15,7 @@ use dynamo_kv_router::indexer::{
     concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed,
 };
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, RoutingConstraints, WorkerConfigLike,
     WorkerId, WorkerWithDpRank, compute_seq_hash_for_block,
 };
@@ -498,43 +498,54 @@ fn kv_event(worker: WorkerId, event_id: u64, data: KvCacheEventData) -> RouterEv
     )
 }
 
-/// Event-thread cost of keeping resident block counts: stores then clears for 128 workers on
-/// 8 event threads, untracked and tracked. A concurrent reader belongs in the pinned Mooncake
-/// replay (`--resident-blocks-reader-cpu`): unpinned, any busy thread skews this bench.
+/// Event-thread cost of keeping resident block counts, untracked and tracked: 128 workers on 8
+/// event threads each store a 16-block chain one block per event, then remove it the same way.
+/// Single-block events are the cheapest to apply, so the per-event tracking cost is the largest
+/// share of them. Nothing reads the counters here; unpinned, a busy reader thread skews this
+/// bench. The pinned Mooncake replay's `--resident-blocks-reader-cpu` covers a reader, at that
+/// trace's larger events.
 fn resident_blocks_write(c: &mut Criterion) {
     const WORKERS: u64 = 128;
-    const BLOCKS: u64 = 64;
+    const BLOCKS: u64 = 16;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let stores: Vec<_> = (0..WORKERS)
-        .map(|worker| {
+    let events: Vec<_> = (0..WORKERS)
+        .flat_map(|worker| {
             let local: Vec<_> = (0..BLOCKS)
                 .map(|i| LocalBlockHash(worker * BLOCKS + i))
                 .collect();
-            let blocks = local
-                .iter()
-                .zip(compute_seq_hash_for_block(&local))
-                .map(|(&tokens_hash, hash)| KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(hash),
-                    tokens_hash,
-                    mm_extra_info: None,
-                })
+            let hashes: Vec<_> = compute_seq_hash_for_block(&local)
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
                 .collect();
-            let store = KvCacheStoreData {
-                parent_hash: None,
-                start_position: None,
-                blocks,
-            };
-            kv_event(worker, 0, KvCacheEventData::Stored(store))
+            let stores = (0..hashes.len()).map(|i| {
+                let store = KvCacheStoreData {
+                    parent_hash: i.checked_sub(1).map(|parent| hashes[parent]),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: hashes[i],
+                        tokens_hash: local[i],
+                        mm_extra_info: None,
+                    }],
+                };
+                kv_event(worker, i as u64, KvCacheEventData::Stored(store))
+            });
+            let removes = (0..hashes.len()).rev().map(|i| {
+                let remove = KvCacheRemoveData {
+                    block_hashes: vec![hashes[i]],
+                };
+                kv_event(worker, BLOCKS + i as u64, KvCacheEventData::Removed(remove))
+            });
+            stores.chain(removes).collect::<Vec<_>>()
         })
         .collect();
     let mut group = c.benchmark_group("resident_blocks_write");
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
-    group.throughput(Throughput::Elements(WORKERS * 2));
+    group.throughput(Throughput::Elements(events.len() as u64));
     for (name, tracked) in [("untracked", false), ("tracked", true)] {
         let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 8, 32);
         if tracked {
@@ -543,14 +554,8 @@ fn resident_blocks_write(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 runtime.block_on(async {
-                    for store in &stores {
-                        indexer.apply_event(store.clone()).await;
-                    }
-                    indexer.flush().await;
-                    for worker in 0..WORKERS {
-                        indexer
-                            .apply_event(kv_event(worker, 1, KvCacheEventData::Cleared))
-                            .await;
+                    for event in &events {
+                        indexer.apply_event(event.clone()).await;
                     }
                     indexer.flush().await;
                 })
