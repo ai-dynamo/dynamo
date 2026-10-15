@@ -1086,10 +1086,12 @@ mod tests {
                 })
                 .await?;
         }
+        // Explicit reservations need a hint to account for prefill tokens.
         service
             .create_reservation(serde_json::from_value(serde_json::json!({
                 "selection_id": "busy", "worker_id": 42, "dp_rank": 0,
-                "token_ids": [1, 2, 3, 4], "track_prefill_tokens": true
+                "token_ids": [1, 2, 3, 4], "track_prefill_tokens": true,
+                "effective_prefill_tokens": 4
             }))?)
             .await?;
         let mut subscriber = EventSubscriber::for_endpoint(&endpoint, SCHEDULER_LOAD_SUBJECT)
