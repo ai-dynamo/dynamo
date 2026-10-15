@@ -2234,7 +2234,8 @@
       "date": "Oct 15, 2026",
       "packages": [
         "ai-dynamo",
-        "ai-dynamo-runtime"
+        "ai-dynamo-runtime",
+        "kvbm"
       ],
       "dateIso": "2026-10-15"
     },
