@@ -59,6 +59,59 @@ fn prefill_request_is_marked_context_only() {
     assert!(proto.kv.is_none(), "prefill carries no session to replay");
 }
 
+/// Image inputs must survive both RPC legs. TensorRT-LLM reconstructs its
+/// multimodal position/hash state while resuming the KV session, so the decode
+/// request needs the same ordered media metadata as the context request.
+#[test]
+fn image_media_is_preserved_across_prefill_and_decode_requests() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "data:image/png;base64,c2Vjb25k",
+        ],
+    );
+    req.extra_args = Some(json!({
+        "mm_hashes": ["0123456789abcdef", "fedcba9876543210"]
+    }));
+
+    let prefill = build_generate_request(
+        &req,
+        "req",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Prefill,
+    )
+    .expect("build image prefill");
+    assert!(is_context_only(&prefill));
+    assert_eq!(prefill.stopping.as_ref().unwrap().max_tokens, Some(1));
+    assert_eq!(prefill.media.len(), 2);
+    assert_eq!(prefill.media[0].uuid, "0123456789abcdef");
+    assert_eq!(prefill.media[1].uuid, "fedcba9876543210");
+
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session())
+            .expect("encode handoff"),
+        prompt_tokens_details: None,
+    });
+    let decode = build_generate_request(
+        &req,
+        "req",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .expect("build image decode");
+    assert!(!is_context_only(&decode));
+    assert_eq!(decode.media, prefill.media);
+    assert_eq!(
+        decode.kv.and_then(|kv| kv.session),
+        Some(fake_session()),
+        "decode must carry both the image metadata and the KV handoff"
+    );
+}
+
 /// `PrefillReady` is the prefill worker's terminal chunk: no tokens, and the
 /// handoff the decode worker will replay.
 #[tokio::test]

@@ -42,6 +42,64 @@ async fn aggregated_generation_streams_delta_then_terminal() {
 }
 
 #[tokio::test]
+async fn advertised_image_media_reaches_openengine_and_uses_expanded_usage() {
+    let service = FakeTrtllm::default();
+    service.supports_multimodal.store(true, Ordering::SeqCst);
+    service.advertises_image.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    add_images(&mut req, ["data:image/png;base64,aW1hZ2U="]);
+    let outputs = collect(&engine, req).await;
+    let usage = outputs
+        .last()
+        .and_then(|output| output.completion_usage.as_ref())
+        .expect("terminal engine usage");
+    assert_eq!(usage.prompt_tokens, 67, "3 text tokens + 64 image tokens");
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(
+        sent.stopping.as_ref().expect("stopping").max_tokens,
+        None,
+        "the expanded image prompt budget belongs to TensorRT-LLM"
+    );
+    assert_eq!(sent.media.len(), 1);
+    assert_eq!(sent.media[0].modality, pb::Modality::Image as i32);
+    assert!(matches!(
+        sent.media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:image/png")
+    ));
+}
+
+#[tokio::test]
+async fn both_multimodal_capability_signals_are_required() {
+    for (coarse, image) in [(true, false), (false, true)] {
+        let service = FakeTrtllm::default();
+        service.supports_multimodal.store(coarse, Ordering::SeqCst);
+        service.advertises_image.store(image, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine(&server.endpoint, 1);
+        engine.start(0).await.expect("start");
+
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        let context = dynamo_backend_common::testing::mock_context();
+        let result = engine
+            .generate(req, GenerateContext::new(context, None))
+            .await;
+        assert!(
+            result.is_err(),
+            "capabilities ({coarse}, {image}) must fail closed"
+        );
+        assert!(server.service.requests.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeTrtllm::default();
     service.reject.store(true, Ordering::SeqCst);

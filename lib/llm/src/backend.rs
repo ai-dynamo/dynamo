@@ -261,8 +261,8 @@ impl
                 return state.pending_flush.pop().map(|output| (output, state));
             }
 
-            let output = loop {
-                let output = state.stream.next().await;
+            let (output, trailing_usage) = loop {
+                let mut output = state.stream.next().await;
                 let choice_already_finished = output.as_ref().is_some_and(|output| {
                     !output.is_event()
                         && output.data.as_ref().is_some_and(|data| {
@@ -272,7 +272,50 @@ impl
                         })
                 });
                 if !choice_already_finished {
-                    break output;
+                    break (output, false);
+                }
+
+                let carries_usage = output
+                    .as_ref()
+                    .and_then(|output| output.data.as_ref())
+                    .is_some_and(|data| data.completion_usage.is_some());
+                let backend_failed = output
+                    .as_ref()
+                    .and_then(|output| output.data.as_ref())
+                    .is_some_and(|data| matches!(data.finish_reason, Some(FinishReason::Error(_))));
+                if carries_usage || backend_failed {
+                    // Native backends can put authoritative cumulative usage
+                    // on a terminal event immediately after the token Dynamo
+                    // recognized locally as EOS. Preserve that metadata without
+                    // emitting duplicate content or a second successful finish
+                    // event. Preserve a backend error with or without usage: it
+                    // is not duplicate success metadata and must reach the
+                    // frontend.
+                    if let Some(data) = output.as_mut().and_then(|output| output.data.as_mut()) {
+                        data.token_ids.clear();
+                        data.tokens = None;
+                        data.text = None;
+                        data.cum_log_probs = None;
+                        data.log_probs = None;
+                        data.top_logprobs = None;
+                        if !backend_failed {
+                            data.finish_reason = None;
+                            data.stop_reason = None;
+                        }
+                    }
+                    break (output, true);
+                }
+
+                let is_terminal = output
+                    .as_ref()
+                    .and_then(|output| output.data.as_ref())
+                    .is_some_and(|data| data.finish_reason.is_some());
+                if !is_terminal && state.finished_choices.len() >= state.decoders.len() {
+                    // Once every choice ended locally, tolerate only terminal
+                    // metadata. A nonterminal suffix means the backend ignored
+                    // the stop; cancel rather than burning the remaining budget.
+                    state.stream.context().stop_generating();
+                    return None;
                 }
             };
 
@@ -280,6 +323,11 @@ impl
                 Some(output) => {
                     // move to state.process_output
                     // handle any error conditions / unwraps here
+
+                    if trailing_usage {
+                        state.finished = state.finished_choices.len() >= state.decoders.len();
+                        return Some((output, state));
+                    }
 
                     // events are pass thru
                     if output.is_event() || output.data.is_none() {
@@ -497,13 +545,12 @@ impl
                         .unwrap_or((None, None));
 
                     // If we detected a local stop condition, mark this choice as finished.
-                    // Once all expected choices are finished, stop the upstream generator.
+                    // Keep the upstream stream alive just long enough to consume
+                    // a native backend's following terminal-usage event. The
+                    // loop above still cancels on any nonterminal suffix once
+                    // every choice has stopped.
                     if finish_reason.is_some() && data.finish_reason.is_none() {
                         state.finished_choices.insert(choice_idx);
-                        if state.finished_choices.len() >= decoders_count {
-                            state.stream.context().stop_generating();
-                            state.finished = true;
-                        }
                     }
 
                     let text = result.text;
@@ -1919,6 +1966,149 @@ mod tests {
             Some(&serde_json::json!([101, 103]))
         );
         assert_eq!(generator.get_usage().completion_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn local_eos_preserves_a_following_authoritative_usage_trailer() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let reported = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 82,
+            completion_tokens: 2,
+            total_tokens: 84,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![
+                    // Dynamo recognizes 103 as EOS before the native backend's
+                    // separate terminal event arrives.
+                    LLMEngineOutput {
+                        token_ids: vec![101, 103],
+                        index: Some(0),
+                        ..Default::default()
+                    },
+                    LLMEngineOutput {
+                        index: Some(0),
+                        finish_reason: Some(FinishReason::Stop),
+                        completion_usage: Some(reported.clone()),
+                        ..Default::default()
+                    },
+                ]),
+            });
+
+        let outputs = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(outputs.len(), 2);
+
+        let local_terminal = outputs[0].data.as_ref().expect("local terminal");
+        assert_eq!(local_terminal.finish_reason, Some(FinishReason::Stop));
+        let usage_trailer = outputs[1].data.as_ref().expect("usage trailer");
+        assert!(usage_trailer.token_ids.is_empty());
+        assert!(usage_trailer.finish_reason.is_none());
+        assert_eq!(usage_trailer.completion_usage.as_ref(), Some(&reported));
+
+        let options = DeltaGeneratorOptions::new(None, None, false, None);
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        for output in outputs {
+            generator
+                .choice_from_postprocessor(output.data.expect("backend output"))
+                .expect("OpenAI response conversion succeeds");
+        }
+        assert_eq!(generator.get_usage(), reported);
+    }
+
+    #[tokio::test]
+    async fn local_eos_does_not_mask_a_trailing_backend_error() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let reported = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 82,
+            completion_tokens: 2,
+            total_tokens: 84,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        for completion_usage in [None, Some(reported.clone())] {
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                Arc::new(SyntheticSglangStopEngine {
+                    outputs: Some(vec![
+                        LLMEngineOutput {
+                            token_ids: vec![101, 103],
+                            index: Some(0),
+                            ..Default::default()
+                        },
+                        LLMEngineOutput {
+                            index: Some(0),
+                            finish_reason: Some(FinishReason::Error("worker failed".to_string())),
+                            completion_usage: completion_usage.clone(),
+                            ..Default::default()
+                        },
+                    ]),
+                });
+
+            let outputs =
+                Operator::generate(backend.as_ref(), SingleIn::new(request.clone()), engine)
+                    .await
+                    .expect("backend generation succeeds")
+                    .collect::<Vec<_>>()
+                    .await;
+            assert_eq!(outputs.len(), 2);
+            let error_trailer = outputs[1].data.as_ref().expect("error trailer");
+            assert!(error_trailer.token_ids.is_empty());
+            assert_eq!(
+                error_trailer.finish_reason,
+                Some(FinishReason::Error("worker failed".to_string()))
+            );
+            assert_eq!(
+                error_trailer.completion_usage.as_ref(),
+                completion_usage.as_ref()
+            );
+
+            let options = DeltaGeneratorOptions::new(None, None, false, None);
+            let mut generator = DeltaGenerator::new(
+                "test-model".to_string(),
+                options,
+                "test-request".to_string(),
+            );
+            generator
+                .choice_from_postprocessor(outputs[0].data.clone().expect("local terminal"))
+                .expect("the local terminal converts");
+            let error = generator
+                .choice_from_postprocessor(outputs[1].data.clone().expect("error trailer"))
+                .expect_err("the backend error must reach the OpenAI response layer");
+            assert!(error.to_string().contains("worker failed"));
+        }
     }
 
     #[tokio::test]
