@@ -655,6 +655,18 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         avg_itl_ms = tracing::field::Empty,
         prefill_worker_id = tracing::field::Empty,
         decode_worker_id = tracing::field::Empty,
+        prefill_dp_rank = tracing::field::Empty,
+        decode_dp_rank = tracing::field::Empty,
+        cached_tokens = tracing::field::Empty,
+        prefill_wait_ms = tracing::field::Empty,
+        prefill_ms = tracing::field::Empty,
+        decode_ms = tracing::field::Empty,
+        kv_hit_rate = tracing::field::Empty,
+        router_queue_depth = tracing::field::Empty,
+        http_status = tracing::field::Empty,
+        session_id = tracing::field::Empty,
+        agent_session_id = tracing::field::Empty,
+        parent_session_id = tracing::field::Empty,
     );
 
     if let Some(context) = otel_context {

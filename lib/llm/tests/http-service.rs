@@ -1011,6 +1011,254 @@ async fn test_http_service() {
 
 // === HTTP Client Tests ===
 
+/// At the default log level the frontend writes exactly one INFO line per
+/// request, `request completed`, when the response finishes. Admission,
+/// routing, and HTTP response lines are debug-level so operators get one record
+/// per request, and the request span already carries the HTTP status, tokens,
+/// and session fields when that line is written, for streaming and unary alike.
+#[tokio::test]
+async fn test_frontend_emits_one_info_line_per_request() {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Debug)]
+    struct InfoEvent {
+        target: String,
+        fields: HashMap<String, String>,
+        /// Fields of the enclosing `http-request` span when the event fired.
+        span_fields: HashMap<String, String>,
+    }
+
+    struct FieldRecorder<'a>(&'a mut HashMap<String, String>);
+
+    impl Visit for FieldRecorder<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Default)]
+    struct Captured {
+        events: Mutex<Vec<InfoEvent>>,
+        spans: Mutex<HashMap<u64, HashMap<String, String>>>,
+    }
+
+    struct CaptureLayer(Arc<Captured>);
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            _ctx: TraceContext<'_, S>,
+        ) {
+            if attrs.metadata().name() == "http-request" {
+                let mut fields = HashMap::new();
+                attrs.record(&mut FieldRecorder(&mut fields));
+                self.0.spans.lock().unwrap().insert(id.into_u64(), fields);
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: TraceContext<'_, S>,
+        ) {
+            if let Some(fields) = self.0.spans.lock().unwrap().get_mut(&id.into_u64()) {
+                values.record(&mut FieldRecorder(fields));
+            }
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: TraceContext<'_, S>) {
+            let metadata = event.metadata();
+            if *metadata.level() != tracing::Level::INFO
+                || !metadata.target().starts_with("dynamo_")
+            {
+                return;
+            }
+            let mut fields = HashMap::new();
+            event.record(&mut FieldRecorder(&mut fields));
+            let span_fields = ctx
+                .event_scope(event)
+                .and_then(|mut scope| scope.find(|span| span.name() == "http-request"))
+                .and_then(|span| {
+                    self.0
+                        .spans
+                        .lock()
+                        .unwrap()
+                        .get(&span.id().into_u64())
+                        .cloned()
+                })
+                .unwrap_or_default();
+            self.0.events.lock().unwrap().push(InfoEvent {
+                target: metadata.target().to_string(),
+                fields,
+                span_fields,
+            });
+        }
+    }
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("one-line");
+    manager
+        .add_chat_completions_model("one-line", card.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    // Capture only around the requests so startup logging is excluded. The
+    // service runs on this current-thread runtime, so a thread-local default
+    // subscriber sees every event the request path emits.
+    let captured = Arc::new(Captured::default());
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(CaptureLayer(captured.clone())),
+    );
+
+    let client = reqwest::Client::new();
+    for stream in [true, false] {
+        let request_json = serde_json::json!({
+            "model": "one-line",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": stream,
+            "max_tokens": 5,
+        });
+        let response = client
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
+            .header("x-dynamo-session-id", "session-one-line")
+            .header("x-dynamo-parent-session-id", "parent-one-line")
+            .json(&request_json)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert!(response.status().is_success(), "{response:?}");
+        let _ = response.bytes().await.unwrap();
+    }
+
+    // The streaming completion line fires when the server-side stream drops,
+    // which can trail the client reading the last byte.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let completed = captured
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event.fields.get("message").map(String::as_str) == Some("request completed")
+            })
+            .count();
+        if completed >= 2 || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(guard);
+
+    // Scope the guard so it is released before the shutdown await below.
+    {
+        let events = captured.events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "expected exactly one INFO line per request, got {events:#?}"
+        );
+        let request_types: std::collections::HashSet<&str> = events
+            .iter()
+            .filter_map(|event| event.fields.get("request_type").map(String::as_str))
+            .collect();
+        assert_eq!(
+            request_types,
+            [
+                frontend_service::request_type::STREAM,
+                frontend_service::request_type::UNARY,
+            ]
+            .into_iter()
+            .collect(),
+            "{events:#?}"
+        );
+        for event in events.iter() {
+            assert!(
+                event.target.starts_with("dynamo_llm::http::service"),
+                "{event:?}"
+            );
+            assert_eq!(
+                event.fields.get("message").map(String::as_str),
+                Some("request completed"),
+                "{event:?}"
+            );
+            assert_eq!(
+                event.fields.get("status").map(String::as_str),
+                Some("success")
+            );
+            for key in ["start_time", "end_time", "elapsed_ms"] {
+                assert!(event.fields.contains_key(key), "missing {key}: {event:?}");
+            }
+            // Identity lives on the span so the readable line carries it once.
+            assert!(!event.fields.contains_key("model"), "{event:?}");
+            assert!(!event.fields.contains_key("request_id"), "{event:?}");
+
+            // The readable formatter merges these span fields into the line, so
+            // they must already be recorded when the event fires.
+            let span = &event.span_fields;
+            let expect = [
+                ("http_status", "200"),
+                ("model", "one-line"),
+                ("request.outcome", "success"),
+                ("session_id", "session-one-line"),
+                ("agent_session_id", "session-one-line"),
+                ("parent_session_id", "parent-one-line"),
+            ];
+            for (key, value) in expect {
+                assert_eq!(
+                    span.get(key).map(String::as_str),
+                    Some(value),
+                    "{key}: {event:?}"
+                );
+            }
+            assert!(span.contains_key("request_id"), "{event:?}");
+        }
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 /// Wait for the HTTP service to be ready by checking its health endpoint
 async fn wait_for_service_ready(port: u16) {
     let start = tokio::time::Instant::now();
