@@ -61,36 +61,35 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Cover XT configuration mounts and HX hybrid model-storage paths")
+	t.Log("Cover shared configuration overrides and HX hybrid model-storage paths")
 	hybrid := newV3CompilerFixture()
 	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
 	xtSnapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	tests := []struct {
 		name       string
-		family     lpxv1alpha1.TargetFamily
 		pipeline   Pipeline
 		snapshot   *BuildSnapshot
 		configPath string
 	}{
 		{
-			name: "XT config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			name: "XT config mount", pipeline: PipelineSingle,
 			snapshot: xtSnapshot, configPath: "/custom",
 		},
 		{
-			name: "XT omitted config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			name: "XT omitted config mount", pipeline: PipelineSingle,
 			snapshot: xtSnapshot,
 		},
 		{
-			name: "HX omitted config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			name: "HX omitted config mount", pipeline: PipelineSingle,
 			snapshot: hxSnapshot,
 		},
 		{
-			name: "HX custom config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			name: "HX custom config mount", pipeline: PipelineSingle,
 			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
-			name: "HX hybrid storage", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineLPX,
+			name: "HX hybrid storage", pipeline: PipelineLPX,
 			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
@@ -117,7 +116,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				{Key: "cluster.example/custom", Operator: corev1.TolerationOpExists},
 				{Key: "lpu.nvidia.com/node", Operator: corev1.TolerationOpExists},
 			}
-			if test.family == lpxv1alpha1.TargetFamilyXt8888 && test.configPath != "" {
+			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: lpuConfigVolumeName,
 					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -145,6 +144,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Same(t, pcs, rendered)
 			require.Equal(t, projection.Digest().String(), rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].Annotations[WorkloadDigestAnnotation])
 			for _, clique := range rendered.Spec.Template.Cliques {
+				require.Equal(t, "main", clique.Spec.PodSpec.Containers[0].Name)
 				require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
 					require.Equal(t, projection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
@@ -165,6 +165,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			if test.pipeline != PipelineLPX {
 				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
+				require.Subset(t, conductor.Spec.PodSpec.Volumes, template.Spec.Volumes)
 				require.Equal(t, template.Spec.Containers[0].VolumeMounts, conductor.Spec.PodSpec.Containers[0].VolumeMounts)
 				require.Equal(t, template.Spec.Containers[0].VolumeMounts, agent.Spec.PodSpec.Containers[0].VolumeMounts)
 			} else {
@@ -254,13 +255,40 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	source := newSelectedTestDGD(t, "specdecode", draft, target)
+
+	t.Log("Keep role-named sidecars and explicit main-container references in every template")
+	for _, component := range source.Spec.Components {
+		for _, role := range component.Roles {
+			spec := &role.PodTemplate.Spec
+			spec.Containers = append(spec.Containers, corev1.Container{
+				Name: "agent", Image: "sidecar", Env: []corev1.EnvVar{{
+					Name: "MAIN_CPU", ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+						ContainerName: "main", Resource: "limits.cpu",
+					}},
+				}},
+			})
+			spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "conductor", Image: "setup"})
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources", VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{
+					Path: "main-memory", ResourceFieldRef: &corev1.ResourceFieldSelector{
+						ContainerName: "main", Resource: "limits.memory",
+					},
+				}}},
+			}})
+		}
+	}
+
+	t.Log("Assign distinct runtime settings to each component and conductor")
 	stages := make(map[string]corev1.PodTemplateSpec)
 	for _, component := range source.Spec.Components {
 		template := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 		template.Labels = map[string]string{"owner": component.ComponentName}
 		template.Annotations = map[string]string{"owner": component.ComponentName}
 		template.Spec.Containers[0].Image = component.ComponentName + "-runtime"
-		template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "AUTHORED_STAGE", Value: component.ComponentName}}
+		template.Spec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "AUTHORED_STAGE", Value: component.ComponentName},
+			{Name: "CONTAINER_NAME", Value: "main"},
+		}
 		template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/stage", Operator: corev1.TolerationOpEqual, Value: component.ComponentName}}
 		stages[component.ComponentName] = *template.DeepCopy()
 	}
@@ -268,7 +296,16 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
 	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
 	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
+	conductorResources := corev1.ResourceList{
+		v2LPUResourceName: resource.MustParse("3"),
+		v3LPUResourceName: resource.MustParse("5"),
+		corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),
+	}
+	conductorTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Requests: conductorResources.DeepCopy(), Limits: conductorResources.DeepCopy(),
+	}
 	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "CONTAINER_NAME", Value: "main"},
 		{Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}"},
 		{Name: "NOVA_PIPELINE_TYPE", Value: "SpecDecode"},
 		{Name: "NOVA_MAX_SWA_DKVC_BLOCKS_DRAFT", Value: "2"},
@@ -289,6 +326,17 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
 	})
 	require.NoError(t, err)
+
+	t.Log("Preserve container identity and references while materializing distinct Pod roles")
+	for _, clique := range templates.Cliques {
+		spec := &clique.Spec.PodSpec
+		require.Equal(t, "main", spec.Containers[0].Name)
+		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
+		require.Equal(t, conductorTemplate.Spec.Containers[1:], spec.Containers[1:])
+		require.Equal(t, conductorTemplate.Spec.InitContainers, spec.InitContainers)
+		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
+		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
+	}
 
 	t.Log("Retain each authored component's image and metadata on its Agent cliques")
 	pcs.Spec.Template.Cliques = templates.Cliques
@@ -316,6 +364,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
 
 	t.Log("Preserve runtime settings in the conductor template and share only partition data")
+	require.Equal(t, conductorTemplate.Spec.Containers[0].Resources, conductor.Spec.PodSpec.Containers[0].Resources)
 	configMap, ok := templates.Resources[0].(*corev1.ConfigMap)
 	require.True(t, ok)
 	require.NotContains(t, configMap.Data, "model_config.toml")

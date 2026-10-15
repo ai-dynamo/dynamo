@@ -137,9 +137,15 @@ SPDX-License-Identifier: Apache-2.0
   For build changes, all retiring requests in an engine must release before any
   are deleted. Keep UID/resource-version delete preconditions. Deadline cancellation
   remains separate.
-- Never directly delete Pods or PodCliques from graph reconciliation or LPR
-  lifecycle helpers. Grove scaling and owner garbage collection own workload
-  cleanup; scheduler Pod references and release journals do not authorize it.
+- Ordinary retirement leaves Pod and PodClique cleanup to Grove and owner GC.
+  The Dynamo operator's LPX controller may directly delete Pods only for a matching,
+  still-desired, non-deleting NodeLocal LPR in `Releasing` for `requestChanged`,
+  `dependencyChanged`, or `bindingFailed`: remove its journaled current and target
+  Agent Pod UIDs, including plan-replacement predecessors, after verifying their
+  PodClique -> PCSG -> PCS owner chain, including terminating PodCliques. Keep namespace
+  checks and UID/resource-version delete preconditions. Retry missing observations
+  without blocking cleanup of the remaining journaled Pods. Preserve Grove capacity
+  and LPUPipelineRequest status, finalizers, and annotations.
 - A terminating LPR is pending cleanup, not a reason to delete its PCS or Pods.
   Wait for scheduler finalization through watches, including when external
   capacity is unchanged.
