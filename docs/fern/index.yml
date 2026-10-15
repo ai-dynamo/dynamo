@@ -817,6 +817,9 @@ navigation:
           - page: Qwen3-32B FP8
             path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
             slug: qwen3-32b-fp8
+          - page: Muse-Spark-open-816B-A42B
+            path: pages/recipes/model-recipes/Muse-Spark-Open.mdx
+            slug: Muse-Spark-Open
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
