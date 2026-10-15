@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compare Dynamo/framework request and response contracts from local OpenAPI files."""
+"""Run an offline Dynamo/framework assessment from local OpenAPI files.
+
+This CLI parses arguments and translates input/tool errors to exit code 2.
+assessment.openapi_workflow owns the assessment and its output directory;
+reporting.openapi provides a separate CLI to rebuild reports from saved evidence.
+See README.md for commands, input requirements, and output formats.
+"""
 
 import argparse
 import subprocess
@@ -16,7 +22,12 @@ from .assessment.openapi_workflow import DEFAULT_MANIFEST, assess
 
 
 def main(argv=None) -> int:
-    """Assess local specifications; return 2 for input/tool failures reported on stderr."""
+    """Run assess with argument tokens, or process arguments when argv is None.
+
+    Return 0 for no differences/gaps, 1 for review findings, or 2 for caught
+    input/tool errors reported on stderr. argparse exits on help or invalid syntax.
+    See assess for output writes and partial results after a failure.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     assessment = commands.add_parser(

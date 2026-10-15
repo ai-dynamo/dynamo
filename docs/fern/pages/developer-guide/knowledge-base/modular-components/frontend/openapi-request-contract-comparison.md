@@ -8,8 +8,7 @@ subtitle: Compare declared request and response schemas without treating agreeme
 Compare NVIDIA Dynamo's declared request and response schemas with an OpenAPI 3.1 or 3.2
 framework contract from local, versioned JSON/YAML files. The `assess` command resolves
 dependency schemas, normalizes equivalent representations, and reports request and response
-differences. It also reports coverage
-gaps: contracts that the tool cannot fully check.
+differences and coverage gaps: contracts that the tool cannot fully check.
 
 Specification generation and acquisition are separate from comparison. A local file may
 come from a source exporter, a published specification, or a previous live-server capture.
@@ -27,9 +26,9 @@ For installation, CLI arguments, runnable examples, output files, and exit codes
 
 ## Comparison Scope
 
-The default goal is to compare the full declared request/response contracts for the supported
-endpoints, not only the features enabled in one deployment. Full input documents are scoped
-internally to those endpoints. Do not remove differences from the inputs to manufacture agreement.
+Compare the full declared request/response contracts for the supported endpoints, not only
+the features enabled in one deployment. The tool limits comparison to those endpoints.
+Do not remove differences from the inputs to manufacture agreement.
 
 Both inputs must contain JSON POST request schemas for `/v1/chat/completions` and
 `/v1/completions`. If a required request schema is missing or contains an unresolved
@@ -63,8 +62,9 @@ The composer fills these placeholders from an OpenAI document with a pinned chec
 It applies corrections reviewed against Dynamo's Rust types and guarded by input checks.
 See the [composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#composition-invariants).
 
-`async-openai` 0.42.2 includes the annotations. Frontend-crates maintainers must enable
-those schemas and replace the placeholder types. Track that integration in
+`async-openai` 0.42.2 includes the annotations. Frontend-crates maintainers must wire
+`protocol-schema` to `async-openai/openapi` and replace the placeholder `value_type`
+overrides; enabling the feature alone is insufficient. Track integration in
 [frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
 After Dynamo exports those schemas through updated dependencies, remove their import mappings.
 Remove composition only when no placeholders remain for the compared schemas.
@@ -124,7 +124,7 @@ for export assertions and serialization fixtures.
 The tool uses pinned `oasdiff` for structural comparison, with the normalization, alias
 matching, and streaming projection below. These operations do not change runtime behavior.
 
-### Equivalent representations versus contract differences
+### Equivalent Representations Versus Contract Differences
 
 The tool treats `anyOf: [{type: string}, {type: null}]` and
 `type: [string, null]` as equivalent, regardless of order. It records each rewrite and
@@ -132,7 +132,7 @@ retains both original and normalized projections. Only bare string/null alternat
 normalized; constraints, defaults, references, `oneOf`, other unions, and literal data
 remain significant.
 
-### Input aliases
+### Input Aliases
 
 Dynamo's `x-dynamo-input-aliases` extension lists alternative input names.
 It documents Serde's rejection of multiple spellings of one field in the same object.
@@ -143,7 +143,7 @@ value schemas. Ambiguous alias ownership produces a coverage gap. A match establ
 declared name coverage only. It does not prove runtime acceptance, requiredness, union
 behavior, or whole-contract compatibility. The tool retains the complete request differences.
 
-### Streaming responses
+### Streaming Responses
 
 Native OpenAPI 3.2 `itemSchema` describes parsed SSE events with string `data`.
 `contentSchema` describes JSON chunks and structured errors decoded from that string;
@@ -192,10 +192,15 @@ exists only in Dynamo and a deletion exists only in the framework. A structural 
 such as moving a property into `allOf`, does not by itself prove that the field was removed.
 Direction alone does not determine compatibility.
 
-Start with `report.md`. Each finding shows both declarations, its location, interpretation,
-evidence links, and a suggested check. `findings.json` retains location IDs and accounts for
-every raw delta terminal. An unresolved union or `allOf` change remains a whole finding;
-an accounting pass is not a compatibility pass.
+Read `report.md` for review, or `report.json` for programmatic use. Both contain findings
+with declarations, locations, interpretations, evidence pointers, and suggested checks.
+`findings.json` contains only the structured inventory. Missing declaration evidence is
+marked unavailable. The accounting check assigns every raw delta terminal to a finding;
+it does not prove compatibility. Unresolved union or `allOf` changes remain whole findings.
+
+The report defines categories in a suggested review order, not a severity ranking.
+Declared aliases classify spelling-only differences as `alias_evidence`; value constraints
+remain separate. Keep the full assessment directory so evidence pointers remain usable.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -211,7 +216,9 @@ collect acceptance, delivery, effect, response, and error evidence.
 
 ### From Generated Findings to Reviewed Actions
 
-The tool inventories declarations; the reviewer decides what they mean for a client workflow:
+The tool reports declaration evidence, not a fix specification. A human or agent still needs
+the source checkout and intended contract to decide whether to change Dynamo, correct an
+export, or retain an intentional difference:
 
 1. Freeze the endpoints, transports, client workflow, revisions, and configuration.
    Distinguish static exports from captures of a running server.
@@ -222,14 +229,20 @@ The tool inventories declarations; the reviewer decides what they mean for a cli
 4. Attach evidence with its original revisions and configuration. Distinguish declaration
    defects, runtime defects, intentional policy, and unresolved coverage. Do not present
    historical observations as new runtime results.
-5. Prioritize by client impact, affected workflows, evidence confidence, and the next
-   check's investigation value. Category order is navigation, not severity. Group
-   candidates that share a root cause; keep uncertainty separate from impact.
-6. Assign an owner and a concrete next action. Verify whether a related change is proposed,
-   implemented, tested, approved, or merged, and whether the compared input includes it.
+5. Prioritize by client impact, affected workflows, evidence confidence, and the value of
+   the next check. Group candidates that share a root cause; keep uncertainty separate
+   from impact.
+6. Assign an owner and a concrete next action. Resolve unclear intended behavior or scope
+   with the responsible maintainer. An existing contract and authorized task can settle
+   routine fixes without a separate decision for every finding.
 
-Keep proposed protocol changes separate from approved work. To regenerate only the report,
-use the [saved-evidence renderer](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#re-render-saved-evidence).
+For an approved change, add a focused regression test and regenerate affected schemas before
+rerunning comparison. Runtime changes also need behavioral validation. Check whether related
+work is proposed, implemented, tested, approved, or merged, and whether the input includes it.
+
+The [saved-evidence renderer](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#re-render-saved-evidence)
+rebuilds interpretations and presentation with the current code. It preserves raw deltas and
+does not rerun comparison; a revised report is not evidence that a fix passed.
 
 ## Maintenance and Validation
 

@@ -3,15 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Protocol compatibility tooling
+# Protocol Compatibility Tooling
 
-Compare local, versioned Dynamo and framework OpenAPI 3.1/3.2 specifications for
-`/v1/chat/completions` and `/v1/completions`. The tool does not generate or fetch
-specifications and requires no running server. A local file may have been exported
-from source, published upstream, or previously captured from a live server. Read the
-[OpenAPI request-contract comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
-for scope, provenance, normalization, aliases, and interpretation. Schema agreement
-does not establish actual acceptance or behavioral compatibility.
+Compare local, versioned NVIDIA Dynamo and framework OpenAPI 3.1/3.2 specifications for
+`/v1/chat/completions` and `/v1/completions`. Inputs can be source exports, published
+specifications, or previous server captures. The tool does not generate or fetch them
+and requires no running server. Schema agreement does not prove runtime compatibility.
+See the [comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
+for scope, provenance, normalization, aliases, and interpretation.
 
 Use inputs that describe the full declared request/response contract for those endpoints,
 not only one deployment's enabled features. Supplied scope and configuration labels are
@@ -25,7 +24,7 @@ Composition does not modify the running frontend's `/openapi.json` or `/docs`.
 
 ## Installation
 
-On a Linux validation host, install the pinned Python requirements and
+From the repository root on a Linux validation host, install the pinned Python requirements and
 [oasdiff 1.33.0](https://github.com/oasdiff/oasdiff/releases/tag/v1.33.0).
 Verify the release checksum for your platform; CI pins the Linux amd64 checksum.
 
@@ -68,7 +67,7 @@ For optional scope, configuration, or provenance annotations, pass JSON object f
 | --- | --- |
 | `--dynamo`, `--framework` | Required local OpenAPI JSON/YAML files |
 | `--dynamo-metadata`, `--framework-metadata` | Optional JSON annotation files |
-| `--framework-name` | Required lowercase identity other than `dynamo` |
+| `--framework-name` | Required lowercase slug, 1–64 characters, starting with a letter; allows digits, `_`, and `-`; cannot be `dynamo` |
 | `--openai` | Required pinned OpenAI YAML; checksum checked against the manifest |
 | `--manifest` | Optional composition manifest; defaults to `composition/async-openai-0.42.1.yaml` within this package |
 | `--response-adapters` | Optional YAML with exact input hashes, source identities, server-sent event (SSE) interpretations, and bounded route mappings |
@@ -122,16 +121,24 @@ An explicit `serde_json::Value` is intentionally untyped. Record excluded Dynamo
 
 ## Outputs and Exit Codes
 
-The `assess` command saves each input's exact JSON/YAML bytes as `openapi.raw`, with its
-checksum and metadata in `acquisition.json`. The timestamp records when the file was read,
-not when its schema was generated or captured from a server. To reuse a saved input,
-pass its raw file; pass any provenance labels separately with the metadata option.
+The `assess` command retains inputs under `dynamo/` and `framework/`. Each directory contains:
+
+- `openapi.raw`: the exact input bytes, including JSON/YAML formatting.
+- `acquisition.json`: the source path, input identity, SHA-256 checksum, read time
+  (`captured_at`), and optional unverified `caller_metadata`.
+
+Despite its name, `acquisition.json` records local file loading, not a server fetch.
+Its timestamp does not identify when the schema was generated. To reuse an input, pass
+its raw file to `--dynamo` or `--framework`. Supply provenance labels separately through
+the corresponding metadata option.
 
 Start with `assessment/report.md`. Retain the entire assessment directory:
 
 | Output | Purpose |
 | --- | --- |
-| `report.md`, `report.json`, `findings.json` | Readable findings, next actions, exact evidence pointers, candidate accounting, and provenance |
+| `report.md` | Human-readable findings, category descriptions, suggested checks, and evidence links |
+| `report.json` | Full machine-readable assessment: deltas, gaps, input metadata, comparator commands, and `finding_inventory` |
+| `findings.json` | The same `finding_inventory`, without the surrounding assessment metadata |
 | `dynamo.composed.json` | Dynamo document after pinned imports and guarded corrections |
 | `*.requests.json` | Original request projections |
 | `*.requests.normalized.json`, `normalization.json` | Comparison inputs and equivalent-representation audit |
@@ -142,7 +149,7 @@ Start with `assessment/report.md`. Retain the entire assessment directory:
 | `response-chunk-probes.json`, `chunk-probes/` | Separate selected-chunk comparisons when a source declares chunks only |
 | `alias-matches.json` | Alias-name matches, parent constraints, and value-schema comparison results |
 
-The `assess` command also saves inputs, the composition manifest, and the coverage catalog.
+The `assess` command also saves the pinned OpenAI document, composition manifest, and coverage catalog.
 Checksum mismatches and unresolved Dynamo imports stop the command with an error.
 A later failure can leave partial output; use a new output directory for a retry.
 
@@ -157,9 +164,22 @@ The `assess` command returns these exit codes:
 No exit code proves runtime compatibility. The current coverage catalog contains
 known gaps, so a completed assessment returns `1` even if the comparator finds no differences.
 
+### Using the Findings
+
+For programmatic use, read `report.json` and its `finding_inventory`. Each finding includes
+its category, declarations, interpretation, suggested action, raw delta, and evidence
+pointers. Agents and scripts do not need to parse Markdown.
+
+Finding IDs identify locations and change kinds, not unchanged content or confirmed defects.
+The accounting check assigns each raw delta terminal to one finding. Unresolved union or
+`allOf` changes remain whole findings. Suggested actions are investigation guidance, not
+approved fixes. See the guide's
+[review workflow](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#from-generated-findings-to-reviewed-actions)
+for deciding and validating changes.
+
 ### Re-render Saved Evidence
 
-To update presentation without rerunning `oasdiff`, render a retained assessment:
+To rebuild finding interpretations and Markdown from retained evidence, run:
 
 ```bash
 python -m scripts.protocol_compatibility.reporting.openapi \
@@ -167,22 +187,13 @@ python -m scripts.protocol_compatibility.reporting.openapi \
 ```
 
 The output directory must be new and outside the input directory. The renderer copies
-the original assessment into `evidence/` so links remain valid when the output moves.
-It does not modify the input or rerun composition or comparison. Missing
-normalized projections appear as unavailable declarations, not as absent fields.
+the original assessment into `evidence/` and rebuilds `report.json`, `findings.json`, and
+`report.md` with the current interpretation code. Categories and suggested checks can
+change when that code changes; raw deltas remain unchanged. It does not modify the input
+or rerun composition or comparison. Missing normalized projections appear as unavailable
+declarations, not as absent fields. `render-source.json` records source hashes and that
+comparison was not rerun.
 Rendering exits `0` on success or `2` on failure; success is not a compatibility verdict.
-
-`report.json` contains `finding_inventory`; `findings.json` contains the same inventory.
-Each finding retains its raw delta and evidence pointers. IDs identify locations and change
-kinds, not unchanged content. The accounting check assigns each raw delta terminal to one
-finding. Unresolved union or `allOf` changes remain whole findings.
-Reviewer dispositions, policy approvals, and historical runtime evidence remain separate.
-
-The report defines each category and its review order. That order is navigation,
-not severity. Exact declared aliases classify spelling differences as `alias_evidence`;
-value constraints remain separate. See the guide's
-[result interpretation](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#reading-the-result)
-for the boundary between generated findings and reviewed actions.
 
 ## Source-qualified SSE Adapters
 
@@ -275,8 +286,10 @@ for what these checks establish.
 
 | Module | Responsibility |
 | --- | --- |
-| `inputs.py` | Load local files; retain exact bytes and unverified metadata |
-| `composition/openai.py` | Resolve pinned imports and guarded corrections |
-| `assessment/openapi.py`, `assessment/responses.py` | Project requests/responses, record gaps, and invoke oasdiff |
-| `assessment/openapi_workflow.py` | Connect input loading, composition, comparison, and retained evidence |
-| `reporting/findings.py`, `reporting/openapi.py` | Explain retained deltas and render portable reports without rerunning comparison |
+| [`inputs.py`](inputs.py) | Keep exact input bytes and metadata separate from derived comparison documents |
+| [`composition/openai.py`](composition/openai.py) | Fill dependency placeholders from pinned imports and guarded corrections |
+| [`assessment/openapi.py`](assessment/openapi.py) | Project requests and match aliases; supply shared schema helpers and the oasdiff runner |
+| [`assessment/responses.py`](assessment/responses.py) | Project JSON bodies, decoded events, and selected chunks; identify unsupported response declarations |
+| [`assessment/openapi_workflow.py`](assessment/openapi_workflow.py) | Run an assessment and retain its inputs, projections, comparator results, and reports |
+| [`reporting/findings.py`](reporting/findings.py) | Classify retained evidence and build structured findings with raw-delta accounting |
+| [`reporting/openapi.py`](reporting/openapi.py) | Write JSON/Markdown reports and rebuild interpretations from saved evidence without rerunning comparison |

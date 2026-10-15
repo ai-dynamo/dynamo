@@ -1,6 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Connect retained OpenAPI documents, composition, and comparison."""
+"""Coordinate one assessment and retain the evidence needed to inspect its findings.
+
+assess loads local inputs, composes Dynamo's dependency schemas, and compares
+request and response projections from framework to Dynamo. It also runs alias
+value and selected-chunk probes. Schema transformations live in openapi.py and
+responses.py; finding interpretation and report writing live in reporting/.
+
+This module owns the new output directory and retains inputs, projections,
+comparator deltas, and commands alongside reports. Failures after directory
+creation can leave partial evidence; no runtime behavior is checked.
+"""
 
 import copy
 import hashlib
@@ -49,12 +59,14 @@ def compare_responses(
 ) -> tuple[list, list, list, list]:
     """Retain full projections and compare only mutually interpretable event layers.
 
-    Documents and qualified selections use framework/Dynamo keys. Chunk-only
-    pairs retain full projections, but omit both SSE body schemas from the event
+    `args` supplies oasdiff and an existing output_dir. Documents and qualified
+    selections use the keys "framework" and "dynamo"; selections come from
+    prepare_response_source. Chunk-only pairs retain full projections, but omit
+    both SSE body schemas from the event
     comparator and run an independent, explicitly selected chunk probe. Status
     and media declarations remain. Missing chunk evidence is a gap, never a pass.
-    Return findings, gaps, chunk probe evidence and comparator command. Writes
-    under the existing output directory; failures propagate with partial evidence.
+    Return response deltas, gaps, chunk probe evidence and the response comparator
+    command. Writes under output_dir; failures can leave partial evidence.
     Inputs are not mutated and only the pinned comparator performs schema diffs.
     """
     projections, gaps, probes, normalizations = {}, [], [], []
@@ -182,10 +194,12 @@ def compare_responses(
 
 
 def assess(args) -> int:
-    """Retain inputs and report request/response candidates, never runtime parity.
+    """Run a CLI-configured assessment and print its status and report path.
 
-    `args` supplies local input paths and optional metadata, composition manifest/baseline,
-    pinned comparator, optional hash-qualified response adapters, and a new output directory.
+    `args` is the Namespace built by the package CLI; README.md documents its paths,
+    identity, optional metadata/adapters, and pinned composition/comparator inputs.
+    output_dir must not exist. Inputs are read-only; reports and evidence are written
+    beneath that directory.
     Return 1 for any difference or coverage gap, otherwise 0.
     Invalid inputs, existing output, and tool failures propagate;
     a later failure may leave partial evidence in the newly created directory.

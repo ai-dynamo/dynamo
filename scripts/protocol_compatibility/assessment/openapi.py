@@ -1,10 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Request-only projection and coverage guards around the pinned oasdiff engine.
+"""Prepare request schemas and run the shared oasdiff comparison engine.
 
-This module selects schemas, normalizes a bounded equivalent representation,
-and reports unsupported constructs. It does not implement a source parser,
-schema merger, or general semantic compatibility algorithm.
+request_document selects POST JSON bodies for chat and legacy completions, with
+their referenced components and comparison gaps. Explicit input aliases get
+separate value probes so name matching cannot hide constraint differences.
+
+The response pipeline shares the schema walker, validator, nullable-string
+normalization, and compare. compare runs framework-to-Dynamo; its raw deltas are
+not runtime compatibility verdicts. openapi_workflow.py owns file retention and
+reporting, keeping those effects separate from schema projection.
 """
 
 import copy
@@ -209,8 +214,9 @@ def validate_comparison_document(document: dict, roots: list[str]) -> None:
 
 
 def request_document(document: dict) -> tuple[dict, list[dict]]:
-    """Copy scoped request contracts into a 3.1 comparator input, reporting gaps.
+    """Return a request comparison document and gaps for the two ENDPOINTS.
 
+    Both paths must declare POST requestBody with only application/json content.
     Standard 3.2 request schema keywords use the same 2020-12 semantics here. The
     projection is not a server export: responses and other API surfaces are removed.
     Original documents remain untouched. Missing contracts or unresolved imports
@@ -359,8 +365,10 @@ def compare(
 
 
 def request_fields(document: dict, endpoint: str) -> list[dict]:
-    """Index instance paths, not component names or union branch indexes.
+    """Index fields beneath endpoint's POST JSON body for alias matching.
 
+    Records contain instance path segments (None for array items), schema pointers,
+    declarations, and parent context; component names are not instance paths.
     Union and parent constraints stay attached as context; a name match never
     establishes whole-object equivalence. Recursive refs are not expanded forever.
     Missing pointers raise. Returned schema/context objects refer to input data;

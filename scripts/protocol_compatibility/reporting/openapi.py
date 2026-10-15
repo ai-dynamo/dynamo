@@ -1,6 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Render retained declaration differences as actionable, evidence-linked findings."""
+"""Write assessment reports and rebuild them from saved comparison evidence.
+
+findings.py owns interpretation; this module owns the JSON/Markdown files,
+category descriptions and review order, and escaped links to retained evidence.
+write_reports serves new assessments. regenerate copies an existing assessment
+into evidence/ and rebuilds its findings and reports with the current interpreter.
+Interpretations can change; raw deltas do not, and comparison is not rerun.
+
+report.json carries the assessment and finding inventory; findings.json contains
+only that inventory; report.md presents it for human review. See README.md for
+CLI usage and the distinction between findings and approved changes.
+"""
 
 import argparse
 import copy
@@ -69,7 +80,11 @@ def prose(value) -> str:
 
 
 def file_link(label: str, filename: str, location: str = "", prefix: str = "") -> str:
-    """Link a retained relative file and optional JSON Pointer; reject external or escaping paths."""
+    """Format an evidence link; unsafe filenames become explanatory text, not links.
+
+    `prefix` is a trusted relative directory supplied by the renderer, not evidence
+    content. `location` is an optional JSON Pointer. File existence is not checked.
+    """
     path = PurePosixPath(filename)
     if path.is_absolute() or ".." in path.parts or ":" in filename or "\\" in filename:
         return prose(label) + " (unsafe evidence path omitted)"
@@ -124,8 +139,8 @@ def render(
     """Render category descriptions and findings in review order, not severity order.
 
     Use report.finding_inventory when present; otherwise build it with declarations
-    marked unavailable. `evidence_prefix` names
-    the retained evidence subdirectory for regenerated reports. When available_files
+    marked unavailable. `evidence_prefix` is the trusted relative evidence directory,
+    including its trailing slash, or empty for a new assessment. When available_files
     is supplied, mark missing output-relative files instead of emitting broken links.
     Unknown categories follow the documented categories. Inputs are unchanged;
     rendering does not adjudicate runtime behavior or policy.
@@ -330,7 +345,11 @@ def render(
 
 
 def load_projections(directory: Path) -> dict:
-    """Read available normalized projections; missing files stay unavailable, invalid JSON fails."""
+    """Map retained request/response projection filenames to parsed JSON.
+
+    Read the four framework/Dynamo normalized projections under directory.
+    Omit missing files; JSON and I/O errors propagate for files that exist.
+    """
     filenames = (
         f"{side}.{kind}.normalized.json"
         for side in ("framework", "dynamo")
@@ -346,9 +365,12 @@ def load_projections(directory: Path) -> dict:
 def write_reports(
     report: dict, directory: Path, projections: dict, evidence_prefix: str = ""
 ) -> dict:
-    """Write additive JSON, inventory and Markdown into an existing output directory.
+    """Rebuild findings and overwrite report.json, findings.json, and report.md.
 
-    Preserve report keys except regenerated finding_inventory. Inputs are unchanged.
+    directory must exist; projections follows build_findings' filename-to-document
+    mapping. evidence_prefix follows render's relative-directory convention.
+    Return a copy of report with finding_inventory replaced; other keys and caller
+    inputs are unchanged. Raw evidence files are not written by this function.
     I/O or accounting failures propagate and may leave partial files.
     """
     result = copy.deepcopy(report)
@@ -368,12 +390,15 @@ def write_reports(
 
 
 def regenerate(assessment_dir: Path, output_dir: Path) -> dict:
-    """Re-render saved evidence without comparison into a new portable output directory.
+    """Rebuild a saved assessment's findings and reports without rerunning comparison.
 
+    assessment_dir must contain report.json; normalized projections are optional.
     Reject an existing output, an output inside the input, or input symlinks.
-    Copy original evidence under evidence/ so links survive relocation. Missing
-    projections become explicit limitations. Failures may leave partial output;
-    retry with a new directory. The source assessment is never modified.
+    Copy original evidence under evidence/ so links survive relocation, and record
+    source hashes in render-source.json. Return the rebuilt assessment; current
+    interpretation code can change categories or suggestions, but not raw deltas.
+    Missing projections become explicit limitations. Failures may leave partial
+    output; retry with a new directory. The source assessment is never modified.
     """
     source, target = assessment_dir.resolve(), output_dir.resolve()
     if target == source or source in target.parents:

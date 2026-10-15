@@ -1,6 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Explain retained oasdiff evidence without inferring accepted sets or runtime policy."""
+"""Turn assessment evidence into structured findings for humans and agents.
+
+build_findings combines retained deltas, normalized projections, aliases, and
+coverage gaps. It classifies declaration presence and attaches source pointers,
+literal constraints, and suggested checks. Missing projections mean unavailable
+evidence, not absent fields. Union branches remain separate rather than being
+merged into an inferred set of accepted values.
+
+Each raw delta terminal must belong to exactly one finding. This module does not
+rerun comparison, write files, or decide which differences require implementation
+changes. reporting.openapi owns report files and presentation order.
+"""
 
 import copy
 import hashlib
@@ -191,7 +202,13 @@ def describe(schema, document: dict, depth: int = 0) -> str:
 def declaration(
     document: dict | None, filename: str, root: str, steps: tuple, keyword: str | None
 ) -> dict:
-    """Return explicit presence/value summaries and pointers; never convert absent annotations to null."""
+    """Summarize declarations found by locate, with evidence and traversal limitations.
+
+    `filename` labels evidence links; no file is read. `keyword` selects one
+    annotation/constraint, or None summarizes each schema. A missing keyword is
+    not a null value. A None document means unavailable evidence, while a missing
+    path means no declaration at that location. Inputs are unchanged.
+    """
     if document is None:
         return {
             "summary": "projection unavailable",
@@ -260,18 +277,20 @@ def related_aliases(
 
 
 def build_findings(report: dict, projections: dict | None = None) -> dict:
-    """Explain saved report/projection evidence and account for every raw difference.
+    """Return a finding inventory with category counts and raw-delta accounting.
 
-    `projections` maps retained filenames to parsed JSON; omitted files are marked
-    unavailable. This explains oasdiff's output, not a second diff/validation engine.
+    `report` is the assessment record written by assess, not a bare oasdiff delta.
+    `projections` maps normalized projection filenames to parsed JSON, as returned
+    by reporting.openapi.load_projections; omitted files are marked unavailable.
     Declaration categories use presence at the inspected location on each side;
     absent annotations do not make an otherwise declared field absent.
     Exact declared aliases classify spelling-only deltas as alias evidence. Value
     comparisons, parent constraints and ambiguous structures remain separate.
     Gap and alias status/media come only from the endpoint's POST operation
     containers; schema property names do not supply transport context.
-    Raw deltas and their report pointers remain in each finding. Every terminal must belong
-    to exactly one row or ValueError is raised. No input mutation or I/O occurs.
+    Raw deltas and their report pointers remain in each finding. Raise ValueError
+    if a terminal is unaccounted for, belongs to multiple rows, or finding IDs
+    collide. No input mutation or I/O occurs.
     """
     projections = projections or {}
     rows, expected = [], set()

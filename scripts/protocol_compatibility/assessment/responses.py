@@ -1,15 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Project unary bodies and decoded SSE events for the pinned comparison engine.
+"""Translate response declarations into schemas that oasdiff can compare.
 
-Call response_document on each retained server export, then compare the returned
-documents with assessment.openapi.compare. These are comparison-only documents:
-SSE projections describe decoded events or explicitly selected chunks, never a
-wire body. Original itemSchema/contentSchema locations accompany coverage gaps.
+Unary JSON bodies remain body schemas. Server-sent events (SSE) need a different
+representation: decoded event data carries an encoding tag so a JSON string and
+a literal terminator remain distinct. Selected chunk payloads are compared
+separately from event envelopes; neither projection describes raw wire bytes.
 
-Only explicit string data alternatives (JSON contentSchema or a string const)
-are decoded. Unsupported encodings/constraints never become a compatibility pass.
-Neither this projection nor a structural diff proves runtime behavior or ordering.
+prepare_response_source checks explicit adapters against input hashes, then
+response_document or chunk_document returns comparison documents and coverage gaps.
+openapi_workflow.py retains them and invokes the comparator. validate_sse_event
+checks one already-parsed event for fixture validation, not stream ordering or
+termination. No function here starts a server or parses an SSE byte stream.
 """
 
 import copy
@@ -37,6 +39,8 @@ def prepare_response_source(
 ) -> tuple[dict, dict, dict]:
     """Copy a source and validate hash-qualified route/stream selections.
 
+    `config` is one sources entry from the response-adapter YAML documented in
+    README.md; None selects native itemSchema handling without route mappings.
     `sha256` must identify the retained raw bytes, including when `document` is
     their composed Dynamo derivative. Caller source/revision labels are retained,
     not attested. Only the two explicit OpenAI /v1 route mappings are supported.
@@ -301,8 +305,10 @@ def decoded_data_schema(schema: dict) -> dict | bool:
 
 
 def decoded_event_schema(document: dict, schema: dict, refs: tuple = ()) -> dict:
-    """Copy an itemSchema, replacing supported data schemas with decoded equivalents.
+    """Copy an event-envelope schema, decoding its declared data alternatives.
 
+    Accept a native itemSchema or an adapter-selected OpenAPI 3.1 event schema.
+    `refs` tracks the active reference chain; callers normally leave it empty.
     Resolve local event-envelope refs and anyOf/oneOf event variants, retaining
     envelope constraints. Unwrap a bare single-alternative event union; payload
     refs stay refs. Missing/recursive/external event

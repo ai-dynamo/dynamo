@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Actual pinned comparator checks. CI must set OASDIFF_BIN; no mock engine."""
+"""Check that projections remove representation noise without hiding schema changes.
+
+These synthetic request, alias, event, and chunk cases execute the pinned oasdiff
+binary. Set OASDIFF_BIN to its path; without it, the suite skips. The tests cover
+the Python-to-comparator boundary, not compatibility of real framework releases
+or server behavior. test_workflow.py separately checks orchestration with mocks.
+"""
 
 import copy
 import os

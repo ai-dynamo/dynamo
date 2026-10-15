@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Check CLI orchestration, retained evidence, and failure status with a mocked comparator."""
+"""Check assessment outputs and exit status independently of oasdiff behavior.
+
+Synthetic inputs and mocked comparator results exercise file retention, alias
+probes, response evidence, and failure reporting. tests/integration/test_oasdiff.py
+covers the real executable; these tests do not establish comparator correctness.
+"""
 
 import copy
 import hashlib
