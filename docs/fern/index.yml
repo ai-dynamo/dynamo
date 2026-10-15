@@ -882,6 +882,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Nemotron 3.5 Super VL
+                path: pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b.mdx
+                slug: nemotron-3-5-super-vl
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
@@ -933,6 +936,13 @@ navigation:
               - page: Solar Open2 250B
                 path: pages/recipes/model-recipes/solar-open2-250b.mdx
                 slug: solar-open2-250b
+          - section: Meta
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Muse-Spark-open-816B-A42B
+                path: pages/recipes/model-recipes/Muse-Spark-Open.mdx
+                slug: Muse-Spark-Open
           - section: MiniMax
             skip-slug: true
             collapsed: true

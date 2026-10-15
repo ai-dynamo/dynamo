@@ -220,7 +220,7 @@ A new value renders but filters nothing until CSS is added.
 | --- | --- |
 | `recipe-sku` | `b200`, `h200`, `h100`, `gb200`, `hopper`, `blackwell` |
 | `recipe-usecase` | `chat`, `agentic` |
-| `recipe-variant` | `agg`, `disagg`, `disagg-single-node`, `disagg-multi-node`, `trtllm-agg`, `trtllm-disagg`, `vllm-disagg`, `standard`, `efa`, `kvbm` |
+| `recipe-variant` | `agg`, `disagg`, `disagg-single-node`, `disagg-multi-node`, `trtllm-agg`, `trtllm-disagg`, `vllm-disagg`, `standard`, `efa`, `kv-router`, `kvbm` |
 
 Landing-page filter chips (`docs/fern/pages/recipes/model-recipes/overview.mdx`) are a separate
 vocabulary — `provider`, `runtime`, `hardware`, `technique`, `workload` — also
