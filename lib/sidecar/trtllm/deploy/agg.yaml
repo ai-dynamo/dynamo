@@ -44,13 +44,9 @@ spec:
     runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
-        # Temporary private image until the TensorRT-LLM nightly includes KV events.
-        # Create ghcr-pull-secret in the target namespace before applying.
-        imagePullSecrets:
-        - name: ghcr-pull-secret
         containers:
         - name: main
-          image: ghcr.io/tanmayv25/tensorrt-llm-kv-events:20261007-4a599236-amd64@sha256:2b2991e1afec6029a26b3b9feaa1d75f381a283f680ba2e37de1030d83237424
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1.dev202610140007
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state (grpc + model, plus kv_connector when configured)
           # rather than just a connectable socket.

@@ -12,9 +12,8 @@
 # engine-to-engine over the cache transceiver, never through the sidecars, so
 # both engines need `cache_transceiver_config` (the ConfigMaps below).
 #
-# Use the default router until KV routing is validated with the pinned Dynamo
-# runtime. The temporary engine image exposes KV events and accepts targeted
-# DP ranks, but this example has only been tested with the default router.
+# Use the default router. KV routing requires engine KV events and DP-rank
+# targeting, which this example does not validate.
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 # The cache transceiver binds a separate port on the pod IP, which is what the
@@ -82,10 +81,6 @@ spec:
     runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
-        # Temporary private image until the TensorRT-LLM nightly includes KV events.
-        # Create ghcr-pull-secret in the target namespace before applying.
-        imagePullSecrets:
-        - name: ghcr-pull-secret
         volumes:
         - name: engine-config
           configMap:
@@ -97,7 +92,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: ghcr.io/tanmayv25/tensorrt-llm-kv-events:20261007-4a599236-amd64@sha256:2b2991e1afec6029a26b3b9feaa1d75f381a283f680ba2e37de1030d83237424
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1.dev202610140007
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
           # The pinned engine ships OpenEngine bindings under tensorrt_llm,
@@ -225,10 +220,6 @@ spec:
     runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
-        # Temporary private image until the TensorRT-LLM nightly includes KV events.
-        # Create ghcr-pull-secret in the target namespace before applying.
-        imagePullSecrets:
-        - name: ghcr-pull-secret
         volumes:
         - name: engine-config
           configMap:
@@ -239,7 +230,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: ghcr.io/tanmayv25/tensorrt-llm-kv-events:20261007-4a599236-amd64@sha256:2b2991e1afec6029a26b3b9feaa1d75f381a283f680ba2e37de1030d83237424
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1.dev202610140007
           startupProbe:
             exec:
               command: *engineReadyCommand
