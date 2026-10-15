@@ -302,8 +302,9 @@ func TestDeploymentContractReadsRemoteBytesOnce(t *testing.T) {
 	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
 	require.NoError(t, err)
 	require.Equal(t, buildContractDeploymentV1, snapshot.format)
-	require.Len(t, client.listRequests, 1)
-	require.Equal(t, []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}, client.listRequests[0].GetFileSelector().GetPaths())
+	require.Len(t, client.listRequests, 2)
+	require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.listRequests[0].GetFileSelector().GetPaths())
+	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.listRequests[1].GetFileSelector().GetPaths())
 	require.Len(t, client.filesRequests, 1)
 	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
 }
