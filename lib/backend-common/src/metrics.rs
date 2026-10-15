@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_runtime::metrics::{
-    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric, prometheus_names::labels,
+    MetricsHierarchy, PrometheusExpositionFormatCallback, PrometheusTypedCallback, create_metric,
+    prometheus_names::labels,
 };
 
 use crate::engine::EngineConfig;
@@ -26,6 +27,7 @@ use crate::error::{BackendError, DynamoError, ErrorType};
 pub struct EngineMetrics {
     hierarchy: Arc<dyn MetricsHierarchy>,
     auto_labels: Arc<HashMap<String, String>>,
+    engine_family_labels: Arc<HashMap<String, String>>,
 }
 
 impl EngineMetrics {
@@ -36,10 +38,11 @@ impl EngineMetrics {
         H: MetricsHierarchy + 'static,
     {
         let arc: Arc<dyn MetricsHierarchy> = Arc::new(hierarchy);
-        let labels = compute_auto_labels(&*arc, None, None);
+        let labels = Arc::new(compute_auto_labels(&*arc, None, None));
         Self {
             hierarchy: arc,
-            auto_labels: Arc::new(labels),
+            engine_family_labels: labels.clone(),
+            auto_labels: labels,
         }
     }
 
@@ -54,9 +57,18 @@ impl EngineMetrics {
             Some(&engine_config.model),
             engine_config.served_model_name.as_deref(),
         );
+        // Engine families carry the served model name under both model labels,
+        // matching the integrated Python bridge, which dashboards filter on.
+        let served = engine_config
+            .served_model_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&engine_config.model);
+        let engine_family_labels = compute_auto_labels(&*arc, Some(served), Some(served));
         Self {
             hierarchy: arc,
             auto_labels: Arc::new(labels),
+            engine_family_labels: Arc::new(engine_family_labels),
         }
     }
 
@@ -70,6 +82,13 @@ impl EngineMetrics {
         &self.auto_labels
     }
 
+    /// The six identity labels injected into re-exported engine families:
+    /// the hierarchy labels, `worker_id`, and the served model name as both
+    /// `model` and `model_name`.
+    pub fn engine_family_labels(&self) -> &Arc<HashMap<String, String>> {
+        &self.engine_family_labels
+    }
+
     /// Register a scrape callback for a foreign Prometheus registry.
     /// Auto-labels are not injected — the callback owns its own labelling.
     pub fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
@@ -77,13 +96,21 @@ impl EngineMetrics {
             .get_metrics_registry()
             .add_expfmt_callback(callback);
     }
+
+    /// Register a typed-family callback. This feeds OTLP only; `/metrics`
+    /// reads the exposition callback above.
+    pub fn add_typed_callback(&self, callback: PrometheusTypedCallback) {
+        self.hierarchy
+            .get_metrics_registry()
+            .add_typed_callback(callback);
+    }
 }
 
 /// Helper: build the `const_labels` slice that goes into `create_metric`
 /// — strips out the auto-injected hierarchy labels (namespace, component,
 /// endpoint, worker_id) so the runtime can re-inject them. Keeps
 /// model/model_name and anything else engine-specific.
-fn const_labels(metrics: &EngineMetrics) -> Vec<(&str, &str)> {
+pub(crate) fn const_labels(metrics: &EngineMetrics) -> Vec<(&str, &str)> {
     let auto_injected = [
         labels::NAMESPACE,
         labels::COMPONENT,
@@ -337,6 +364,29 @@ mod tests {
         assert_eq!(labels.get("model").unwrap(), "/local/path/qwen");
         // served_model_name wins over model for the `model_name` label.
         assert_eq!(labels.get("model_name").unwrap(), "qwen3-0.6b");
+    }
+
+    #[test]
+    fn engine_family_labels_use_the_served_name_for_both_model_labels() {
+        let config = EngineConfig {
+            model: "/local/path/qwen".to_string(),
+            served_model_name: Some("qwen3-0.6b".to_string()),
+            ..Default::default()
+        };
+        let metrics = EngineMetrics::with_engine_config(TestHierarchy::new(), &config);
+        let labels = metrics.engine_family_labels();
+        assert_eq!(labels.get("model").unwrap(), "qwen3-0.6b");
+        assert_eq!(labels.get("model_name").unwrap(), "qwen3-0.6b");
+
+        let config = EngineConfig {
+            model: "/local/path/qwen".to_string(),
+            ..Default::default()
+        };
+        let metrics = EngineMetrics::with_engine_config(TestHierarchy::new(), &config);
+        assert_eq!(
+            metrics.engine_family_labels().get("model_name").unwrap(),
+            "/local/path/qwen"
+        );
     }
 
     #[test]

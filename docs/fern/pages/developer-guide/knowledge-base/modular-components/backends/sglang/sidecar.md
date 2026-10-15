@@ -61,6 +61,16 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
+## Metrics
+
+Start SGLang with `--enable-metrics`. The sidecar then re-exports SGLang's
+`sglang:*` families on its `/metrics` endpoint with Dynamo identity labels,
+fetching them from SGLang's HTTP server on every scrape; it reads the port from
+`GetServerInfo`. Without `--enable-metrics` the sidecar logs a warning at
+startup and serves only Dynamo's own metrics. See
+[Metrics](../../../concepts/system-architecture/sidecar-backends.md#metrics)
+for the labels, bounds, and the opt-out for direct scraping.
+
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event

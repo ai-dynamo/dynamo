@@ -3122,6 +3122,7 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.8.4",
  "clap",
  "dynamo-backend-common",
  "dynamo-runtime",
@@ -3129,6 +3130,7 @@ dependencies = [
  "hyper-util",
  "prost-types 0.13.5",
  "prost-types 0.14.3",
+ "reqwest 0.12.28",
  "serde_json",
  "temp-env",
  "tokio",
@@ -3295,6 +3297,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "axum 0.8.4",
  "base64 0.22.1",
  "clap",
  "dynamo-backend-common",

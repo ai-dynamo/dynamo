@@ -53,6 +53,8 @@ Passed via `metrics_labels=` when the worker calls `serve_endpoint()`. Not auto-
 
 <ParamField path="model_name" type="string">
   `[Shared]` Same model identifier under a second label name, retained for engine-native and dashboard back-compat. Added by vLLM and TRT-LLM workers; **not** added by SGLang. Example: `Qwen/Qwen3-0.6B`.
+
+  Engine families re-exported by a vLLM or SGLang sidecar carry the served model name under both `model` and `model_name`, unless the engine already set the label, which is kept.
 </ParamField>
 
 ## Metric-specific labels

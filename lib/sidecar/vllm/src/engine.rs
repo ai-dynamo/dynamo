@@ -7,14 +7,17 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dynamo_backend_common::exposition::ExpositionOutputs;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
+    LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, RlAdminBaseUrl,
+    RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
 use dynamo_sidecar_common::{
-    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+    EngineBootstrapResult, EngineMetricsEndpoint, GrpcEndpoint, GrpcTransportConfig, HttpEndpoint,
+    SidecarStartupError, register_engine_metrics,
 };
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
@@ -32,11 +35,63 @@ use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, reso
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 
+/// `vllm-rs serve` binds its HTTP server here unless `--port` says otherwise;
+/// gRPC shares the host, so this is where `/metrics` lives by default.
+const VLLM_DEFAULT_HTTP_PORT: u16 = 8000;
+
+/// The families the integrated vLLM worker re-exports.
+const VLLM_METRIC_PREFIXES: &[&str] = &["vllm:", "lmcache:"];
+
+/// Where the sidecar reads vLLM's Prometheus exposition and which runtime
+/// surfaces receive it.
+pub(crate) struct EngineMetricsConfig {
+    endpoint: Arc<EngineMetricsEndpoint>,
+    outputs: ExpositionOutputs,
+    /// Whether `--vllm-http-endpoint` supplied the address, which changes the
+    /// operator hint when the endpoint is unreachable.
+    explicit: bool,
+}
+
+impl EngineMetricsConfig {
+    #[cfg(test)]
+    pub(crate) fn url(&self) -> &str {
+        self.endpoint.url().as_str()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_explicit(&self) -> bool {
+        self.explicit
+    }
+}
+
+/// `--vllm-http-endpoint` when given, else the gRPC host on vLLM's default
+/// HTTP port. `ServerInfo` does not report the HTTP port, so there is nothing
+/// to discover.
+pub(crate) fn resolve_engine_metrics(
+    grpc_endpoint: &GrpcEndpoint,
+    http_endpoint: Option<&HttpEndpoint>,
+    outputs: ExpositionOutputs,
+) -> Result<EngineMetricsConfig, DynamoError> {
+    let (base, explicit) = match http_endpoint {
+        Some(endpoint) => (endpoint.clone(), true),
+        None => (
+            HttpEndpoint::from_grpc(grpc_endpoint, VLLM_DEFAULT_HTTP_PORT)?,
+            false,
+        ),
+    };
+    Ok(EngineMetricsConfig {
+        endpoint: Arc::new(EngineMetricsEndpoint::new(&base)?),
+        outputs,
+        explicit,
+    })
+}
+
 pub struct VllmSidecarEngine {
     endpoint: GrpcEndpoint,
     model: DiscoveredModel,
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
+    engine_metrics: EngineMetricsConfig,
     client: OnceCell<VllmClient>,
     runtime_endpoint: OnceCell<Endpoint>,
     lora_downloader: OnceCell<LoRADownloader>,
@@ -60,6 +115,7 @@ impl VllmSidecarEngine {
         model: DiscoveredModel,
         mode: DisaggregationMode,
         transport: GrpcTransportConfig,
+        engine_metrics: EngineMetricsConfig,
     ) -> Self {
         Self {
             is_lora_enabled: lora_serving_enabled() && model.supports_lora(),
@@ -68,6 +124,7 @@ impl VllmSidecarEngine {
             model,
             mode,
             transport,
+            engine_metrics,
             client: OnceCell::new(),
             runtime_endpoint: OnceCell::new(),
             lora_downloader: OnceCell::new(),
@@ -193,6 +250,11 @@ impl VllmSidecarEngine {
                 "Dynamo parsers need vLLM without its own reasoning parser, but vLLM runs `{parser}`; start vllm-rs with `--reasoning-parser none`"
             )));
         }
+        let engine_metrics = resolve_engine_metrics(
+            &args.sidecar.grpc_endpoint,
+            args.vllm_http_endpoint.as_ref(),
+            args.engine_metrics.outputs(),
+        )?;
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
         let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
@@ -207,7 +269,7 @@ impl VllmSidecarEngine {
         let rl_metadata = enable_rl
             .then(|| model.rl_worker_metadata(vllm_http_url, vllm_rl_world_size))
             .transpose()?;
-        let engine = Self::new(endpoint, model.clone(), mode, transport);
+        let engine = Self::new(endpoint, model.clone(), mode, transport, engine_metrics);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -741,6 +803,27 @@ impl VllmSidecarEngine {
 
 #[async_trait]
 impl LLMEngine for VllmSidecarEngine {
+    /// Re-export vLLM's own Prometheus families, labelled with this worker's
+    /// identity, by fetching the engine's `/metrics` whenever the sidecar's is
+    /// scraped. No per-rank snapshot publishing yet.
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let hint = if self.engine_metrics.explicit {
+            "check --vllm-http-endpoint"
+        } else {
+            "set --vllm-http-endpoint if vLLM's HTTP server does not listen on port 8000"
+        };
+        register_engine_metrics(
+            ctx.metrics,
+            "vLLM",
+            self.engine_metrics.endpoint.clone(),
+            VLLM_METRIC_PREFIXES,
+            self.engine_metrics.outputs,
+            hint,
+        )
+        .await?;
+        Ok(MetricsBindings::default())
+    }
+
     async fn start(
         &self,
         _worker_id: u64,

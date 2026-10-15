@@ -58,6 +58,15 @@ kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
 
+## Metrics
+
+The sidecar re-exports vLLM's `vllm:*` families on its `/metrics` endpoint with
+Dynamo identity labels, fetching them from the engine on every scrape. It reads
+`vllm-rs serve`'s HTTP server on the gRPC host at port `8000`; set
+`--vllm-http-endpoint` (`VLLM_HTTP_ENDPOINT`) on the sidecar when vLLM runs on
+another `--port`. See [Metrics](../../../concepts/system-architecture/sidecar-backends.md#metrics)
+for the labels, bounds, and the opt-out for direct scraping.
+
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event

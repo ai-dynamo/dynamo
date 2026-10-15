@@ -17,6 +17,7 @@ pub mod args;
 pub mod disagg;
 pub mod engine;
 pub mod error;
+pub mod exposition;
 pub mod metrics;
 mod publisher;
 mod rl;
@@ -44,6 +45,9 @@ pub use engine::{
     TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
+pub use exposition::{
+    Exposition, ExpositionFilter, ExpositionOutputs, ExpositionSource, ExpositionSourceConfig,
+};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use rl::{RlAdminBaseUrl, RlWorkerMetadata};
 pub use run::{run, run_raw};

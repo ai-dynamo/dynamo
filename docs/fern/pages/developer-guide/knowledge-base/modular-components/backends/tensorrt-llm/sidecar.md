@@ -63,6 +63,14 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
+## Metrics
+
+The sidecar serves Dynamo's worker metrics on `/metrics`. It does not yet
+re-export `trtllm_*` families: `trtllm-serve --grpc` runs the OpenEngine gRPC
+server without an HTTP metrics endpoint, so there is nothing to fetch. The
+engine-side gap is tracked in
+[DEP #16468](https://github.com/ai-dynamo/dynamo/issues/16468).
+
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event

@@ -9,13 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use dynamo_backend_common::exposition::ExpositionOutputs;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
-    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
-    PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration,
+    MetricsBindings, MetricsCtx, ModelInput, PreprocessedRequest, RuntimeConfig, WorkerConfig,
+    usage,
 };
 use dynamo_sidecar_common::{
-    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+    EngineBootstrapResult, EngineMetricsEndpoint, GrpcEndpoint, GrpcTransportConfig, HttpEndpoint,
+    SidecarStartupError, register_engine_metrics,
 };
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -34,6 +37,9 @@ use crate::protocol::{
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+/// The families the integrated SGLang worker re-exports.
+const SGLANG_METRIC_PREFIXES: &[&str] = &["sglang:"];
+
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
@@ -41,6 +47,7 @@ pub struct SglangSidecarEngine {
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
     native_http_max_event_bytes: usize,
+    engine_metrics_outputs: ExpositionOutputs,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -50,6 +57,9 @@ struct StartedState {
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    /// SGLang's `/metrics`, present only when the engine runs with
+    /// `--enable-metrics`.
+    engine_metrics: Option<Arc<EngineMetricsEndpoint>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,6 +182,7 @@ impl SglangSidecarEngine {
         );
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
+        let engine_metrics_outputs = args.engine_metrics.outputs();
         let common = args.sidecar.common;
         let config = WorkerConfig {
             runtime: common.runtime,
@@ -208,6 +219,7 @@ impl SglangSidecarEngine {
                 bootstrap_host,
                 bootstrap_port,
                 native_http_max_event_bytes,
+                engine_metrics_outputs,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -262,6 +274,28 @@ impl SglangSidecarEngine {
 
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
+    /// Re-export SGLang's own Prometheus families, labelled with this worker's
+    /// identity, by fetching the engine's `/metrics` whenever the sidecar's is
+    /// scraped. No per-rank snapshot publishing yet.
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
+        if let Some(endpoint) = &state.engine_metrics {
+            register_engine_metrics(
+                ctx.metrics,
+                "SGLang",
+                endpoint.clone(),
+                SGLANG_METRIC_PREFIXES,
+                self.engine_metrics_outputs,
+                "the address comes from SGLang's GetServerInfo host and port",
+            )
+            .await?;
+        }
+        Ok(MetricsBindings::default())
+    }
+
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
@@ -322,12 +356,19 @@ impl LLMEngine for SglangSidecarEngine {
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
+        let engine_metrics = resolve_engine_metrics_endpoint(&self.endpoint, &discovery)?;
+        if engine_metrics.is_none() && self.engine_metrics_outputs.any() {
+            tracing::warn!(
+                "SGLang engine metrics are off; start SGLang with --enable-metrics to re-export sglang:* families"
+            );
+        }
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
                 combined_token_limit,
+                engine_metrics,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -639,6 +680,40 @@ fn discovery_string(value: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
+}
+
+/// SGLang's `/metrics` lives on its HTTP server, whose `port` `GetServerInfo`
+/// reports, and exists only with `--enable-metrics`. The gRPC host is reused
+/// because both servers bind SGLang's `--host`.
+pub(crate) fn resolve_engine_metrics_endpoint(
+    grpc_endpoint: &GrpcEndpoint,
+    discovery: &Discovery,
+) -> Result<Option<Arc<EngineMetricsEndpoint>>, DynamoError> {
+    if discovery
+        .server_info
+        .get("enable_metrics")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Ok(None);
+    }
+    let raw_port = discovery
+        .server_info
+        .get("port")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let port = client::json_u64(&discovery.server_info, "port")
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            client::protocol_error(format!(
+                "SGLang GetServerInfo.port must be in 1..=65535 when enable_metrics is set, got {raw_port}"
+            ))
+        })?;
+    let base = HttpEndpoint::from_grpc(grpc_endpoint, port).map_err(|error| {
+        client::protocol_error(format!("invalid SGLang HTTP endpoint: {error}"))
+    })?;
+    Ok(Some(Arc::new(EngineMetricsEndpoint::new(&base)?)))
 }
 
 fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, DynamoError> {
@@ -1171,8 +1246,45 @@ mod tests {
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
         discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        omitted_max_tokens_default, resolve_bootstrap_host_with_local,
+        resolve_engine_metrics_endpoint, sglang_eagle_enabled,
     };
+
+    #[test]
+    fn engine_metrics_endpoint_requires_enable_metrics_and_a_valid_port() {
+        let grpc = GrpcEndpoint::parse("http://127.0.0.1:30001", "--grpc-endpoint").unwrap();
+        for server_info in [
+            json!({"port": 30000}),
+            json!({"port": 30000, "enable_metrics": false}),
+            json!({"port": 30000, "enable_metrics": "true"}),
+        ] {
+            assert!(
+                resolve_engine_metrics_endpoint(&grpc, &discovery(server_info))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let endpoint = resolve_engine_metrics_endpoint(
+            &grpc,
+            &discovery(json!({"port": "30000", "enable_metrics": true})),
+        )
+        .unwrap()
+        .expect("metrics endpoint");
+        assert_eq!(endpoint.url().as_str(), "http://127.0.0.1:30000/metrics");
+        for port in [json!(0), json!(70000), json!("bad"), json!(null)] {
+            let error = resolve_engine_metrics_endpoint(
+                &grpc,
+                &discovery(json!({"port": port, "enable_metrics": true})),
+            )
+            .err()
+            .expect("invalid port is rejected");
+            assert!(error.to_string().contains("GetServerInfo.port"), "{error}");
+        }
+        assert!(
+            resolve_engine_metrics_endpoint(&grpc, &discovery(json!({"enable_metrics": true})))
+                .is_err()
+        );
+    }
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {
