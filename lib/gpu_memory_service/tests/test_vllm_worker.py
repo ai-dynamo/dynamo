@@ -105,12 +105,13 @@ _NON_TORCH = 2 * _GIB  # NCCL and NIXL buffers
 _CUDAGRAPH = int(0.43 * _GIB)
 
 
-def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0):
+def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0, is_cuda=True):
     """Run init_device and the scratch-KV budget beside a resident peer engine."""
-    # The peer engine is already resident on the device, and this engine's
-    # CUDA context exists before init_device runs.
-    peer_used = _WEIGHTS + _CONTEXT + _TORCH_PEAK + _NON_TORCH
-    device = _FakeDevice(_TOTAL, peer_used=peer_used + _CONTEXT)
+    # The peer engine is already resident. On CUDA, this engine's context
+    # also exists before init_device runs.
+    context = _CONTEXT if is_cuda else 0
+    peer_used = _WEIGHTS + context + _TORCH_PEAK + _NON_TORCH
+    device = _FakeDevice(_TOTAL, peer_used=peer_used + context)
 
     def base_init_device(_worker):
         """Allocate local buffers while the peer changes its memory use."""
@@ -127,14 +128,16 @@ def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0):
     monkeypatch.setattr(gms_worker, "get_or_create_gms_client_memory_manager", Mock())
     monkeypatch.setattr(gms_worker, "_get_dp_adjusted_local_rank", lambda *_: 0)
     monkeypatch.setattr(
-        gms_worker, "get_vmm_device_type", lambda: SimpleNamespace(value="cuda")
+        gms_worker,
+        "get_vmm_device_type",
+        lambda: SimpleNamespace(value="cuda" if is_cuda else "xpu"),
     )
     monkeypatch.setattr(
         gms_worker, "get_socket_path", lambda *_: str(tmp_path / "weights.sock")
     )
     monkeypatch.setattr(
         "vllm.platforms.current_platform",
-        SimpleNamespace(set_device=lambda _: None, is_cuda=lambda: True),
+        SimpleNamespace(set_device=lambda _: None, is_cuda=lambda: is_cuda),
     )
     monkeypatch.setattr(gms_worker._BaseWorker, "init_device", base_init_device)
     monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1")
@@ -183,6 +186,15 @@ def test_shadow_kv_budget_ignores_peer_memory_changes(
     engine_non_kv = (
         gms_worker._CUDA_CONTEXT_BYTES + _TORCH_PEAK + allowance + _CUDAGRAPH
     )
+    assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
+    assert kv_budget > 0
+
+
+def test_shadow_kv_budget_excludes_cuda_context_on_xpu(monkeypatch, tmp_path):
+    """Do not charge either XPU engine for a CUDA context or CUDA graphs."""
+    kv_budget = _shadow_kv_budget(monkeypatch, tmp_path, is_cuda=False)
+
+    engine_non_kv = _TORCH_PEAK + gms_worker._NON_TORCH_INIT_BYTES
     assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
     assert kv_budget > 0
 

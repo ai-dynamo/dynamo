@@ -261,11 +261,12 @@ class GMSWorker(_BaseWorker):
         weights_memory = get_imported_weights_bytes()
         invisible_weights_memory = 0 if has_pending_write else weights_memory
         non_torch_memory = _NON_TORCH_INIT_BYTES
+        cuda_context_memory = _CUDA_CONTEXT_BYTES if current_platform.is_cuda() else 0
         non_kv_cache_memory = (
             torch_peak
             + invisible_weights_memory
             + non_torch_memory
-            + _CUDA_CONTEXT_BYTES
+            + cuda_context_memory
             + cudagraph_memory_estimate_applied
         )
         # KV is one cuMemCreate at wake beside the resident peer engine, which runs
@@ -290,7 +291,7 @@ class GMSWorker(_BaseWorker):
             torch_peak / (1 << 30),
             invisible_weights_memory / (1 << 30),
             non_torch_memory / (1 << 30),
-            _CUDA_CONTEXT_BYTES / (1 << 30),
+            cuda_context_memory / (1 << 30),
             cudagraph_memory_estimate / (1 << 30),
             cudagraph_memory_estimate_applied / (1 << 30),
         )
