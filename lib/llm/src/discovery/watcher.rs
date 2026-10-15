@@ -827,9 +827,8 @@ impl ModelWatcher {
             .await?;
             let client = load_context.client().clone();
 
-            // KV routing needs frontend tokenization to compute block hashes, and
-            // `PushRouter` refuses `RouterMode::KV`, so text-input cards fall back
-            // to round-robin instead of failing every request at runtime.
+            // KV routing needs frontend tokenization and `PushRouter` refuses
+            // `RouterMode::KV`, so text-input cards fall back to round-robin.
             let text_router_mode = if router_config.router_mode.is_kv_routing() {
                 tracing::warn!(
                     model_name = card.name(),
