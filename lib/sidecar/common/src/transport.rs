@@ -4,6 +4,7 @@
 use std::fmt::Write as _;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
@@ -12,8 +13,8 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep_until, timeout_at};
+use tonic::codegen::Service;
 use tonic::codegen::http::Uri;
-use tonic::codegen::{Context, Poll, Service};
 use tonic::transport::{Channel, Endpoint};
 
 use crate::{GrpcEndpoint, GrpcTransportConfig, cannot_connect, invalid_argument};
@@ -33,12 +34,17 @@ const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 struct RejectSelfConnect(HttpConnector);
 
 impl RejectSelfConnect {
-    /// Mirrors the connector `Endpoint::connect` builds from default settings.
-    fn new(connect_timeout: Duration) -> Self {
+    /// Matches the connector `Endpoint::connect` builds from default endpoint
+    /// settings, except for the connect timeout: `connect_with_connector`
+    /// already applies the endpoint's `connect_timeout` around this connector.
+    ///
+    /// TCP options set on the `Endpoint` (`tcp_keepalive` and `local_address`,
+    /// plus the keepalive interval and retries in tonic 0.14) do not reach
+    /// this connector. Nothing sets them today; set them here if that changes.
+    fn new() -> Self {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
-        http.set_connect_timeout(Some(connect_timeout));
         Self(http)
     }
 }
@@ -103,7 +109,7 @@ impl GrpcChannelPool {
             bootstrap,
             |_, attempt_timeout| {
                 let endpoint = tonic_endpoint.clone().connect_timeout(attempt_timeout);
-                let connector = RejectSelfConnect::new(attempt_timeout);
+                let connector = RejectSelfConnect::new();
                 async move { endpoint.connect_with_connector(connector).await }
             },
         )
