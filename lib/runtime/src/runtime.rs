@@ -67,12 +67,9 @@ pub struct Runtime {
     endpoint_shutdown_token: CancellationToken,
     shutdown_started: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
-    /// Bound the in-progress shutdown is draining endpoints with. Set once,
-    /// before Phase 1, so the endpoint drain and the Phase 2 wait for it use
-    /// the same number — otherwise Phase 3 can tear down the transports while
-    /// a drain on a different clock is still running. Per-runtime rather than
-    /// process-global so tests (and embedded runtimes) cannot see each other's.
-    active_drain_timeout: Arc<std::sync::OnceLock<Duration>>,
+    /// Earliest drain deadline requested by any caller. Later callers may
+    /// shorten it, but can never extend a shutdown already in progress.
+    drain_deadline: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
     /// Background tasks that do their cleanup *after* the primary token is
     /// cancelled — today the etcd lease keep-alive, whose `lease.revoke()` runs
     /// on cancellation. Phase 3 only cancels; without joining these the process
@@ -123,7 +120,7 @@ impl Runtime {
             endpoint_shutdown_token,
             shutdown_started,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
-            active_drain_timeout: Arc::new(std::sync::OnceLock::new()),
+            drain_deadline: tokio::sync::watch::channel(None).0,
             teardown_tasks: Arc::new(std::sync::Mutex::new(Some(Vec::new()))),
             shutdown_completion: Arc::new(std::sync::OnceLock::new()),
             compute_pool,
@@ -368,10 +365,11 @@ impl Runtime {
 
     /// Use the active shutdown bound, or the runtime default outside shutdown.
     pub(crate) fn endpoint_drain_timeout(&self) -> Duration {
-        self.active_drain_timeout
-            .get()
-            .copied()
-            .unwrap_or_else(graceful_shutdown_timeout)
+        self.drain_deadline
+            .borrow()
+            .map_or_else(graceful_shutdown_timeout, |deadline| {
+                deadline.saturating_duration_since(tokio::time::Instant::now())
+            })
     }
 
     pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
@@ -446,17 +444,38 @@ impl Runtime {
         }
     }
 
-    // The first caller selects the drain bound. All callers join the same task;
+    /// Bound the complete teardown, reserving up to five seconds (at most half
+    /// the remaining budget) for transport cleanup after endpoint draining.
+    pub async fn shutdown_with_budget(&self, remaining: Duration) -> anyhow::Result<()> {
+        let reserve = TEARDOWN_TASK_JOIN_TIMEOUT.min(remaining / 2);
+        tokio::time::timeout(remaining, self.shutdown_and_wait(Some(remaining - reserve)))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("runtime teardown exceeded the worker shutdown deadline")
+            })?
+    }
+
+    // All callers join the same task and may tighten its drain deadline;
     // cancelling a waiter must not cancel teardown or lose its lease handles.
     fn start_shutdown(
         &self,
         drain_timeout: Option<Duration>,
     ) -> tokio::sync::watch::Receiver<ShutdownCompletion> {
         self.mark_shutting_down();
+        let deadline =
+            tokio::time::Instant::now() + drain_timeout.unwrap_or_else(graceful_shutdown_timeout);
+        self.drain_deadline.send_if_modified(|current| {
+            if current.is_none_or(|previous| deadline < previous) {
+                *current = Some(deadline);
+                true
+            } else {
+                false
+            }
+        });
         self.shutdown_completion
             .get_or_init(|| {
                 let (complete, receiver) = tokio::sync::watch::channel(None);
-                let sequence = self.shutdown_sequence(drain_timeout);
+                let sequence = self.shutdown_sequence();
                 self.primary().spawn(async move {
                     let outcome = sequence.await.map_err(|error| error.to_string());
                     if let Err(error) = &outcome {
@@ -474,26 +493,17 @@ impl Runtime {
     /// so the fire-and-forget path can spawn it.
     fn shutdown_sequence(
         &self,
-        drain_timeout: Option<Duration>,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static {
         tracing::info!("Runtime shutdown initiated");
 
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
-        let active_drain_timeout = self.active_drain_timeout.clone();
+        let drain_deadline = self.drain_deadline.clone();
         let teardown_tasks = self.teardown_tasks.clone();
 
         async move {
-            // Resolve the one bound this shutdown will use, *before* Phase 1.
-            // The endpoint drain that Phase 2 waits on runs inside the endpoint
-            // cleanup task, which reads this — without it the drain used
-            // `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (900s) while Phase 2
-            // waited with the caller's bound (30s for a worker), so Phase 3
-            // cancelled the primary token and tore down NATS/etcd with the
-            // drain still running. Two clocks that could never agree.
-            let timeout = drain_timeout.unwrap_or_else(graceful_shutdown_timeout);
-            let _ = active_drain_timeout.set(timeout);
+            let mut deadlines = drain_deadline.subscribe();
 
             // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
             tracing::info!("Phase 1: Cancelling endpoint shutdown token");
@@ -505,17 +515,23 @@ impl Runtime {
             let count = tracker.get_count();
             tracing::info!("Active graceful endpoints: {count}");
 
-            if count != 0
-                && tokio::time::timeout(timeout, tracker.wait_for_completion())
-                    .await
-                    .is_err()
-            {
-                let remaining = tracker.get_count();
-                tracing::error!(
-                    timeout_secs = timeout.as_secs(),
-                    remaining_endpoints = remaining,
-                    "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
-                );
+            let drained = tracker.wait_for_completion();
+            tokio::pin!(drained);
+            while count != 0 {
+                let deadline = deadlines
+                    .borrow_and_update()
+                    .expect("shutdown deadline set before spawn");
+                tokio::select! {
+                    _ = &mut drained => break,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(
+                            remaining_endpoints = tracker.get_count(),
+                            "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
+                        );
+                        break;
+                    }
+                    _ = deadlines.changed() => {}
+                }
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
