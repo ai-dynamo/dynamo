@@ -6991,9 +6991,7 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     from dynamo.common.forward_pass_metrics import decode
 
     ctx = zmq.Context.instance()
-    # The publisher binds an OS-assigned port and keeps it; probing a free port
-    # and releasing it before the publisher binds lets another process take it.
-    # Keep publishing paused until the subscriber is connected.
+    # Keep publishing paused until the subscriber connects and the worker ID is set.
     publisher = instrumented_scheduler_module._FpmPublisherThread(
         "tcp://127.0.0.1:*", worker_id="", dp_rank=0, start_paused=True
     )
@@ -7002,7 +7000,6 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
         sub = ctx.socket(zmq.SUB)
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         sub.connect(publisher.endpoint)
-        publisher.resume()
 
         scheduler = object.__new__(InstrumentedScheduler)
         scheduler._fpm_worker_id = ""
@@ -7017,6 +7014,7 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
             EngineCoreRequestType.UTILITY,
             (0, 7, FPM_UTILITY_NAME, ("8465209922961459",)),
         )
+        publisher.resume()
 
         _client, outputs = engine.output_queue.get_nowait()
         assert outputs.utility_output.failure_message is None

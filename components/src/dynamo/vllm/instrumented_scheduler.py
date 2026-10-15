@@ -1659,7 +1659,6 @@ class _FpmPublisherThread:
         max_queue_size: int = 10_000,
         start_paused: bool = False,
     ) -> None:
-        """Expose the resolved ``endpoint`` without cross-thread socket access."""
         self._queue: queue.Queue[ForwardPassMetrics | None] = queue.Queue(
             maxsize=max_queue_size
         )
