@@ -2,25 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # EXPERIMENTAL: engine-primary disaggregated SGLang with the Dynamo native sidecar
-#
-# Prefill and decode run as separate worker pods, each with two containers:
-#   - main: stock SGLang image in --disaggregation-mode prefill|decode with the
-#     NIXL backend; holds one GPU. KV moves prefill -> decode over NIXL/RDMA.
-#   - runtime: Dynamo worker (dynamo-sglang-sidecar), no GPU; runs as a
-#     restartable init container and auto-discovers its role from the engine.
-#
-# Unlike aggregated, the engine binds 0.0.0.0 so its bootstrap server (8998) is
-# reachable across pods; the decode worker dials the prefill worker's advertised
-# bootstrap address, which the sidecar auto-detects. SGLang's single
-# --host binds ALL listeners, so the unauthenticated native gRPC (30001) is also
-# exposed on the pod network — rely on NetworkPolicy, not loopback isolation.
-#
-# PREREQUISITES / CAVEATS:
-#   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
-#     for your fabric (UCX_NET_DEVICES etc.). The SGLang image must include
-#     NIXL/UCX support.
-#   - Model / served-model-name / TP must match between prefill and decode.
-#   - Set the runtime image to a sidecar image built from lib/sidecar/Dockerfile.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -38,15 +19,11 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
 
   - name: SGLangPrefillWorker
-    type: worker
+    type: prefill
     replicas: 1
+    sharedMemorySize: 10Gi
     podTemplate:
       spec:
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 10Gi
         initContainers:
         - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
@@ -59,35 +36,46 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.21
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
-          # Real gRPC HealthCheck (see agg.yaml). startupProbe gates the engine;
-          # readinessProbe drops it if the engine becomes unhealthy.
+          # All probes pass only for HealthCheckResponse.healthy=true;
+          # its raw protobuf encoding is 0x08 0x01.
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
-            periodSeconds: 5
-            timeoutSeconds: 10
-            failureThreshold: 60
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
           readinessProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
-            periodSeconds: 10
-            timeoutSeconds: 10
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -96,9 +84,6 @@ spec:
               nvidia.com/gpu: "1"
               rdma/ib: "1"
               ephemeral-storage: 2Gi
-          volumeMounts:
-          - name: dshm
-            mountPath: /dev/shm
           command:
           - python3
           - -m
@@ -121,15 +106,11 @@ spec:
           - nixl
 
   - name: SGLangDecodeWorker
-    type: worker
+    type: decode
     replicas: 1
+    sharedMemorySize: 10Gi
     podTemplate:
       spec:
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 10Gi
         initContainers:
         - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
@@ -142,35 +123,44 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.21
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
-          # Real gRPC HealthCheck (see agg.yaml). startupProbe gates the engine;
-          # readinessProbe drops it if the engine becomes unhealthy.
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
-            periodSeconds: 5
-            timeoutSeconds: 10
-            failureThreshold: 60
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
           readinessProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
-            periodSeconds: 10
-            timeoutSeconds: 10
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -179,9 +169,6 @@ spec:
               nvidia.com/gpu: "1"
               rdma/ib: "1"
               ephemeral-storage: 2Gi
-          volumeMounts:
-          - name: dshm
-            mountPath: /dev/shm
           command:
           - python3
           - -m

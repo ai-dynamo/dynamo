@@ -2,19 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # EXPERIMENTAL: engine-primary aggregated SGLang behind Dynamo's KV-aware router
-#
-# This deploys two worker pods. Each pod colocates:
-#   - main: the stock SGLang image. It holds one GPU and publishes KV-cache
-#     events over ZMQ for exact KV-aware routing.
-#   - runtime: the restartable Dynamo init sidecar, which discovers the engine's
-#     KV-event source over gRPC and registers it with Dynamo.
-#
-# SGLang binds its unauthenticated gRPC and ZMQ listeners on the pod network.
-# The sidecar connects over the downward-API pod IP so it can replace the ZMQ
-# wildcard with that routable address. Restrict both ports with NetworkPolicy.
-#
-# Set the runtime image below to a sidecar image built from
-# lib/sidecar/Dockerfile.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -38,8 +25,6 @@ spec:
     replicas: 2
     podTemplate:
       spec:
-        # Every replica can use the same ports because each engine runs in a
-        # separate pod network namespace.
         initContainers:
         - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
@@ -52,26 +37,29 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.21
+          # All probes pass only for HealthCheckResponse.healthy=true;
+          # its raw protobuf encoding is 0x08 0x01.
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
-            periodSeconds: 5
-            timeoutSeconds: 10
-            failureThreshold: 60
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
           readinessProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
-            periodSeconds: 10
-            timeoutSeconds: 10
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+            periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             exec:
@@ -82,11 +70,12 @@ spec:
               # 0x08 0x01. Fail when the RPC succeeds but reports unhealthy.
               - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
-            timeoutSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 6
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           resources:
             limits:
               nvidia.com/gpu: "1"
