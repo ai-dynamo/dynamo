@@ -74,7 +74,7 @@ use crate::protocols::openai::{
     audios::{AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-        NvCreateChatCompletionStreamResponse,
+        NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template,
     },
     classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -3373,11 +3373,12 @@ fn deduplicate_stream_roles(
 ///
 /// The lowest-index call keeps the single slot while its id or name can still
 /// arrive. Fragments are buffered until a call is selected; at the choice's
-/// finish reason, the lowest-index call with a complete identity wins. Only the
-/// selected call is forwarded, at outward index 0.
+/// finish reason or at stream end, the lowest-index call with a complete
+/// identity wins. Only the selected call is forwarded, at outward index 0.
 #[derive(Default)]
 struct SingleToolCallFilter {
     choices: HashMap<u32, SingleToolCallChoice>,
+    template: Option<NvCreateChatCompletionStreamResponse>,
 }
 
 #[derive(Default)]
@@ -3456,6 +3457,45 @@ impl SingleToolCallFilter {
             }
             choice.delta.tool_calls = (!forwarded.is_empty()).then_some(forwarded);
         }
+
+        if self.template.is_none()
+            && self
+                .choices
+                .values()
+                .any(|state| !state.candidates.is_empty())
+        {
+            self.template = Some(resp.clone());
+        }
+    }
+
+    /// Publishes calls still buffered when the stream ends without a finish reason.
+    fn finish(&mut self) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let Some(template) = self.template.take() else {
+            return Vec::new();
+        };
+        let mut indices: Vec<u32> = self.choices.keys().copied().collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .filter_map(|choice_index| {
+                let state = self.choices.get_mut(&choice_index)?;
+                let selected = state.selected.is_none().then(|| state.select(true))??;
+                let mut fragments = state.candidates.remove(&selected)?.fragments;
+                state.selected = Some(selected);
+                state.candidates.clear();
+                for tool_call in &mut fragments {
+                    tool_call.index = 0;
+                }
+                Some(stream_choice_chunk_from_template(
+                    &template,
+                    choice_index,
+                    None,
+                    None,
+                    Some(fragments),
+                    None,
+                ))
+            })
+            .collect()
     }
 }
 
@@ -3874,6 +3914,33 @@ async fn chat_completions(
                 events.reverse();
                 while let Some(event) = events.pop() {
                     yield event;
+                }
+            }
+
+            if producer_error_signal.error_type().is_none()
+                && let Some(filter) = single_tool_call_filter.as_mut()
+            {
+                for response in filter.finish() {
+                    events.clear();
+                    if tool_dispatch_enabled {
+                        streaming_tool_dispatch_events(
+                            &response,
+                            &mut dispatched_tool_ids,
+                            &mut events,
+                        );
+                    }
+                    let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
+                        EventConverter::from(response),
+                        &mut response_collector,
+                        &mut http_queue_guard,
+                        reasoning_field,
+                    );
+                    if let Ok(Some(ev)) = sse_result {
+                        events.push(Ok(ev));
+                    }
+                    for event in events.drain(..) {
+                        yield event;
+                    }
                 }
             }
         };
@@ -11032,7 +11099,6 @@ mod tests {
     /// `(index, id, name, arguments)` of a forwarded tool-call fragment.
     type ForwardedFragment = (u32, Option<String>, Option<String>, Option<String>);
 
-    /// Runs `chunks` through the single-call filter and returns the forwarded fragments.
     fn forwarded_single_tool_calls(
         chunks: Vec<(
             Vec<ChatCompletionMessageToolCallChunk>,
@@ -11040,10 +11106,21 @@ mod tests {
         )>,
     ) -> Vec<ForwardedFragment> {
         let mut filter = SingleToolCallFilter::default();
-        let mut forwarded = Vec::new();
+        let mut responses = Vec::new();
         for (tool_calls, finish) in chunks {
             let mut resp = make_delta(None, None, Some(tool_calls), finish, None, None, None, None);
             filter.apply(&mut resp);
+            responses.push(resp);
+        }
+        responses.extend(
+            filter
+                .finish()
+                .into_iter()
+                .filter_map(|response| response.data),
+        );
+
+        let mut forwarded = Vec::new();
+        for mut resp in responses {
             for call in resp.inner.choices[0]
                 .delta
                 .tool_calls
@@ -11189,6 +11266,34 @@ mod tests {
         );
         filter.apply(&mut second);
         assert!(second.inner.choices[0].delta.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_single_tool_call_filter_falls_back_at_stream_end() {
+        let forwarded = forwarded_single_tool_calls(vec![
+            (
+                vec![tool_call_fragment(0, None, Some("read_file"), Some("{}"))],
+                None,
+            ),
+            (
+                vec![tool_call_fragment(
+                    1,
+                    Some("call_b"),
+                    Some("read_file"),
+                    Some("{\"path\":\"/b\"}"),
+                )],
+                None,
+            ),
+        ]);
+        assert_eq!(
+            forwarded,
+            vec![fragment(
+                0,
+                Some("call_b"),
+                Some("read_file"),
+                Some("{\"path\":\"/b\"}")
+            )]
+        );
     }
 
     #[test]
