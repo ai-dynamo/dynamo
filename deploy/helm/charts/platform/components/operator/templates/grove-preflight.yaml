@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-{{- $grove := dig "grove" dict (.Values.global | default dict) -}}
+{{ $grove := dig "grove" dict (.Values.global | default dict) -}}
 {{- $config := .Values.grovePreflight -}}
 {{- if and ($grove.enabled | default false) (not ($grove.install | default false)) $config.enabled -}}
 {{- if and $config.deploymentName (not $config.namespace) -}}

@@ -5,6 +5,11 @@ suite: external Grove preflight
 templates:
   - charts/dynamo-operator/templates/grove-preflight.yaml
 tests:
+  - it: preserves the first hook resource apiVersion
+    set: {global.grove.enabled: true}
+    documentSelector: {path: kind, value: ServiceAccount}
+    asserts:
+      - equal: {path: apiVersion, value: v1}
   - it: omits the hook when Grove integration is disabled
     asserts:
       - hasDocuments: {count: 0}
