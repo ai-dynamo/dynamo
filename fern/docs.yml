@@ -116,6 +116,8 @@ versions:
     path: ./versions/v0.7.0.yml
     availability: stable
 redirects:
+  - source: "/dynamo/dev/recipes/nemotron-3-5-super-vl-120b-a12b"
+    destination: "/dynamo/dev/recipes/nemotron-3-5-super-vl"
   - source: "/dynamo/dev/reference/agent-skills"
     destination: "/dynamo/dev/agent-skills/overview"
   # Recipe slug renamed to include -fp8 suffix to match HF model ID.
