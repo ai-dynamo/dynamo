@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import re
+import runpy
+import subprocess
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -16,8 +18,6 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
-
-from tests.wheels.smoke_install import AISIMULATE_FIND_LINKS
 
 try:
     import tomllib
@@ -157,7 +157,8 @@ def test_dynamo_declares_matching_aisimulate_requirements() -> None:
         assert python_versions.contains(cargo_version)
         assert python_versions.contains("0.13.0")
     else:
-        # Release freezes pin Rust source independently of the Python wheel.
+        # Release containers build Python and Rust from the same source patch.
+        assert python_versions.contains(cargo_version)
         assert set(patch) == {"git", "rev"}
         assert patch["git"] == "https://github.com/ai-dynamo/aisimulate.git"
         assert re.fullmatch(r"[0-9a-f]{40}", patch["rev"])
@@ -170,8 +171,8 @@ def test_dynamo_declares_matching_aisimulate_requirements() -> None:
     )
 
 
-def test_container_stages_the_published_aisimulate_wheel() -> None:
-    pyproject, _ = _root_configs()
+def test_container_builds_the_matching_aisimulate_source_wheel() -> None:
+    pyproject, cargo = _root_configs()
     python_versions = _python_version_range(_python_requirement(pyproject))
     container_versions = _python_version_range(
         _requirements_file_aisimulate_requirement(AISIMULATE_REQUIREMENTS)
@@ -181,19 +182,58 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     )
 
     assert container_versions == python_versions
-    assert "requirements.aisimulate.txt" in wheel_builder
-    assert (
-        "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
-        in wheel_builder
+    assert "container/deps/build_aisimulate.py" in wheel_builder
+    assert "--root /opt/dynamo" in wheel_builder
+    assert "--output /opt/dynamo/dist" in wheel_builder
+    assert "pip download" not in wheel_builder
+    assert python_versions.contains(
+        cargo["workspace"]["dependencies"]["aisimulate-core"]["version"].removeprefix(
+            "="
+        )
     )
-    assert "--only-binary=:all:" in wheel_builder
-    assert "--no-deps" in wheel_builder
-    assert "--no-index" in wheel_builder
-    assert AISIMULATE_FIND_LINKS == "https://pypi.nvidia.com/aisimulate/"
-    assert f"--find-links {AISIMULATE_FIND_LINKS}" in wheel_builder
-    assert "COPY aisimulate" not in wheel_builder
-    assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()
+
+
+@pytest.mark.parametrize("version", ["0.13.0", "0.13.0.dev1", "0.14.0"])
+def test_source_wheel_build_validates_version_before_compilation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    _, cargo = _root_configs()
+    patch = cargo["patch"]["crates-io"]["aisimulate-core"]
+    source = tmp_path / "source"
+    output = tmp_path / "wheels"
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if "checkout" in command:
+            project = source / "python/aisimulate"
+            project.mkdir(parents=True)
+            (project / "pyproject.toml").write_text(
+                f'[project]\nversion = "{version}"\n', encoding="utf-8"
+            )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    build = runpy.run_path(str(ROOT / "container/deps/build_aisimulate.py"))["build"]
+    if version == "0.13.0":
+        build(ROOT, source, output)
+        assert commands[1] == [
+            "git",
+            "-C",
+            str(source),
+            "fetch",
+            "--depth=1",
+            patch["git"],
+            patch["rev"],
+        ]
+        assert commands[-1][0] == "maturin"
+        assert "--locked" in commands[-1]
+        assert str(output.resolve()) in commands[-1]
+    else:
+        with pytest.raises(ValueError, match="does not satisfy"):
+            build(ROOT, source, output)
+        assert all(command[0] != "maturin" for command in commands)
 
 
 def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
