@@ -16,10 +16,10 @@ import {
 } from "./events.generated";
 import {
   MONTH_INDEX,
-  agendaEvents,
   resolveCalendarMonth,
   resolveToday,
 } from "./calendar-today";
+import { eventsInMonth, upcomingWithMeeting } from "./community-meeting";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -110,19 +110,14 @@ export function EventsCalendar() {
   const selectedDay =
     today && today.year === year && today.month === month ? today.day : null;
   const days = buildMonthDays(year, month);
-  const agenda = agendaEvents(UPCOMING_EVENTS).slice(0, 4);
-  const recent = agendaEvents(PAST_EVENTS).slice(0, 5);
 
   // Days in the displayed month that have something scheduled, so the grid
   // still carries event information now that the highlight marks today.
   const eventDays = new Set(
-    [...UPCOMING_EVENTS, ...PAST_EVENTS]
-      .filter(
-        (event) =>
-          Number(event.year) === year && MONTH_INDEX[event.month] === month,
-      )
+    eventsInMonth([...UPCOMING_EVENTS, ...PAST_EVENTS], year, month, MONTH_INDEX)
       .map((event) => Number(event.day)),
   );
+  const upcoming = upcomingWithMeeting(UPCOMING_EVENTS);
 
   return (
     <section
@@ -198,8 +193,8 @@ export function EventsCalendar() {
           </div>
 
           <div className="dynamo-calendar__events">
-            {agenda.length > 0 ? (
-              agenda.map((event) => (
+            {upcoming.length > 0 ? (
+              upcoming.slice(0, 4).map((event) => (
                 <UpcomingEvent
                   key={`${event.start}-${event.title}`}
                   event={event}
@@ -218,11 +213,11 @@ export function EventsCalendar() {
             )}
           </div>
 
-          {recent.length > 0 && (
+          {PAST_EVENTS.length > 0 && (
             <details className="dynamo-calendar__past">
               <summary>Recent events</summary>
               <div>
-                {recent.map((event) => (
+                {PAST_EVENTS.slice(0, 5).map((event) => (
                   <a
                     key={`${event.start}-${event.title}`}
                     href={event.addUrl}

@@ -5,8 +5,6 @@ CALSCALE:GREGORIAN
 METHOD:PUBLISH
 X-WR-CALNAME:NVIDIA Dynamo Community Meeting
 X-WR-TIMEZONE:America/Los_Angeles
-X-DYNAMO-GENERATED-BY:.github/scripts/generate-events.js from the public
-  Dynamo Google Calendar. Do not edit by hand.
 BEGIN:VTIMEZONE
 TZID:America/Los_Angeles
 X-LIC-LOCATION:America/Los_Angeles

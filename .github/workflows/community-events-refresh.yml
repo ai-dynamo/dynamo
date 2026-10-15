@@ -1,19 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Refreshes the generated views of the public Dynamo Google Calendar and commits
+# Refreshes both generated views of the public Dynamo Google Calendar and commits
 # them to main in a single commit:
 #
-#   docs/fern/components/events.generated.ts      -- the docs-site calendars and
-#                                                    the community meeting card
-#   docs/fern/assets/dynamo-community-meeting.ics -- the meeting's invite
-#   README.md, between the EVENTS markers         -- the repo front-door table
+#   docs/fern/components/events.generated.ts  -- the docs-site calendar grid
+#   README.md, between the EVENTS markers     -- the repo front-door table
 #
 # For the docs site the push is what publishes: main is in fern-docs.yml's
 # `push:` trigger and events.generated.ts sits under `docs/**`, so the existing
 # sync-and-publish job picks the change up. README.md is served by GitHub
-# directly and needs no publish step, and the Community page links the invite
-# from main on GitHub.
+# directly and needs no publish step.
 #
 # This used to be a step inside fern-docs.yml, fired by a `schedule:` trigger on
 # that workflow. Regenerating there meant the refreshed file only ever existed
@@ -38,7 +35,7 @@
 # changes on that rollover and additionally whenever an event starts or ends,
 # because update-events.js recomputes the upcoming/past split from the current
 # time on every run. Expect roughly one commit a day plus one near each event
-# boundary. The invite changes only when the meeting's series does.
+# boundary.
 
 name: Community Events Refresh
 
@@ -85,16 +82,9 @@ jobs:
           # `npm install` — reproducible and offline-cache-friendly.
           npm ci --prefix .github/scripts/events
 
-      - name: Test the generator
-        # Offline and fixture-based. The refresh pushes straight to main where
-        # nothing reviews it, so a generator that fails these must not run:
-        # the last good calendar and invite stay in place instead.
-        run: npm test --prefix .github/scripts/events
-
-      - name: Refresh the calendars and push if any moved
+      - name: Refresh both calendars and push if either moved
         env:
           EVENTS: docs/fern/components/events.generated.ts
-          INVITE: docs/fern/assets/dynamo-community-meeting.ics
           README: README.md
         run: |
           # Both generators live at .github/scripts/ and `require('node-ical')`,
@@ -116,18 +106,17 @@ jobs:
           # would fail the run red on a six-hour cron.
           #
           # Regenerate after each reset rather than stashing the outputs aside
-          # and copying them back. events.generated.ts and the invite are wholly
-          # generated, so a whole-file copy would be safe, but README.md is
-          # hand-written around a generated block: restoring a saved copy of it
-          # would silently revert any other README edit that landed while we
-          # were pushing.
+          # and copying them back. events.generated.ts is wholly generated, so a
+          # whole-file copy would be safe, but README.md is hand-written around a
+          # generated block: restoring a saved copy of it would silently revert
+          # any other README edit that landed while we were pushing.
           for attempt in 1 2 3; do
             git fetch --depth=1 origin main
             git reset --hard FETCH_HEAD
 
             regenerate
 
-            if [ -z "$(git status --porcelain -- "$EVENTS" "$INVITE" "$README")" ]; then
+            if [ -z "$(git status --porcelain -- "$EVENTS" "$README")" ]; then
               echo "Calendar already current on main; nothing to publish."
               exit 0
             fi
@@ -135,7 +124,7 @@ jobs:
             # Only ever stage the generated files. npm ci writes node_modules
             # into .github/scripts/events/ and a stray `git add -A` would
             # commit it.
-            git add "$EVENTS" "$INVITE" "$README"
+            git add "$EVENTS" "$README"
             # Separate -m flags: a YAML block scalar would carry its own
             # indentation into the commit body verbatim.
             git commit -s \

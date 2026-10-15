@@ -8,22 +8,26 @@
 // this file uses hooks, state, or browser APIs.
 
 import {
-  COMMUNITY_MEETING,
   UPCOMING_EVENTS,
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
 import {
   MONTH_INDEX,
-  agendaEvents,
   resolveCalendarMonth,
   resolveToday,
 } from "./calendar-today";
+import {
+  COMMUNITY_MEETING,
+  MEETING_SCHEDULE,
+  eventsInMonth,
+  upcomingWithMeeting,
+} from "./community-meeting";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
-const NOTES_URL =
-  "https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view";
+const MEETING_URL = COMMUNITY_MEETING.joinUrl;
+const NOTES_URL = COMMUNITY_MEETING.notesUrl;
 const INVITE_URL =
   "https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/assets/dynamo-community-meeting.ics";
 
@@ -145,10 +149,8 @@ function FullCalendar() {
   // next event is in another month.
   const { year, month } = resolveCalendarMonth();
   const today = resolveToday();
-  const upNext = agendaEvents(UPCOMING_EVENTS).slice(0, 3);
-  const events = [...UPCOMING_EVENTS, ...PAST_EVENTS].filter(
-    (event) => Number(event.year) === year && MONTH_INDEX[event.month] === month,
-  );
+  const events = eventsInMonth([...UPCOMING_EVENTS, ...PAST_EVENTS], year, month, MONTH_INDEX);
+  const upcoming = upcomingWithMeeting(UPCOMING_EVENTS);
   const eventsByDay = new Map<number, DynamoEvent[]>();
 
   events.forEach((event) => {
@@ -227,7 +229,7 @@ function FullCalendar() {
       <div className="dynamo-community-calendar__upcoming">
         <p>Up next</p>
         <div>
-          {upNext.length > 0 ? upNext.map((event) => (
+          {upcoming.length > 0 ? upcoming.slice(0, 3).map((event) => (
             <a href={event.addUrl} target="_blank" rel="noreferrer" key={`${event.start}-${event.title}`}>
               <span className="dynamo-community-event-date"><strong>{event.month}</strong>{event.day}</span>
               <span className="dynamo-community-event-copy"><strong>{event.title}</strong><small>{event.dateLabel}{event.location ? ` · ${event.location}` : ''}</small></span>
@@ -284,16 +286,16 @@ export function CommunityLanding() {
     <div className="dynamo-community-page">
       <section className="dynamo-community-meeting" aria-labelledby="community-meeting-title">
         <div className="dynamo-community-meeting__cadence" aria-hidden="true">
-          <span>{`Every ${COMMUNITY_MEETING.weekday}`}</span>
-          <strong>{COMMUNITY_MEETING.time}</strong>
-          <small>{`${COMMUNITY_MEETING.meridiem} Pacific Time`}</small>
+          <span>{`Every ${MEETING_SCHEDULE.weekday}`}</span>
+          <strong>{MEETING_SCHEDULE.time}</strong>
+          <small>{`${MEETING_SCHEDULE.meridiem} Pacific Time`}</small>
         </div>
         <div className="dynamo-community-meeting__copy">
           <p className="dynamo-community-eyebrow">Weekly community meeting</p>
           <h2 id="community-meeting-title">Join the project conversation</h2>
           <p>Meet maintainers and contributors for project updates, design discussions, demos, and open Q&amp;A.</p>
           <div className="dynamo-community-meeting__actions">
-            <a className="dynamo-community-button is-primary" href={COMMUNITY_MEETING.joinUrl} target="_blank" rel="noreferrer">
+            <a className="dynamo-community-button is-primary" href={MEETING_URL} target="_blank" rel="noreferrer">
               Join Google Meet <Arrow diagonal />
             </a>
             <a className="dynamo-community-button" href={NOTES_URL} target="_blank" rel="noreferrer">
