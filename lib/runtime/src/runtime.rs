@@ -517,7 +517,7 @@ impl Runtime {
 
             let drained = tracker.wait_for_completion();
             tokio::pin!(drained);
-            while count != 0 {
+            while tracker.get_count() != 0 {
                 let deadline = deadlines
                     .borrow_and_update()
                     .expect("shutdown deadline set before spawn");
