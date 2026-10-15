@@ -1309,10 +1309,19 @@ class TestGenerateLocally:
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
 
-    async def _generate_async_cache_salt(self, request):
+    @pytest.mark.asyncio
+    async def test_health_check_gets_dedicated_cache_salt(self):
+        """Keep the default canary out of the attention-DP dummy's cache namespace."""
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        # An unsalted canary of [1] collides with TRT-LLM's attention-DP dummy
+        # request prefix, so the canary must use its own salt.
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+        assert request["token_ids"] == [1]
 
         chunks = [
             c async for c in handler.generate_locally(request, self._make_context())
@@ -1321,20 +1330,7 @@ class TestGenerateLocally:
 
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
-        return kwargs["cache_salt"]
-
-    @pytest.mark.asyncio
-    async def test_health_check_gets_dedicated_cache_salt(self):
-        # An unsalted canary of [1] collides with TRT-LLM's attention-DP dummy
-        # request prefix, so the canary must use its own salt.
-        request = TrtllmHealthCheckPayload(
-            disaggregation_mode=DisaggregationMode.AGGREGATED,
-        ).to_dict()
-        assert request["token_ids"] == [1]
-
-        assert await self._generate_async_cache_salt(request) == (
-            HEALTH_CHECK_CACHE_SALT
-        )
+        assert kwargs["cache_salt"] == HEALTH_CHECK_CACHE_SALT
 
     @pytest.mark.asyncio
     async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
@@ -1540,7 +1536,6 @@ class TestRequestHasImages:
 
 
 class _FakeConversationParams:
-
     """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
     is read back by the assertions."""
 
