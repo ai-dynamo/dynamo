@@ -368,6 +368,7 @@ markers = [
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
+    "engine_ports: dynamo_dynamic_ports also allocates per-worker engine HTTP/gRPC ports, exported as DYN_ENGINE_{HTTP,GRPC}_PORT{N}",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_consolidator: marks KVBM consolidator/router integration tests",
     "kvbm_determinism: marks KVBM model determinism tests",
