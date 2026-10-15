@@ -3069,8 +3069,8 @@ mod tests {
                     completion_tokens: generated as u32,
                     total_tokens: prompt_tokens + generated as u32,
                     prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
-                        audio_tokens: None,
                         cached_tokens: Some(prompt_tokens),
+                        ..Default::default()
                     }),
                     completion_tokens_details: Some(
                         dynamo_protocols::types::CompletionTokensDetails {
