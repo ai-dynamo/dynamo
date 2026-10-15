@@ -1,7 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package features
 
@@ -64,10 +62,8 @@ type GroveCompatibility struct {
 	Message string
 }
 
-// GroveCompatibilityProbe checks whether the installed Grove controller and
-// CRDs are new enough for multinode rank aliases. It never modifies the
-// cluster. A nil probe reports Compatible so callers that do not wire one keep
-// working.
+// GroveCompatibilityProbe checks whether the installed Grove controller and CRDs are new
+// enough for multinode rank aliases. It is read-only; a nil probe reports Compatible.
 type GroveCompatibilityProbe struct {
 	reader client.Reader
 	now    func() time.Time
@@ -77,17 +73,14 @@ type GroveCompatibilityProbe struct {
 	checkedAt time.Time
 }
 
-// NewGroveCompatibilityProbe returns a probe that reads CRDs and Deployments
-// through reader. Use a non-cached reader so the operator does not start
-// informers for them.
+// NewGroveCompatibilityProbe returns a probe that reads CRDs and Deployments through
+// reader. Pass a non-cached reader so the operator starts no informers for them.
 func NewGroveCompatibilityProbe(reader client.Reader) *GroveCompatibilityProbe {
 	return &GroveCompatibilityProbe{reader: reader, now: time.Now}
 }
 
-// Check returns the cached result when it is fresh and probes otherwise.
-// A transient read error (anything but NotFound or Forbidden) is never cached:
-// Check returns the previous verdict when there is one, and the error
-// otherwise, so a single API hiccup cannot fail running DGDs.
+// Check returns the fresh cached result or probes. A transient read error is never cached:
+// Check returns the previous verdict, or the error, so one API hiccup cannot fail DGDs.
 func (p *GroveCompatibilityProbe) Check(ctx context.Context) (GroveCompatibility, error) {
 	if p == nil {
 		return GroveCompatibility{State: GroveCompatible}, nil
@@ -160,11 +153,8 @@ func probeGroveCompatibility(ctx context.Context, reader client.Reader) (GroveCo
 	return GroveCompatibility{State: GroveCompatible, Message: strings.TrimSpace(controllerNote)}, nil
 }
 
-// groveControllerVersion returns the image tag of the first identifiable Grove
-// controller and whether it predates GroveMinimumVersion. Released Grove charts
-// set the image tag to the release tag. An empty tag means no controller
-// version could be identified: no readable Deployment (NotFound, Forbidden), or
-// only digests, -dev, or custom tags. Other read errors are returned.
+// groveControllerVersion returns the first release image tag of a Grove controller and whether
+// it predates GroveMinimumVersion; "" means unreadable or digest, -dev, or custom tags only.
 func groveControllerVersion(ctx context.Context, reader client.Reader) (string, bool, error) {
 	deployments := &appsv1.DeploymentList{}
 	if err := reader.List(ctx, deployments, client.MatchingLabels{"app.kubernetes.io/name": groveControllerName}); err != nil {
@@ -217,11 +207,8 @@ func groveAlphaNumber(tag string) (int, bool) {
 	return n, err == nil
 }
 
-// podCliqueSetHasCliqueRollingUpdate reports whether the served v1alpha1
-// schema has the per-clique rollingUpdate field. Grove added that field in
-// the same release as GROVE_PCSG_POD_INDEX (absent through v0.1.0-alpha.13,
-// present from v0.1.0-alpha.14). The CRDs carry no version label, so the
-// schema is the signal for the CRD side.
+// podCliqueSetHasCliqueRollingUpdate reports whether served v1alpha1 has per-clique rollingUpdate,
+// added in v0.1.0-alpha.14 with GROVE_PCSG_POD_INDEX; the CRDs carry no version label.
 func podCliqueSetHasCliqueRollingUpdate(crd *apiextensionsv1.CustomResourceDefinition) bool {
 	for i := range crd.Spec.Versions {
 		version := &crd.Spec.Versions[i]

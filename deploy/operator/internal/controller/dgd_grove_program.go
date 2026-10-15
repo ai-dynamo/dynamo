@@ -148,8 +148,7 @@ func (p *groveProgram) Reconcile(
 	}
 
 	// Block multinode rank aliases before any write when Grove cannot expand them.
-	// A transient probe error is returned without failing the DGD so
-	// controller-runtime retries with backoff.
+	// A transient probe error is returned unfailed so controller-runtime retries.
 	if blocked, err := p.checkGroveCompatibility(ctx, req.DGD, &programResult); err != nil || blocked {
 		return programResult, err
 	}
@@ -270,10 +269,8 @@ func (p *groveProgram) Reconcile(
 // upgraded without an operator restart or a DGD edit.
 const groveCompatibilityRecheckInterval = time.Minute
 
-// checkGroveCompatibility fails the DGD and reports true when its multinode
-// workers would reference GROVE_PCSG_POD_INDEX on a Grove that does not set it.
-// Single-node DGDs and DGDs created before the rank aliases are never blocked.
-// A transient probe error is returned as is and leaves the DGD status alone.
+// checkGroveCompatibility fails the DGD and reports true when multinode workers would need
+// GROVE_PCSG_POD_INDEX that Grove does not set; a transient probe error leaves status alone.
 func (p *groveProgram) checkGroveCompatibility(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
