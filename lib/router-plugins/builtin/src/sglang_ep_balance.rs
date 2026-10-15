@@ -202,11 +202,16 @@ impl<'a> Candidates<'a> {
             .filter(|row| *row != bound_row)
             .map(|row| {
                 let saved = (stay - self.barrier_increase(row, request_blocks)) / scale;
-                let net = saved - parameters.affinity_min_imbalance_reduction * move_cost(row);
-                (row, saved, net, move_cost(row))
+                let cost = move_cost(row);
+                // The threshold term is non-negative, so a positive net implies a real saving.
+                (
+                    row,
+                    saved - parameters.affinity_min_imbalance_reduction * cost,
+                    cost,
+                )
             })
-            .filter(|(_, saved, net, _)| *saved > 0.0 && *net > 0.0)
-            .max_by(|(lr, _, ln, lc), (rr, _, rn, rc)| {
+            .filter(|(_, net, _)| *net > 0.0)
+            .max_by(|(lr, ln, lc), (rr, rn, rc)| {
                 ln.total_cmp(rn)
                     .then_with(|| rc.total_cmp(lc))
                     .then_with(|| self.blocks[*rr].cmp(&self.blocks[*lr]))
@@ -383,15 +388,7 @@ mod tests {
     }
 
     fn select(groups: &[[(usize, usize, usize); 2]], parameters: Parameters) -> WorkerWithDpRank {
-        select_with_overlap(groups, &[], parameters)
-    }
-
-    fn select_with_overlap(
-        groups: &[[(usize, usize, usize); 2]],
-        device_overlap: &[(u64, u32, usize)],
-        parameters: Parameters,
-    ) -> WorkerWithDpRank {
-        select_with_affinity(groups, device_overlap, None, 1, parameters)
+        select_with_affinity(groups, &[], None, 1, parameters)
     }
 
     fn select_with_affinity(
@@ -505,16 +502,20 @@ mod tests {
 
     #[test]
     fn cached_prefix_keeps_a_session_on_its_rank() {
-        let selected = select_with_overlap(
+        let selected = select_with_affinity(
             &[[(9, 90, 1), (0, 0, 1)], [(0, 0, 1), (0, 0, 1)]],
             &[(0, 0, 1)],
+            None,
+            1,
             Parameters::default(),
         );
         assert_eq!(selected, WorkerWithDpRank::new(0, 0));
 
-        let below_threshold = select_with_overlap(
+        let below_threshold = select_with_affinity(
             &[[(9, 90, 1), (0, 0, 1)], [(0, 0, 1), (0, 0, 1)]],
             &[(0, 0, 1)],
+            None,
+            1,
             Parameters {
                 cache_affinity_min_fraction: 2.0,
                 ..Default::default()

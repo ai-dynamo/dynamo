@@ -220,7 +220,10 @@ worker_selection:
             Err(error) => error,
             Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
         };
-        assert!(error.to_string().contains("test"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("unknown worker-selection policy type \"test\""),
+            "{error:#}"
+        );
     }
 
     #[test]

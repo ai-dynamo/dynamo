@@ -1087,9 +1087,7 @@ impl OfflineReplayRouter {
         let mut eligibility = scheduling_request.eligibility();
         // Same rule as the production scheduler queue: the default selector treats a live
         // session binding as exclusive; custom policies only see it as advisory context.
-        if <DefaultWorkerSelector as WorkerSelector<ReplayWorkerConfig>>::uses_exclusive_affinity_target(
-            &self.selector,
-        )
+        if WorkerSelector::<ReplayWorkerConfig>::uses_exclusive_affinity_target(&self.selector)
             && let Some(target) = scheduling_request.affinity_target
             && eligibility.affinity_target_is_eligible(&self.workers_with_configs, target)
         {

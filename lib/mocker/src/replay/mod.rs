@@ -197,15 +197,17 @@ pub struct ReplaySessionAffinity {
 
 impl Default for ReplaySessionAffinity {
     fn default() -> Self {
-        Self {
-            aggregated: true,
-            prefill: true,
-            decode: true,
-        }
+        Self::ON
     }
 }
 
 impl ReplaySessionAffinity {
+    const ON: Self = Self {
+        aggregated: true,
+        prefill: true,
+        decode: true,
+    };
+
     pub(crate) fn enabled_for(self, worker_type: WorkerType) -> bool {
         match worker_type {
             WorkerType::Prefill => self.prefill,
@@ -217,7 +219,7 @@ impl ReplaySessionAffinity {
 
 thread_local! {
     static SESSION_AFFINITY: std::cell::Cell<ReplaySessionAffinity> =
-        const { std::cell::Cell::new(ReplaySessionAffinity { aggregated: true, prefill: true, decode: true }) };
+        const { std::cell::Cell::new(ReplaySessionAffinity::ON) };
 }
 
 /// Run `replay` with session affinity enabled only for the given roles in offline KV-router
