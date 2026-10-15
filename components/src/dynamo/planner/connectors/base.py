@@ -11,6 +11,7 @@ capability discovery, and replica-state introspection for one deployment mode.
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Protocol, TypeGuard, runtime_checkable
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
@@ -22,6 +23,22 @@ if TYPE_CHECKING:
         ComponentGPUShape,
         ComponentPowerConfig,
     )
+
+
+@dataclass(frozen=True)
+class ReplicaUpdateResult:
+    """Outcome of one absolute replica-target operation.
+
+    ``accepted`` reports whether the connector accepted the target. ``applied``
+    is true only when this invocation completed at least one write.
+    """
+
+    accepted: bool
+    applied: bool
+
+    def __bool__(self) -> bool:
+        """Preserve the historical truth test for connector callers."""
+        return self.accepted
 
 
 class WorkerInfoProvider(Protocol):
@@ -116,7 +133,7 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
-    ) -> bool | None:
+    ) -> ReplicaUpdateResult | None:
         pass
 
 

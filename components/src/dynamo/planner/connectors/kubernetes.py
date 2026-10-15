@@ -31,7 +31,7 @@ from dynamo.common.kubernetes import (
     retry_kubernetes_write,
 )
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
-from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.base import PlannerConnector, ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import (
     PLANNER_WRITER_FENCE_ANNOTATION,
     KubernetesAPI,
@@ -1121,7 +1121,7 @@ class KubernetesConnector(PlannerConnector):
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
-    ) -> bool:
+    ) -> ReplicaUpdateResult:
         """Set the replicas for multiple components at once"""
         if not target_replicas:
             raise EmptyTargetReplicasError()
@@ -1165,7 +1165,10 @@ class KubernetesConnector(PlannerConnector):
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )
-        return should_wait
+        return ReplicaUpdateResult(
+            accepted=should_wait,
+            applied=transaction.possibly_applied,
+        )
 
     def _set_component_replicas_once(
         self,

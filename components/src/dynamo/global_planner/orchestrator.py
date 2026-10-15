@@ -360,9 +360,9 @@ class Orchestrator:
             grouped_targets, ordered_participants, blocking=blocking
         )
         if blocking:
-            terminal, applied = await apply
+            terminal, completed = await apply
         else:
-            terminal, applied = await run_async_to_completion(apply)
+            terminal, completed = await run_async_to_completion(apply)
         if terminal is not None:
             return terminal
 
@@ -370,7 +370,7 @@ class Orchestrator:
             sub_type: spec.current_replicas
             for sub_type, spec in all_pools.get(participant_id, {}).items()
         }
-        if participant_id in applied:
+        if participant_id in completed:
             for target in grouped_targets[participant_id]:
                 current_replicas[
                     target.sub_component_type.value
@@ -393,16 +393,14 @@ class Orchestrator:
 
         # TODO(global-planner): Persist enough state to repair or roll back a
         # plan that still becomes partial because a later participant fails.
+        completed: list[str] = []
         applied: list[str] = []
-        for i, pid in enumerate(ordered_participants):
+        for pid in ordered_participants:
             tgts = grouped_targets[pid]
             if not self.capacity_manager.participant_exists(pid):
-                if i == 0:
-                    # First patch: missing participant is unrecoverable since
-                    # nothing has been applied yet.
+                if not applied:
                     logger.error(
-                        f"Multi-partner transfer aborted: unknown "
-                        f"first participant ({pid})"
+                        f"Multi-partner transfer aborted: unknown participant ({pid})"
                     )
                     return (
                         ScaleOutcome(
@@ -410,7 +408,7 @@ class Orchestrator:
                             message=f"Multi-partner transfer: unknown participant {pid}",
                             current_replicas={},
                         ),
-                        applied,
+                        completed,
                     )
                 logger.error(
                     f"Multi-partner transfer: unknown participant {pid} "
@@ -418,9 +416,9 @@ class Orchestrator:
                 )
                 return self._partial_plan_error(pid, applied, "participant is unknown")
             try:
-                accepted = await self.capacity_manager.scale(pid, tgts, blocking=False)
+                result = await self.capacity_manager.scale(pid, tgts, blocking=False)
             except DynamoGraphDeploymentNotReadyError as patch_err:
-                if i == 0:
+                if not applied:
                     raise
                 logger.warning(
                     "Multi-partner transfer: patch on %s was skipped "
@@ -434,9 +432,9 @@ class Orchestrator:
                     pid, applied, f"participant is not ready: {patch_err}"
                 )
             except Exception as patch_err:
-                if i == 0:
-                    # First patch failure: nothing applied, propagate to the
-                    # outer handler so the caller sees ERROR.
+                if not applied:
+                    # No write has completed, so a conflict can restart the
+                    # complete transaction; other failures reach the handler.
                     raise
                 logger.error(
                     f"Multi-partner transfer: patch on {pid} "
@@ -444,7 +442,7 @@ class Orchestrator:
                     f"{patch_err}; stopping plan until the next tick"
                 )
                 return self._partial_plan_error(pid, applied, str(patch_err))
-            if not accepted:
+            if not result.accepted:
                 logger.warning(
                     "Multi-partner transfer: participant %s did not accept its "
                     "target after applying %s; stopping plan until the next tick",
@@ -461,13 +459,15 @@ class Orchestrator:
                         message=f"Participant {pid} did not accept its scale target",
                         current_replicas={},
                     ),
-                    applied,
+                    completed,
                 )
-            applied.append(pid)
-            if blocking:
+            completed.append(pid)
+            if result.applied:
+                applied.append(pid)
+            if blocking and result.applied:
                 await self.capacity_manager.wait_for_ready(pid)
 
-        return None, applied
+        return None, completed
 
     @staticmethod
     def _partial_plan_error(

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Optional, TypeVar
 
 from dynamo.planner import TargetReplica
+from dynamo.planner.connectors.base import ReplicaUpdateResult
 
 T = TypeVar("T")
 
@@ -101,8 +102,8 @@ class CapacityManager:
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
-    ) -> bool:
-        """Apply desired targets; return whether the participant accepted them."""
+    ) -> ReplicaUpdateResult:
+        """Apply desired targets and report acceptance and committed writes."""
         raise NotImplementedError
 
     async def wait_for_ready(self, participant_id: str) -> None:

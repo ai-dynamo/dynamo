@@ -18,6 +18,7 @@ import pytest
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
 from dynamo.global_planner.orchestrator import Orchestrator
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleStatus
 
 pytestmark = [
@@ -204,7 +205,7 @@ class FakeCapacityManager(CapacityManager):
             st = t.sub_component_type.value
             if st in self.pools[participant_id]:
                 self.pools[participant_id][st][0] = t.desired_replicas
-        return True
+        return ReplicaUpdateResult(accepted=True, applied=True)
 
     async def wait_for_ready(self, participant_id):
         return None
@@ -282,6 +283,52 @@ async def test_conflict_retry_reobserves_before_reapplying_budget_decision():
     assert cm.observe_calls == 2
     assert cm.scale_calls == 1
     assert cm.pools["default/b"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
+async def test_noop_before_conflict_retries_complete_budget_transaction():
+    class ConflictError(Exception):
+        pass
+
+    class NoopThenConflictCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.observe_calls = 0
+            self.scale_attempts = []
+
+        def observe(self, require_complete=False):
+            self.observe_calls += 1
+            return super().observe(require_complete)
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_attempts.append(participant_id)
+            if participant_id == "default/a":
+                self.pools[participant_id]["decode"][0] = 1
+                return ReplicaUpdateResult(accepted=True, applied=False)
+            if self.scale_attempts.count("default/b") == 1:
+                raise ConflictError()
+            return await super().scale(participant_id, targets, blocking)
+
+        async def run_with_conflict_retry(self, operation):
+            try:
+                return await operation()
+            except ConflictError:
+                return await operation()
+
+    cm = NoopThenConflictCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    result = await _submit(orch, "default/b", _targets(decode=3))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.observe_calls == 3
+    assert cm.scale_attempts == ["default/a", "default/b", "default/b"]
+    assert cm.pools["default/b"]["decode"][0] == 3
 
 
 @pytest.mark.asyncio
@@ -406,7 +453,7 @@ async def test_blocking_transfer_stops_when_downscale_does_not_settle():
 async def test_skipped_scale_is_not_reported_or_waited_as_applied():
     class SkippingCapacityManager(FakeCapacityManager):
         async def scale(self, participant_id, targets, blocking):
-            return False
+            return ReplicaUpdateResult(accepted=False, applied=False)
 
         async def wait_for_ready(self, participant_id):
             raise AssertionError("skipped scale must not wait for readiness")
@@ -437,7 +484,7 @@ async def test_skipped_downscale_stops_dependent_upscale():
         async def scale(self, participant_id, targets, blocking):
             self.scale_attempts.append(participant_id)
             if participant_id == "default/a":
-                return False
+                return ReplicaUpdateResult(accepted=False, applied=False)
             return await super().scale(participant_id, targets, blocking)
 
     cm = SkippingDownscaleCapacityManager()

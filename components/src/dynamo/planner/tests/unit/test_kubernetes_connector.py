@@ -1482,10 +1482,11 @@ async def test_set_component_replicas_component_already_at_desired_replicas(
     mock_kube_api.wait_for_graph_deployment_ready.return_value = None
 
     # Act
-    accepted = await kubernetes_connector.set_component_replicas(target_replicas)
+    result = await kubernetes_connector.set_component_replicas(target_replicas)
 
     # Assert
-    assert accepted
+    assert result.accepted
+    assert result.applied
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
 
@@ -1494,6 +1495,27 @@ async def test_set_component_replicas_component_already_at_desired_replicas(
         "test-graph", "component1", 3, deployment=mock_deployment
     )
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_reports_ready_noop_without_write(
+    kubernetes_connector, mock_kube_api
+):
+    target_replicas = [
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2)
+    ]
+    deployment = _deployment(_component("decode", "decode", replicas=2))
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+
+    result = await kubernetes_connector.set_component_replicas(
+        target_replicas, blocking=False
+    )
+
+    assert result.accepted
+    assert not result.applied
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+    mock_kube_api.update_dgd_replica_targets.assert_not_called()
 
 
 @pytest.mark.asyncio

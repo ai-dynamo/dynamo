@@ -26,6 +26,7 @@ from dynamo.global_planner.capacity_manager import (
     PoolSpec,
 )
 from dynamo.planner import KubernetesConnector, TargetReplica
+from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.monitoring.dgd_services import (
     V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
@@ -302,7 +303,7 @@ class KubernetesCapacityManager(CapacityManager):
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
-    ) -> bool:
+    ) -> ReplicaUpdateResult:
         """Apply desired replica targets to one participant.
 
         Raises ``DynamoGraphDeploymentNotReadyError`` when the participant is not
@@ -310,7 +311,14 @@ class KubernetesCapacityManager(CapacityManager):
         rejection.
         """
         connector = self.connectors[participant_id]
-        return await connector.set_component_replicas(targets, blocking=blocking)
+        result = await connector.set_component_replicas(targets, blocking=blocking)
+        if isinstance(result, ReplicaUpdateResult):
+            return result
+
+        # Keep test doubles and older out-of-tree connectors conservative: a
+        # truthy legacy result may have written and therefore blocks replay.
+        accepted = bool(result)
+        return ReplicaUpdateResult(accepted=accepted, applied=accepted)
 
     async def wait_for_ready(self, participant_id: str) -> None:
         """Wait for one participant without repeating its accepted write."""

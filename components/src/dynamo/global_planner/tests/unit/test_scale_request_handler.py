@@ -313,10 +313,11 @@ async def test_handler_blocking_mode(mock_runtime):
         async for _ in handler.scale_request(request.model_dump()):
             pass
 
-        # Verify blocking=True was passed to connector
+        # Blocking requests use a nonblocking write plus an explicit barrier.
         mock_connector.set_component_replicas.assert_called_once()
         call_args = mock_connector.set_component_replicas.call_args
-        assert call_args[1]["blocking"] is True
+        assert call_args[1]["blocking"] is False
+        mock_connector.wait_for_deployment_ready.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------- #
@@ -680,7 +681,9 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, caplog):
+async def test_cross_dgd_pair_second_patch_failure_reports_partial_error(
+    mock_runtime, caplog
+):
     """If the second K8s patch in a cross-DGD pair fails, the first stays
     applied and a loud error is logged; no rollback, no crash."""
     import logging as _logging
@@ -714,9 +717,7 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
     with caplog.at_level(_logging.ERROR, logger="dynamo.global_planner.scale_handler"):
         results = await _run(handler, req)
-    # Overall response: the request-side patch succeeded; response path reports
-    # success because the request-side was applied. The cross-DGD partner
-    # failure is logged as an error; self-correction happens on the next tick.
+    # The request-side patch committed before the partner failed.
     connector_a.set_component_replicas.assert_called_once()
     connector_b.set_component_replicas.assert_called_once()
     # Second-patch failure should be logged at ERROR
@@ -724,8 +725,8 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
         "Multi-partner transfer" in rec.message and "failed" in rec.message
         for rec in caplog.records
     )
-    # Request response still reports success for the request side
-    assert results[0]["status"] == "success"
+    assert results[0]["status"] == "error"
+    assert "after applying" in results[0]["message"]
 
 
 @pytest.mark.asyncio
@@ -1596,10 +1597,13 @@ async def test_pair_packing_direction_aware_order_multi_dgd(mock_runtime):
     )
     # Track call order
     call_order: list[str] = []
-    up_dgd.set_component_replicas.side_effect = lambda *a, **kw: call_order.append("up")
-    down_dgd.set_component_replicas.side_effect = lambda *a, **kw: call_order.append(
-        "down"
-    )
+
+    def record_call(name):
+        call_order.append(name)
+        return True
+
+    up_dgd.set_component_replicas.side_effect = lambda *a, **kw: record_call("up")
+    down_dgd.set_component_replicas.side_effect = lambda *a, **kw: record_call("down")
     req = _scale_req(dgd="up-dgd", caller_ns="default-up-dgd", decode=5)
     results = await _run(handler, req)
     assert results[0]["status"] == "success"
@@ -1613,7 +1617,7 @@ async def test_pair_packing_direction_aware_order_multi_dgd(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_generic_worker_role_used_for_budget_and_readback(mock_runtime):
+async def test_generic_worker_role_used_for_budget_and_response(mock_runtime):
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-my-dgd"],
@@ -1628,7 +1632,7 @@ async def test_generic_worker_role_used_for_budget_and_readback(mock_runtime):
     )
     results = await _run(handler, req)
     assert results[0]["status"] == "success"
-    assert results[0]["current_replicas"] == {"decode": 1}
+    assert results[0]["current_replicas"] == {"decode": 2}
     connector.set_component_replicas.assert_called_once()
 
 

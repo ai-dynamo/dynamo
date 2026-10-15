@@ -232,9 +232,10 @@ async def test_scale_calls_connector():
     targets = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3)
     ]
-    accepted = await cm.scale("default/my-dgd", targets, blocking=True)
+    result = await cm.scale("default/my-dgd", targets, blocking=True)
 
-    assert accepted
+    assert result.accepted
+    assert result.applied
     connector.set_component_replicas.assert_awaited_once_with(targets, blocking=True)
 
 
