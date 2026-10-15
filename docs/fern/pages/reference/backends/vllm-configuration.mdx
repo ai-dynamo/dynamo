@@ -131,7 +131,7 @@ These flags control which role this worker plays in a disaggregated deployment. 
 ## Tokenizer and multimodal
 
 <ParamField path="--use-vllm-tokenizer" type="boolean" default="false">
-  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`.
+  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`. If the frontend runs with `--router-mode kv`, it routes this worker's requests round-robin instead, because KV-aware routing needs frontend tokenization.
 
   Environment variable: `DYN_VLLM_USE_TOKENIZER`
 </ParamField>
