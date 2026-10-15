@@ -132,18 +132,24 @@ func (r *defaultModelRegistry) buildContractFiles(ctx context.Context, buildURL 
 	if r.mxClient == nil {
 		return nil, fmt.Errorf("Model Express client is required for GCS model registry reads of %q", buildURL.String())
 	}
-	// Ask Model Express only for supported control-plane entry points.
-	listed, err := r.mxClient.ListModelFiles(ctx, &modelpb.ModelFilesRequest{
-		ModelName: buildURL.String(), Provider: modelpb.ModelProvider_GCS,
-		FileSelector: &modelpb.ModelFileSelector{Paths: candidates},
-	})
-	if err != nil {
-		return nil, err
-	}
+
+	// Probe alternatives separately because Model Express requires every selected path to exist.
 	var paths []string
-	for _, file := range listed.GetFiles() {
-		if name := file.GetRelativePath(); name == candidates[0] || name == candidates[1] {
-			paths = append(paths, name)
+	for _, name := range candidates {
+		listed, err := r.mxClient.ListModelFiles(ctx, &modelpb.ModelFilesRequest{
+			ModelName: buildURL.String(), Provider: modelpb.ModelProvider_GCS,
+			FileSelector: &modelpb.ModelFileSelector{Paths: []string{name}},
+		})
+		if status.Code(err) == codes.NotFound {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range listed.GetFiles() {
+			if file.GetRelativePath() == name {
+				paths = append(paths, name)
+			}
 		}
 	}
 	return paths, nil

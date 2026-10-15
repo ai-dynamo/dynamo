@@ -16,6 +16,8 @@ import (
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const registryTestTopology = "test-topology"
@@ -40,6 +42,7 @@ type fakeModelServiceClient struct {
 	filesErr      error
 	listRequests  []*modelpb.ModelFilesRequest
 	list          *modelpb.ModelFileList
+	listErrors    map[string]error
 
 	metadataContexts []context.Context
 }
@@ -79,10 +82,35 @@ func (c *fakeModelServiceClient) ListModelFiles(
 ) (*modelpb.ModelFileList, error) {
 	c.listRequests = append(c.listRequests, request)
 	c.metadataContexts = append(c.metadataContexts, ctx)
-	if c.list != nil {
-		return c.list, nil
+
+	// Use a manifest-only build unless the test supplies another file inventory.
+	listed := c.list
+	if listed == nil {
+		listed = &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}}
 	}
-	return &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}}, nil
+	if len(request.GetFileSelector().GetPaths()) == 0 {
+		return listed, nil
+	}
+
+	// Model Express requires every explicitly selected path to exist.
+	selected := &modelpb.ModelFileList{}
+	for _, path := range request.GetFileSelector().GetPaths() {
+		if err := c.listErrors[path]; err != nil {
+			return nil, err
+		}
+		var match *modelpb.ModelFileInfo
+		for _, file := range listed.GetFiles() {
+			if file.GetRelativePath() == path {
+				match = file
+				break
+			}
+		}
+		if match == nil {
+			return nil, status.Errorf(codes.NotFound, "Selected file not found in model directory: %s", path)
+		}
+		selected.Files = append(selected.Files, match)
+	}
+	return selected, nil
 }
 
 type fakeModelDownloadStream struct {
