@@ -92,55 +92,42 @@ class KubernetesCapacityManager(CapacityManager):
     def discover(self, managed_deployments: Optional[set[str]]) -> list[str]:
         """Pre-populate connectors for deployments managed by this GlobalPlanner.
 
-        Ensures the GPU budget accounts for deployments that already exist at
-        startup, even if they haven't sent a scale request yet. In explicit mode
-        (``managed_deployments`` set) only matching deployments are discovered; in
-        implicit mode (``None``) all deployments in the namespace are discovered.
+        Ensures the GPU budget accounts for deployments that have not sent a scale
+        request yet. Explicitly managed names are registered without an API read;
+        implicit mode discovers every deployment in the namespace with one LIST.
         """
         managed_deployment_names = self._managed_deployment_names(managed_deployments)
         self._observe_all_deployments = managed_deployment_names is None
-        try:
-            kube_api = KubernetesAPI(self.namespace)
-            if managed_deployment_names is None:
+        if managed_deployment_names is None:
+            try:
+                kube_api = KubernetesAPI(self.namespace)
                 dgds = kube_api.list_graph_deployments()
-            else:
-                dgds = []
-                for name in sorted(managed_deployment_names):
-                    try:
-                        dgds.append(kube_api.get_graph_deployment(name))
-                    except Exception as error:
-                        logger.warning(
-                            f"Failed to discover managed deployment {name!r}: {error}"
-                        )
-            discovered: list[str] = []
-            for dgd in dgds:
-                name = dgd.get("metadata", {}).get("name", "")
-                if not name:
-                    continue
-                # In explicit mode, skip deployments not in the managed set.
-                if (
-                    managed_deployment_names is not None
-                    and name not in managed_deployment_names
-                ):
-                    continue
-                participant_id = f"{self.namespace}/{name}"
-                if participant_id not in self.connectors:
-                    connector = KubernetesConnector(
-                        dynamo_namespace="discovered",
-                        k8s_namespace=self.namespace,
-                        parent_dgd_name=name,
-                        raise_not_ready=True,
-                        retry_conflicts=False,
-                    )
-                    self.connectors[participant_id] = connector
-                discovered.append(name)
-            logger.info(
-                f"Discovered {len(discovered)} existing deployments: {discovered}"
-            )
-            return discovered
-        except Exception as e:
-            logger.warning(f"Failed to discover existing deployments: {e}")
-            return []
+            except Exception as error:
+                logger.warning(f"Failed to discover existing deployments: {error}")
+                return []
+            deployment_names = [
+                name
+                for dgd in dgds
+                if (name := dgd.get("metadata", {}).get("name", ""))
+            ]
+        else:
+            deployment_names = sorted(managed_deployment_names)
+
+        registered: list[str] = []
+        for name in deployment_names:
+            participant_id = f"{self.namespace}/{name}"
+            if participant_id not in self.connectors:
+                connector = KubernetesConnector(
+                    dynamo_namespace="discovered",
+                    k8s_namespace=self.namespace,
+                    parent_dgd_name=name,
+                    raise_not_ready=True,
+                    retry_conflicts=False,
+                )
+                self.connectors[participant_id] = connector
+            registered.append(name)
+        logger.info(f"Registered {len(registered)} managed deployments: {registered}")
+        return registered
 
     def ensure_participant(
         self,

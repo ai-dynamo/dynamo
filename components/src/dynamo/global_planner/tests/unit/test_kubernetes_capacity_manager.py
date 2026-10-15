@@ -154,9 +154,6 @@ def test_discover_explicit_mode():
             "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
-        mock_kube = MagicMock()
-        mock_kube_cls.return_value = mock_kube
-        mock_kube.get_graph_deployment.return_value = {"metadata": {"name": "model-a"}}
         mock_connector_cls.return_value = MagicMock()
 
         # Managed callers are namespaces; the deployment name is derived.
@@ -165,8 +162,7 @@ def test_discover_explicit_mode():
         assert discovered == ["model-a"]
         assert "default/model-a" in cm.connectors
         assert "default/model-b" not in cm.connectors
-        mock_kube.get_graph_deployment.assert_called_once_with("model-a")
-        mock_kube.list_graph_deployments.assert_not_called()
+        mock_kube_cls.assert_not_called()
         assert not cm._observe_all_deployments
         mock_connector_cls.assert_called_once_with(
             dynamo_namespace="discovered",

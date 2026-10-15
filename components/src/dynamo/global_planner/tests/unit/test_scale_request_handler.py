@@ -227,13 +227,6 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
             "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
-        mock_kube = MagicMock()
-        mock_kube_cls.return_value = mock_kube
-        mock_kube.list_graph_deployments.return_value = [
-            {"metadata": {"name": "model-a"}},
-            {"metadata": {"name": "model-b"}},  # Not in managed set
-            {"metadata": {"name": "gp-ctrl"}},  # Not in managed set
-        ]
         mock_connector_cls.return_value = MagicMock()
 
         handler.orchestrator.capacity_manager.discover(
@@ -245,6 +238,7 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
         assert "default/model-b" not in handler.orchestrator.capacity_manager.connectors
         assert "default/gp-ctrl" not in handler.orchestrator.capacity_manager.connectors
         assert mock_connector_cls.call_count == 1
+        mock_kube_cls.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1055,21 +1049,12 @@ async def test_initial_below_floor_logs_warning(mock_runtime):
             "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
-        mock_kube = MagicMock()
-        mock_kube_cls.return_value = mock_kube
-        mock_kube.list_graph_deployments.return_value = [
-            {"metadata": {"name": "my-dgd"}},
-        ]
         mock_connector = MagicMock()
         mock_connector.parent_dgd_name = "my-dgd"
         mock_connector.kube_api = MagicMock()
-        mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=_dgd_spec(prefill_replicas=1, decode_replicas=1)
         )
-        mock_connector.kube_api.list_graph_deployments.return_value = [
-            _listed_dgd(_dgd_spec(prefill_replicas=1, decode_replicas=1), "my-dgd")
-        ]
         mock_connector_cls.return_value = mock_connector
 
         with patch("dynamo.global_planner.orchestrator.logger") as mock_logger:
@@ -1084,7 +1069,13 @@ async def test_initial_below_floor_logs_warning(mock_runtime):
                 for call in mock_logger.warning.call_args_list
                 if call.args and "below min_total_gpus" in str(call.args[0])
             ]
-            assert warnings, "Expected a warning about being below the floor"
+            assert any(
+                "Current total GPUs (2)" in str(call.args[0]) for call in warnings
+            )
+            mock_kube_cls.assert_not_called()
+            mock_connector.kube_api.get_graph_deployment.assert_called_once_with(
+                "my-dgd"
+            )
             # No proactive fill was issued.
             mock_connector.set_component_replicas.assert_not_called()
 
@@ -1302,7 +1293,7 @@ async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
 
 def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
     """Reproduces the worker-thread race: another coroutine may insert into
-    self.connectors while _read_all_pools iterates from a thread (the
+    self.connectors while observe iterates from a thread (the
     handler offloads it via asyncio.to_thread). The snapshot must not
     raise RuntimeError on concurrent insert."""
     handler = ScaleRequestHandler(
@@ -1315,9 +1306,9 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
     )
 
     connector = handler.orchestrator.capacity_manager.connectors["default/my-dgd"]
-    original = connector.kube_api.list_graph_deployments.side_effect
+    deployment = connector.kube_api.get_graph_deployment.return_value
 
-    def _mutating_list():
+    def _mutating_get(_name):
         # Inject a new connector mid-iteration. Without the list() snapshot
         # this raises RuntimeError: dictionary changed size during iteration.
         new_conn = MagicMock()
@@ -1330,16 +1321,17 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
         handler.orchestrator.capacity_manager.connectors.setdefault(
             "default/racy-dgd", new_conn
         )
-        return original()
+        return deployment
 
-    connector.kube_api.list_graph_deployments.side_effect = _mutating_list
+    connector.kube_api.get_graph_deployment.side_effect = _mutating_get
 
     # Should not raise.
     snapshot = handler.orchestrator.capacity_manager.observe()
-    # The pre-existing key is in the snapshot; the mid-iteration insert
-    # may or may not appear (depends on snapshot timing) but the call
-    # must complete cleanly.
+    # The read uses the pre-call connector snapshot while retaining the insert
+    # for the next observation.
     assert "default/my-dgd" in snapshot
+    assert "default/racy-dgd" not in snapshot
+    assert "default/racy-dgd" in handler.orchestrator.capacity_manager.connectors
 
 
 @pytest.mark.asyncio
