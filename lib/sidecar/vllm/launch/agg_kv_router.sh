@@ -4,7 +4,6 @@
 #
 # Two aggregated vLLM native-gRPC sidecars behind Dynamo's KV-aware router.
 # Requires a vLLM build that exposes KV-event source discovery.
-# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 

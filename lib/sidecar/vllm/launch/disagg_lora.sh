@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Prefill/decode LoRA serving with NIXL (2 GPUs).
-# Requires vLLM #52840 and #54814; load adapters on both workers.
+# Load adapters on both workers.
 
 set -e
 
