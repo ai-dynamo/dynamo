@@ -223,9 +223,7 @@ targets:
     asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
   expected_performance:
     available: true
-    summary: >-
-      Preliminary result from an earlier image. Retest pending.
-      75.99 output tok/s, 19.00 output tok/s/GPU, 4.99 user output tok/s P50, TTFT P50 26,218.26 ms at concurrency 24 over 500 requests
+    summary: 384.58 output tok/s, 96.15 output tok/s/GPU, 30.82 user output tok/s P50, TTFT P50 11,533.66 ms at concurrency 24 over 500 requests [functional validation]
 - id: trtllm-agg-gb300
   recommended: false
   hardware:
@@ -248,7 +246,7 @@ targets:
     asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 582.10 output tok/s, 145.53 output tok/s/GPU, 31.25 user output tok/s P50, TTFT P50 601.70 ms at concurrency 24 over 500 requests [functional validation]
+    summary: 583.23 output tok/s, 145.81 output tok/s/GPU, 31.37 user output tok/s P50, TTFT P50 600.34 ms at concurrency 24 over 500 requests [functional validation]
 related_benchmarks: []
 maintainer: null
 gaps:
