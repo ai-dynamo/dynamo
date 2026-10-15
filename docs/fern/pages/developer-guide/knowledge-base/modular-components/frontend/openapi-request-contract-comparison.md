@@ -6,9 +6,14 @@ subtitle: Compare declared request and response schemas without treating agreeme
 ---
 
 Compare NVIDIA Dynamo's declared request and response schemas with an OpenAPI 3.1 or 3.2
-framework contract. The `assess` command resolves dependency schemas, normalizes equivalent
-representations, and reports request and response differences. It also reports coverage
+framework contract from local, versioned JSON/YAML files. The `assess` command resolves
+dependency schemas, normalizes equivalent representations, and reports request and response
+differences. It also reports coverage
 gaps: contracts that the tool cannot fully check.
+
+Specification generation and acquisition are separate from comparison. A local file may
+come from a source exporter, a published specification, or a previous live-server capture.
+The tool does not fetch schemas or require running servers.
 
 [Protocol Field Handling](protocol-field-handling.md) remains authoritative for semantic
 ownership, the complete field lifecycle, and the two acceptance layers.
@@ -21,6 +26,10 @@ For installation, CLI arguments, runnable examples, output files, and exit codes
 [tooling README](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md).
 
 ## Comparison Scope
+
+The default goal is to compare the full declared request/response contracts for the supported
+endpoints, not only the features enabled in one deployment. Full input documents are scoped
+internally to those endpoints. Do not remove differences from the inputs to manufacture agreement.
 
 Both inputs must contain JSON POST request schemas for `/v1/chat/completions` and
 `/v1/completions`. If a required request schema is missing or contains an unresolved
@@ -43,9 +52,10 @@ instructions in the framework's recipe.
 Use `generate-frontend-openapi` as the default Dynamo source. It builds the frontend router
 without a listener and writes `docs/frontends/openapi.json`; no model, GPU, or deployment is
 required. File export includes all standard endpoints and optional chat dispatch events.
-HTTP export includes only registered endpoints and enabled dispatch events. Capture HTTP
-when you need a deployment's configured contract. Match endpoints and configuration,
-and exclude credentials from retained evidence. A capture does not test inference.
+The production HTTP export includes only registered endpoints and enabled dispatch events.
+A file captured from that endpoint is a valid input, but its configured scope may omit
+variants. Record that scope; comparison cannot recover missing variants or establish that
+the input covers the full contract. Capturing a schema does not test inference.
 
 The native export contains `x-dynamo-schema-import` placeholders because the pinned
 `async-openai` 0.42.1 types lack the annotations needed to generate their schemas.
@@ -67,8 +77,9 @@ For each assessment, retain:
 - The composition manifest, comparator version, and coverage catalog
 
 For a framework, prefer a revision-pinned generated, checked-in, or published JSON/YAML
-document. The optional acquisition command retains exact file or HTTP(S) bytes with their
-checksum and origin.
+document saved locally. Assessment retains exact input bytes and checksums. Optional
+per-input metadata records scope, configuration, and provenance without verification or
+filtering the comparison.
 
 These inputs answer different questions:
 
@@ -79,7 +90,7 @@ These inputs answer different questions:
 | Does a deployment expose or implement that contract? | Deployment inspection and served spec; behavioral tests for actual acceptance and effects |
 
 When a schema needs correction, update its authoritative definition and regenerate it.
-Acquisition metadata and checksums support repeatability. They do not verify the source
+Input metadata and checksums support repeatability. They do not verify the source
 build, dependencies, configuration, or agreement with runtime behavior. Use dependency
 documents that match the versions in the composition manifest.
 
@@ -183,7 +194,7 @@ Direction alone does not determine compatibility.
 
 Start with `report.md`. Each finding shows both declarations, its location, interpretation,
 evidence links, and a suggested check. `findings.json` retains location IDs and accounts for
-every raw delta terminal. An unresolved union or `allOf` change remains a structural group;
+every raw delta terminal. An unresolved union or `allOf` change remains a whole finding;
 an accounting pass is not a compatibility pass.
 
 | Outcome | Meaning |

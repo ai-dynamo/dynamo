@@ -9,8 +9,8 @@ from pathlib import Path
 import jsonpointer
 import yaml
 
-from ..acquisition.http import load_capture, server_name, write_json
 from ..composition.openai import compose
+from ..inputs import load_input, server_name, write_json
 from ..reporting.openapi import load_projections, write_reports
 from .openapi import (
     alias_value_document,
@@ -184,8 +184,8 @@ def compare_responses(
 def assess(args) -> int:
     """Retain inputs and report request/response candidates, never runtime parity.
 
-    `args` supplies the acquisition paths, composition manifest/baseline, pinned
-    comparator, optional hash-qualified response adapters, and a new output directory.
+    `args` supplies local input paths and optional metadata, composition manifest/baseline,
+    pinned comparator, optional hash-qualified response adapters, and a new output directory.
     Return 1 for any difference or coverage gap, otherwise 0.
     Invalid inputs, existing output, and tool failures propagate;
     a later failure may leave partial evidence in the newly created directory.
@@ -193,8 +193,8 @@ def assess(args) -> int:
     framework_name = server_name(args.framework_name)
     if framework_name == "dynamo":
         raise ValueError("Framework identity must differ from dynamo")
-    dynamo_input = load_capture(args.dynamo, "dynamo")
-    native_input = load_capture(args.framework, framework_name)
+    dynamo_input = load_input(args.dynamo, "dynamo", args.dynamo_metadata)
+    native_input = load_input(args.framework, framework_name, args.framework_metadata)
     manifest_bytes = args.manifest.read_bytes()
     manifest = yaml.safe_load(manifest_bytes)
     baseline_bytes = args.openai.read_bytes()

@@ -13,15 +13,8 @@ import jsonpointer
 from ..assessment.openapi import pointer
 
 
-def digest(value) -> str:
-    """Hash canonical JSON content; array order remains significant."""
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-
-
 def identifier(kind: str, endpoint: str, field: str) -> str:
-    """Reuse the historical inventory's location ID; it does not identify content or a defect."""
+    """Identify a finding location and change kind, not its content or a confirmed defect."""
     key = json.dumps([kind, endpoint, field], separators=(",", ":"))
     return kind.upper() + "-" + hashlib.sha256(key.encode()).hexdigest()[:12]
 
@@ -39,156 +32,6 @@ def terminals(value, location: str) -> set[str]:
 def contains(parent: str, child: str) -> bool:
     """Return whether one JSON Pointer contains another, respecting segment boundaries."""
     return child == parent or child.startswith(parent + "/")
-
-
-def candidate_groups(report: dict) -> list[dict]:
-    """Partition raw candidates using the historical request-field/response-status IDs.
-
-    Preserve complete nested deltas and exact report pointers. Unknown request
-    body changes get an additional operation group; no historical count is assumed.
-    Repeated legacy locations get side/layer-qualified IDs. No input mutation.
-    """
-    groups = []
-
-    def add(kind, endpoint, field, location, delta, raw):
-        """Retain one original location group and its separately hashed content."""
-        groups.append(
-            dict(
-                id=identifier(kind, endpoint, field),
-                kind=kind,
-                endpoint=endpoint,
-                field=field,
-                location=location,
-                delta=copy.deepcopy(delta),
-                delta_sha256=digest(delta),
-                raw_report_pointers=raw,
-            )
-        )
-
-    for index, finding in enumerate(report.get("differences", [])):
-        base = pointer("differences", index, "delta")
-        schema_path = base + "/content/modified/application~1json/schema"
-        schema = (
-            finding["delta"]
-            .get("content", {})
-            .get("modified", {})
-            .get("application/json", {})
-            .get("schema", {})
-        )
-        for change, fields in schema.get("properties", {}).items():
-            if change not in {"added", "deleted", "modified"} or not isinstance(
-                fields, (list, dict)
-            ):
-                continue
-            for key, value in (
-                fields.items() if isinstance(fields, dict) else enumerate(fields)
-            ):
-                field = key if isinstance(fields, dict) else value
-                if not isinstance(field, str):
-                    continue
-                raw = schema_path + pointer("properties", change, key)[1:]
-                add(
-                    "request",
-                    finding["endpoint"],
-                    field,
-                    finding["location"] + pointer("properties", field)[1:],
-                    {change: value if isinstance(fields, dict) else True},
-                    [raw],
-                )
-        remaining = {key: value for key, value in schema.items() if key != "properties"}
-        if remaining:
-            add(
-                "request",
-                finding["endpoint"],
-                "$root",
-                finding["location"],
-                remaining,
-                [schema_path + pointer(key)[1:] for key in remaining],
-            )
-        covered = set().union(
-            *(
-                terminals(jsonpointer.resolve_pointer(report, p[1:]), p)
-                for group in groups
-                for p in group["raw_report_pointers"]
-                if contains(base, p)
-            )
-        )
-        leftover = terminals(finding["delta"], base) - covered
-        if leftover:
-            add(
-                "request",
-                finding["endpoint"],
-                "$operation",
-                finding["location"],
-                {
-                    p: jsonpointer.resolve_pointer(report, p[1:])
-                    for p in sorted(leftover)
-                },
-                sorted(leftover),
-            )
-    for index, finding in enumerate(report.get("response_differences", [])):
-        for change, statuses in finding["delta"].items():
-            if (
-                change not in {"added", "deleted", "modified"}
-                or not isinstance(statuses, (list, dict))
-                or not statuses
-            ):
-                add(
-                    "response",
-                    finding["endpoint"],
-                    "$" + change,
-                    finding["location"],
-                    statuses,
-                    [pointer("response_differences", index, "delta", change)],
-                )
-                continue
-            for key, value in (
-                statuses.items() if isinstance(statuses, dict) else enumerate(statuses)
-            ):
-                status = key if isinstance(statuses, dict) else value
-                add(
-                    "response",
-                    finding["endpoint"],
-                    str(status),
-                    finding["location"] + pointer(status)[1:],
-                    {change: value if isinstance(statuses, dict) else True},
-                    [pointer("response_differences", index, "delta", change, key)],
-                )
-        if not finding["delta"]:
-            add(
-                "response",
-                finding["endpoint"],
-                "$root",
-                finding["location"],
-                {},
-                [pointer("response_differences", index, "delta")],
-            )
-    for index, gap in enumerate(report.get("coverage_gaps", [])):
-        field = gap["kind"] + ":" + gap["location"] + ":" + gap.get("field", "*")
-        add(
-            "gap",
-            gap["endpoint"],
-            field,
-            gap["location"],
-            gap,
-            [pointer("coverage_gaps", index)],
-        )
-    duplicates = Counter(group["id"] for group in groups)
-    for group in groups:
-        if duplicates[group["id"]] > 1:
-            group["id"] += (
-                "-"
-                + digest([group["delta"].get("side"), group["delta"].get("layer")])[:8]
-            )
-    return sorted(
-        groups,
-        key=lambda group: (
-            group["kind"],
-            group["endpoint"],
-            group["field"],
-            group["id"],
-        ),
-    )
 
 
 def locate(document: dict, root: str, steps: tuple) -> tuple[list, list]:
@@ -417,7 +260,7 @@ def related_aliases(
 
 
 def build_findings(report: dict, projections: dict | None = None) -> dict:
-    """Build additive, fully accounted findings from saved report/projection evidence.
+    """Explain saved report/projection evidence and account for every raw difference.
 
     `projections` maps retained filenames to parsed JSON; omitted files are marked
     unavailable. This explains oasdiff's output, not a second diff/validation engine.
@@ -425,12 +268,13 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
     absent annotations do not make an otherwise declared field absent.
     Exact declared aliases classify spelling-only deltas as alias evidence. Value
     comparisons, parent constraints and ambiguous structures remain separate.
-    Historical location IDs and raw deltas remain in groups; finding IDs exclude
-    content, which has separate hashes. Every raw candidate terminal must belong
+    Gap and alias status/media come only from the endpoint's POST operation
+    containers; schema property names do not supply transport context.
+    Raw deltas and their report pointers remain in each finding. Every terminal must belong
     to exactly one row or ValueError is raised. No input mutation or I/O occurs.
     """
     projections = projections or {}
-    groups, rows, expected = candidate_groups(report), [], set()
+    rows, expected = [], set()
     keywords = {
         "min": "minimum",
         "max": "maximum",
@@ -931,10 +775,20 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
                             None,
                         )
                         parts = jsonpointer.JsonPointer(source_location[1:]).parts
-                        if "responses" in parts:
-                            row["status"] = parts[parts.index("responses") + 1]
-                        if "content" in parts:
-                            row["media"] = parts[parts.index("content") + 1]
+                        body = (
+                            parts[3:]
+                            if parts[:3] == ["paths", endpoint, "post"]
+                            else []
+                        )
+                        if len(body) >= 2 and body[0] == "responses":
+                            row["status"] = body[1]
+                            body = body[2:]
+                        elif body[:1] == ["requestBody"]:
+                            body = body[1:]
+                        else:
+                            body = []
+                        if len(body) >= 2 and body[0] == "content":
+                            row["media"] = body[1]
                             row["transport"] = (
                                 "SSE"
                                 if row["media"] == "text/event-stream"
@@ -950,17 +804,6 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
                     )
     ownership = Counter()
     for row in rows:
-        row["candidate_ids"] = sorted(
-            group["id"]
-            for group in groups
-            if any(
-                contains(a, b) or contains(b, a)
-                for a in group["raw_report_pointers"]
-                for b in row["raw_report_pointers"]
-            )
-        )
-        row["delta_sha256"] = digest(row["delta"])
-        row["content_sha256"] = digest([row["delta"], row["declarations"]])
         for raw in row["raw_report_pointers"]:
             ownership.update(
                 terminals(jsonpointer.resolve_pointer(report, raw[1:]), raw)
@@ -971,21 +814,10 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
         )
     if len({row["id"] for row in rows}) != len(rows):
         raise ValueError("Ambiguous duplicate finding locations")
-    for group in groups:
-        members = sorted(
-            (row for row in rows if group["id"] in row["candidate_ids"]),
-            key=lambda row: row["id"],
-        )
-        group["finding_ids"] = [row["id"] for row in members]
-        group["declaration_sha256"] = digest([row["declarations"] for row in members])
-        group["content_sha256"] = digest([group["delta"], group["declaration_sha256"]])
-        if not group["finding_ids"]:
-            raise ValueError("Candidate group has no generated finding: " + group["id"])
     return {
         "schema": "protocol-actionable-findings/v1",
         "behavioral_conformance": "not_assessed",
         "identity_policy": "IDs identify locations, not unchanged content, independent defects, or approved fixes.",
-        "groups": groups,
         "findings": sorted(
             rows,
             key=lambda row: (
@@ -1004,7 +836,6 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
             "multiply_owned": [],
         },
         "counts": {
-            "location_groups": len(groups),
             "readable_findings": len(rows),
             "categories": dict(
                 sorted(Counter(row["category"] for row in rows).items())

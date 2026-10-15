@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-from ..acquisition.http import write_json
+from ..inputs import write_json
 from .findings import build_findings
 
 # Default review order, not severity. Keep descriptions beside the presentation owner.
@@ -123,8 +123,8 @@ def render(
 ) -> str:
     """Render category descriptions and findings in review order, not severity order.
 
-    Prefer report.finding_inventory from build_findings. Legacy callers may omit
-    it; their declarations are explicitly unavailable. `evidence_prefix` names
+    Use report.finding_inventory when present; otherwise build it with declarations
+    marked unavailable. `evidence_prefix` names
     the retained evidence subdirectory for regenerated reports. When available_files
     is supplied, mark missing output-relative files instead of emitting broken links.
     Unknown categories follow the documented categories. Inputs are unchanged;
@@ -148,9 +148,9 @@ def render(
         "reference-client inputs against Dynamo admission and effects. For responses, check "
         "possible Dynamo outputs against the client's expectations.",
         "",
-        f"{counts['location_groups']} location groups; {counts['readable_findings']} readable findings. "
+        f"{counts['readable_findings']} readable findings. "
         f"All {accounting['raw_terminal_count']} raw candidate terminals are accounted for exactly once. "
-        "These counts use different units; neither is a defect count or compatibility score.",
+        "Findings are not confirmed defects or a compatibility score.",
         "",
         "## Review actions",
         "",
@@ -192,7 +192,7 @@ def render(
         [
             "",
             evidence_link("Complete inventory and accounting", "findings.json") + ". "
-            "Location IDs remain stable when content changes. Compare delta and declaration hashes separately.",
+            "Finding IDs identify locations and change kinds, not unchanged content.",
         ]
     )
     for name, title, _ in categories:
@@ -249,10 +249,6 @@ def render(
                 for raw in row["alias_report_pointers"]
             )
             lines.extend(["", "Evidence: " + "; ".join(links) + "."])
-            if row["candidate_ids"]:
-                lines.append(
-                    "Location groups: " + ", ".join(row["candidate_ids"]) + "."
-                )
     lines.extend(
         [
             "",
@@ -312,7 +308,7 @@ def render(
         lines.append(
             f"- {prose(side)} raw SHA-256: {prose(metadata['sha256'])}; "
             + evidence_link(
-                "acquisition metadata",
+                "input metadata",
                 side + "/acquisition.json",
                 prefix=evidence_prefix,
             )

@@ -4,7 +4,7 @@
 //! Helper binary to generate the Dynamo HTTP frontend OpenAPI specification.
 //!
 //! This allows CI and documentation tooling to obtain the frontend API schemas
-//! without starting the HTTP service and scraping the endpoint. File mode also
+//! without starting the HTTP service and scraping the endpoint. The export also
 //! lists `/docs` and `/openapi.json`: those documentation routes are registered
 //! after the served document's route list is captured, so the documents differ there.
 //!
@@ -14,10 +14,6 @@
 //! ```
 //! The generated spec will be written to:
 //!   `docs/frontends/openapi.json`
-//!
-//! Alternatively, `--serve 0.0.0.0:8000` starts the actual HttpService router
-//! with in-memory discovery and no workers. Query `/openapi.json` over HTTP.
-//! This mode needs neither model weights nor a GPU and does not test inference.
 //!
 //! This is a native, partially resolved document: `x-dynamo-schema-import` marks
 //! dependency schema slots that require version-pinned offline composition. Those
@@ -31,7 +27,6 @@
 //! named dispatch event variants; HTTP only advertises enabled dispatches.
 
 use std::fs;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::thread;
 
@@ -44,21 +39,14 @@ use dynamo_llm::http::service::{openapi_docs, service_v2::HttpService};
 /// additional stack space due to recursive type expansion.
 const GENERATOR_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-/// Run [`generate_openapi`] in file mode or the CLI-selected `--serve IP:PORT` mode.
+/// Run [`generate_openapi`] on the larger-stack thread required for schema generation.
 ///
-/// Returns its result, or an error for invalid arguments, thread creation failure,
-/// or a generator-thread panic.
+/// Returns its result, or an error if thread creation fails or the thread panics.
 fn main() -> anyhow::Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let listen = match args.as_slice() {
-        [] => None,
-        [flag, address] if flag == "--serve" => Some(address.parse::<SocketAddr>()?),
-        _ => anyhow::bail!("usage: generate-frontend-openapi [--serve IP:PORT]"),
-    };
     // Spawn a thread with a larger stack to handle deeply nested schema generation
     let handle = thread::Builder::new()
         .stack_size(GENERATOR_STACK_SIZE)
-        .spawn(move || generate_openapi(listen))
+        .spawn(generate_openapi)
         .context("failed to spawn generator thread")?;
 
     handle
@@ -66,61 +54,32 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("generator thread panicked: {:?}", e))?
 }
 
-/// Write the native schema to disk or serve it through a workerless frontend.
+/// Export the native document to disk without starting a listener or loading a model.
 ///
-/// With `listen = None`, write `docs/frontends/openapi.json` under the current
-/// directory, creating parents and overwriting the file non-atomically.
-/// With `Some(address)`, bind there until server termination; Ctrl-C requests
-/// shutdown. Serving mode writes no file and has no inference workers.
-/// Returns `Ok(())` after the file is written or the server stops successfully.
+/// Uses the current directory as the output root; run from the repository root to
+/// update its `docs/frontends/openapi.json`. Creates parent directories and overwrites
+/// that file non-atomically. Returns `Ok(())` after writing it and printing its path.
 ///
 /// # Errors
 ///
-/// Propagates service-construction, schema-invariant, serialization, I/O, runtime,
-/// signal, and server errors. A failed write can leave a truncated file or new directories.
-fn generate_openapi(listen: Option<SocketAddr>) -> anyhow::Result<()> {
+/// Propagates service-construction, schema-invariant, serialization, and I/O errors.
+/// A failed write may leave a truncated file; created directories remain on failure.
+fn generate_openapi() -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
     // reflects the full surface area exposed to users.
     //
     // This does NOT start any network listeners; it only builds the router
     // graph and associated route documentation.
-    let builder = HttpService::builder()
+    let http_service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .enable_responses_endpoints(true)
         .enable_anthropic_endpoints(true)
-        .enable_batch_endpoints(true);
-    let builder = if let Some(address) = listen {
-        builder.host(address.ip().to_string()).port(address.port())
-    } else {
-        builder
-    };
-    let http_service = builder
+        .enable_batch_endpoints(true)
         .build()
         .context("failed to build HttpService for OpenAPI generation")?;
-
-    if let Some(address) = listen {
-        println!("Serving frontend OpenAPI at http://{address}/openapi.json (no workers)");
-        return tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .thread_stack_size(GENERATOR_STACK_SIZE)
-            .build()?
-            .block_on(async {
-                let cancellation = tokio_util::sync::CancellationToken::new();
-                let server = http_service.run(cancellation.clone());
-                tokio::pin!(server);
-                tokio::select! {
-                    result = &mut server => result,
-                    signal = tokio::signal::ctrl_c() => {
-                        signal?;
-                        cancellation.cancel();
-                        server.await
-                    }
-                }
-            });
-    }
 
     let route_docs = http_service.route_docs().to_vec();
     let openapi = openapi_docs::generate_openapi_spec_with_options(

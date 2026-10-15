@@ -5,11 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # Protocol compatibility tooling
 
-Compare Dynamo and framework OpenAPI 3.1/3.2 request and response contracts for
-`/v1/chat/completions` and `/v1/completions`. Read the
+Compare local, versioned Dynamo and framework OpenAPI 3.1/3.2 specifications for
+`/v1/chat/completions` and `/v1/completions`. The tool does not generate or fetch
+specifications and requires no running server. A local file may have been exported
+from source, published upstream, or previously captured from a live server. Read the
 [OpenAPI request-contract comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
 for scope, provenance, normalization, aliases, and interpretation. Schema agreement
 does not establish actual acceptance or behavioral compatibility.
+
+Use inputs that describe the full declared request/response contract for those endpoints,
+not only one deployment's enabled features. Supplied scope and configuration labels are
+retained, not used to filter differences. The tool cannot recover variants missing from
+an input or attest its completeness.
 
 The `assess` command fills dependency placeholders in Dynamo's native export, then
 compares requests and responses separately. The guide explains the temporary
@@ -24,73 +31,51 @@ Verify the release checksum for your platform; CI pins the Linux amd64 checksum.
 
 ```bash
 python -m pip install -r scripts/protocol_compatibility/requirements.txt
-python -m scripts.protocol_compatibility acquire --help
 python -m scripts.protocol_compatibility assess --help
 ```
 
 ## CLI Examples
 
-Run these commands from the selected Dynamo checkout. Use new output directories for
-`acquire` and `assess`.
+Prepare local Dynamo and framework JSON/YAML specifications and the
+[pinned OpenAI schema](https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml)
+before comparison. How those files are generated or acquired is separate from this tool.
+When a fresh Dynamo export is needed, run its file generator from the selected checkout:
 
-1. Generate Dynamo's default schema. This command needs no GPU and starts no HTTP listener.
+```bash
+cargo run --locked -p dynamo-llm --no-default-features --bin generate-frontend-openapi
+```
 
-   ```bash
-   cargo run --locked -p dynamo-llm --no-default-features --bin generate-frontend-openapi
-   ```
+This writes `docs/frontends/openapi.json` without a listener, model, or GPU. To compare it,
+save the framework spec as `framework.yaml` and the pinned schema as `openai-d4535923.yaml`.
+Replace `example-engine` with the framework's lowercase identifier and the comparator path
+with its installed location. Use a new output directory:
 
-2. Download the OpenAI schema pinned by the composition manifest.
+```bash
+python -m scripts.protocol_compatibility assess \
+  --dynamo docs/frontends/openapi.json --framework framework.yaml \
+  --framework-name example-engine \
+  --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
+  --output-dir assessment
+```
 
-   ```bash
-   curl --fail --location \
-     https://raw.githubusercontent.com/64bit/async-openai/d453592328fdbb3f59c1ea74f8e6cdf7f9140efb/openapi.yaml \
-     --output openai-d4535923.yaml
-   ```
-
-3. Set `FRAMEWORK_NAME` to a lowercase identifier such as `example-engine`.
-4. Set `FRAMEWORK_SPEC_URL` to the direct URL of the framework's published or served OpenAPI schema.
-5. Capture the framework schema.
-
-   ```bash
-   python -m scripts.protocol_compatibility acquire \
-     --server "$FRAMEWORK_NAME" --url "$FRAMEWORK_SPEC_URL" \
-     --output-dir captures/framework
-   ```
-
-6. Compare the schemas. Replace `/absolute/path/to/oasdiff` with the installed executable's path.
-
-   ```bash
-   python -m scripts.protocol_compatibility assess \
-     --dynamo docs/frontends/openapi.json --framework captures/framework \
-     --framework-name "$FRAMEWORK_NAME" \
-     --openai openai-d4535923.yaml --oasdiff /absolute/path/to/oasdiff \
-     --output-dir assessment
-   ```
-
-Alternatively, pass JSON/YAML files directly as `--dynamo` and `--framework`.
-To retain acquisition metadata for a local file, replace `--url` with `--file framework.yaml`.
-To capture a running Dynamo frontend, use
-`acquire --server dynamo --url http://127.0.0.1:8000/openapi.json` with a new `--output-dir`.
+For optional scope, configuration, or provenance annotations, pass JSON object files with
+`--dynamo-metadata` and `--framework-metadata`. Their contents are retained as unverified
+`caller_metadata`; they do not restrict comparison or prove the inputs' source versions.
 
 ### Arguments
 
-| Command | Argument | Meaning |
-| --- | --- | --- |
-| `acquire` | `--server` | Required identity: `dynamo` or a lowercase framework slug |
-| `acquire` | `--url` / `--file` | Exactly one HTTP(S) URL or local JSON/YAML file |
-| `acquire` | `--metadata` | Optional JSON annotations, retained as unverified `caller_metadata` |
-| `assess` | `--dynamo`, `--framework` | Required files or checksummed capture directories |
-| `assess` | `--framework-name` | Required non-Dynamo identity; must match capture metadata |
-| `assess` | `--openai` | Required pinned OpenAI YAML; checksum checked against the manifest |
-| `assess` | `--manifest` | Optional composition manifest; defaults to `composition/async-openai-0.42.1.yaml` within this package |
-| `assess` | `--response-adapters` | Optional YAML with exact input hashes, source identities, server-sent event (SSE) interpretations, and bounded route mappings |
-| `assess` | `--oasdiff` | Required path to the pinned oasdiff 1.33.0 executable |
-| Both | `--output-dir` | Required output directory that must not already exist |
+| Argument | Meaning |
+| --- | --- |
+| `--dynamo`, `--framework` | Required local OpenAPI JSON/YAML files |
+| `--dynamo-metadata`, `--framework-metadata` | Optional JSON annotation files |
+| `--framework-name` | Required lowercase identity other than `dynamo` |
+| `--openai` | Required pinned OpenAI YAML; checksum checked against the manifest |
+| `--manifest` | Optional composition manifest; defaults to `composition/async-openai-0.42.1.yaml` within this package |
+| `--response-adapters` | Optional YAML with exact input hashes, source identities, server-sent event (SSE) interpretations, and bounded route mappings |
+| `--oasdiff` | Required path to the pinned oasdiff 1.33.0 executable |
+| `--output-dir` | Required output directory that must not already exist |
 
-The `acquire` command requires HTTP(S) URLs that return HTTP 200 without redirects.
-It rejects credentials, query strings, and fragments in URLs. It limits captures to
-32 MiB, uses a 30-second socket timeout, and disables proxies. Review paths, URLs,
-and annotations for secrets before publishing artifacts.
+Review retained paths and annotations for secrets before publishing artifacts.
 
 ## Composition
 
@@ -112,7 +97,7 @@ python -m scripts.protocol_compatibility.composition.responses \
 
 The `composition.responses` command handles both request and response imports.
 It requires a new output directory and writes
-`openapi.composed.json` and `composition.yaml`. Keep the raw capture and acquisition
+`openapi.composed.json` and `composition.yaml`. Keep the raw input and provenance
 metadata separately. This command does not require the `oasdiff` executable.
 
 ### Composition Invariants
@@ -137,9 +122,10 @@ An explicit `serde_json::Value` is intentionally untyped. Record excluded Dynamo
 
 ## Outputs and Exit Codes
 
-The `acquire` command writes exact JSON/YAML bytes to `openapi.raw` and observations to
-`acquisition.json`. Legacy v1 capture directories with `openapi.raw.json` remain
-readable; their deployment metadata is not reverified.
+The `assess` command saves each input's exact JSON/YAML bytes as `openapi.raw`, with its
+checksum and metadata in `acquisition.json`. The timestamp records when the file was read,
+not when its schema was generated or captured from a server. To reuse a saved input,
+pass its raw file; pass any provenance labels separately with the metadata option.
 
 Start with `assessment/report.md`. Retain the entire assessment directory:
 
@@ -182,16 +168,14 @@ python -m scripts.protocol_compatibility.reporting.openapi \
 
 The output directory must be new and outside the input directory. The renderer copies
 the original assessment into `evidence/` so links remain valid when the output moves.
-It does not modify the input or rerun acquisition, composition, or comparison. Missing
+It does not modify the input or rerun composition or comparison. Missing
 normalized projections appear as unavailable declarations, not as absent fields.
 Rendering exits `0` on success or `2` on failure; success is not a compatibility verdict.
 
-The existing report schema gains `finding_inventory`; original deltas remain unchanged.
-`findings.json` contains the same inventory. Location-group IDs follow the earlier
-request-field/response-status inventory. Finding IDs identify locations and change kinds.
-Neither ID proves unchanged content: compare `delta_sha256`, `declaration_sha256` on groups,
-and `content_sha256` separately. The accounting record checks that each raw delta terminal
-belongs to one readable finding. Unresolved union or `allOf` changes remain whole groups.
+`report.json` contains `finding_inventory`; `findings.json` contains the same inventory.
+Each finding retains its raw delta and evidence pointers. IDs identify locations and change
+kinds, not unchanged content. The accounting check assigns each raw delta terminal to one
+finding. Unresolved union or `allOf` changes remain whole findings.
 Reviewer dispositions, policy approvals, and historical runtime evidence remain separate.
 
 The report defines each category and its review order. That order is navigation,
@@ -211,7 +195,7 @@ Pass `--response-adapters adapters.yaml` to select a non-native representation. 
 requires the SHA-256 of the exact raw input bytes, a source identifier, and a revision.
 The tool verifies the checksum, but not the source and revision labels.
 This example selects one vLLM-style envelope. Replace the checksum and revision with those
-of the acquired input. Add one stream entry per selected endpoint and status code.
+of the local input. Add one stream entry per selected endpoint and status code.
 
 ```yaml
 version: 1
@@ -291,8 +275,8 @@ for what these checks establish.
 
 | Module | Responsibility |
 | --- | --- |
-| `acquisition/http.py` | Capture exact bytes and unverified source metadata |
+| `inputs.py` | Load local files; retain exact bytes and unverified metadata |
 | `composition/openai.py` | Resolve pinned imports and guarded corrections |
 | `assessment/openapi.py`, `assessment/responses.py` | Project requests/responses, record gaps, and invoke oasdiff |
-| `assessment/openapi_workflow.py` | Connect acquisition, composition, comparison, and retained evidence |
+| `assessment/openapi_workflow.py` | Connect input loading, composition, comparison, and retained evidence |
 | `reporting/findings.py`, `reporting/openapi.py` | Explain retained deltas and render portable reports without rerunning comparison |

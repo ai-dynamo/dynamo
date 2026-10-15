@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts.protocol_compatibility.acquisition.http import write_json
 from scripts.protocol_compatibility.assessment.openapi import (
     alias_value_document,
     compare,
@@ -24,6 +23,7 @@ from scripts.protocol_compatibility.assessment.responses import (
     response_differences,
     response_document,
 )
+from scripts.protocol_compatibility.inputs import write_json
 from scripts.protocol_compatibility.tests.assessment import test_openapi as fixtures
 from scripts.protocol_compatibility.tests.assessment.test_openapi import document
 from scripts.protocol_compatibility.tests.assessment.test_responses import (

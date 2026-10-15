@@ -19,13 +19,13 @@ from scripts.protocol_compatibility.assessment.openapi import (
     compare,
     match_input_aliases,
     normalize_nullable_strings,
+    pointer,
     request_differences,
     request_document,
     request_pointer,
 )
 from scripts.protocol_compatibility.reporting.findings import (
     build_findings,
-    identifier,
     related_aliases,
 )
 from scripts.protocol_compatibility.reporting.openapi import (
@@ -734,9 +734,6 @@ class FindingReportTests(unittest.TestCase):
         )
         self.assertEqual(explicit["declarations"]["dynamo"]["summary"], "default=null")
         self.assertEqual(explicit["id"], by_change["default"]["id"])
-        self.assertNotEqual(
-            explicit["content_sha256"], by_change["default"]["content_sha256"]
-        )
 
     def test_union_and_allof_movement_stay_one_ambiguous_group(self):
         """A root field removed beside added allOf is not reported as a removed wire field."""
@@ -751,7 +748,6 @@ class FindingReportTests(unittest.TestCase):
         row = result["findings"][0]
         self.assertEqual(row["category"], "representation_ambiguity")
         self.assertEqual(row["delta"], delta)
-        self.assertEqual(len(row["candidate_ids"]), 2)
         self.assertIn("not established", row["interpretation"])
         for keyword in ("anyOf", "oneOf"):
             report, sources = self.fixture(
@@ -791,34 +787,68 @@ class FindingReportTests(unittest.TestCase):
         }
         self.assertEqual(len(build_findings(report, sources)["findings"]), 1)
 
-    def test_location_ids_survive_reordering_but_content_hashes_change(self):
-        """Historical IDs are location keys, never proof that a declaration is unchanged."""
-        report, sources = self.fixture(
-            {"properties": {"deleted": ["value", "recursive"]}}
-        )
-        first = build_findings(report, sources)
-        report["differences"][0]["delta"]["content"]["modified"]["application/json"][
-            "schema"
-        ]["properties"]["deleted"].reverse()
-        second = build_findings(report, sources)
-        self.assertEqual(
-            [r["id"] for r in first["findings"]], [r["id"] for r in second["findings"]]
-        )
-        self.assertEqual(
-            [g["id"] for g in first["groups"]], [g["id"] for g in second["groups"]]
-        )
-        self.assertIn(
-            identifier("request", ENDPOINTS[0], "value"),
-            [g["id"] for g in first["groups"]],
-        )
-        sources["framework.requests.normalized.json"]["components"]["schemas"][
-            "Request"
-        ]["properties"]["value"]["maxLength"] = 9
-        third = build_findings(report, sources)
-        group = next(g for g in first["groups"] if g["field"] == "value")
-        changed = next(g for g in third["groups"] if g["field"] == "value")
-        self.assertEqual(group["delta_sha256"], changed["delta_sha256"])
-        self.assertNotEqual(group["declaration_sha256"], changed["declaration_sha256"])
+    def test_gap_transport_context_uses_operation_structure(self):
+        """Only operation containers supply status/media; property names and truncated paths do not."""
+        endpoint = ENDPOINTS[0]
+        operation = pointer("paths", endpoint, "post")
+        component = "#/components/schemas/Request/properties"
+        cases = [
+            (component + "/content", None, None, "JSON"),
+            (component + "/responses", None, None, "JSON"),
+            (component + "/content/properties/responses/type", None, None, "JSON"),
+            (operation, None, None, "JSON"),
+            (operation + "/requestBody/content", None, None, "JSON"),
+            (operation + "/responses", None, None, "HTTP"),
+            (operation + "/responses/400", "400", None, "HTTP"),
+            (operation + "/responses/200/content", "200", None, "HTTP"),
+            (
+                operation
+                + "/responses/200/content/text~1event-stream/schema/properties/content",
+                "200",
+                "text/event-stream",
+                "SSE",
+            ),
+            (
+                operation
+                + "/requestBody/content/application~1json/schema/properties/responses",
+                None,
+                "application/json",
+                "JSON",
+            ),
+            (
+                pointer(
+                    "paths",
+                    "/other",
+                    "post",
+                    "responses",
+                    "200",
+                    "content",
+                    "text/event-stream",
+                ),
+                None,
+                None,
+                "JSON",
+            ),
+        ]
+        for location, status, media, transport in cases:
+            with self.subTest(location=location):
+                report, sources = self.fixture({})
+                report["differences"] = []
+                report["coverage_gaps"] = [
+                    {
+                        "kind": "response"
+                        if location.startswith(operation + "/responses")
+                        else "request",
+                        "endpoint": endpoint,
+                        "location": location,
+                        "reason": "Unsupported declaration",
+                    }
+                ]
+                (row,) = build_findings(report, sources)["findings"]
+                self.assertEqual(
+                    (row["status"], row["media"], row["transport"]),
+                    (status, media, transport),
+                )
 
     def test_response_sse_error_alias_and_gap_evidence_remain_separate(self):
         """Retain transport/status context and aliases without promoting them to runtime proof."""
