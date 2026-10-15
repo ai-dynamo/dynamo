@@ -98,6 +98,37 @@ function and nested API types are handled by their exact-type functions.
 - Use standard `k8s.io/utils/ptr` helpers for pointer defaults and equality. Do not
   add one-line dereference, presence, or pointer-comparison helpers.
 
+### Signature examples
+
+Representative signatures, with function bodies omitted:
+
+```go
+// dynamographdeployment_handler.go
+func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error
+
+// dynamographdeployment.go
+func defaultDynamoGraphDeployment(
+    dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+    opts dynamoGraphDeploymentDefaultOptions,
+) error
+
+func defaultDynamoGraphDeploymentSpec(
+    spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+    operation admissionv1.Operation,
+)
+
+// dynamographdeployment_v1alpha1.go
+func defaultDynamoGraphDeploymentV1alpha1(
+    dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+    opts dynamoGraphDeploymentV1alpha1DefaultOptions,
+) error
+
+func defaultDynamoGraphDeploymentSpecV1alpha1(
+    spec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+    operation admissionv1.Operation,
+)
+```
+
 ## Files and shared types
 
 - Keep registration, request decoding, GVK checks, and the call to the root
@@ -111,6 +142,10 @@ function and nested API types are handled by their exact-type functions.
 - Version-specific defaults are exceptional. Document why conversion cannot carry
   the required semantics, keep the rule in `<owner>_<version>.go`, and test its
   conversion behavior independently.
+- Keep canonical-version structural function and options names unsuffixed. Suffix
+  every non-canonical version-specific function and options type with the Go API
+  version, for example `defaultDynamoGraphDeploymentSpecV1alpha1` and
+  `dynamoGraphDeploymentV1alpha1DefaultOptions`; do not prefix the version.
 - Use one `<owner>_helpers.go` file across API versions; typed signatures make the
   applicable version explicit.
 
