@@ -1655,6 +1655,11 @@ class HandlerBase(BaseGenerativeHandler):
 
     @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
+        passthrough = (request.get("extra_args") or {}).get("sampling_options") or {}
+        if passthrough.get("routed_experts_start_len") is not None:
+            raise InvalidArgument(
+                "routed_experts_start_len is not supported by the TensorRT-LLM backend"
+            )
         overrides = {
             key: value
             for key, value in request["sampling_options"].items()

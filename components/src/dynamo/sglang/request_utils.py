@@ -4,6 +4,8 @@
 from collections.abc import Mapping
 from typing import Any
 
+from dynamo.llm.exceptions import InvalidArgument
+
 
 def request_cache_salt(request: Mapping[str, Any]) -> str | None:
     """Return the first non-empty cache salt, preferring resolved routing hints."""
@@ -44,4 +46,9 @@ def routed_experts_start_len(request: Mapping[str, Any]) -> int | None:
     )
     if not isinstance(sampling, Mapping):
         return None
-    return sampling.get("routed_experts_start_len")
+    start_len = sampling.get("routed_experts_start_len")
+    if start_len is not None and (
+        isinstance(start_len, bool) or not isinstance(start_len, int) or start_len < 0
+    ):
+        raise InvalidArgument("routed_experts_start_len must be a non-negative integer")
+    return start_len

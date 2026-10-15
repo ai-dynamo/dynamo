@@ -840,6 +840,10 @@ def build_sampling_params(
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
             continue
+        if key == "routed_experts_start_len" and value is not None:
+            raise InvalidArgument(
+                "routed_experts_start_len is not supported by the vLLM backend"
+            )
         if key == "bad_words_token_ids" and value is not None:
             # vLLM has no public setter for token-id bad words; we write the
             # private field directly. Guard so a vLLM upgrade that renames it

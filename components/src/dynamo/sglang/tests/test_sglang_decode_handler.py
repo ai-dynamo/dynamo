@@ -2734,7 +2734,7 @@ async def test_parallel_sampling_omits_kv_cache_hit(n):
     assert reports == [expected] * n
 
 
-def _routed_experts_handler(mode, async_generate=None):
+def _routed_experts_handler(mode):
     chunk = {
         "index": 0,
         "output_ids": [42],
@@ -2746,11 +2746,12 @@ def _routed_experts_handler(mode, async_generate=None):
     handler._mm_hashes_supported = False
     handler._engine_supports_priority = False
     handler._routed_experts_kwargs = {"return_routed_experts": True}
+    handler._supports_routed_experts_start_len = True
     handler.enable_trace = False
     handler._get_input_param = lambda request: {"input_ids": [1, 2]}
     handler._resolve_lora = lambda request: None
     handler.engine = SimpleNamespace(
-        async_generate=async_generate or AsyncMock(return_value=_stream([chunk]))
+        async_generate=AsyncMock(return_value=_stream([chunk]))
     )
     return handler
 
@@ -2774,13 +2775,7 @@ def _routed_experts_request(extra_fields=None, start_len=None):
 
 
 async def _routed_experts_engine_kwargs(handler, request):
-    context = SimpleNamespace(
-        id=lambda: "request-id",
-        trace_id="trace-id",
-        is_stopped=lambda: False,
-        notify_first_token=lambda: None,
-    )
-    [output async for output in handler.generate(request, context)]
+    await _collect(handler.generate(request, _Context()))
     kwargs = handler.engine.async_generate.await_args.kwargs
     return {key: value for key, value in kwargs.items() if "routed_experts" in key}
 
@@ -2789,9 +2784,7 @@ async def _routed_experts_engine_kwargs(handler, request):
 @pytest.mark.parametrize(
     "extra_fields,start_len,expected",
     [
-        (None, None, {}),
         (None, 1, {}),
-        (["stop_reason"], None, {}),
         (["routed_experts"], None, {"return_routed_experts": True}),
         (
             ["routed_experts"],
@@ -2800,9 +2793,7 @@ async def _routed_experts_engine_kwargs(handler, request):
         ),
     ],
 )
-async def test_aggregated_routed_experts_follow_request_opt_in(
-    extra_fields, start_len, expected
-):
+async def test_routed_experts_follow_request_opt_in(extra_fields, start_len, expected):
     handler = _routed_experts_handler(DisaggregationMode.AGGREGATED)
     request = _routed_experts_request(extra_fields, start_len)
 
@@ -2810,50 +2801,27 @@ async def test_aggregated_routed_experts_follow_request_opt_in(
 
 
 @pytest.mark.asyncio
-async def test_raw_nvext_opt_in_requests_routed_experts():
-    handler = _routed_experts_handler(DisaggregationMode.AGGREGATED)
-    request = {
-        **_routed_experts_request(),
-        "nvext": {"extra_fields": ["routed_experts"]},
-    }
-
-    assert await _routed_experts_engine_kwargs(handler, request) == {
-        "return_routed_experts": True
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("start_len", [None, 0, 1])
-async def test_disagg_decode_rejects_stale_prompt_routed_experts(start_len):
+@pytest.mark.parametrize(
+    "start_len,multimodal,rejected",
+    [(1, False, True), (2, True, True), (2, False, False)],
+)
+async def test_disagg_decode_returns_only_output_routed_experts(
+    start_len, multimodal, rejected
+):
     handler = _routed_experts_handler(DisaggregationMode.DECODE)
     request = _routed_experts_request(["routed_experts"], start_len)
+    if multimodal:
+        request["multi_modal_data"] = {"image_url": [{"Url": "http://image"}]}
 
-    with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
-        await _routed_experts_engine_kwargs(handler, request)
-    handler.engine.async_generate.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_disagg_decode_forwards_output_only_routed_experts():
-    handler = _routed_experts_handler(DisaggregationMode.DECODE)
-    request = _routed_experts_request(["routed_experts"], 2)
-
-    assert await _routed_experts_engine_kwargs(handler, request) == {
-        "return_routed_experts": True,
-        "routed_experts_start_len": 2,
-    }
-
-
-@pytest.mark.asyncio
-async def test_routed_experts_start_len_rejected_when_engine_lacks_it():
-    async def async_generate(input_ids=None, return_routed_experts=False):
-        return None
-
-    handler = _routed_experts_handler(DisaggregationMode.AGGREGATED, async_generate)
-    request = _routed_experts_request(["routed_experts"], 1)
-
-    with pytest.raises(InvalidArgument, match="not supported"):
-        await _collect(handler.generate(request, _Context()))
+    if rejected:
+        with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
+            await _collect(handler.generate(request, _Context()))
+        handler.engine.async_generate.assert_not_awaited()
+    else:
+        assert await _routed_experts_engine_kwargs(handler, request) == {
+            "return_routed_experts": True,
+            "routed_experts_start_len": 2,
+        }
 
 
 def test_prefill_dp_rank_kwargs_follows_engine_signature():

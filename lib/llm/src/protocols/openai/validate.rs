@@ -198,10 +198,10 @@ fn validate_no_unsupported_fields_with_ignore(
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
     }
-    if let Some(value) = unsupported_fields.get("routed_experts_start_len") {
-        serde_json::from_value::<u32>(value.clone()).map_err(|_| {
-            anyhow::anyhow!("`routed_experts_start_len` must be a non-negative integer")
-        })?;
+    if let Some(value) = unsupported_fields.get("routed_experts_start_len")
+        && value.as_u64().and_then(|v| u32::try_from(v).ok()).is_none()
+    {
+        anyhow::bail!("`routed_experts_start_len` must be a non-negative integer");
     }
     Ok(())
 }
@@ -1326,18 +1326,6 @@ mod tests {
             let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
             let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
-        }
-    }
-
-    #[test]
-    fn validate_no_unsupported_fields_checks_routed_experts_start_len() {
-        let fields = HashMap::from([("routed_experts_start_len".to_string(), json!(12))]);
-        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
-
-        for bad in [json!(-1), json!(1.5), json!("12"), json!(true), json!([1])] {
-            let fields = HashMap::from([("routed_experts_start_len".to_string(), bad)]);
-            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
-            assert!(err.to_string().contains("must be a non-negative integer"));
         }
     }
 

@@ -2030,6 +2030,7 @@ impl OpenAIPreprocessor {
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
         let mut sampling_passthrough = serde_json::Map::new();
 
+        // Top-level backend extensions; not all of them are sampling controls.
         if let Some(fields) = request.unsupported_fields() {
             for key in [
                 "detokenize",

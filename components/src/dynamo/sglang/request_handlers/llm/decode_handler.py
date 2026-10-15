@@ -415,6 +415,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self._routed_experts_kwargs: Dict[
             str, Any
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._supports_routed_experts_start_len = bool(
+            filter_supported_async_generate_kwargs(
+                self.engine, {"routed_experts_start_len": 0}
+            )
+        )
         self._enable_frontend_decoding = enable_frontend_decoding
         self._first_token_source = first_token_source
         self._image_loader: Optional[ImageLoader] = None
@@ -451,7 +456,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _request_routed_experts_kwargs(
         self, request: Dict[str, Any], input_param: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Request routed experts only for callers that opted in via nvext."""
+        """Raises InvalidArgument for P/D requests that would get stale prompt
+        rows, and for a start position the engine cannot apply."""
         if not self._routed_experts_kwargs or not nvext_extra_field_requested(
             request, "routed_experts"
         ):
@@ -461,14 +467,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         start_len = routed_experts_start_len(request)
         if start_len is None:
             return self._routed_experts_kwargs
-        kwargs = {**self._routed_experts_kwargs, "routed_experts_start_len": start_len}
-        if "routed_experts_start_len" not in filter_supported_async_generate_kwargs(
-            self.engine, kwargs
-        ):
+        if not self._supports_routed_experts_start_len:
             raise InvalidArgument(
                 "routed_experts_start_len is not supported by the installed SGLang engine"
             )
-        return kwargs
+        return {**self._routed_experts_kwargs, "routed_experts_start_len": start_len}
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
@@ -660,6 +663,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             if native_session_request_id is not None:
                 sglang_request_id = native_session_request_id
+        else:
+            routed_experts_kwargs = self._request_routed_experts_kwargs(
+                request, input_param
+            )
         logging.info(
             "Submitted SGLang Request ID: %s, Context: %s",
             sglang_request_id,
@@ -712,9 +719,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             supported=getattr(self, "_supports_ordered_cancellation", False),
         )
         logprob_kwargs = self._build_logprob_kwargs(request)
-        routed_experts_kwargs = self._request_routed_experts_kwargs(
-            request, input_param
-        )
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
