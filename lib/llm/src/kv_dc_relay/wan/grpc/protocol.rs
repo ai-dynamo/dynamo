@@ -526,13 +526,23 @@ mod tests {
                 let tokens = model.load.as_mut().unwrap().tokens.as_mut().unwrap();
                 tokens.active_decode_blocks = Some(1);
             },
-            |model| model.deployment.as_mut().unwrap().serving_pools.push(pool_id()),
+            |model| {
+                model
+                    .deployment
+                    .as_mut()
+                    .unwrap()
+                    .serving_pools
+                    .push(pool_id())
+            },
         ];
         for (index, violate) in model_violations.iter().enumerate() {
             let mut model = update.models[0].clone();
             violate(&mut model);
             let error = validate_model_serving_load(&model).unwrap_err();
-            assert!(!error.is_unsupported(), "model violation {index}: {error:?}");
+            assert!(
+                !error.is_unsupported(),
+                "model violation {index}: {error:?}"
+            );
         }
 
         let mut incomplete = update.pools[0].clone();

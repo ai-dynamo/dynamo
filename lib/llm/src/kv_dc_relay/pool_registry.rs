@@ -24,7 +24,7 @@ use super::identity::{
 };
 use super::load::{
     Coverage, LoadObservationOutcome, PoolDeployment, PoolLoadSnapshot, PoolLoadState,
-    SchedulerLoadSnapshot, SchedulerLoadState,
+    PoolSchedulerLoad, SchedulerLoadState,
 };
 use super::publication::{
     PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubSubscription,
@@ -1043,7 +1043,7 @@ impl PoolRegistry {
         loads.retain(|load| {
             serving
                 .load
-                .declares(&WorkerWithDpRank::new(load.worker_id, load.dp_rank))
+                .has_rank(&WorkerWithDpRank::new(load.worker_id, load.dp_rank))
         });
         let all_declared = loads.len() == reported_ranks;
         serving.scheduler.observe(envelope, loads, received_at);
@@ -1051,9 +1051,13 @@ impl PoolRegistry {
     }
 
     /// Serving load of every active pool, which is exactly the catalog's pool
-    /// set. `scheduler_publishers` holds the scheduler-load publishers
-    /// discovered per serving endpoint; an endpoint whose listing failed is
+    /// set. `scheduler_publishers` holds the recently registered scheduler-load
+    /// publishers per serving endpoint; an endpoint whose roster is unknown is
     /// absent. Also forgets expired scheduler views.
+    ///
+    /// This prunes and aggregates every pool under the registry lock that
+    /// ingest also takes, once per load window: O(routers x ranks), cheap at
+    /// current scale. A per-pool lock would remove the contention if it grows.
     pub(super) fn serving_pool_loads(
         &self,
         scheduler_publishers: &HashMap<EndpointId, HashSet<u64>>,
@@ -1075,7 +1079,7 @@ impl PoolRegistry {
                         )
                     }
                     None => (
-                        SchedulerLoadSnapshot {
+                        PoolSchedulerLoad {
                             coverage: Coverage::Missing,
                             source_observed_ms: 0,
                         },
@@ -3343,106 +3347,145 @@ mod tests {
         registry.detach(replacement).await.unwrap();
     }
 
-    #[tokio::test]
-    async fn scheduler_load_and_deployment_are_generation_scoped_and_list_every_pool() {
-        let registry = PoolRegistry::new(relay_identity(), config());
-        let worker = |max_num_seqs| ModelRuntimeConfig {
+    fn serving_worker(max_num_seqs: Option<u64>) -> ModelRuntimeConfig {
+        ModelRuntimeConfig {
             total_kv_blocks: Some(100),
             max_num_seqs,
             ..ModelRuntimeConfig::default()
-        };
+        }
+    }
+
+    async fn attach_served(registry: &PoolRegistry) -> PoolAttachment {
         let mut attach_request = request(pool(1), "fast.router.generate", "llama");
         attach_request.serving_facts = Some(PoolServingFacts {
-            runtime_configs: HashMap::from([(1, worker(Some(8)))]),
+            runtime_configs: HashMap::from([(1, serving_worker(Some(8)))]),
         });
-        let served = registry.attach(attach_request).await.unwrap();
-        let mut unserved_request = request(pool(2), "slow.router.generate", "llama");
-        unserved_request.serving_facts = None;
-        let unserved = registry.attach(unserved_request).await.unwrap();
-        let kv_before = registry.load_snapshots();
-        let envelope = |sequence| EventEnvelope {
+        registry.attach(attach_request).await.unwrap()
+    }
+
+    fn scheduler_envelope(sequence: u64) -> EventEnvelope {
+        EventEnvelope {
             publisher_id: 7,
             sequence,
             published_at: 1_000,
             topic: String::new(),
             payload: Default::default(),
-        };
-        let view = |dp_rank| SchedulerLoad {
+        }
+    }
+
+    fn scheduler_view(dp_rank: u32) -> SchedulerLoad {
+        SchedulerLoad {
             worker_id: 1,
             dp_rank,
             active_decode_blocks: 3,
             active_prefill_tokens: 4,
             group: dynamo_kv_router::protocols::SchedulerGroup::Standalone { scheduler_id: 7 },
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_load_is_generation_scoped_and_separate_from_kv_usage() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let served = attach_served(&registry).await;
+        let kv_before = registry.load_snapshots();
         let now = Instant::now();
+        // Rank 1 is not declared; the next generation does not exist yet.
         assert!(!registry.observe_scheduler_load(
             served.pool_id,
             served.layout_generation,
-            &envelope(1),
-            vec![view(1)],
+            &scheduler_envelope(1),
+            vec![scheduler_view(1)],
             now,
         ));
         assert!(!registry.observe_scheduler_load(
             served.pool_id,
             served.layout_generation + 1,
-            &envelope(1),
-            vec![view(0)],
+            &scheduler_envelope(1),
+            vec![scheduler_view(0)],
             now,
         ));
         assert!(registry.observe_scheduler_load(
             served.pool_id,
             served.layout_generation,
-            &envelope(2),
-            vec![view(0)],
+            &scheduler_envelope(2),
+            vec![scheduler_view(0)],
             now,
         ));
-        // Scheduler views never touch the KV-usage plane.
         assert_eq!(registry.load_snapshots(), kv_before);
 
-        let discovered =
+        let registered =
             HashMap::from([(EndpointId::from("fast.router.generate"), HashSet::from([7]))]);
-        let loads = registry.serving_pool_loads(&discovered, now);
-        assert_eq!(loads.len(), 2);
-        assert_eq!(loads[0].producer.pool_id(), served.pool_id);
         assert_eq!(
-            loads[0].scheduler.coverage,
-            Coverage::Complete(super::super::load::SchedulerTotals {
+            registry.serving_pool_loads(&registered, now)[0]
+                .scheduler
+                .coverage,
+            Coverage::Complete(super::super::load::SchedulerGauges {
                 active_decode_blocks: 3,
                 active_prefill_tokens: 4,
             })
         );
-        assert_eq!(
-            loads[0].deployment,
-            Some(PoolDeployment {
-                live_workers: 1,
-                max_concurrency: Some(8),
-            })
-        );
-        assert_eq!(loads[1].producer.pool_id(), unserved.pool_id);
-        assert_eq!(loads[1].scheduler.coverage, Coverage::Missing);
-        assert_eq!(loads[1].deployment, None);
-
-        // A failed discovery listing cannot prove coverage.
+        // An unknown roster cannot prove coverage.
         assert_eq!(
             registry.serving_pool_loads(&HashMap::new(), now)[0]
                 .scheduler
                 .coverage,
             Coverage::Partial
         );
+        registry.detach(served).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serving_pool_loads_list_every_pool() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let served = attach_served(&registry).await;
+        let mut unserved_request = request(pool(2), "slow.router.generate", "llama");
+        unserved_request.serving_facts = None;
+        let unserved = registry.attach(unserved_request).await.unwrap();
+        let now = Instant::now();
+
+        let loads = registry.serving_pool_loads(&HashMap::new(), now);
+        assert_eq!(loads.len(), 2);
+        assert_eq!(loads[0].producer.pool_id(), served.pool_id);
+        assert_eq!(loads[1].producer.pool_id(), unserved.pool_id);
+        assert_eq!(loads[1].scheduler.coverage, Coverage::Missing);
+        assert_eq!(loads[1].deployment, None);
+
+        registry.detach(served).await.unwrap();
+        registry.detach(unserved).await.unwrap();
+        assert!(registry.serving_pool_loads(&HashMap::new(), now).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pool_deployment_follows_runtime_configs() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let served = attach_served(&registry).await;
+        let deployment =
+            || registry.serving_pool_loads(&HashMap::new(), Instant::now())[0].deployment;
+        assert_eq!(
+            deployment(),
+            Some(PoolDeployment {
+                live_workers: 1,
+                max_concurrency: Some(8),
+            })
+        );
+
+        // A worker without a declared limit leaves the pool's limit unknown.
         registry
             .replace_load_capacity(
                 served.pool_id,
                 served.layout_generation,
-                &HashMap::from([(1, worker(Some(8))), (2, worker(None))]),
+                &HashMap::from([(1, serving_worker(Some(8))), (2, serving_worker(None))]),
             )
             .unwrap();
         assert_eq!(
-            registry.serving_pool_loads(&discovered, now)[0].deployment,
+            deployment(),
             Some(PoolDeployment {
                 live_workers: 2,
                 max_concurrency: None,
             })
         );
+
+        // An invalid configuration leaves no deployment facts.
         registry
             .replace_load_capacity(
                 served.pool_id,
@@ -3451,18 +3494,12 @@ mod tests {
                     1,
                     ModelRuntimeConfig {
                         data_parallel_size: 0,
-                        ..worker(Some(8))
+                        ..serving_worker(Some(8))
                     },
                 )]),
             )
             .unwrap_err();
-        assert_eq!(
-            registry.serving_pool_loads(&discovered, now)[0].deployment,
-            None
-        );
-
+        assert_eq!(deployment(), None);
         registry.detach(served).await.unwrap();
-        registry.detach(unserved).await.unwrap();
-        assert!(registry.serving_pool_loads(&discovered, now).is_empty());
     }
 }

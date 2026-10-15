@@ -87,7 +87,7 @@ pub(super) async fn run_load_publisher<T: LoadWindow>(
 /// Publishes `window_update(snapshot, sequence)` for every snapshot `source`
 /// produces, starting at sequence 1, so windows follow the source's cadence.
 /// Fails once the source's sender is dropped, unless already cancelled.
-pub(super) async fn run_snapshot_publisher<S, T: LoadWindow>(
+pub(super) async fn run_snapshot_publisher<S: Clone, T: LoadWindow>(
     mut source: watch::Receiver<Option<S>>,
     updates: LoadUpdateHub<T>,
     cancel: CancellationToken,
@@ -106,14 +106,13 @@ pub(super) async fn run_snapshot_publisher<S, T: LoadWindow>(
             }
             anyhow::bail!("KV Relay load source stopped");
         }
-        let update = match &*source.borrow_and_update() {
-            Some(snapshot) => {
-                sequence = next_sequence(sequence)?;
-                window_update(snapshot, sequence)
-            }
-            None => continue,
+        // Clone out of the borrow so the source's sender is not blocked while
+        // the window is built.
+        let Some(snapshot) = source.borrow_and_update().clone() else {
+            continue;
         };
-        updates.publish(update);
+        sequence = next_sequence(sequence)?;
+        updates.publish(window_update(&snapshot, sequence));
     }
 }
 

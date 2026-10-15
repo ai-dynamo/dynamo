@@ -40,7 +40,7 @@ use self::frontend::{
     sync_subscriptions,
 };
 use self::roster::Rosters;
-use super::load::{Coverage, PoolDeployment, SCHEDULER_FRESHNESS, SchedulerLoadSnapshot};
+use super::load::{Coverage, PoolDeployment, PoolSchedulerLoad, SCHEDULER_FRESHNESS};
 use super::pool_registry::PoolRegistry;
 use super::topology::TopologyPublisher;
 use crate::frontend_load::{FRONTEND_LOAD_TOPIC, RequestGauges, RequestTotals};
@@ -74,7 +74,7 @@ pub(crate) struct ServingLoadSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PoolServingLoad {
     pub(super) producer: ProducerIdentity,
-    pub(super) scheduler: SchedulerLoadSnapshot,
+    pub(super) scheduler: PoolSchedulerLoad,
     /// `None` for a pool without valid serving facts.
     pub(super) deployment: Option<PoolDeployment>,
 }
@@ -116,7 +116,10 @@ impl ServingLoadAggregator {
         topology: Arc<TopologyPublisher>,
         window: Duration,
         cancel: CancellationToken,
-    ) -> (watch::Receiver<Option<Arc<ServingLoadSnapshot>>>, JoinHandle<()>) {
+    ) -> (
+        watch::Receiver<Option<Arc<ServingLoadSnapshot>>>,
+        JoinHandle<()>,
+    ) {
         let (snapshots, receiver) = watch::channel(None);
         let aggregator = Self {
             drt: component.drt().clone(),
@@ -163,7 +166,10 @@ impl ServingLoadAggregator {
                 frontend_events(self.drt.clone(), namespace.to_string()).boxed()
             });
             frontend_rosters.sync(
-                namespaces.iter().map(|&namespace| namespace.to_string()).collect(),
+                namespaces
+                    .iter()
+                    .map(|&namespace| namespace.to_string())
+                    .collect(),
                 |namespace| EventChannelQuery::namespace_topic(namespace, FRONTEND_LOAD_TOPIC),
                 &self.drt,
             );
@@ -173,11 +179,16 @@ impl ServingLoadAggregator {
                     .iter()
                     .map(|pool| pool.serving_endpoint().clone())
                     .collect(),
-                |endpoint| EventChannelQuery::endpoint_topic(endpoint.clone(), SCHEDULER_LOAD_SUBJECT),
+                |endpoint| {
+                    EventChannelQuery::endpoint_topic(endpoint.clone(), SCHEDULER_LOAD_SUBJECT)
+                },
                 &self.drt,
             );
             let now = Instant::now();
-            reports.prune(|namespace, publisher| frontend_rosters.contains(namespace, publisher), now);
+            reports.prune(
+                |namespace, publisher| frontend_rosters.contains(namespace, publisher),
+                now,
+            );
             let snapshot = ServingLoadSnapshot {
                 pools: self
                     .pools
@@ -193,7 +204,10 @@ impl ServingLoadAggregator {
             silent_frontends.check(
                 has_pools
                     && !frontend_rosters.any_registered()
-                    && snapshot.models.iter().all(|model| model.observed_frontends == 0),
+                    && snapshot
+                        .models
+                        .iter()
+                        .all(|model| model.observed_frontends == 0),
                 now,
             );
             silent_routers.check(
@@ -231,7 +245,10 @@ impl SilentStream {
     fn check(&mut self, silent: bool, now: Instant) {
         if !silent {
             if self.warned {
-                tracing::info!(stream = self.stream, "KV DC Relay serving-load publishers appeared");
+                tracing::info!(
+                    stream = self.stream,
+                    "KV DC Relay serving-load publishers appeared"
+                );
             }
             self.since = None;
             self.warned = false;

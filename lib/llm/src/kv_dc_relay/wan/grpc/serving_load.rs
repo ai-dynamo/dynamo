@@ -40,14 +40,14 @@ fn coverage_to_wire<T: Copy>(coverage: Coverage<T>) -> (Option<T>, proto::DataSt
 }
 
 fn pool_to_wire(pool: &PoolServingLoad) -> proto::PoolServingLoad {
-    let (totals, status) = coverage_to_wire(pool.scheduler.coverage);
+    let (gauges, status) = coverage_to_wire(pool.scheduler.coverage);
     proto::PoolServingLoad {
         producer: Some(producer_to_wire(pool.producer)),
         load: Some(proto::LoadView {
             requests: None,
             tokens: Some(proto::TokenLoadStats {
-                active_prefill_tokens: totals.map(|totals| totals.active_prefill_tokens),
-                active_decode_blocks: totals.map(|totals| totals.active_decode_blocks),
+                active_prefill_tokens: gauges.map(|gauges| gauges.active_prefill_tokens),
+                active_decode_blocks: gauges.map(|gauges| gauges.active_decode_blocks),
                 ..Default::default()
             }),
             status: status as i32,
@@ -112,7 +112,7 @@ mod tests {
 
     use super::*;
     use crate::frontend_load::{RequestGauges, RequestTotals};
-    use crate::kv_dc_relay::load::{PoolDeployment, SchedulerLoadSnapshot, SchedulerTotals};
+    use crate::kv_dc_relay::load::{PoolDeployment, PoolSchedulerLoad, SchedulerGauges};
 
     fn producer(seed: u8) -> ProducerIdentity {
         let format = DcCkfState::new(CkfConfig::new(32)).unwrap().format();
@@ -154,8 +154,8 @@ mod tests {
             pools: vec![
                 PoolServingLoad {
                     producer: producer(1),
-                    scheduler: SchedulerLoadSnapshot {
-                        coverage: Coverage::Complete(SchedulerTotals {
+                    scheduler: PoolSchedulerLoad {
+                        coverage: Coverage::Complete(SchedulerGauges {
                             active_decode_blocks: 12,
                             active_prefill_tokens: 34,
                         }),
@@ -169,7 +169,7 @@ mod tests {
                 // A pool without serving data is still listed.
                 PoolServingLoad {
                     producer: producer(2),
-                    scheduler: SchedulerLoadSnapshot {
+                    scheduler: PoolSchedulerLoad {
                         coverage: Coverage::Missing,
                         source_observed_ms: 0,
                     },

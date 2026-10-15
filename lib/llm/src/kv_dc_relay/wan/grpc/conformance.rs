@@ -800,12 +800,12 @@ async fn serving_load_has_an_independent_subscriber_limit() {
     let fixture = RelayFixture::start(|config| config.max_serving_load_subscribers = 1).await;
     let mut client = fixture.client().await;
     let request = || serving_load_request(proto::RELAY_CONTRACT_MARKER);
-    let mut first = client
+    // The permit is taken when the stream is admitted, before any window.
+    let first = client
         .subscribe_serving_load(request())
         .await
         .unwrap()
         .into_inner();
-    next_serving_load(&mut first).await;
 
     let rejected = client.subscribe_serving_load(request()).await.unwrap_err();
     assert_eq!(rejected.code(), tonic::Code::ResourceExhausted);

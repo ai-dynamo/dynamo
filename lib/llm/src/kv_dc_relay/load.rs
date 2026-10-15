@@ -120,11 +120,11 @@ impl PoolLoadState {
         LoadObservationOutcome::Updated
     }
 
-    pub(super) fn declares(&self, rank: &WorkerWithDpRank) -> bool {
+    pub(super) fn has_rank(&self, rank: &WorkerWithDpRank) -> bool {
         self.capacities.contains_key(rank)
     }
 
-    pub(super) fn declared_ranks(&self) -> usize {
+    pub(super) fn declared_rank_count(&self) -> usize {
         self.capacities.len()
     }
 
@@ -227,19 +227,21 @@ pub(super) enum Coverage<T> {
 
 /// One pool's in-flight load as the routers' schedulers see it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct SchedulerTotals {
+pub(super) struct SchedulerGauges {
     pub(super) active_decode_blocks: u64,
     pub(super) active_prefill_tokens: u64,
 }
 
-impl SchedulerTotals {
-    fn of(load: &SchedulerLoad) -> Self {
+impl From<&SchedulerLoad> for SchedulerGauges {
+    fn from(load: &SchedulerLoad) -> Self {
         Self {
             active_decode_blocks: load.active_decode_blocks,
             active_prefill_tokens: load.active_prefill_tokens,
         }
     }
+}
 
+impl SchedulerGauges {
     fn max(self, other: Self) -> Self {
         Self {
             active_decode_blocks: self.active_decode_blocks.max(other.active_decode_blocks),
@@ -260,8 +262,8 @@ impl SchedulerTotals {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SchedulerLoadSnapshot {
-    pub(super) coverage: Coverage<SchedulerTotals>,
+pub(super) struct PoolSchedulerLoad {
+    pub(super) coverage: Coverage<SchedulerGauges>,
     /// Oldest publish time among the counted views; 0 when none.
     pub(super) source_observed_ms: u64,
 }
@@ -293,13 +295,15 @@ pub(super) struct SchedulerLoadState {
 
 impl SchedulerLoadState {
     /// Replaces one publisher's complete rank batch. Duplicate and reordered batches
-    /// are ignored; gaps are accepted.
+    /// are ignored; gaps are accepted. Prunes first, so state stays bounded even
+    /// when nothing takes snapshots (a Relay without a WAN listener).
     pub(super) fn observe(
         &mut self,
         envelope: &EventEnvelope,
         loads: Vec<SchedulerLoad>,
         received_at: Instant,
     ) {
+        self.prune(received_at);
         let progress = PublisherProgress {
             last_sequence: envelope.sequence,
             last_seen: received_at,
@@ -356,9 +360,9 @@ impl SchedulerLoadState {
         declared: &PoolLoadState,
         discovered: Option<&HashSet<u64>>,
         now: Instant,
-    ) -> SchedulerLoadSnapshot {
+    ) -> PoolSchedulerLoad {
         let mut per_group =
-            HashMap::<(WorkerWithDpRank, &SchedulerGroup), (SchedulerTotals, u64)>::new();
+            HashMap::<(WorkerWithDpRank, &SchedulerGroup), (SchedulerGauges, u64)>::new();
         let mut ranks_per_publisher = HashMap::<u64, usize>::new();
         let mut oldest = None::<u64>;
         for (publisher, batch) in &self.batches {
@@ -367,11 +371,11 @@ impl SchedulerLoadState {
             }
             let mut observed_ranks = 0;
             for (rank, report) in &batch.loads {
-                if !declared.declares(rank) {
+                if !declared.has_rank(rank) {
                     continue;
                 }
                 observed_ranks += 1;
-                let load = SchedulerTotals::of(report);
+                let load = SchedulerGauges::from(report);
                 let group = &report.group;
                 per_group
                     .entry((*rank, group))
@@ -393,12 +397,12 @@ impl SchedulerLoadState {
             }
         }
         let Some(source_observed_ms) = oldest else {
-            return SchedulerLoadSnapshot {
+            return PoolSchedulerLoad {
                 coverage: Coverage::Missing,
                 source_observed_ms: 0,
             };
         };
-        let ranks = declared.declared_ranks();
+        let ranks = declared.declared_rank_count();
         let complete = discovered.is_some_and(|discovered| {
             discovered
                 .iter()
@@ -410,12 +414,12 @@ impl SchedulerLoadState {
                 per_group
                     .into_values()
                     .map(|(total, _)| total)
-                    .fold(SchedulerTotals::default(), SchedulerTotals::saturating_add),
+                    .fold(SchedulerGauges::default(), SchedulerGauges::saturating_add),
             )
         } else {
             Coverage::Partial
         };
-        SchedulerLoadSnapshot {
+        PoolSchedulerLoad {
             coverage,
             source_observed_ms,
         }
@@ -725,8 +729,8 @@ mod tests {
         .unwrap()
     }
 
-    fn totals(decode: u64, prefill: u64) -> Coverage<SchedulerTotals> {
-        Coverage::Complete(SchedulerTotals {
+    fn totals(decode: u64, prefill: u64) -> Coverage<SchedulerGauges> {
+        Coverage::Complete(SchedulerGauges {
             active_decode_blocks: decode,
             active_prefill_tokens: prefill,
         })
@@ -952,7 +956,7 @@ mod tests {
         let expired = now + SCHEDULER_FRESHNESS + Duration::from_millis(1);
         assert_eq!(
             state.snapshot(&ranks(1), Some(&discovered), expired),
-            SchedulerLoadSnapshot {
+            PoolSchedulerLoad {
                 coverage: Coverage::Missing,
                 source_observed_ms: 0,
             }

@@ -740,7 +740,8 @@ impl KvDcRelay {
             max_active_streams,
             snapshot_progress_timeout,
         ));
-        let (transport, serving_load_aggregator) = if let Some(transport_config) = transport_config {
+        let (transport, serving_load_aggregator) = if let Some(transport_config) = transport_config
+        {
             let (serving_load, aggregator) = ServingLoadAggregator::spawn(
                 &component,
                 pools.clone(),
@@ -2147,20 +2148,20 @@ fn start_load_collector(
         let collector = tokio::spawn(async move {
             tokio::join!(
                 run_load_collector(
-                    component.clone(),
-                    endpoint.clone(),
+                    &component,
+                    &endpoint,
                     pool_id,
                     layout_generation,
-                    collector_pools.clone(),
-                    collector_cancel.clone(),
+                    &collector_pools,
+                    &collector_cancel,
                 ),
                 run_scheduler_load_collector(
-                    component,
-                    endpoint,
+                    &component,
+                    &endpoint,
                     pool_id,
                     layout_generation,
-                    collector_pools,
-                    collector_cancel,
+                    &collector_pools,
+                    &collector_cancel,
                 ),
             );
         });
@@ -2211,19 +2212,19 @@ async fn collect_pending_while<T>(
 /// generation's observations are cleared whenever the subscription fails, since
 /// updates may have been lost.
 async fn run_load_collector(
-    component: Component,
-    endpoint: EndpointId,
+    component: &Component,
+    endpoint: &EndpointId,
     pool_id: PoolId,
     layout_generation: u64,
-    pools: Arc<PoolRegistry>,
-    cancel: CancellationToken,
+    pools: &PoolRegistry,
+    cancel: &CancellationToken,
 ) {
     let mut retry = Backoff::new(LOAD_RETRY_INITIAL, LOAD_RETRY_MAX);
     let mut failures = FailureStreak::default();
     loop {
         let subscriber = tokio::select! {
             _ = cancel.cancelled() => return,
-            subscriber = KvMetricsSubscriber::for_endpoint_id(&component, &endpoint) => subscriber,
+            subscriber = KvMetricsSubscriber::for_endpoint_id(component, endpoint) => subscriber,
         };
         let error = match subscriber {
             Ok(mut subscriber) => loop {
@@ -2264,12 +2265,12 @@ async fn run_load_collector(
 /// Undecodable reports are skipped. Accepted batches keep their freshness deadline
 /// across resubscription, so a brief disconnect does not erase a recent report.
 async fn run_scheduler_load_collector(
-    component: Component,
-    endpoint: EndpointId,
+    component: &Component,
+    endpoint: &EndpointId,
     pool_id: PoolId,
     layout_generation: u64,
-    pools: Arc<PoolRegistry>,
-    cancel: CancellationToken,
+    pools: &PoolRegistry,
+    cancel: &CancellationToken,
 ) {
     let mut retry = Backoff::new(LOAD_RETRY_INITIAL, LOAD_RETRY_MAX);
     let mut failures = FailureStreak::default();
@@ -2277,7 +2278,7 @@ async fn run_scheduler_load_collector(
     loop {
         let subscriber = tokio::select! {
             _ = cancel.cancelled() => return,
-            subscriber = EventSubscriber::for_endpoint_id(component.drt(), &endpoint, SCHEDULER_LOAD_SUBJECT) => subscriber,
+            subscriber = EventSubscriber::for_endpoint_id(component.drt(), endpoint, SCHEDULER_LOAD_SUBJECT) => subscriber,
         };
         let error = match subscriber {
             Ok(mut subscriber) => loop {

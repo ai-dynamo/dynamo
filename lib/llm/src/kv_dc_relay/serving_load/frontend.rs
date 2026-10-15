@@ -281,9 +281,8 @@ impl FrontendReports {
     /// Forgets frontends silent for [`SOURCE_RETENTION`] whose publisher is no
     /// longer `registered`, which bounds state under frontend churn.
     ///
-    /// Forgetting a frontend also forgets its baselines: if it later resumes
-    /// the same incarnation, its cumulative counters are added in full again.
-    /// That requires a long partition of a frontend that also left discovery.
+    /// A forgotten frontend that resumes is heard mid-stream, so it counts
+    /// only its growth from then on.
     pub(super) fn prune(&mut self, registered: impl Fn(&String, u64) -> bool, now: Instant) {
         self.frontends.retain(|(namespace, _), source| {
             now.saturating_duration_since(source.received_at) <= SOURCE_RETENTION
@@ -588,7 +587,8 @@ mod tests {
         reports: &FrontendReports,
         discovered: &HashMap<String, HashSet<u64>>,
     ) -> ModelServingLoad {
-        let mut models = reports.model_loads(&catalog(Vec::new()), RELAY_NS, discovered, Instant::now());
+        let mut models =
+            reports.model_loads(&catalog(Vec::new()), RELAY_NS, discovered, Instant::now());
         assert_eq!(models.len(), 1);
         models.pop().unwrap()
     }
@@ -606,17 +606,17 @@ mod tests {
         record(
             &mut reports,
             PUBLISHER,
-            frame(1, 2, vec![model_load("a", 2, 5)]),
+            frame(1, 1, vec![model_load("a", 2, 5)]),
+        );
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 0, vec![model_load("a", 9, 9)]),
         );
         record(
             &mut reports,
             PUBLISHER,
             frame(1, 1, vec![model_load("a", 9, 9)]),
-        );
-        record(
-            &mut reports,
-            PUBLISHER,
-            frame(1, 2, vec![model_load("a", 9, 9)]),
         );
 
         let model = only_model(&reports, &listed(&[PUBLISHER]));
@@ -772,7 +772,8 @@ mod tests {
         // "other" has a discovered frontend that never published.
         let mut discovered = listed(&[PUBLISHER]);
         discovered.insert("other".to_string(), HashSet::from([2, 3]));
-        let models = reports.model_loads(&catalog(Vec::new()), RELAY_NS, &discovered, Instant::now());
+        let models =
+            reports.model_loads(&catalog(Vec::new()), RELAY_NS, &discovered, Instant::now());
         let keys = models
             .iter()
             .map(|model| (model.namespace.as_str(), model.model.as_str()))
@@ -798,7 +799,8 @@ mod tests {
         other.is_serving_ready = false;
         record(&mut reports, 2, other);
 
-        let models = reports.model_loads(&catalog(Vec::new()), RELAY_NS, &listed(&[]), Instant::now());
+        let models =
+            reports.model_loads(&catalog(Vec::new()), RELAY_NS, &listed(&[]), Instant::now());
         let (a, b) = (&models[0], &models[1]);
         assert_eq!(a.observed_frontends, 2);
         assert_eq!(a.ready_frontends, 1);
@@ -868,7 +870,11 @@ mod tests {
         record(
             &mut reports,
             PUBLISHER,
-            frame(1, 1, vec![model_load("llama ", 1, 1), model_load("a", 2, 5)]),
+            frame(
+                1,
+                1,
+                vec![model_load("llama ", 1, 1), model_load("a", 2, 5)],
+            ),
         );
 
         let model = only_model(&reports, &listed(&[PUBLISHER]));
@@ -918,10 +924,7 @@ mod tests {
         reports.prune(|_, _| false, later);
         assert!(reports.frontends.is_empty());
         // Totals outlive the frontend.
-        assert_eq!(
-            reports.totals(NS, "a").requests_started,
-            5
-        );
+        assert_eq!(reports.totals(NS, "a").requests_started, 5);
     }
 
     #[test]

@@ -137,7 +137,9 @@ impl<K: Clone + Eq + Hash + Unpin> Rosters<K> {
 
     /// Whether any key has a registered publisher, however old.
     pub(super) fn any_registered(&self) -> bool {
-        self.registered.values().any(|registered| !registered.is_empty())
+        self.registered
+            .values()
+            .any(|registered| !registered.is_empty())
     }
 }
 

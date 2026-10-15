@@ -324,10 +324,9 @@ message SubscribeServingLoadRequest
 message RequestLifecycleStats
 {
   // Cumulative over every frontend the Relay has heard from during its
-  // relay_incarnation, including frontends that have since left. Monotonic
-  // within one incarnation. A new incarnation starts from each frontend's own
-  // running totals when it is first heard, so values are neither zero nor
-  // continuous across incarnations: compute rates only within one incarnation.
+  // relay_incarnation, including frontends that have since left. Start at zero
+  // with each relay_incarnation and count what it observed; monotonic within
+  // one incarnation, so compute rates only within one incarnation.
   // Set even when the view is not COMPLETE. Each started request ends exactly
   // once: completed counts successes only and failed excludes cancellations,
   // so started = completed + failed + cancelled + in flight.
