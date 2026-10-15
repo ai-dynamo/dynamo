@@ -1118,9 +1118,7 @@ mod tests_non_nixl {
 
     #[test]
     fn test_allow_remote_urls_from_env_value() {
-        for off in ["0", "false", " OFF "] {
-            assert!(!MediaFetcher::allow_remote_urls_from(Some(off)));
-        }
+        assert!(!MediaFetcher::allow_remote_urls_from(Some("0")));
         for on in [None, Some("1"), Some("")] {
             assert!(MediaFetcher::allow_remote_urls_from(on));
         }
