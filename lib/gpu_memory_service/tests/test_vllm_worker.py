@@ -141,9 +141,8 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
     worker.init_device()
     kv_budget = worker._determine_available_memory_before_gms_publish()
 
-    # The KV cache is one allocation made at wake while the peer stays
-    # resident; both engines' non-KV memory and the shared weights must fit
-    # beside it within the requested share of the device.
+    # The wake-time KV allocation, both engines' non-KV memory and the shared
+    # weights must fit within the requested share of the device.
     engine_non_kv = torch_peak + non_torch + cudagraph
     assert kv_budget + weights + 2 * engine_non_kv <= requested
     assert kv_budget > 0

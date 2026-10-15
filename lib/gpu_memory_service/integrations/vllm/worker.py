@@ -183,11 +183,8 @@ class GMSWorker(_BaseWorker):
             timeout_ms=self.gms_ro_connect_timeout_ms,
         )
 
-        # Shadow-mode KV sizing cannot read this engine's non-torch memory
-        # (NCCL, workspaces) from device-wide free memory at profile time: the
-        # co-located engine allocates on the same device. Measure it over the
-        # parent's init only. The window starts after the RO connect above,
-        # which can block while the peer profiles.
+        # Profile-time free memory includes the co-located engine, so measure
+        # non-torch init memory (NCCL, workspaces) here, after the RO connect.
         measure_non_torch = is_scratch_kv_enabled()
         if measure_non_torch:
             free_before, _ = torch_device().mem_get_info()
@@ -271,10 +268,8 @@ class GMSWorker(_BaseWorker):
             + non_torch_memory
             + cudagraph_memory_estimate_applied
         )
-        # The KV tensors are one cuMemCreate at wake, made while the other
-        # engine of the failover pair stays resident on this device. Both
-        # engines run the same model and arguments, so reserve this engine's
-        # non-KV footprint again for the peer, minus the weights they share.
+        # KV is one cuMemCreate at wake beside the resident peer engine, which runs
+        # the same model: reserve our non-KV footprint again, minus shared weights.
         peer_non_kv_cache_memory = max(0, non_kv_cache_memory - weights_memory)
 
         projected_available = (
