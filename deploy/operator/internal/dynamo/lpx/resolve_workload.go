@@ -105,12 +105,12 @@ func ResolveWorkload(
 			pipeline = PipelineSingle
 			if len(components) == 2 {
 				pipeline = PipelineSpecDecode
-			} else if snapshot.build.CompilationMode == BuildCompilationModeHybrid {
+			} else if snapshot.build.HasCUDAPartitions {
 				pipeline = PipelineLPX
 			}
 		}
 
-		if err := validateWorkloadConductor(dgd, stage, pipeline, snapshot.build.CompilationMode); err != nil {
+		if err := validateWorkloadConductor(dgd, stage, pipeline, snapshot.build.HasCUDAPartitions); err != nil {
 			return nil, err
 		}
 
@@ -163,11 +163,11 @@ func validateWorkloadConductor(
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	component *dynamov1beta1.DynamoComponentDeploymentSharedSpec,
 	pipeline Pipeline,
-	compilationMode BuildCompilationMode,
+	requiresGPU bool,
 ) error {
 	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
-	// Hybrid execution is selected by immutable build metadata, not template presence.
-	if compilationMode == BuildCompilationModeHybrid {
+	// Validate the selected hybrid runtime's GPU resources and claim bindings.
+	if requiresGPU {
 		if pipeline == PipelineSpecDecode {
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}

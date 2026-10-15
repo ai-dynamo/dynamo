@@ -151,10 +151,10 @@ def test_dynamo_tensor_to_numpy_float16():
 
 
 def test_dynamo_tensor_to_numpy_bfloat16():
-    """BFloat16 goes to an ml_dtypes.bfloat16 array. NumPy has no native
-    bfloat16, but tritonclient.utils.triton_to_np_dtype('BF16') returns
-    ml_dtypes.bfloat16, which is what tritonserver's Python bindings expect
-    for a BF16 input tensor."""
+    """BFloat16 goes to an ml_dtypes.bfloat16 array, the dtype
+    tritonclient.utils.triton_to_np_dtype('BF16') returns. tritonserver cannot
+    take this array as an input directly; the handler wraps its bytes in a
+    tritonserver.Tensor(DataType.BF16, ...)."""
     arr = dynamo_tensor_to_numpy(_tensor("IN", "BFloat16", [3], [1.5, -2.25, 0.5]))
     assert arr.dtype == ml_dtypes.bfloat16
     np.testing.assert_array_equal(arr, np.array([1.5, -2.25, 0.5], ml_dtypes.bfloat16))

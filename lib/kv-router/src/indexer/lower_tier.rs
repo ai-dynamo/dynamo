@@ -1123,7 +1123,6 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 // Only the device-tier primary tracks resident blocks.
                 WorkerTask::TrackResidentBlocks(_) => {}
-                WorkerTask::CleanupStaleChildren => {}
                 WorkerTask::Terminate => {
                     break;
                 }
