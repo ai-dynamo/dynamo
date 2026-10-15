@@ -238,6 +238,7 @@ class OmniHandler(BaseOmniHandler):
             media_fs=media_output_fs,
             media_http_url=media_output_http_url,
             default_fps=getattr(config, "default_video_fps", 16),
+            image_png_compression_level=config.image_png_compression_level,
         )
 
         # Audio/TTS handler — composition, not inheritance.

@@ -109,6 +109,35 @@ def _make_handler(stage_types=("diffusion",)):
     return handler
 
 
+def test_handler_passes_png_compression_to_formatter():
+    config = SimpleNamespace(
+        model="test-model",
+        served_model_name=None,
+        default_video_fps=16,
+        image_png_compression_level=0,
+    )
+    handler = OmniHandler.__new__(OmniHandler)
+    handler.engine_client = MagicMock()
+    with (
+        patch(
+            "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
+        ),
+        patch("dynamo.vllm.omni.omni_handler.AudioGenerationHandler"),
+        patch("dynamo.vllm.omni.omni_handler.OutputFormatter") as formatter,
+    ):
+        OmniHandler.__init__(
+            handler, runtime=None, config=config, default_sampling_params={}
+        )
+
+    formatter.assert_called_once_with(
+        model_name="test-model",
+        media_fs=None,
+        media_http_url=None,
+        default_fps=16,
+        image_png_compression_level=0,
+    )
+
+
 class TestEngineInputs:
     def test_defaults(self):
         """EngineInputs uses CHAT_COMPLETION, fps=0, and None optionals by default."""

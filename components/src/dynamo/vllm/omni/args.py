@@ -114,6 +114,18 @@ class OmniArgGroup(ArgGroup):
             arg_type=int,
             help="Default frames per second for generated videos.",
         )
+        add_argument(
+            g,
+            flag_name="--image-png-compression-level",
+            env_var="DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL",
+            default=6,
+            arg_type=int,
+            help=(
+                "Lossless PNG compression level for generated images (0-9). "
+                "0 disables compression for faster encoding and larger responses; "
+                "6 preserves Pillow's default. Set on the router in disaggregated mode."
+            ),
+        )
 
         # OmniDiffusionKwargs fields
         add_negatable_bool_argument(
@@ -458,6 +470,7 @@ class OmniConfig(DynamoRuntimeConfig):
     stage_configs_path: Optional[str] = None
     default_video_fps: int = 16
     no_guardrails: bool = False
+    image_png_compression_level: int = 6
 
     # Nested structs — each group of fields has a clear destination
     diffusion: OmniDiffusionKwargs = dataclasses.field(
@@ -521,6 +534,8 @@ class OmniConfig(DynamoRuntimeConfig):
             )
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
+        if not 0 <= self.image_png_compression_level <= 9:
+            raise ValueError("--image-png-compression-level must be between 0 and 9")
         if self.parallel.ulysses_degree <= 0:
             raise ValueError("--ulysses-degree must be > 0")
         if self.parallel.ring_degree <= 0:
