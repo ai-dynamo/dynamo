@@ -174,9 +174,6 @@ func projectV3PropSync(partitions []BuildPartition, edgePositions []int) (json.R
 			return nil, nil, fmt.Errorf("HX prop-sync graph exceeds %d logical connections", maxConnections)
 		}
 		remainingConnections -= source.DevicesPerNode
-		if capacity := destination.effectiveNodeCount() * destination.DevicesPerNode; source.DevicesPerNode > capacity {
-			return nil, nil, fmt.Errorf("HX prop-sync destination partition %d has %d devices, need %d", destination.SourcePartitionID, capacity, source.DevicesPerNode)
-		}
 
 		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, source.DevicesPerNode)
 		connections := make([][2]int64, source.DevicesPerNode)
