@@ -931,6 +931,46 @@ mod tests {
         assert_eq!(source.reason().as_str(), "capacity.worker_overloaded");
     }
 
+    #[test]
+    fn pre_stream_validation_refusal_is_not_a_transport_failure() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        for error_type in [
+            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
+            ErrorType::InvalidRequest,
+        ] {
+            let worker_error = DynamoError::builder()
+                .error_type(error_type)
+                .message("missing kwargs_data")
+                .build();
+            let err = pre_stream_failure_error(StreamPrologueError::new(
+                format!("Generate Error: {worker_error}"),
+                worker_error,
+            ));
+            assert_eq!(err.class(), ErrorType::InvalidRequest, "{error_type:?}");
+            assert!(
+                !error::match_error_chain(&err, &[ErrorType::CannotConnect], &[]),
+                "{error_type:?} must not carry a CannotConnect ancestor"
+            );
+            assert!(!is_migratable(&err), "{error_type:?} must not migrate");
+        }
+
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine is shutting down")
+            .build();
+        for prologue in [
+            StreamPrologueError::new("Generate Error: engine is shutting down", shutdown),
+            StreamPrologueError::from_message("Generate Error: legacy worker"),
+        ] {
+            let err = pre_stream_failure_error(prologue);
+            assert_eq!(err.error_type(), ErrorType::CannotConnect, "{err}");
+            assert!(is_migratable(&err), "{err}");
+        }
+    }
+
     // dynamo-runtime cannot import this module, so the addressed router keeps a copy.
     #[test]
     fn migration_sensitive_reasons_match_the_blocking_set() {

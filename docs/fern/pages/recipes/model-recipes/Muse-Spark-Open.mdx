@@ -1,15 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Muse-Spark-open-816B-A42B"
-subtitle: "Serve Muse-Spark-open-816B-A42B with Dynamo using SGLang or vLLM on GB200 and GB300."
+title: "Muse-Spark-Open-816B-A42B"
+subtitle: "Serve Muse-Spark-Open-816B-A42B with Dynamo using SGLang or vLLM on GB200 and GB300."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-This page covers serving Muse-Spark-open-816B-A42B with SGLang (recommended) or experimental vLLM on GB200 and GB300.
+This page covers serving Muse-Spark-Open-816B-A42B with SGLang (recommended) or experimental vLLM on GB200 and GB300.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -37,54 +37,54 @@ This page covers serving Muse-Spark-open-816B-A42B with SGLang (recommended) or 
 <label htmlFor="recipe-variant-kv-router">KV-aware routing</label>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="sglang" data-sku="gb200" data-variant="agg">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> SGLang</span>
 <span><b>GPUs</b> 4x GB200, TP4/EP4</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="sglang" data-sku="gb200" data-variant="disagg">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> SGLang</span>
 <span><b>Topology</b> 1P1D, TP4/EP4 per worker</span>
 <span><b>KV transfer</b> NIXL</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="sglang" data-sku="gb200" data-variant="kv-router">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> SGLang</span>
 <span><b>GPUs</b> 8x GB200, 2 TP4/EP4 replicas</span>
 <span><b>Routing</b> KV-aware</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="sglang" data-sku="gb300" data-variant="agg">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> SGLang</span>
 <span><b>GPUs</b> 4x GB300, TP4/EP4</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="sglang" data-sku="gb300" data-variant="disagg">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> SGLang</span>
 <span><b>Topology</b> 1P1D, TP4/EP4 per worker</span>
 <span><b>KV transfer</b> NIXL</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="sglang" data-sku="gb300" data-variant="kv-router">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> SGLang</span>
 <span><b>GPUs</b> 8x GB300, 2 TP4/EP4 replicas</span>
 <span><b>Routing</b> KV-aware</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="vllm" data-sku="gb200">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> vLLM (experimental)</span>
 <span><b>GPUs</b> 4x GB200, TP4/EP4</span>
 <span><b>Topology</b> Aggregated</span>
 </div>
 <div className="dynamo-target-picker-summary" data-engine="vllm" data-sku="gb300">
-<span><b>Model</b> Muse-Spark-open-816B-A42B</span>
+<span><b>Model</b> Muse-Spark-Open-816B-A42B</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>Framework</b> vLLM (experimental)</span>
 <span><b>GPUs</b> 4x GB300, TP4/EP4</span>
@@ -106,7 +106,7 @@ Video requests fail with the referenced Dynamo image because it does not include
 <div data-engine="sglang" data-sku="gb200">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available. Use 4 GPUs (one node) for aggregated serving and 8 GPUs (two nodes) for either the disaggregated or KV-aware routed target.
-- Access to the Muse-Spark-open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
+- Access to the Muse-Spark-Open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
 - Access to the SGLang runtime image referenced by the deployment manifest.
 - ComputeDomain support with Dynamic Resource Allocation (DRA) enabled.
 
@@ -115,7 +115,7 @@ Video requests fail with the referenced Dynamo image because it does not include
 <div data-engine="sglang" data-sku="gb300">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available. Use 4 GPUs for aggregated serving and 8 GPUs for either the disaggregated or KV-aware routed target.
-- Access to the Muse-Spark-open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
+- Access to the Muse-Spark-Open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
 - Access to the SGLang runtime image referenced by the deployment manifest.
 - For disaggregated serving, ComputeDomain support with Dynamic Resource Allocation (DRA) enabled.
 
@@ -124,7 +124,7 @@ Video requests fail with the referenced Dynamo image because it does not include
 <div data-engine="vllm" data-sku="gb200">
 
 - A Kubernetes cluster with the Dynamo platform installed and 4 GB200 GPUs available.
-- Access to the Muse-Spark-open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
+- Access to the Muse-Spark-Open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
 - Access to the vLLM runtime image referenced by the deployment manifest.
 
 </div>
@@ -132,7 +132,7 @@ Video requests fail with the referenced Dynamo image because it does not include
 <div data-engine="vllm" data-sku="gb300">
 
 - A Kubernetes cluster with the Dynamo platform installed and 4 GB300 GPUs available.
-- Access to the Muse-Spark-open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
+- Access to the Muse-Spark-Open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
 - Access to the vLLM runtime image referenced by the deployment manifest.
 
 </div>
@@ -553,7 +553,7 @@ These results cover the first 500 trace requests and establish functional operat
 
 <div data-engine="sglang">
 
-- Deployment assets: [Muse-Spark-open-816B-A42B SGLang manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/muse-spark-open-816b-a42b/sglang)
+- Deployment assets: [Muse-Spark-Open-816B-A42B SGLang manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/muse-spark-open-816b-a42b/sglang)
 - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/muse-spark-open-816b-a42b/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/muse-spark-open-816b-a42b/model-cache/model-download.yaml)
 - Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/muse-spark-open-816b-a42b/perf/perf.yaml)
 
@@ -561,7 +561,7 @@ These results cover the first 500 trace requests and establish functional operat
 
 <div data-engine="vllm">
 
-- Deployment assets: [Muse-Spark-open-816B-A42B vLLM manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/muse-spark-open-816b-a42b/vllm)
+- Deployment assets: [Muse-Spark-Open-816B-A42B vLLM manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/muse-spark-open-816b-a42b/vllm)
 - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/muse-spark-open-816b-a42b/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/muse-spark-open-816b-a42b/model-cache/model-download.yaml)
 - Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/muse-spark-open-816b-a42b/perf/perf.yaml)
 
