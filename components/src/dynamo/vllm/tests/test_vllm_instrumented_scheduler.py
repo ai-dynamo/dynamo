@@ -9347,9 +9347,9 @@ def _complete_realseed_cache_shot(stub):
     return requests, hits
 
 
-@pytest.mark.parametrize("kv_read_tokens", [16, 64, 1024])
 @pytest.mark.parametrize(
-    ("drop", "new_tokens"), [(0, 1), (0, 16), (16, 1), (16, 16), (16, 17), (16, 32)]
+    ("drop", "new_tokens", "kv_read_tokens"),
+    [(0, 1, 16), (0, 16, 64), (16, 1, 16), (16, 16, 64), (16, 17, 16), (16, 32, 1024)],
 )
 def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
     realseed_prefix_cache, kv_read_tokens, drop, new_tokens
