@@ -9,6 +9,7 @@ import asyncio
 import base64
 import math
 import os
+import sqlite3
 import threading
 from copy import deepcopy
 from functools import cache
@@ -273,6 +274,26 @@ class VllmArtifactSession:
         session.budget.reserve(session.reserved_bytes)
         return session
 
+    async def observe_async(self, output, prompt_token_ids):
+        native = getattr(output, "routed_experts", None)
+        if native is None or "moe_routes" not in self.contents:
+            self.observe(output, prompt_token_ids)
+            return
+        task = asyncio.create_task(
+            asyncio.to_thread(self.observe, output, prompt_token_ids)
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            if not task.cancelled():
+                task.exception()
+            raise
+
     def observe(self, output, prompt_token_ids):
         if self.error or self._closed:
             return
@@ -394,7 +415,7 @@ class VllmArtifactSession:
                     self.settings["destination"],
                     mode=self.settings["mode"],
                 )
-            except (ValueError, TypeError, RuntimeError, OSError):
+            except (ValueError, TypeError, RuntimeError, OSError, sqlite3.Error):
                 return {
                     "kind": "generation_artifact",
                     "mode": self.settings["mode"],
