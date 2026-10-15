@@ -68,8 +68,10 @@ def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
     from dynamo.common.multimodal.nvdec_decoder import decode_video_nvdec
 
     frames_np, meta = decode_video_nvdec(content, num_frames)  # (N,H,W,3) uint8 RGB
-    stacked = frames_np.astype("float32") * (1.0 / 255.0)
-    nchw = torch.from_numpy(stacked).permute(0, 3, 1, 2).contiguous()
+    # One float32 buffer: .to() on the permuted uint8 view writes a contiguous
+    # NCHW result in a single pass, and div_ scales it in place.
+    nchw = torch.from_numpy(frames_np).permute(0, 3, 1, 2).to(torch.float32)
+    nchw = nchw.div_(255.0)
     frames_pt = list(torch.unbind(nchw, dim=0))
     fps = float(meta.get("fps") or 0.0)
     total = int(meta["total_num_frames"])

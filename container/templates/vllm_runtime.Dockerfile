@@ -184,11 +184,16 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 {% endif %}
 
+{# Keep the base image's Transformers and tokenizers when Omni is disabled. #}
+{% set enable_vllm_omni = context.vllm[device_key].get("enable_vllm_omni", context.vllm.enable_vllm_omni) == "true" %}
+
+{% if enable_vllm_omni %}
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
+{% endif %}
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -257,6 +262,7 @@ RUN set -eux; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
 
+{% if enable_vllm_omni %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
@@ -266,6 +272,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -672,6 +679,7 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
+{% if enable_vllm_omni %}
 # Check that later package layers preserve the Omni-compatible versions.
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
@@ -682,10 +690,35 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
     if actual != expected:
         raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
+{% endif %}
 
 {% if device == "cuda" %}
+# Backport vLLM runtime fixes after all package installs; runtime inherits this stage.
+RUN --mount=type=bind,source=./container/deps/vllm/vllm-pr-60797-mamba2-prefill-conv-history.patch,target=/tmp/vllm-pr-60797.patch \
+    --mount=type=bind,source=./container/deps/vllm/vllm-pr-61077-flashinfer-multi-wave-kv-split.patch,target=/tmp/vllm-pr-61077.patch \
+    --mount=type=bind,source=./container/deps/vllm/vllm-pr-58231-split-topp-huge-logits.patch,target=/tmp/vllm-pr-58231.patch \
+    set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends patch; \
+    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("vllm").origin).parent.parent)')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-pr-60797.patch; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-pr-61077.patch; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-pr-58231.patch; \
+    rm -rf /var/lib/apt/lists/*
+
+# Patch installed FlashInfer after package installs; distinct JIT names bypass stale binaries.
+RUN --mount=type=bind,source=./container/deps/vllm/flashinfer-pr-5267-sm107-stochastic-rounding.patch,target=/tmp/flashinfer-pr-5267.patch \
+    --mount=type=bind,source=./container/deps/vllm/flashinfer-pr-6331-multi-wave-kv-split.patch,target=/tmp/flashinfer-pr-6331.patch \
+    set -eu; \
+    python3 -c 'from importlib.metadata import version; assert version("flashinfer-python") == "0.7.0.post1", "Revalidate FlashInfer backports for the new version"'; \
+    fi_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("flashinfer").origin).parent)')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$fi_root" < /tmp/flashinfer-pr-5267.patch; \
+    patch --batch --forward --fuzz=0 -p1 -d "$fi_root" < /tmp/flashinfer-pr-6331.patch
+
+{% if enable_vllm_omni %}
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
+{% endif %}
 
 RUN vllm-rs --help >/dev/null
 {% else %}

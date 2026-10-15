@@ -125,6 +125,8 @@ jobs:
   backend-status-check:
     runs-on: ubuntu-latest
     needs:
+      - vllm-compliance-audit
+      - trtllm-compliance-audit
       - changed-files
       - operator
       - operator-integration
@@ -1084,7 +1086,7 @@ jobs:
   # they syft-scan the pushed image and diff it against the build's osrb-deps.csv
   # to surface anything shipped-but-unattributed. They need:[<fw>-build] and run
   # in PARALLEL with the test jobs (the slow syft pull+scan stays off the test
-  # critical path). Soft gate: report-only, non-required. EFA-image audits are a
+  # critical path). TRT-LLM/vLLM require clean results on both architectures. EFA-image audits are a
   # follow-up (same caller pattern).
 
   vllm-compliance-audit:
@@ -1093,13 +1095,15 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
+      platforms: '["amd64", "arm64"]'
+      fail_on_findings: true
       framework: vllm
       target: runtime
       cuda_version: '13.0'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
     # No secrets: the audit scans the container's own filesystem (no registry
-    # auth / aws) — don't inherit repo secrets into a report-only job.
+    # auth / aws) — no repository secrets are needed.
 
   sglang-compliance-audit:
     name: sglang-runtime # grouped in the UI with other sglang jobs
@@ -1119,6 +1123,8 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
+      platforms: '["amd64", "arm64"]'
+      fail_on_findings: true
       framework: trtllm
       target: runtime
       cuda_version: '13.1'
@@ -1185,6 +1191,57 @@ jobs:
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
+
+  vllm-efa-copy-to-acr:
+    name: vllm-runtime-efa
+    needs: [changed-files, vllm-efa-build]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.efa == 'true') &&
+      needs.vllm-efa-build.result == 'success'
+    uses: $/.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  # Mirror a pinned EFA image from ECR to ACR on every push that touches the
+  # workflow file, without requiring a fresh vllm-efa-build.  The source is the
+  # base EFA image baked for the parent commit (cbc9e1a); re-run this job to
+  # update the pin when a new EFA image is needed.
+  vllm-efa-mirror-to-acr:
+    name: vllm-runtime-efa / Mirror pinned ECR→ACR
+    runs-on: ubuntu-latest
+    needs: [changed-files]
+    if: always() && !cancelled()
+    env:
+      ECR_SRC: 210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/nemotron3-5-supervl:cbc9e1a73cb297965735b437610f07926e06d471-vllm-runtime-efa
+      ACR_DST: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:cbc9e1a73cb297965735b437610f07926e06d471-vllm-runtime-efa
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502  # v4.0.2
+        with:
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076  # v2.0.1
+        with:
+          registries: "210086341041"
+      - name: Log in to ACR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3.4.0
+        with:
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          username: ${{ secrets.AZURE_ACR_USER }}
+          password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Mirror EFA image ECR → ACR
+        run: |
+          docker pull "$ECR_SRC"
+          docker tag  "$ECR_SRC" "$ACR_DST"
+          docker push "$ACR_DST"
+          echo "Mirrored $ECR_SRC → $ACR_DST"
 
   frontend-copy-to-acr:
     name: frontend
@@ -1261,8 +1318,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # ============================================================================
@@ -1965,6 +2021,7 @@ jobs:
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr
+      - vllm-efa-copy-to-acr
       - vllm-multi-gpu-test
       - vllm-efa-build
       - sglang-copy-to-acr

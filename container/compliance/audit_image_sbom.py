@@ -33,8 +33,10 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
+from posixpath import normpath
 
 logger = logging.getLogger("compliance.audit_image_sbom")
 
@@ -43,7 +45,7 @@ def _normalize(name: str) -> str:
     """Lowercase + unify separators — a coarse key that absorbs common
     dist-vs-import / packaging name skew (e.g. sgl_kernel vs sglang-kernel)
     without over-merging."""
-    return (name or "").strip().lower().replace("_", "-").replace(" ", "-")
+    return re.sub(r"[-_.\s]+", "-", (name or "").strip().lower())
 
 
 def _load_cdx_components(path: Path) -> list[dict]:
@@ -92,14 +94,104 @@ def _is_first_party(name: str) -> bool:
     return name.startswith(_FIRST_PARTY_GO_PREFIXES)
 
 
+def _rootfs_path(path: str) -> str:
+    """Use one root-relative representation for Syft and package-owned paths."""
+    return normpath("/" + path.lstrip("/"))
+
+
+def _locations(component: dict) -> set[str]:
+    return {
+        _rootfs_path(p["value"])
+        for p in component.get("properties", [])
+        if p["name"].startswith("syft:location:") and p["name"].endswith(":path")
+    }
+
+
+def _ownership_coverage(native: dict, our_names: set[str]) -> dict[str, set[str]]:
+    """Known owning-package records; never infer coverage from directory alone."""
+    owners: dict[str, set[str]] = {}
+    for artifact in native.get("artifacts", []):
+        name = _normalize(artifact["name"])
+        if name not in our_names or artifact["type"] not in {"deb", "python"}:
+            continue
+        metadata = artifact.get("metadata", {})
+        root = metadata.get("sitePackagesRootPath", "")
+        for item in metadata.get("files", []):
+            path = item["path"]
+            if not path.startswith("/"):
+                path = normpath(root + "/" + path)
+            owners.setdefault(_rootfs_path(path), set()).add(name)
+    return owners
+
+
+def _covered_by_owner(component: dict, owners: dict[str, set[str]]) -> bool:
+    locations = _locations(component)
+    if not locations:
+        return False
+    # Python metadata is covered under its owning dpkg package. Do not use a
+    # parent wheel to hide vendored distributions with independent licenses.
+    if _purl_type(component.get("purl")) == "pypi" and all(
+        path.startswith("/usr/lib/python3/dist-packages/") for path in locations
+    ):
+        return all(
+            any(owner.startswith("python3-") for owner in owners.get(path, set()))
+            for path in locations
+        )
+    catalogers = {
+        p["value"]
+        for p in component.get("properties", [])
+        if p["name"] == "syft:package:foundBy"
+    }
+    if catalogers == {"pe-binary-package-cataloger"}:
+        return all(
+            (
+                "setuptools" in owners.get(path, set())
+                and ("/setuptools/" in path or "/pkg_resources/tests/" in path)
+            )
+            or (
+                "pip" in owners.get(path, set())
+                and "/pip/_vendor/distlib/" in path
+                and "pip" in owners.get(path.rsplit("/", 1)[0] + "/LICENSE.txt", set())
+            )
+            for path in locations
+        )
+    if component.get("name") == "my-test-package":
+        return all(
+            "/pkg_resources/tests/data/" in path
+            and "setuptools" in owners.get(path, set())
+            for path in locations
+        )
+    if component.get("name") == "command-line-arguments":
+        return all(
+            path.endswith("/mooncake/libetcd_wrapper.so") and owners.get(path)
+            for path in locations
+        )
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="compliance.audit_image_sbom")
     p.add_argument("--syft-sbom", type=Path, required=True)
+    p.add_argument(
+        "--syft-json",
+        type=Path,
+        help="Native Syft JSON for evidence-backed installed-file ownership matching",
+    )
     p.add_argument("--base-sbom", type=Path, default=None)
     p.add_argument("--our-csv", type=Path, required=True)
     p.add_argument("--image", default="")
     p.add_argument("--report", type=Path, default=None)
     p.add_argument("--fail-on-findings", action="store_true")
+    p.add_argument(
+        "--installed-only",
+        action="store_true",
+        help="Report lockfile-only declarations separately from installed attribution gaps",
+    )
+    p.add_argument(
+        "--declarations-report",
+        type=Path,
+        help="Retain source-only dependency declarations for review",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
     logging.basicConfig(
@@ -117,21 +209,39 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     our_names = _csv_names(args.our_csv)
+    owners = (
+        _ownership_coverage(json.loads(args.syft_json.read_text()), our_names)
+        if args.syft_json
+        else {}
+    )
+    owner_matched = 0
 
     # syft_delta = image components above the baseline (exact name+version, as
     # the generators subtract). Then flag any whose normalized name is absent
     # from our attribution.
     unattributed: list[dict] = []
     delta = 0
+    declarations = []
     for c in syft_components:
         name, version = c.get("name"), c.get("version")
         if not name or version is None:
             continue
         if (name, str(version)) in baseline_keys:
             continue
+        catalogers = {
+            p["value"]
+            for p in c.get("properties", [])
+            if p["name"] == "syft:package:foundBy"
+        }
+        if args.installed_only and catalogers == {"rust-cargo-lock-cataloger"}:
+            declarations.append(c)
+            continue
         delta += 1
         if _normalize(name) not in our_names and not _is_first_party(name):
-            unattributed.append(c)
+            if _covered_by_owner(c, owners):
+                owner_matched += 1
+            else:
+                unattributed.append(c)
 
     # De-dup by normalized name for the report.
     seen: set[str] = set()
@@ -150,10 +260,21 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"  syft components: {len(syft_components)} | "
         f"above baseline: {delta} | attributed in osrb-deps.csv: {len(our_names)} | "
-        f"POTENTIALLY UNATTRIBUTED: {len(rows)}"
+        f"owner-matched: {owner_matched} | POTENTIALLY UNATTRIBUTED: {len(rows)}"
     )
     for name, version, ptype in rows:
         print(f"  - {ptype:8} {name} {version}")
+
+    if args.declarations_report:
+        args.declarations_report.write_text(
+            "\n".join(sorted({f"{c['name']}\t{c['version']}" for c in declarations}))
+            + "\n"
+        )
+    if declarations:
+        print(
+            "  Source-lockfile declarations retained separately "
+            f"(linkage unproven): {len(declarations)}"
+        )
 
     if args.report:
         args.report.write_text(

@@ -815,13 +815,39 @@ jobs:
       platform: '["amd64", "arm64"]'
     secrets: inherit
 
+  vllm-compliance-audit:
+    name: vllm-runtime
+    needs: [vllm-build]
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '13.0'
+      platforms: '["amd64", "arm64"]'
+      fail_on_findings: true
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
+
+  trtllm-compliance-audit:
+    name: trtllm-runtime
+    needs: [trtllm-build]
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '13.1'
+      platforms: '["amd64", "arm64"]'
+      fail_on_findings: true
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
+
   # ============================================================================
   # IMAGE COPY JOBS
   # ============================================================================
 
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [vllm-build, vllm-compliance-audit]
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -866,7 +892,7 @@ jobs:
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
+    needs: [trtllm-build, trtllm-compliance-audit]
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -1568,6 +1594,8 @@ jobs:
   deploy-status-check:
     runs-on: ubuntu-latest
     needs:
+      - vllm-compliance-audit
+      - trtllm-compliance-audit
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang

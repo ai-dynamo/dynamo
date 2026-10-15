@@ -92,16 +92,13 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.31.0-ubuntu2404
-    vllm_omni_ref: "v0.31.0rc1"
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
-    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
-    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
-    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
-    # rather than hiding it. Per-arch stem; the licenses stage appends
-    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
-    # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    runtime_image_tag: cu134-nightly-bb87d227d4b964abb2a966cdf9194f3d376d9bbe
+    # cu134 vLLM needs Transformers >=5.16.1; Omni requires <5.15.
+    enable_vllm_omni: "false"
+    # CUDA 13.4.1 base SBOMs for the cu134 nightly, captured per architecture.
+    # All six CUDA base layers match; Ubuntu rootfs drift is recorded in the manifest.
+    # Subtract only the NVIDIA CUDA floor, so vLLM additions remain in scope.
+    baseline_sbom: cuda@3eb2d952
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
@@ -115,6 +112,8 @@ vllm:
     runtime_image_tag: v0.29.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.29.0rc1"
+  enable_vllm_omni: "true"
+  # These pins apply only when enable_vllm_omni is "true".
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"

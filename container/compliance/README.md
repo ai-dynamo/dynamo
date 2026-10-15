@@ -126,3 +126,31 @@ linux_<arch>/
 Detection is conservative: only unambiguous matches get an SPDX identifier. `UNKNOWN`
 fails the policy gate, surfacing the package for an explicit override in
 `license_overrides.yaml` or a signed-off `[[exceptions]]` entry in `policy/licenses.toml`.
+
+### Installed binary and vendored Python attribution
+
+TRT-LLM and vLLM runtime license stages scan installed Rust/Go binary metadata
+with Syft 1.44.0. `binary_dependencies.py` resolves the recorded versions rather
+than a fresh dependency solve. It checks crates.io archive checksums, reads exact
+UV workspace tags, enriches Go module licenses, and harvests upstream license and
+notice text. Unresolved components fail the license stage. Cobra's generated
+license templates are retained as scan evidence but do not relicense the module.
+The scanner and downloaded archives stay in the temporary build stage; final
+images receive the generated `/legal` inventory, notices and binary scan evidence.
+
+Python attribution includes installed system roots alongside the runtime virtualenv,
+and discovers distributions under explicit vendor directories. Vendored packages
+such as autocommand keep their own license expression. Every bundled license and
+notice under a distribution's metadata directory is retained. Dpkg notices retain
+the complete installed copyright file, including NRL acknowledgments.
+
+The independent runtime audit runs on AMD64 and ARM64 in PR and post-merge CI.
+It fails for scan errors or unresolved installed components. Native Syft file
+ownership reconciles Debian Python metadata, setuptools fixtures/launchers, and
+pip's distlib launchers when the owning package and license file are recorded.
+It does not hide independently licensed vendored distributions. Cargo.lock-only
+source declarations are retained in a separate review artifact rather than treated
+as proof of compiled linkage; wheel Rust
+SBOMs remain inputs to the standard attribution generator. Post-merge runtime
+copies depend on successful audits. Rebuild images after changing attribution;
+existing registry tags do not acquire corrected notices automatically.
