@@ -836,6 +836,46 @@ async def test_cancelled_observation_joins_worker_before_releasing_scale_lock():
 
 
 @pytest.mark.asyncio
+async def test_post_write_readback_holds_scale_lock():
+    class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.readback_started = Event()
+            self.release_readback = Event()
+            self.readback_calls = 0
+            self.scale_calls = 0
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            return await super().scale(participant_id, targets, blocking)
+
+        def current_replicas(self, participant_id):
+            self.readback_calls += 1
+            if self.readback_calls == 1:
+                self.readback_started.set()
+                self.release_readback.wait()
+            return super().current_replicas(participant_id)
+
+    cm = BlockingFirstReadbackCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm)
+    first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
+    assert await asyncio.to_thread(cm.readback_started.wait, 1)
+
+    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
+    try:
+        await asyncio.sleep(0)
+        assert cm.scale_calls == 1
+        assert not second.done()
+    finally:
+        cm.release_readback.set()
+
+    assert (await asyncio.wait_for(first, 1)).status == ScaleStatus.SUCCESS
+    assert (await asyncio.wait_for(second, 1)).status == ScaleStatus.SUCCESS
+    assert cm.scale_calls == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("use_lock", [True, False])
 async def test_submit_ceiling_rejects_without_mutating(use_lock):
     cm = FakeCapacityManager()

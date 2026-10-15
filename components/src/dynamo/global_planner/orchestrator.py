@@ -294,29 +294,29 @@ class Orchestrator:
                     )[0]
                 raise
 
-        if self._scale_lock is not None:
-            async with self._scale_lock:
-                terminal = await run_async_to_completion(
-                    transaction(), complete_on_cancel=complete_after_cancel
-                )
-        else:
+        async def execute() -> ScaleOutcome:
             terminal = await run_async_to_completion(
                 transaction(), complete_on_cancel=complete_after_cancel
             )
-        if terminal is not None:
-            return terminal
+            if terminal is not None:
+                return terminal
 
-        # Preserve the response contract: current_replicas is an observed
-        # post-transaction snapshot, not the requested desired state.
-        current_replicas = await asyncio.to_thread(
-            self.capacity_manager.current_replicas, participant_id
-        )
-        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
-        return ScaleOutcome(
-            status=ScaleStatus.SUCCESS,
-            message=f"Scaled {deployment_name} successfully",
-            current_replicas=current_replicas,
-        )
+            # Preserve the response contract: current_replicas is an observed
+            # post-transaction snapshot, not the requested desired state.
+            current_replicas = await run_sync_in_thread(
+                self.capacity_manager.current_replicas, participant_id
+            )
+            logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
+            return ScaleOutcome(
+                status=ScaleStatus.SUCCESS,
+                message=f"Scaled {deployment_name} successfully",
+                current_replicas=current_replicas,
+            )
+
+        if self._scale_lock is not None:
+            async with self._scale_lock:
+                return await execute()
+        return await execute()
 
     async def _observe_decide_apply(
         self,

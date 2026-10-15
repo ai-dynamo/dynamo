@@ -258,46 +258,30 @@ class KubernetesCapacityManager(CapacityManager):
         whole snapshot so budget enforcement cannot under-count cluster usage.
 
         Snapshots ``self.connectors`` up-front via ``list(...)``: this runs on a
-        worker thread (the orchestrator calls it via ``asyncio.to_thread``), and
+        worker thread (the orchestrator calls it via ``run_sync_in_thread``), and
         a concurrent first-time request for another deployment can insert into
         the dict before it blocks on the scale lock. Without the snapshot, that
         insertion races iteration.
         """
         all_pools: PoolSnapshot = {}
-        if self._configured_deployment_names is not None:
-            for name in sorted(self._configured_deployment_names):
-                key = f"{self.namespace}/{name}"
-                if key not in self.connectors:
-                    self.connectors[key] = self._new_connector(
-                        "discovered", self.namespace, name
-                    )
         connectors_snapshot = list(self.connectors.items())
+        managed_names: set[str] | None = None
         if not self._observe_all_deployments:
-            for key, connector in connectors_snapshot:
-                try:
-                    all_pools[key] = self._read_pools(
-                        connector, self._component_roles.get(key)
-                    )
-                except DynamoGraphDeploymentNotFoundError:
-                    drain_error = self._deployment_drain_error(key, connector)
-                    if drain_error is not None:
-                        self._record_observation_failure(
-                            all_pools, key, drain_error, require_complete
-                        )
-                except Exception as error:
-                    self._record_observation_failure(
-                        all_pools, key, error, require_complete
-                    )
-            return all_pools
+            managed_names = set(self._configured_deployment_names or ())
+            managed_names.update(
+                connector.parent_dgd_name for _, connector in connectors_snapshot
+            )
 
-        # Implicit mode manages every DGD in the namespace, so one namespace LIST
-        # is both the intended scope and cheaper than one GET per participant.
+        # One namespace LIST bounds inventory reads independently of participant
+        # count. Explicit mode filters the returned objects against its allowlist.
         try:
             deployments = self._get_inventory_api().list_graph_deployments()
             deployments_by_name: dict[str, dict] = {}
             for deployment in deployments:
                 name = (deployment.get("metadata", {}) or {}).get("name")
                 if not isinstance(name, str) or not name:
+                    continue
+                if managed_names is not None and name not in managed_names:
                     continue
                 if name in deployments_by_name:
                     raise ValueError(f"duplicate DGD {name!r} in list response")
@@ -398,20 +382,6 @@ class KubernetesCapacityManager(CapacityManager):
                 f"and {component_name!r} both resolve to planner pool {pool_key!r}"
             )
         components_by_pool[pool_key] = component_name
-
-    def _read_pools(
-        self,
-        connector: KubernetesConnector,
-        role_hints: Optional[dict[str, str]] = None,
-    ) -> dict[str, PoolSpec]:
-        """Read the current pool state for one deployment (v1beta1 components).
-
-        An unmapped generic worker is keyed by component name so it still
-        contributes to the total; once its Planner sends a request, the
-        component-name hint replaces that key with its prefill/decode role.
-        """
-        deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
-        return self._pools_from_deployment(connector, deployment, role_hints)
 
     def _pools_from_deployment(
         self,
