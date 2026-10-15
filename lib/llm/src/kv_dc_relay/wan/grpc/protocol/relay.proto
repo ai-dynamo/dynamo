@@ -347,7 +347,9 @@ message RequestLifecycleStats
 message TokenLoadStats
 {
   // Pools: uncached prompt tokens the routers' schedulers have assigned to the
-  // pool and that are waiting for or undergoing prefill.
+  // pool and that are waiting for or undergoing prefill. This is the
+  // schedulers' live estimate; with a prefill model configured it decays as
+  // prefill progresses.
   optional uint64 active_prefill_tokens = 1;
   // Pools: KV blocks the routers' schedulers attribute to running requests.
   optional uint64 active_decode_blocks = 2;

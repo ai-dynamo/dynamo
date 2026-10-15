@@ -309,6 +309,11 @@ Fields that belong to the other view kind are never set. `PoolDeploymentStatus` 
 while the pool's runtime configuration is invalid or, for `max_concurrency`, while a worker
 does not declare its limit.
 
+Router `active_prefill_tokens` is the scheduler's live estimate of prefill work it has assigned
+and not yet seen complete, the same number the router schedules with. With a prefill model
+configured it decays as prefill progresses; without one it stays at the full effective prompt
+tokens until prefill completes.
+
 Within one scheduler group, router reports overlap, so the Relay takes each rank's maximum.
 Distinct groups are disjoint, so it sums them. A standalone router that reconnects counts only
 its latest report. Frontends are heard in every namespace that holds a catalog pool or a served model, and in
