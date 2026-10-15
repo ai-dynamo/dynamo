@@ -23,6 +23,9 @@ from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
+# Default seconds a NIXL write receiver waits for buffer space, then for the write.
+NIXL_WRITE_RECEIVE_TIMEOUT_S = 60
+
 
 def _load_nixl_api():
     try:
@@ -430,11 +433,20 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         # Seconds a prepared tensor may wait for its receiver's handshake before it is
         # reclaimed. A receiver that gave up (buffer wait timeout, cancelled or failed
         # request, dead worker) never claims it, so without this the tensor and its
-        # NIXL registration are held forever. Must exceed the receiver's buffer wait
-        # (receive_timeout, 60s by default) plus request routing delay.
+        # NIXL registration are held forever. A receiver may wait up to its buffer
+        # wait before handshaking, so a shorter timeout would drop live transfers.
         self.unclaimed_timeout = float(
             os.getenv("DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S", "120")
         )
+        if not (
+            math.isfinite(self.unclaimed_timeout)
+            and self.unclaimed_timeout > NIXL_WRITE_RECEIVE_TIMEOUT_S
+        ):
+            raise ValueError(
+                "DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S must be a finite number of "
+                f"seconds above the receiver's {NIXL_WRITE_RECEIVE_TIMEOUT_S}s "
+                f"buffer wait, got {self.unclaimed_timeout}"
+            )
 
     def __del__(self):
         state_update_task = getattr(self, "_state_update_task", None)
@@ -708,7 +720,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.to_buffer_id = {}
 
     async def receive_embeddings(
-        self, request: TransferRequest, receive_timeout=60
+        self, request: TransferRequest, receive_timeout=NIXL_WRITE_RECEIVE_TIMEOUT_S
     ) -> tuple[int, torch.Tensor]:
         """
         Receive precomputed embeddings for a given request ID.

@@ -210,16 +210,17 @@ class EncodeWorkerHandler:
         """
         task = asyncio.create_task(self._wait_sent(transfer_future, tensor))
         self._pending_sends.add(task)
-        task.add_done_callback(self._pending_sends.discard)
+        task.add_done_callback(self._on_sent)
+
+    def _on_sent(self, task: asyncio.Task) -> None:
+        self._pending_sends.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("Embedding transfer failed", exc_info=error)
 
     @staticmethod
     async def _wait_sent(transfer_future: Any, tensor: torch.Tensor) -> None:
-        try:
-            await transfer_future
-        except Exception:
-            logger.exception(
-                "Embedding transfer of a %s tensor failed", tuple(tensor.shape)
-            )
+        # ``tensor`` is unused; this frame holding it is what keeps it alive.
+        await transfer_future
 
     def cleanup(self):
         for task in list(self._pending_sends):

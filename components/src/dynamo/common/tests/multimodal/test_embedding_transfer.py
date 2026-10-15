@@ -172,6 +172,12 @@ class TestNixlWriteUnclaimedReclaim:
             await receiver.receive_embeddings(request, receive_timeout=2)
         await correctness(sender, receiver)
 
+    @pytest.mark.parametrize("timeout", ["30", "60", "inf", "nan"])
+    async def test_rejects_timeout_not_above_receiver_wait(self, monkeypatch, timeout):
+        monkeypatch.setenv("DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S", timeout)
+        with pytest.raises(ValueError, match="DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S"):
+            NixlWriteEmbeddingSender()
+
 
 @pytest.mark.asyncio
 @pytest.mark.gpu_1  # NIXL init requires proper CUDA environment

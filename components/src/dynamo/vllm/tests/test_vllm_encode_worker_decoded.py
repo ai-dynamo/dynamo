@@ -142,7 +142,27 @@ async def test_stuck_transfer_does_not_pin_later_transfer_buffers():
 
     assert sent_ref() is None
     assert stuck_ref() is not None
+    pending = list(handler._pending_sends)
     handler.cleanup()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert not handler._pending_sends
+
+
+async def test_failed_transfer_is_logged_and_released(caplog):
+    handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
+    handler._pending_sends = set()
+    failed = asyncio.get_running_loop().create_future()
+    handler._keep_alive_until_sent(failed, torch.empty(4))
+    (task,) = handler._pending_sends
+
+    failed.set_exception(RuntimeError("nixl write failed"))
+    with caplog.at_level(logging.ERROR, logger=encode_worker_handler.__name__):
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    assert not handler._pending_sends
+    assert "Embedding transfer failed" in caplog.text
+    assert "nixl write failed" in caplog.text
 
 
 def test_prepare_embedding_transfers_coalesces_uneven_images():
