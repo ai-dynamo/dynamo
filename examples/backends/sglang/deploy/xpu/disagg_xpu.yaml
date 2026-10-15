@@ -13,11 +13,10 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: docker.io/library/dynamo-sglang-xpu:latest
+        - image: my-registry/sglang-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     type: frontend
   - name: decode
     podTemplate:
@@ -56,7 +55,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: docker.io/library/dynamo-sglang-xpu:latest
+          image: my-registry/sglang-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -64,7 +63,6 @@ spec:
               gpu.intel.com/xe: "1"
           workingDir: /workspace/examples/backends/sglang
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     type: decode
   - name: prefill
     podTemplate:
@@ -103,7 +101,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: docker.io/library/dynamo-sglang-xpu:latest
+          image: my-registry/sglang-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -111,5 +109,4 @@ spec:
               gpu.intel.com/xe: "1"
           workingDir: /workspace/examples/backends/sglang
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     type: prefill

@@ -48,11 +48,10 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: docker.io/library/dynamo-sglang-xpu:latest
+        - image: my-registry/sglang-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     type: frontend
   - name: Planner
     podTemplate:
@@ -69,14 +68,10 @@ spec:
           - python3
           - -m
           - dynamo.planner
-          env:
-          # Keep the optional query string non-empty until Planner accepts an unset value.
-          - name: PROMETHEUS_EXTRA_QUERY_PARAMS
-            value: "_="
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: docker.io/library/dynamo-planner:latest
+          image: my-registry/dynamo-planner:my-tag
           imagePullPolicy: IfNotPresent
           name: main
           volumeMounts:
@@ -88,7 +83,6 @@ spec:
             name: planner-profile-data-xpu
           name: planner-profile-data-xpu
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     type: planner
   - name: decode
     podTemplate:
@@ -127,7 +121,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: docker.io/library/dynamo-sglang-xpu:latest
+          image: my-registry/sglang-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -138,7 +132,6 @@ spec:
         - name: gpu
           resourceClaimTemplateName: gpu-template
     replicas: 2
-    runtimeVersionOverride: 1.4.0
     type: decode
   - name: prefill
     podTemplate:
@@ -177,7 +170,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: docker.io/library/dynamo-sglang-xpu:latest
+          image: my-registry/sglang-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -188,5 +181,4 @@ spec:
         - name: gpu
           resourceClaimTemplateName: gpu-template
     replicas: 1
-    runtimeVersionOverride: 1.4.0
     type: prefill

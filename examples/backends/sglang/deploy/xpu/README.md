@@ -23,7 +23,7 @@ Build the XPU runtime image from the current source:
 
 ```bash
 python3 container/render.py --framework=sglang --device=xpu --target=runtime
-docker build -t docker.io/library/dynamo-sglang-xpu:latest \
+docker build -t my-registry/sglang-runtime-xpu:my-tag \
   -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
 ```
 
@@ -31,13 +31,13 @@ For `disagg_planner_xpu_dra.yaml`, also build the Planner image:
 
 ```bash
 python3 container/render.py --framework=dynamo --target=planner
-docker build -t docker.io/library/dynamo-planner:latest \
+docker build -t my-registry/dynamo-planner:my-tag \
   -f container/dynamo-planner-cuda13.0-amd64-rendered.Dockerfile .
 ```
 
 The Planner template uses `optimization_target: sla` and requires Prometheus. Install `kube-prometheus-stack` as described in the [Dynamo Platform installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md). Planner uses `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090` by default. If your Prometheus service uses a different address, set `PROMETHEUS_ENDPOINT` in the Planner container.
 
-The manifests use `imagePullPolicy: IfNotPresent`. Load these images on every eligible Kubernetes node, or push them to a registry and update the image references. If you build from a Dynamo version other than 1.4.0, update each `runtimeVersionOverride` to match.
+The manifests use placeholder images (`my-registry/...:my-tag`) and `imagePullPolicy: IfNotPresent`. Replace `my-registry` and `my-tag` in each manifest with your image, then load it on every eligible Kubernetes node or push it to a registry. The operator reads the Dynamo version from the image tag, so the manifests set no `runtimeVersionOverride`.
 
 Create the Hugging Face token secret:
 
