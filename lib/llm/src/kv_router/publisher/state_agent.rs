@@ -129,12 +129,13 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
-    pub(crate) sockets: KvStateAgentSockets,
+    /// Sockets shared with sibling slots; `Default::default()` binds dedicated ones.
+    pub sockets: KvStateAgentSockets,
 }
 
 /// Host-wide sockets a slot can share with its siblings.
 #[derive(Clone, Default)]
-pub(crate) struct KvStateAgentSockets {
+pub struct KvStateAgentSockets {
     /// Output PUB shared with other slots; `None` binds one for this slot.
     pub(crate) event_socket: Option<SharedZmqPublisherSocket>,
     /// Pooled raw-input SUBs; `None`, or a source without a topic, connects a
@@ -1725,12 +1726,21 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
     }
 }
 
-/// Queue a raw batch without waiting on the coordinator. A full queue drops it;
-/// the coordinator records the gap when the next batch arrives.
+/// Queue a raw batch without waiting on the coordinator. A full queue drops an
+/// ordinary batch; the coordinator records the gap when the next batch arrives.
+/// A batch reporting a fault fails the listener instead, which quarantines the
+/// attachment.
 fn admit_ingress(ingress_tx: &mpsc::Sender<IngressBatch>, envelope: IngressBatch) -> Result<()> {
     match ingress_tx.try_send(envelope) {
         Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(envelope)) => {
+            match envelope.source_fault.or(envelope.cache_owner_fault) {
+                Some(fault) => {
+                    anyhow::bail!("state-agent ingress queue is full at a fault: {fault}")
+                }
+                None => Ok(()),
+            }
+        }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             anyhow::bail!("state-agent ingress coordinator is closed")
         }
@@ -2349,26 +2359,23 @@ mod tests {
     }
 
     #[test]
-    fn listener_admission_drops_instead_of_waiting_for_coordinator_progress() {
-        let (tx, mut rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
-        for source_cursor in 1..=INGRESS_QUEUE_CAPACITY as u64 + 1 {
-            admit_ingress(
-                &tx,
-                IngressBatch {
-                    generation: 7,
-                    source_cursor,
-                    chunk_index: 0,
-                    final_chunk: true,
-                    events: Vec::new(),
-                    source_fault: None,
-                    cache_owner_fault: None,
-                },
-            )
-            .unwrap();
-        }
+    fn listener_admission_drops_batches_but_not_faults_when_the_coordinator_lags() {
+        let batch = |source_cursor, cache_owner_fault| IngressBatch {
+            generation: 7,
+            source_cursor,
+            chunk_index: 0,
+            final_chunk: true,
+            events: Vec::new(),
+            source_fault: None,
+            cache_owner_fault,
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        admit_ingress(&tx, batch(1, None)).unwrap();
+        admit_ingress(&tx, batch(2, None)).unwrap();
+        assert!(admit_ingress(&tx, batch(3, Some("KVCR block size is incompatible"))).is_err());
 
         assert_eq!(rx.try_recv().unwrap().source_cursor, 1);
-        assert_eq!(rx.len(), INGRESS_QUEUE_CAPACITY - 1);
+        assert!(rx.try_recv().is_err());
     }
 
     async fn detach(control: &mpsc::Sender<ControlCommand>, generation: u64) -> Result<u64> {

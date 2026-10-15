@@ -29,8 +29,8 @@ use dynamo_kv_router::{
 use dynamo_runtime::{
     component::Component,
     discovery::{
-        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EventScope,
-        EventSourceInstanceId, EventSourceQuery,
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
+        EventScope, EventSourceInstanceId, EventSourceQuery,
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
@@ -308,6 +308,16 @@ enum Affected {
     All,
 }
 
+impl Affected {
+    fn merge(&mut self, other: Affected) {
+        match (self, other) {
+            (Affected::All, _) => {}
+            (this, Affected::All) => *this = Affected::All,
+            (Affected::Owners(owners), Affected::Owners(more)) => owners.extend(more),
+        }
+    }
+}
+
 struct PublishedOwner {
     worker: Option<WorkerWithDpRank>,
     hint: Option<(RouterHintSourceMetadata, Option<WorkerWithDpRank>)>,
@@ -496,6 +506,27 @@ impl FenceIndex {
         Affected::Owners(owners)
     }
 
+    /// Folds the discovery events already queued on either watch into
+    /// `affected`, so a burst withdraws its owners with one projection rebuild.
+    /// Returns `None` once a watch ends.
+    fn drain_ready(
+        &mut self,
+        sources: &mut DiscoveryStream,
+        attachments: &mut DiscoveryStream,
+        mut affected: Affected,
+    ) -> Option<Affected> {
+        loop {
+            let next = if let Some(event) = sources.next().now_or_never() {
+                event.map(|event| self.source(event))
+            } else if let Some(event) = attachments.next().now_or_never() {
+                event.map(|event| self.attachment(event))
+            } else {
+                return Some(affected);
+            };
+            affected.merge(next?);
+        }
+    }
+
     /// Workers that joined or left affect the owners attached to them.
     fn membership(&mut self, view: &KvSourceMembershipView) -> Affected {
         let live_workers: HashSet<_> = view.sources.keys().copied().collect();
@@ -654,10 +685,13 @@ async fn start_observation_fence(
                 event = sources.next() => event.map(|event| index.source(event)),
                 event = attachments.next() => event.map(|event| index.attachment(event)),
             };
-            let Some(affected) = affected else {
+            let Some(affected) = affected
+                .and_then(|affected| index.drain_ready(&mut sources, &mut attachments, affected))
+            else {
+                // Dropping `fenced_tx` ends reconciliation, which keeps V2
+                // routing withdrawn.
                 tracing::error!("KV state observation fence lost a discovery watch");
                 fence.lock().await.withdraw_all(&indexer);
-                let _ = fenced_tx.send(Affected::All);
                 break;
             };
             if matches!(&affected, Affected::Owners(owners) if owners.is_empty()) {
@@ -764,6 +798,7 @@ async fn run_state_agent_router(
             Fenced(Affected),
             Withdrawn((CacheOwnerId, u64)),
             IngestEnded,
+            FenceEnded,
             Recovery(Option<Box<OwnerRecoveryResult>>),
             Retry,
             Cancelled,
@@ -781,7 +816,7 @@ async fn run_state_agent_router(
                     None => std::future::pending().await,
                 }
             } => Input::Attachment(event),
-            Some(affected) = fenced_rx.recv() => Input::Fenced(affected),
+            affected = fenced_rx.recv() => affected.map_or(Input::FenceEnded, Input::Fenced),
             Some(withdrawn) = withdrawn_rx.recv() => Input::Withdrawn(withdrawn),
             _ = async {
                 match ingest_task.as_mut() {
@@ -869,6 +904,12 @@ async fn run_state_agent_router(
                 fence.lock().await.withdraw_all(&indexer);
                 // V2 stays fail-closed, but unrelated legacy ranks must keep
                 // receiving membership updates until the router shuts down.
+                cancel.cancelled().await;
+                break;
+            }
+            Input::FenceEnded => {
+                tracing::error!(%endpoint, "KV state observation fence ended; keeping recognized ranks fail-closed");
+                fence.lock().await.withdraw_all(&indexer);
                 cancel.cancelled().await;
                 break;
             }
@@ -1498,6 +1539,37 @@ async fn schedule_state_sources(
             _ => None,
         };
 
+        let previous = runtime.get(&owner).cloned();
+        let expected_generation = attachment.map(|value| value.attachment_generation);
+        let last_worker = attachment
+            .map(|value| value.worker)
+            .or_else(|| previous.as_ref().and_then(|value| value.last_worker));
+        let recognized_worker = last_worker.filter(|worker| live_workers.contains(worker));
+        let attachment_changed = previous.as_ref().is_none_or(|value| {
+            value.publisher_id != Some(source.publisher_id)
+                || value.attachment_generation != expected_generation
+        });
+        // Fence the previous live ingest before clearing anything: a batch it
+        // applied after a clear would survive the recovery snapshot.
+        let mut reused_ingest = None;
+        if let Some(previous) = previous.as_ref()
+            && let Some(ingest) = previous.ingest.as_ref()
+        {
+            if previous.publisher_id == Some(source.publisher_id) {
+                let (cursor, recovery_required) = buffer_live_ingest(
+                    ingest,
+                    expected_generation,
+                    recognized_worker,
+                    attachment_changed,
+                    schedule_generation,
+                )
+                .await;
+                reused_ingest = Some((ingest.clone(), cursor, recovery_required));
+            } else {
+                retire_ingest(bindings, ingest).await;
+            }
+        }
+
         if attachment.is_none() {
             for candidate in matching {
                 if live_workers.contains(&candidate.worker) {
@@ -1505,16 +1577,8 @@ async fn schedule_state_sources(
                 }
             }
         }
-
-        let previous = runtime.get(&owner).cloned();
-        let expected_generation = attachment.map(|value| value.attachment_generation);
-        let last_worker = attachment
-            .map(|value| value.worker)
-            .or_else(|| previous.as_ref().and_then(|value| value.last_worker));
-        if let Some(previous) = previous.as_ref()
-            && (previous.publisher_id != Some(source.publisher_id)
-                || previous.attachment_generation != expected_generation)
-            && let Some(worker) = previous.last_worker
+        if attachment_changed
+            && let Some(worker) = previous.as_ref().and_then(|value| value.last_worker)
         {
             clear_worker(indexer, worker, owner).await?;
         }
@@ -1526,73 +1590,39 @@ async fn schedule_state_sources(
         {
             clear_worker(indexer, worker, owner).await?;
         }
-        let recognized_worker = last_worker.filter(|worker| live_workers.contains(worker));
         if previous.is_none()
             && let Some(worker) = recognized_worker
         {
             clear_worker(indexer, worker, owner).await?;
         }
-        let previous_ingest = previous
-            .as_ref()
-            .filter(|value| value.publisher_id == Some(source.publisher_id))
-            .and_then(|value| value.ingest.clone());
-        let (previous_cursor, previous_recovery_required) = match &previous_ingest {
-            Some(ingest) => {
-                let ingest = ingest.lock().await;
-                (ingest.recovered_cursor, ingest.recovery_required)
-            }
-            None => (0, false),
-        };
-        let recovery_required = previous.as_ref().is_none_or(|value| {
-            value.publisher_id != Some(source.publisher_id)
-                || value.attachment_generation != expected_generation
-                || previous_recovery_required
-        });
 
         let expected = KvStateAgentIdentity {
             cache_owner_id: owner,
             publisher_id: source.publisher_id,
             protocol_version: source.protocol_version,
         };
-        let ingest = match previous_ingest {
-            Some(ingest) => ingest,
+        let (ingest, previous_cursor, recovery_required) = match reused_ingest {
+            Some(reused) => reused,
             None => {
-                if let Some(ingest) = previous.as_ref().and_then(|value| value.ingest.as_ref()) {
-                    retire_ingest(bindings, ingest).await;
-                }
+                // Buffer live events from the first batch until recovery replays them.
                 let ingest = Arc::new(Mutex::new(OwnerIngest {
                     owner,
                     publisher_id: source.publisher_id,
                     recovered_cursor: 0,
                     attachment_generation: expected_generation,
                     last_worker: recognized_worker,
-                    recovery_required,
-                    tail: None,
-                    retired: false,
-                }));
-                bindings.insert(source.publisher_id, ingest.clone());
-                ingest
-            }
-        };
-        {
-            // Buffer live events from here until recovery replays them.
-            let mut ingest = ingest.lock().await;
-            ingest.attachment_generation = expected_generation;
-            ingest.last_worker = recognized_worker;
-            ingest.recovery_required = recovery_required;
-            match ingest.tail.as_mut() {
-                Some(tail) if tail.attachment_generation == expected_generation => {
-                    tail.schedule_generation = schedule_generation;
-                }
-                _ => {
-                    ingest.tail = Some(OwnerRecoveryTail {
+                    recovery_required: attachment_changed,
+                    tail: Some(OwnerRecoveryTail {
                         attachment_generation: expected_generation,
                         schedule_generation,
                         rank: RankState::default(),
-                    });
-                }
+                    }),
+                    retired: false,
+                }));
+                bindings.insert(source.publisher_id, ingest.clone());
+                (ingest, 0, attachment_changed)
             }
-        }
+        };
         runtime.insert(
             owner,
             OwnerRuntime {
@@ -2044,6 +2074,35 @@ async fn fail_owner_recovery(
         ingest.tail = None;
         ingest.recovery_required = true;
     }
+}
+
+/// Buffers the live events of a reused ingest until recovery replays them, and
+/// returns its recovered cursor and whether recovery must rebuild its state.
+async fn buffer_live_ingest(
+    ingest: &SharedIngest,
+    attachment_generation: Option<u64>,
+    last_worker: Option<WorkerWithDpRank>,
+    attachment_changed: bool,
+    schedule_generation: u64,
+) -> (u64, bool) {
+    let mut ingest = ingest.lock().await;
+    let recovery_required = attachment_changed || ingest.recovery_required;
+    ingest.attachment_generation = attachment_generation;
+    ingest.last_worker = last_worker;
+    ingest.recovery_required = recovery_required;
+    match ingest.tail.as_mut() {
+        Some(tail) if tail.attachment_generation == attachment_generation => {
+            tail.schedule_generation = schedule_generation;
+        }
+        _ => {
+            ingest.tail = Some(OwnerRecoveryTail {
+                attachment_generation,
+                schedule_generation,
+                rank: RankState::default(),
+            });
+        }
+    }
+    (ingest.recovered_cursor, recovery_required)
 }
 
 async fn retire_ingest(bindings: &IngestBindings, ingest: &SharedIngest) {
@@ -2916,6 +2975,39 @@ mod tests {
     }
 
     #[test]
+    fn fence_folds_queued_discovery_events_into_one_withdrawal() {
+        let (first, second) = (owner(4), owner(5));
+        let mut index = FenceIndex::default();
+        let queued = |event| -> DiscoveryStream {
+            Box::pin(futures::stream::iter([event]).chain(futures::stream::pending()))
+        };
+        let mut sources = queued(event_source_added(
+            KV_STATE_SOURCE_TOPIC_V2,
+            41,
+            &source_advertisement(first),
+        ));
+        let mut attachments = queued(event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            1,
+            &attachment_advertisement(second, 7),
+        ));
+        let affected = index.drain_ready(
+            &mut sources,
+            &mut attachments,
+            Affected::Owners(HashSet::new()),
+        );
+        assert_eq!(owners(affected.unwrap()), HashSet::from([first, second]));
+
+        // A watch that ends fails the fence closed.
+        let mut ended: DiscoveryStream = Box::pin(futures::stream::empty());
+        assert!(
+            index
+                .drain_ready(&mut ended, &mut attachments, Affected::All)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn discovery_changes_dirty_only_their_owners() {
         let (first, second, third) = (owner(4), owner(5), owner(6));
         let endpoint = EndpointId::from("ns.worker.generate");
@@ -2974,6 +3066,29 @@ mod tests {
         ingest.lock().await.attachment_generation = Some(2);
         live.apply(41, vec![worker_store(owner, worker, 2)]).await;
         assert_eq!(primary.dump_events().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_change_buffers_old_worker_events_before_clearing() {
+        let (primary, indexer) = test_indexer();
+        let owner = owner(4);
+        let old_worker = WorkerWithDpRank::new(17, 3);
+        let ingest = bound_ingest(owner, 41, Some(7), Some(old_worker));
+        let (live, _withdrawn) = live_ingest(indexer, &[&ingest]);
+
+        buffer_live_ingest(
+            &ingest,
+            Some(8),
+            Some(WorkerWithDpRank::new(18, 3)),
+            true,
+            1,
+        )
+        .await;
+        // A late batch from the old attachment, after the old worker is cleared.
+        live.apply(41, vec![worker_store(owner, old_worker, 1)])
+            .await;
+
+        assert!(primary.dump_events().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -108,6 +108,18 @@ impl HostSockets {
             raw_pool: self.raw_pool.clone(),
         })
     }
+
+    /// Returns the share of a slot that failed to start.
+    fn release(&mut self, sockets: &KvStateAgentSockets) {
+        if let Some(socket) = &sockets.event_socket
+            && let Some((_, slots)) = self
+                .publishers
+                .iter_mut()
+                .find(|(shared, _)| shared.endpoint() == socket.endpoint())
+        {
+            *slots -= 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -653,6 +665,7 @@ async fn reconcile_owner(
             ingress_protocol: intent.ingress_protocol,
         };
         slots.insert(owner, slot_shape);
+        let slot_sockets = sockets.for_new_slot()?;
         let agent = match KvStateAgent::start(KvStateAgentConfig {
             endpoint: component.endpoint(slot_endpoint_name(owner)),
             kv_state_endpoint: intent.kv_state_endpoint.clone(),
@@ -663,7 +676,7 @@ async fn reconcile_owner(
             },
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
-            sockets: sockets.for_new_slot()?,
+            sockets: slot_sockets.clone(),
         })
         .await
         {
@@ -671,7 +684,9 @@ async fn reconcile_owner(
             Err(error) => {
                 // Keep the failed reservation until this exact intent disappears.
                 // It remains capacity-accounted and avoids implicit construction
-                // retries under an unchanged lease-owned request.
+                // retries under an unchanged lease-owned request. Its socket share
+                // is returned now; the slot never published on it.
+                sockets.release(&slot_sockets);
                 return Err(error).context("failed to construct stable state-agent slot");
             }
         };
@@ -789,6 +804,22 @@ mod tests {
     use dynamo_runtime::protocols::EndpointId;
 
     use super::*;
+
+    #[tokio::test]
+    async fn failed_slot_returns_its_shared_socket_share() {
+        let mut sockets = HostSockets {
+            slots_per_socket: 2,
+            share_publishers: true,
+            publishers: Vec::new(),
+            raw_pool: None,
+        };
+        sockets.for_new_slot().unwrap();
+        let failed = sockets.for_new_slot().unwrap();
+        sockets.release(&failed);
+        sockets.for_new_slot().unwrap();
+
+        assert_eq!(sockets.publishers.len(), 1);
+    }
 
     fn instance(component: &str, instance_id: u64) -> Instance {
         Instance {

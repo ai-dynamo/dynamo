@@ -1491,6 +1491,17 @@ mod tests {
 
     #[tokio::test]
     async fn direct_zmq_publishers_in_one_endpoint_fan_into_one_subscriber() {
+        endpoint_publishers_fan_into_one_subscriber(false).await;
+    }
+
+    /// Routers without shared-endpoint support subscribe once per publisher; a
+    /// shared PUB still delivers every co-located publisher to them.
+    #[tokio::test]
+    async fn shared_socket_publishers_reach_a_per_publisher_subscriber() {
+        endpoint_publishers_fan_into_one_subscriber(true).await;
+    }
+
+    async fn endpoint_publishers_fan_into_one_subscriber(shared_socket: bool) {
         temp_env::async_with_vars(
             [
                 (DYN_EVENT_PLANE_HOST, None::<&str>),
@@ -1511,20 +1522,10 @@ mod tests {
                     .component("worker")
                     .expect("create component")
                     .endpoint("generate");
-                let publisher_a = EventPublisher::for_endpoint_with_transport(
-                    &endpoint,
-                    "events",
-                    EventTransportKind::Zmq,
-                )
-                .await
-                .expect("create first publisher");
-                let publisher_b = EventPublisher::for_endpoint_with_transport(
-                    &endpoint,
-                    "events",
-                    EventTransportKind::Zmq,
-                )
-                .await
-                .expect("create second publisher");
+                let shared = shared_socket
+                    .then(|| SharedZmqPublisherSocket::bind("events").expect("bind shared socket"));
+                let publisher_a = endpoint_publisher(&endpoint, shared.as_ref()).await;
+                let publisher_b = endpoint_publisher(&endpoint, shared.as_ref()).await;
                 let mut subscriber = EventSubscriber::for_endpoint_with_transport(
                     &endpoint,
                     "events",
@@ -1567,6 +1568,31 @@ mod tests {
             },
         )
         .await;
+    }
+
+    async fn endpoint_publisher(
+        endpoint: &crate::component::Endpoint,
+        shared: Option<&SharedZmqPublisherSocket>,
+    ) -> EventPublisher {
+        match shared {
+            Some(socket) => {
+                EventPublisher::for_endpoint_id_on_shared_socket(
+                    endpoint.drt(),
+                    &endpoint.id(),
+                    socket,
+                )
+                .await
+            }
+            None => {
+                EventPublisher::for_endpoint_with_transport(
+                    endpoint,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+            }
+        }
+        .expect("create endpoint publisher")
     }
 
     #[tokio::test]
