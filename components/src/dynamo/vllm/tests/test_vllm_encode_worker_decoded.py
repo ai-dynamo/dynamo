@@ -3,8 +3,11 @@
 
 """Unit tests for encode-worker multimodal helpers."""
 
+import asyncio
+import gc
 import importlib.util
 import logging
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -118,7 +121,28 @@ async def test_encode_worker_image_cache_capacity_follows_env(
             assert keys[-1] in loader._image_cache
     finally:
         handler.cleanup()
-        await handler.send_complete_checker_task
+        assert not handler._pending_sends
+
+
+async def test_stuck_transfer_does_not_pin_later_transfer_buffers():
+    handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
+    handler._pending_sends = set()
+    loop = asyncio.get_running_loop()
+    stuck_future, sent_future = loop.create_future(), loop.create_future()
+    stuck, sent = torch.empty(4), torch.empty(4)
+    stuck_ref, sent_ref = weakref.ref(stuck), weakref.ref(sent)
+    handler._keep_alive_until_sent(stuck_future, stuck)
+    handler._keep_alive_until_sent(sent_future, sent)
+    del stuck, sent
+
+    sent_future.set_result(None)
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gc.collect()
+
+    assert sent_ref() is None
+    assert stuck_ref() is not None
+    handler.cleanup()
 
 
 def test_prepare_embedding_transfers_coalesces_uneven_images():

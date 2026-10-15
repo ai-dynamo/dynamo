@@ -136,6 +136,45 @@ class TestNixlWriteEmbeddingTransfer:
 
 @pytest.mark.asyncio
 @pytest.mark.gpu_1  # NIXL init requires proper CUDA environment
+class TestNixlWriteUnclaimedReclaim:
+    async def test_unclaimed_tensor_is_reclaimed(self):
+        sender = NixlWriteEmbeddingSender()
+        sender.unclaimed_timeout = 0.5
+        _, send_future = await sender.send_embeddings(
+            torch.randn(256, EMBEDDING_SIZE), stage_embeddings=True
+        )
+
+        await asyncio.wait_for(send_future, timeout=10)
+        assert not sender.transfer_tracker
+        assert not sender.registered_descs
+
+    async def test_claimed_transfer_unaffected_by_pending_unclaimed(self):
+        sender = NixlWriteEmbeddingSender()
+        sender.unclaimed_timeout = 30
+        receiver = NixlWriteEmbeddingReceiver()
+        await sender.send_embeddings(
+            torch.randn(256, EMBEDDING_SIZE), stage_embeddings=True
+        )
+
+        await correctness(sender, receiver)
+        assert len(sender.transfer_tracker) == 1
+
+    async def test_late_claim_times_out_and_sender_keeps_serving(self):
+        sender = NixlWriteEmbeddingSender()
+        sender.unclaimed_timeout = 0.5
+        receiver = NixlWriteEmbeddingReceiver()
+        request, send_future = await sender.send_embeddings(
+            torch.randn(256, EMBEDDING_SIZE), stage_embeddings=True
+        )
+        await asyncio.wait_for(send_future, timeout=10)
+
+        with pytest.raises(TimeoutError):
+            await receiver.receive_embeddings(request, receive_timeout=2)
+        await correctness(sender, receiver)
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_1  # NIXL init requires proper CUDA environment
 class TestNixlReadEmbeddingTransfer:
     async def test_correctness(self):
         sender = NixlReadEmbeddingSender()
