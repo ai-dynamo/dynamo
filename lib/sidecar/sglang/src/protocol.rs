@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
+    CompletionUsage, DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt,
+    PreprocessedRequest, PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
@@ -427,8 +427,6 @@ pub(crate) fn terminal_from_meta(
         .and_then(Value::as_str)
         .or_else(|| finish.as_str())
         .ok_or_else(|| client::protocol_error("SGLang finish_reason is missing a type"))?;
-    let mut completion_usage = usage(prompt_tokens, generated);
-    completion_usage.prompt_tokens_details = cached_prompt_tokens(meta, prompt_tokens);
     let mut output = match finish_type {
         "stop" => LLMEngineOutput::stop(),
         "length" => LLMEngineOutput::length(),
@@ -440,34 +438,57 @@ pub(crate) fn terminal_from_meta(
             )));
         }
     }
-    .with_usage(completion_usage);
-    output.stop_reason = finish.get("matched").and_then(|matched| match matched {
-        Value::String(value) => Some(StopReason::String(value.clone())),
-        Value::Number(value) => value
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .filter(|id| {
-                stop_conditions
-                    .stop_token_ids
-                    .as_ref()
-                    .is_some_and(|ids| ids.contains(id))
-            })
-            .map(|id| StopReason::Int(i64::from(id))),
-        _ => None,
+    .with_usage(completion_usage(
+        prompt_tokens,
+        generated,
+        meta_u32(meta, "cached_tokens"),
+    ));
+    output.stop_reason = finish.get("matched").and_then(|matched| {
+        stop_reason(
+            matched,
+            stop_conditions
+                .stop_token_ids
+                .as_deref()
+                .unwrap_or_default(),
+        )
     });
     Ok(output)
 }
 
 /// SGLang reports the prompt tokens served from its prefix cache as `cached_tokens`.
-fn cached_prompt_tokens(
-    meta: &HashMap<String, String>,
+pub(crate) fn completion_usage(
     prompt_tokens: u32,
-) -> Option<PromptTokensDetails> {
-    meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
-        audio_tokens: None,
-        cached_tokens: Some(cached_tokens.min(prompt_tokens)),
-        ..Default::default()
-    })
+    completion_tokens: u32,
+    cached_tokens: Option<u32>,
+) -> CompletionUsage {
+    let mut completion_usage = usage(prompt_tokens, completion_tokens);
+    completion_usage.prompt_tokens_details =
+        cached_tokens.map(|cached_tokens| PromptTokensDetails {
+            cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+            ..Default::default()
+        });
+    completion_usage
+}
+
+/// Map SGLang's `finish_reason.matched`. SGLang also reports EOS and other
+/// hidden stop tokens there; only the user's stop tokens are reported.
+pub(crate) fn stop_reason(matched: &Value, user_stop_token_ids: &[u32]) -> Option<StopReason> {
+    let user_stop = |id: &Value| {
+        id.as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .filter(|id| user_stop_token_ids.contains(id))
+            .map(i64::from)
+    };
+    match matched {
+        Value::String(value) => Some(StopReason::String(value.clone())),
+        Value::Number(_) => user_stop(matched).map(StopReason::Int),
+        Value::Array(ids) => ids
+            .iter()
+            .map(user_stop)
+            .collect::<Option<_>>()
+            .map(StopReason::IntArray),
+        _ => None,
+    }
 }
 
 pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
