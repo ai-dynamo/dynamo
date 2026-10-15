@@ -20,7 +20,6 @@ import (
 
 const (
 	checkpointInterPodCompatibilityMessage = "Snapshot with gpuMemoryService.mode=InterPod is unsupported"
-	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover is temporarily unsupported"
 )
 
 // ValidateCheckpointCompatibility returns unsupported checkpoint combinations
@@ -35,9 +34,6 @@ func ValidateCheckpointCompatibility(experimental *nvidiacomv1beta1.Experimental
 	if experimental.GPUMemoryService != nil &&
 		experimental.GPUMemoryService.Mode == nvidiacomv1beta1.GMSModeInterPod {
 		violations = append(violations, errors.New(checkpointInterPodCompatibilityMessage))
-	}
-	if experimental.Failover != nil {
-		violations = append(violations, errors.New(checkpointFailoverCompatibilityMessage))
 	}
 
 	return violations
@@ -90,6 +86,7 @@ type snapshotCompatibilityContract struct {
 	BackendFramework      string                     `json:"backendFramework"`
 	GMSMode               string                     `json:"gmsMode"`
 	GMSDeviceClassName    string                     `json:"gmsDeviceClassName,omitempty"`
+	CUDASharedMemory      string                     `json:"cudaSharedMemorySupport,omitempty"`
 	TargetContainer       corev1.Container           `json:"targetContainer"`
 	InitContainers        []corev1.Container         `json:"initContainers,omitempty"`
 	Volumes               []corev1.Volume            `json:"volumes,omitempty"`
@@ -142,6 +139,7 @@ func ComputeSnapshotCompatibilityHash(
 		BackendFramework:      backendFramework,
 		GMSMode:               gmsMode,
 		GMSDeviceClassName:    gmsDeviceClassName,
+		CUDASharedMemory:      podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation],
 		TargetContainer:       canonicalSnapshotContainer(*target, false),
 		HostNetwork:           podTemplate.Spec.HostNetwork,
 		HostPID:               podTemplate.Spec.HostPID,

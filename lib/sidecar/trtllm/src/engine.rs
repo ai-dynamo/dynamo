@@ -162,6 +162,7 @@ impl TrtllmSidecarEngine {
             disaggregation_mode: mode,
             route_to_encoder: false,
             enable_rl: args.sidecar.common.enable_rl,
+            default_thinking_mode: args.default_thinking_mode,
             ..Default::default()
         };
         Ok((engine, config))
@@ -307,7 +308,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         // streamed chunk costs a boxed future and a waker registration on every
         // token.
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
-        let shutdown = self.cancel.clone();
+        let shutdown = self.cancel.child_token();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
         // The same deferral applies here, not just to the streaming loop below.
