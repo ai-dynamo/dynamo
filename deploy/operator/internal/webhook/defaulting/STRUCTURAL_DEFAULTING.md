@@ -62,6 +62,19 @@ function and nested API types are handled by their exact-type functions.
 - For an optional child pointer, the parent checks for nil and creates the child
   only when the child object itself has a documented default. Otherwise it leaves
   the pointer absent and skips child traversal.
+- When omission creates a default object but explicit `{}` opts out, put the
+  complete CRD default on the object field. Do not default its child fields in the
+  schema or mutating admission; treat an explicit empty object as authoritative.
+
+For example, DGDR v1beta2 defines these whole-object opt-outs:
+
+```yaml
+spec:
+  workload: {}       # no workload defaults
+  objective:
+    sla: {}          # no SLA bounds and no derived strict_sla
+```
+
 - Keep cross-field defaults at the lowest common API-type ancestor. Pass a small
   typed ancestor fact into a child only when the child's local default remains
   understandable in isolation.
@@ -69,9 +82,11 @@ function and nested API types are handled by their exact-type functions.
   read-only and returns focused typed data; the structural defaulter decides which
   absent API fields receive that data. Do not mix Kubernetes discovery, policy,
   recursive traversal, and mutation in one helper.
-- Preserve explicit values across representations. When native parameters or a
-  foreign-version envelope can own a field, determine effective ownership before
-  applying typed defaults and never overwrite the authoritative representation.
+- Never infer field ownership or caller intent from a value, including equality
+  with a documented default. Use only API-defined presence and deterministic
+  precedence between representations. When the API defines a typed underlay plus
+  a native overlay, default the typed representation structurally and apply the
+  native overlay afterward; the overlay wins without conflict detection.
 - Do not compensate for an invalid explicit value or an unresolved required value.
   Leave those states visible so validating admission reports the exact problem.
 
@@ -170,6 +185,10 @@ func defaultDynamoGraphDeploymentSpecV1alpha1(
   versions differ, then invoke the public mutating webhook handler.
 - Prove that a user-supplied value and an identical value applied by CRD schema
   defaulting produce the same webhook result.
+- For every whole-object opt-out, include separate admission-chain rows for an
+  omitted object and explicit `{}`. Assert that omission receives the complete
+  object default while explicit `{}` remains empty through schema defaulting,
+  conversion, and the mutating webhook.
 - Cover CREATE and UPDATE explicitly. For every operation-specific default, include
   the opposite operation and prove that its behavior is intentional.
 - Prove idempotence by applying defaulting twice and comparing the complete object
