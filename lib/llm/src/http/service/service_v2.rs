@@ -961,6 +961,9 @@ impl HttpService {
 
         let state = self.state.clone();
         let state_cancel = state.cancel_token().clone();
+        // Telemetry continues during drain and stops on every service exit path.
+        let publisher_cancel = CancellationToken::new();
+        let _publisher_guard = publisher_cancel.clone().drop_guard();
 
         let tls = if self.enable_tls {
             let cert_path = self
@@ -1016,7 +1019,7 @@ impl HttpService {
 
         // Spawn canary after all fallible startup so it won't leak on early errors
         tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-        self.start_frontend_load_publisher(&cancel_token);
+        self.start_frontend_load_publisher(&publisher_cancel);
 
         // The server keeps accepting while inflight requests drain, then gives open
         // connections what is left of the shutdown budget.

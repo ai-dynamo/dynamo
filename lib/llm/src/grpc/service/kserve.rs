@@ -272,6 +272,10 @@ impl KserveService {
 impl KserveServiceConfigBuilder {
     pub fn build(self) -> Result<KserveService, anyhow::Error> {
         let config: KserveServiceConfig = self.build_internal()?;
+        anyhow::ensure!(
+            !dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL"),
+            "RL worker discovery is not supported by the KServe gRPC frontend"
+        );
 
         // Create HTTP service with only non-inference endpoints (metrics, health, models list)
         // This provides the metrics endpoint, the shared metrics object, and the

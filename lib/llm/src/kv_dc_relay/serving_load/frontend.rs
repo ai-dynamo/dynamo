@@ -439,7 +439,7 @@ mod tests {
     fn model_load(model: &str, awaiting: u64, started: u64) -> FrontendModelLoad {
         FrontendModelLoad {
             model: model.to_string(),
-            aliases: Vec::new(),
+            is_ready: true,
             gauges: RequestGauges {
                 requests_awaiting_first_token: awaiting,
                 awaiting_first_token_input_tokens: 17,

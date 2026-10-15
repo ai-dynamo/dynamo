@@ -20,7 +20,8 @@ use crate::utils::retry::{Backoff, FailureStreak};
 
 pub(crate) const FRONTEND_LOAD_TOPIC: &str = "frontend_load";
 pub(crate) const FRONTEND_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
-const PUBLISHER_RETRY_MAX: Duration = Duration::from_secs(30);
+const PUBLISHER_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const PUBLISHER_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// Exact configured namespace, else `DYN_NAMESPACE`, else `dynamo`.
 pub(crate) fn frontend_load_namespace(configured: Option<String>) -> String {
@@ -47,7 +48,7 @@ pub(crate) struct FrontendLoadFrame {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FrontendModelLoad {
     pub(crate) model: String,
-    pub(crate) aliases: Vec<String>,
+    pub(crate) is_ready: bool,
     pub(crate) gauges: RequestGauges,
     pub(crate) totals: RequestTotals,
 }
@@ -143,12 +144,10 @@ pub(crate) fn start_frontend_load_publisher(
             }
         };
         let frontend_instance_id = runtime.connection_id();
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + FRONTEND_LOAD_PUBLISH_INTERVAL,
-            FRONTEND_LOAD_PUBLISH_INTERVAL,
-        );
+        // Publish on the first tick, matching the scheduler-load publisher.
+        let mut interval = tokio::time::interval(FRONTEND_LOAD_PUBLISH_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut retry = Backoff::new(FRONTEND_LOAD_PUBLISH_INTERVAL, PUBLISHER_RETRY_MAX);
+        let mut retry = Backoff::new(PUBLISHER_RETRY_INITIAL, PUBLISHER_RETRY_MAX);
         let mut failures = FailureStreak::default();
 
         // Reconnect loop: a publish failure drops the publisher and builds a new one.
@@ -229,7 +228,7 @@ mod tests {
             "frontend_instance_id": 10, "incarnation": 1, "sequence": 2,
             "is_serving_ready": true, "added_frame_field": 1,
             "models": [{
-                "model": "a", "aliases": [], "added_model_field": "x",
+                "model": "a", "is_ready": true, "aliases": [], "added_model_field": "x",
                 "gauges": gauges, "totals": totals,
             }],
         }))
@@ -248,7 +247,7 @@ mod tests {
             decode(json!({
                 "frontend_instance_id": 10, "incarnation": 1, "sequence": 2,
                 "is_serving_ready": true,
-                "models": [{"model": "a", "aliases": [], "totals": totals}],
+                "models": [{"model": "a", "is_ready": true, "aliases": [], "totals": totals}],
             }))
             .is_err()
         );

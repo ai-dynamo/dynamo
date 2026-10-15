@@ -62,11 +62,7 @@ impl Registry {
     }
 
     /// Insert an existing shared object without allocating another Arc.
-    pub fn insert_shared_arc<K: ToString, U: Send + Sync + 'static>(
-        &mut self,
-        key: K,
-        value: Arc<U>,
-    ) {
+    pub fn insert_arc<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: Arc<U>) {
         self.shared_storage.insert(key.to_string(), value);
     }
 

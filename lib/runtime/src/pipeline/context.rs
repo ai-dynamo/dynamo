@@ -101,8 +101,8 @@ impl<T: Send + Sync + 'static> Context<T> {
     }
 
     /// Insert an existing shared object without allocating another Arc.
-    pub fn insert_shared<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: Arc<U>) {
-        self.registry.insert_shared_arc(key, value);
+    pub fn insert_arc<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: Arc<U>) {
+        self.registry.insert_arc(key, value);
     }
 
     /// Insert a unique and takable object into the registry with a specific key.

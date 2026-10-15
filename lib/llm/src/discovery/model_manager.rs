@@ -152,6 +152,7 @@ pub(crate) struct RemovedDiscoveryGroup {
 
 pub(crate) struct CommittedModelView {
     pub(crate) name: String,
+    pub(crate) is_ready: bool,
     pub(crate) aliases: Vec<String>,
 }
 
@@ -522,13 +523,14 @@ impl ModelManager {
         }
         let mut views = catalog
             .models
-            .keys()
-            .filter(|name| !catalog.aliases.contains_key(*name))
-            .map(|name| {
+            .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
+            .map(|(name, model)| {
                 let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
                 aliases.sort_unstable();
                 CommittedModelView {
                     name: name.clone(),
+                    is_ready: model.is_ready_to_serve(),
                     aliases,
                 }
             })
@@ -3478,7 +3480,6 @@ mod tests {
         let frame = metrics.frontend_load(0, true, mm.committed_model_views());
         assert_eq!(frame.models.len(), 1);
         assert_eq!(frame.models[0].model, "llama");
-        assert_eq!(frame.models[0].aliases, ["llama-alias"]);
         assert_eq!(frame.models[0].totals.requests_started, 2);
         assert_eq!(frame.models[0].gauges.requests_awaiting_first_token, 2);
     }

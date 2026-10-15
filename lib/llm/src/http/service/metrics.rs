@@ -746,7 +746,7 @@ impl RequestMetrics {
     }
 
     pub(crate) fn attach_to<T: Data>(self: &Arc<Self>, context: &mut Context<T>) {
-        context.insert_shared(REQUEST_METRICS_KEY, self.clone());
+        context.insert_arc(REQUEST_METRICS_KEY, self.clone());
     }
 
     pub(crate) fn from_context<T: Data>(context: &Context<T>) -> Option<Arc<Self>> {
@@ -826,8 +826,6 @@ impl RequestMetrics {
     }
 }
 
-// Read the integer counter handles, not the exported f64 samples, so load totals
-// remain exact even after a counter exceeds 2^53.
 fn metric_label<'a>(metric: &'a Metric, name: &str) -> &'a str {
     metric
         .get_label()
@@ -835,6 +833,33 @@ fn metric_label<'a>(metric: &'a Metric, name: &str) -> &'a str {
         .find(|label| label.name() == name)
         .expect("frontend metrics have fixed labels")
         .value()
+}
+
+// Read the integer counter handles, not the exported f64 samples, so load totals
+// remain exact even after a counter exceeds 2^53.
+// Only re-resolve labels returned by collect(), so no new series are created.
+fn model_counter_values(family: &IntCounterVec) -> impl Iterator<Item = (String, u64)> + '_ {
+    family
+        .collect()
+        .into_iter()
+        .flat_map(|family| family.metric)
+        .map(|metric| {
+            let model = metric_label(&metric, "model");
+            (model.to_owned(), family.with_label_values(&[model]).get())
+        })
+}
+
+fn model_gauge_values(family: &IntGaugeVec) -> impl Iterator<Item = (String, u64)> {
+    family
+        .collect()
+        .into_iter()
+        .flat_map(|family| family.metric)
+        .map(|metric| {
+            (
+                metric_label(&metric, "model").to_owned(),
+                metric.get_gauge().value().max(0.0) as u64,
+            )
+        })
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -1110,7 +1135,7 @@ impl Metrics {
         let requests_awaiting_first_token = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::REQUESTS_AWAITING_FIRST_TOKEN),
-                "Admitted requests awaiting their first output token",
+                "Admitted requests awaiting their first output token; endpoints that do not emit tokens remain here until completion",
             ),
             &["model"],
         )
@@ -1128,7 +1153,7 @@ impl Metrics {
         let awaiting_first_token_input_tokens = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::AWAITING_FIRST_TOKEN_INPUT_TOKENS),
-                "Known prompt tokens in requests awaiting their first output token",
+                "Known prompt tokens in requests awaiting their first output token; endpoints that do not emit tokens remain here until completion",
             ),
             &["model"],
         )
@@ -1949,35 +1974,46 @@ impl Metrics {
                 *total = total.saturating_add(count);
             }
         }
+        for (model, value) in model_counter_values(&self.input_tokens_counter) {
+            totals.entry(model).or_default().input_tokens = value;
+        }
+        for (model, value) in model_counter_values(&self.output_tokens_counter) {
+            totals.entry(model).or_default().output_tokens = value;
+        }
+        let mut gauges = HashMap::<String, RequestGauges>::new();
+        for (model, value) in model_gauge_values(&self.requests_awaiting_first_token) {
+            gauges
+                .entry(model)
+                .or_default()
+                .requests_awaiting_first_token = value;
+        }
+        for (model, value) in model_gauge_values(&self.requests_generating) {
+            gauges.entry(model).or_default().requests_generating = value;
+        }
+        for (model, value) in model_gauge_values(&self.awaiting_first_token_input_tokens) {
+            gauges
+                .entry(model)
+                .or_default()
+                .awaiting_first_token_input_tokens = value;
+        }
+        for (model, value) in model_gauge_values(&self.inflight_input_tokens) {
+            gauges.entry(model).or_default().inflight_input_tokens = value;
+        }
         let models = models
             .into_iter()
             .map(|view| {
                 let mut load = FrontendModelLoad {
                     model: view.name,
-                    aliases: view.aliases,
+                    is_ready: view.is_ready,
                     ..Default::default()
                 };
-                for name in std::iter::once(&load.model).chain(&load.aliases) {
-                    let labels = &[name.as_str()];
-                    let gauge = |family: &IntGaugeVec| {
-                        u64::try_from(family.with_label_values(labels).get()).unwrap_or(0)
-                    };
-                    load.gauges.add(&RequestGauges {
-                        requests_awaiting_first_token: gauge(&self.requests_awaiting_first_token),
-                        requests_generating: gauge(&self.requests_generating),
-                        awaiting_first_token_input_tokens: gauge(
-                            &self.awaiting_first_token_input_tokens,
-                        ),
-                        inflight_input_tokens: gauge(&self.inflight_input_tokens),
-                    });
+                for name in std::iter::once(&load.model).chain(&view.aliases) {
+                    if let Some(gauge) = gauges.get(name) {
+                        load.gauges.add(gauge);
+                    }
                     if let Some(total) = totals.get(name) {
                         load.totals.add(total);
                     }
-                    load.totals.add(&RequestTotals {
-                        input_tokens: self.input_tokens_counter.with_label_values(labels).get(),
-                        output_tokens: self.output_tokens_counter.with_label_values(labels).get(),
-                        ..Default::default()
-                    });
                 }
                 load
             })
@@ -2949,6 +2985,13 @@ mod tests {
     fn model_ready_metric_tracks_live_routing_catalog() {
         let manager = Arc::new(ModelManager::new());
         let registry = Registry::new();
+        let metrics = Metrics::new();
+        let load_ready = || {
+            metrics
+                .frontend_load(0, true, manager.committed_model_views())
+                .models[0]
+                .is_ready
+        };
         register_model_ready_metric(&registry, manager.clone(), None).unwrap();
 
         assert_eq!(model_ready_value(&registry, "test-model"), None);
@@ -2967,6 +3010,7 @@ mod tests {
         )));
         assert!(manager.add_worker_set("test-model", "watched", worker_set));
         assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+        assert!(!load_ready());
 
         let custom_registry = Registry::new();
         register_model_ready_metric(
@@ -2987,9 +3031,14 @@ mod tests {
 
         worker_tx.send(vec![1]).unwrap();
         assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+        assert!(load_ready());
+        let draining = metrics.frontend_load(0, false, manager.committed_model_views());
+        assert!(!draining.is_serving_ready);
+        assert!(draining.models[0].is_ready);
 
         worker_tx.send(Vec::new()).unwrap();
         assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+        assert!(!load_ready());
     }
 
     #[test]
@@ -3523,6 +3572,7 @@ mod tests {
         let load = || {
             let view = crate::discovery::CommittedModelView {
                 name: model.to_string(),
+                is_ready: true,
                 aliases: Vec::new(),
             };
             metrics.frontend_load(0, true, vec![view]).models.remove(0)
@@ -3564,6 +3614,37 @@ mod tests {
         assert_eq!(first.incarnation, second.incarnation);
     }
 
+    /// Publishing load reads /metrics; it never adds series for idle models or aliases.
+    #[test]
+    fn frontend_load_creates_no_prometheus_series() {
+        let metrics = Metrics::new();
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+
+        metrics.frontend_load(
+            0,
+            true,
+            vec![crate::discovery::CommittedModelView {
+                name: "idle-model".into(),
+                is_ready: false,
+                aliases: vec!["idle-alias".into()],
+            }],
+        );
+
+        let created = registry
+            .gather()
+            .iter()
+            .flat_map(|family| family.get_metric())
+            .flat_map(|metric| metric.get_label())
+            .filter(|label| label.name() == "model")
+            .map(|label| label.value().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            created.is_empty(),
+            "snapshot created series for {created:?}"
+        );
+    }
+
     #[test]
     fn frontend_load_reads_existing_counters_and_keeps_integer_precision() {
         let metrics = Metrics::new();
@@ -3597,6 +3678,7 @@ mod tests {
             true,
             vec![crate::discovery::CommittedModelView {
                 name: "primary".into(),
+                is_ready: true,
                 aliases: vec!["alias".into()],
             }],
         );
@@ -3647,6 +3729,7 @@ mod tests {
             true,
             vec![crate::discovery::CommittedModelView {
                 name: "model".into(),
+                is_ready: true,
                 aliases: vec![],
             }],
         );
