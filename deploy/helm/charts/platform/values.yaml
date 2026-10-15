@@ -76,6 +76,14 @@ dynamo-operator:
   # the cluster-wide operator.
   upgradeCRD: true
 
+  # Experimental operator features. Disabled gates do not change existing stable APIs.
+  featureGates:
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
+    # API schemas. Run and Candidate objects are persisted in etcd; incompatible
+    # schema changes may make them unreadable or block future CRD upgrades. The
+    # operator does not reconcile v1beta2 resources.
+    DGDRV1Beta2: false
+
   # Environment variables to pass to operator Deployment.
   env: []
 

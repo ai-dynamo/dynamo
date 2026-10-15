@@ -15,6 +15,24 @@ tests:
         documentSelector:
           path: kind
           value: Deployment
+      - contains:
+          path: spec.template.spec.initContainers[0].args
+          content: --feature-gates=DGDRV1Beta2=false
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: enables experimental DGDR v1beta2 CRD installation
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.featureGates.DGDRV1Beta2: true
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].args
+          content: --feature-gates=DGDRV1Beta2=true
+        documentSelector:
+          path: kind
+          value: Deployment
 
   - it: rejects CRD upgrades in namespace-restricted mode
     template: charts/dynamo-operator/templates/deployment.yaml
