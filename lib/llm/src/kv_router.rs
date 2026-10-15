@@ -756,6 +756,9 @@ impl KvRouter {
         let session_prefix_index = kv_router_config
             .enable_session_prefix_index
             .then(|| Arc::new(SessionPrefixIndexer::new()));
+        if let (Some(cache), Some(index)) = (shared_cache.as_ref(), session_prefix_index.as_ref()) {
+            cache.attach_session_prefix_index(Arc::clone(index));
+        }
 
         let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
             endpoint: &endpoint,
