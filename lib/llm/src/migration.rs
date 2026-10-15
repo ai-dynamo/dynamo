@@ -534,7 +534,8 @@ where
             if let Some(session_affinity) = self.session_affinity.as_ref() {
                 request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
             }
-            self.context.link_child(request.context());
+            let attempt_context = request.context();
+            self.context.link_child(attempt_context.clone());
             if self.context.is_stopped() || self.context.is_killed() {
                 if let Some(cause) = migration {
                     tracing::info!(
@@ -590,10 +591,19 @@ where
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
-                    self.record_migration_outcome(
-                        migration_event.as_ref(),
-                        frontend_service::migration_outcome::SUCCESS,
-                    );
+                    // A dispatch cancelled before its response prologue returns `Ok` empty,
+                    // so a stopped context here means the client left during the handshake.
+                    // The parent stops its children before itself, so check the attempt too.
+                    let outcome = if self.context.is_stopped()
+                        || self.context.is_killed()
+                        || attempt_context.is_stopped()
+                        || attempt_context.is_killed()
+                    {
+                        frontend_service::migration_outcome::CANCELLED
+                    } else {
+                        frontend_service::migration_outcome::SUCCESS
+                    };
+                    self.record_migration_outcome(migration_event.as_ref(), outcome);
                     self.active_route_trace = Some(route_trace);
                     self.next_stream = Some(next_stream);
                     return Ok(());
@@ -1103,6 +1113,15 @@ mod tests {
         },
         /// Fails on the first call, then generate returns a cancellation error
         FailThenGenerateCancelled,
+        /// Models the addressed router returning an `Ok` empty stream when the
+        /// client cancels before the replacement's response prologue
+        FailThenCancelDuringHandshake {
+            mid_stream: bool,
+            fail_after: usize,
+            dispatched: Arc<tokio::sync::Notify>,
+            /// Stop only the attempt context, as a parent does before stopping itself
+            stop_attempt_only: bool,
+        },
         /// One addressed worker rejects admission, then a replacement succeeds.
         WorkerOverloadSequence {
             worker_ids: Vec<u64>,
@@ -1252,6 +1271,55 @@ mod tests {
                             .error_type(error_type)
                             .message("request cancelled")
                             .build()
+                    ))
+                }
+                MockBehavior::FailThenCancelDuringHandshake {
+                    mid_stream,
+                    fail_after,
+                    dispatched,
+                    stop_attempt_only,
+                } => {
+                    if call_num > 0 {
+                        dispatched.notify_one();
+                        let request_context = context.context();
+                        if *stop_attempt_only {
+                            request_context.stop_generating();
+                        }
+                        request_context.stopped().await;
+                        return Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                            Box::pin(stream::empty()),
+                            request_context,
+                        ));
+                    }
+                    let error = DynamoError::builder()
+                        .error_type(if *mid_stream {
+                            ErrorType::Disconnected
+                        } else {
+                            ErrorType::CannotConnect
+                        })
+                        .message("worker failed")
+                        .build();
+                    if !*mid_stream {
+                        return Err(anyhow::anyhow!(error));
+                    }
+                    let (tx, rx) = mpsc::channel(1);
+                    let token_offset = self.token_offset;
+                    let fail_after = *fail_after;
+                    tokio::spawn(async move {
+                        for i in 0..fail_after {
+                            if tx
+                                .send(create_mock_output(token_offset + 1 + i as u32))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        let _ = tx.send(Annotated::from_err(error)).await;
+                    });
+                    Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                        Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+                        Arc::new(Controller::new(self.context_id.clone())),
                     ))
                 }
                 MockBehavior::WorkerOverloadSequence { worker_ids } => {
@@ -2283,6 +2351,128 @@ mod tests {
             ),
             0
         );
+    }
+
+    /// The client disconnects while the replacement worker is still in its
+    /// response handshake. The addressed router turns that into an `Ok` empty
+    /// stream, which must be recorded as `cancelled`, not `success`.
+    /// With `stop_attempt_only`, the router returns while only the attempt
+    /// context is stopped and the parent is stopped afterwards.
+    async fn run_cancel_during_handshake(mid_stream: bool, stop_attempt_only: bool) {
+        dynamo_runtime::logging::init();
+        let fail_after = 3;
+        let migration_type = if mid_stream {
+            frontend_service::migration_type::ONGOING_REQUEST
+        } else {
+            frontend_service::migration_type::NEW_REQUEST
+        };
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenCancelDuringHandshake {
+                mid_stream,
+                fail_after,
+                dispatched: dispatched.clone(),
+                stop_attempt_only,
+            },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+        let ctx = Arc::new(Controller::new(context_id));
+        let metrics = Arc::new(Metrics::new());
+        let duration_counts = |metrics: &Metrics| {
+            [
+                frontend_service::migration_outcome::SUCCESS,
+                frontend_service::migration_outcome::FAILURE,
+                frontend_service::migration_outcome::CANCELLED,
+            ]
+            .map(|outcome| migration_duration_count(metrics, migration_type, outcome))
+        };
+
+        let consume = async {
+            let mut retry_manager = RetryManager::build(
+                ctx.clone(),
+                BTreeMap::new(),
+                create_mock_request(10),
+                next_generate,
+                3,
+                None,
+                Arc::new(TEST_MODEL.to_string()),
+                metrics.clone(),
+                None,
+            )
+            .await
+            .expect("a handshake cancelled by the client closes cleanly");
+            let mut responses = Vec::new();
+            while let Some(response) = retry_manager.next().await {
+                responses.push(response);
+            }
+            if stop_attempt_only {
+                assert!(!ctx.is_stopped());
+                ctx.stop_generating();
+            }
+            responses
+        };
+        let disconnect = async {
+            if stop_attempt_only {
+                return;
+            }
+            dispatched.notified().await;
+            assert_eq!(
+                duration_counts(&metrics),
+                [0, 0, 0],
+                "no outcome may be recorded while the handshake is pending"
+            );
+            ctx.stop_generating();
+        };
+        let (responses, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(consume, disconnect)
+        })
+        .await
+        .expect("handshake cancellation must not hang");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let expected_tokens = if mid_stream { fail_after } else { 0 };
+        assert_eq!(responses.len(), expected_tokens);
+        for (i, response) in responses.iter().enumerate() {
+            assert!(
+                response.err().is_none(),
+                "the stream must end without an error item"
+            );
+            assert_eq!(
+                response.data.as_ref().unwrap().token_ids,
+                vec![101 + i as u32]
+            );
+        }
+        // [success, failure, cancelled]: exactly one terminal outcome.
+        assert_eq!(duration_counts(&metrics), [0, 0, 1]);
+        assert_eq!(
+            metrics.get_migration_new_request_count(TEST_MODEL),
+            u64::from(!mid_stream)
+        );
+        assert_eq!(
+            metrics.get_migration_ongoing_request_count(TEST_MODEL),
+            u64::from(mid_stream)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_new_request_cancelled_during_handshake() {
+        run_cancel_during_handshake(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_ongoing_request_cancelled_during_handshake() {
+        run_cancel_during_handshake(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_new_request_attempt_cancelled_before_parent() {
+        run_cancel_during_handshake(false, true).await;
     }
 
     /// Test case 8: No migration for guided-decoding (structured-output) requests
