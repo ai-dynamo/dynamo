@@ -21,6 +21,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
+from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     EngineType,
@@ -37,6 +38,7 @@ from .config import (
     apply_worker_engine_args_overrides,
     build_kv_state_agent_descriptors,
     build_runtime_config,
+    kv_state_agent_cache_owner_ids,
     load_mocker_engine_args,
 )
 from .utils.kv_cache import compute_kv_bytes_per_token
@@ -139,9 +141,11 @@ async def start_kv_state_agent_owner(
     runtime,
     engine_args: dict,
     runtime_config,
+    cache_owner_ids: list[str],
 ) -> KvStateAttachmentOwner:
     """Attach one worker's raw ZMQ streams to the namespace's KV state agent."""
     runtime_config.kv_event_source_mode = "state_agent_v2"
+    runtime_config.kv_state_endpoint = args.kv_state_endpoint
     hint_worker_type = None
     if args.kv_state_agent_router_hints:
         hint_worker_type = (
@@ -164,7 +168,9 @@ async def start_kv_state_agent_owner(
         endpoint.connection_id(),
         build_kv_state_agent_descriptors(
             engine_args,
-            kv_state_endpoint=args.endpoint,
+            cache_owner_ids=cache_owner_ids,
+            kv_state_endpoint=args.kv_state_endpoint or args.endpoint,
+            raw_advertise_host=args.kv_state_agent_raw_host,
             zmq_kv_events_port=engine_args["dynamo"]["zmq_kv_events_port"],
             router_hint_worker_type=hint_worker_type,
         ),
@@ -268,6 +274,15 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         )
         runtimes.append(runtime)
 
+        cache_owner_ids = (
+            kv_state_agent_cache_owner_ids(
+                base_engine_args["dp_size"],
+                args.kv_state_agent_cache_slot
+                + worker_id * base_engine_args["dp_size"],
+            )
+            if args.kv_state_agent
+            else None
+        )
         if needs_per_worker_overrides:
             worker_engine_args = apply_worker_engine_args_overrides(
                 base_engine_args,
@@ -280,6 +295,10 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     args.zmq_kv_events_ports_list[worker_id]
                     if args.zmq_kv_events_ports_list
                     else None
+                ),
+                # Every DP rank publishes the worker's state-agent topic, as vLLM does.
+                zmq_kv_events_topic=(
+                    worker_raw_topic(cache_owner_ids) if cache_owner_ids else None
                 ),
                 zmq_replay_port=(
                     args.zmq_replay_ports_list[worker_id]
@@ -302,7 +321,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         if worker_engine_args["dynamo"]["kv_state_agent"]:
             attachment_owners.append(
                 await start_kv_state_agent_owner(
-                    args, runtime, worker_engine_args, runtime_config
+                    args, runtime, worker_engine_args, runtime_config, cache_owner_ids
                 )
             )
 

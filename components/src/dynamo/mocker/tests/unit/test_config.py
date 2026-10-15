@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.mocker import config as CONFIG
 from dynamo.mocker.args import parse_args
 from dynamo.mocker.config import normalize_mocker_config
@@ -438,49 +439,83 @@ def test_kv_state_agent_requires_zmq_ports_and_host_blocks(flags, error):
         parse_args(["--kv-state-agent", *flags])
 
 
-def test_kv_state_agent_router_hints_require_kv_state_agent():
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--kv-state-agent-router-hints"],
+        ["--kv-state-agent-raw-host", "10.0.0.5"],
+        ["--kv-state-agent-cache-slot", "0"],
+    ],
+)
+def test_kv_state_agent_flags_require_kv_state_agent(flags):
     with pytest.raises(ValueError, match="requires --kv-state-agent"):
-        parse_args(["--kv-state-agent-router-hints"])
+        parse_args(flags)
+
+
+_KV_STATE_AGENT_FLAGS = ["--kv-state-agent", "--zmq-kv-events-ports", "5557"]
+_KV_STATE_AGENT_FLAGS += ["--num-host-blocks", "8"]
+
+
+@pytest.mark.parametrize(
+    "flags, error",
+    [
+        (["--kv-state-agent-cache-slot", "0"], "requires --kv-state-agent-raw-host"),
+        (["--kv-state-agent-raw-host", "127.0.0.1"], "non-loopback"),
+        (["--kv-state-agent-raw-host", "10.0.0.5"], "cache-slot"),
+    ],
+)
+def test_kv_state_agent_needs_a_connectable_host_and_a_cache_slot(flags, error):
+    # As vLLM's dynamo_state_agent raw_advertise_host and cache_owner_ids.
+    with pytest.raises(ValueError, match=error):
+        parse_args([*_KV_STATE_AGENT_FLAGS, *flags])
 
 
 def test_kv_state_agent_descriptors_cover_each_dp_rank():
     args = parse_args(
         [
-            "--kv-state-agent",
+            *_KV_STATE_AGENT_FLAGS,
             "--kv-state-agent-router-hints",
-            "--zmq-kv-events-ports",
-            "5557",
-            "--num-host-blocks",
-            "8",
+            "--kv-state-agent-raw-host",
+            "10.0.0.5",
+            "--kv-state-agent-cache-slot",
+            "40",
             "--kv-bytes-per-token",
             "1024",
             "--data-parallel-size",
             "2",
         ]
     )
+    owners = CONFIG.kv_state_agent_cache_owner_ids(2, args.kv_state_agent_cache_slot)
+    topic = worker_raw_topic(owners)
     config = CONFIG.apply_worker_engine_args_overrides(
         CONFIG.build_mocker_engine_args(args),
         zmq_kv_events_port=5557,
+        zmq_kv_events_topic=topic,
         kv_state_agent=True,
     )
     assert config["dynamo"]["kv_state_agent"] is True
+    assert config["dynamo"]["zmq_kv_events_topic"] == topic
 
     descriptors = CONFIG.build_kv_state_agent_descriptors(
         config,
+        cache_owner_ids=owners,
         kv_state_endpoint=args.endpoint,
+        raw_advertise_host=args.kv_state_agent_raw_host,
         zmq_kv_events_port=5557,
         router_hint_worker_type="aggregated",
     )
     assert [d["global_dp_rank"] for d in descriptors] == [0, 1]
     assert [d["raw_zmq_endpoint"] for d in descriptors] == [
-        "tcp://127.0.0.1:5557",
-        "tcp://127.0.0.1:5558",
+        "tcp://10.0.0.5:5557",
+        "tcp://10.0.0.5:5558",
     ]
-    # Slots come from the rank's ZMQ port, so they survive worker restarts.
+    # Operator-assigned slots, as KVCR_CACHE_SLOT in the vLLM KVCR manifests.
     assert [d["cache_owner_id"].rsplit("/", 1)[1] for d in descriptors] == [
-        f"{5557:032x}",
-        f"{5558:032x}",
+        f"{40:032x}",
+        f"{41:032x}",
     ]
+    # One topic per worker, published by every rank, as a vLLM worker's.
+    assert [d["raw_topic"] for d in descriptors] == [topic, topic]
     for descriptor in descriptors:
         assert descriptor["cache_owner_id"].startswith(
             descriptor["indexer_domain_id"] + "/"

@@ -26,6 +26,9 @@ pub struct MockerRuntimeOptions {
     pub reasoning: Option<ReasoningConfig>,
     pub response_replay_trace_path: Option<PathBuf>,
     pub zmq_kv_events_port: Option<u16>,
+    /// Topic frame of every raw KV event batch, shared by all DP ranks like
+    /// vLLM's `kv_events_config.topic`. Unset publishes the empty topic.
+    pub zmq_kv_events_topic: Option<String>,
     pub zmq_replay_port: Option<u16>,
     /// Publish raw ZMQ events for an external KV state agent only: no
     /// in-process relay, and host-pinned events are tagged KVCR-owned.
@@ -42,6 +45,7 @@ impl Default for MockerRuntimeOptions {
             reasoning: None,
             response_replay_trace_path: None,
             zmq_kv_events_port: None,
+            zmq_kv_events_topic: None,
             zmq_replay_port: None,
             kv_state_agent: false,
             router_queue_policy: None,

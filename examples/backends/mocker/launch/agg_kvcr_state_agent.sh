@@ -22,6 +22,10 @@ DP_SIZE="${DP_SIZE:-1}"
 NUM_HOST_BLOCKS="${NUM_HOST_BLOCKS:-4096}"
 ZMQ_BASE_PORT="${ZMQ_BASE_PORT:-20080}"
 ROUTER_HINTS="${ROUTER_HINTS:-1}"
+# Like a vLLM worker's dynamo_state_agent settings: the connectable address the
+# state agent dials for raw KV events, and this process's first CacheOwner slot.
+RAW_HOST="${RAW_HOST:-$(hostname -I | awk '{print $1}')}"
+CACHE_SLOT="${CACHE_SLOT:-0}"
 STATE_AGENT_SYSTEM_PORT="${STATE_AGENT_SYSTEM_PORT:-9091}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -48,6 +52,8 @@ python3 -m dynamo.mocker \
     --num-host-blocks "$NUM_HOST_BLOCKS" \
     --zmq-kv-events-ports "$ZMQ_PORTS" \
     --kv-state-agent \
+    --kv-state-agent-raw-host "$RAW_HOST" \
+    --kv-state-agent-cache-slot "$CACHE_SLOT" \
     "${HINT_ARGS[@]}" &
 
 # 3. Frontend with KV routing.

@@ -150,13 +150,16 @@ pub struct ZmqKvEventSink {
 
 impl ZmqKvEventSink {
     /// `kvcr_host_ownership` tags host-pinned events as KVCR-owned, so a KV
-    /// state agent indexes them under the attached CacheOwner.
+    /// state agent indexes them under the attached CacheOwner. `topic` is the
+    /// topic frame of every published and replayed batch, as vLLM's
+    /// `kv_events_config.topic`.
     pub async fn new(
         port: u16,
         replay_port: Option<u16>,
         dp_rank: u32,
         block_size: u32,
         kvcr_host_ownership: bool,
+        topic: String,
     ) -> Result<Self> {
         Self::bind_with_ownership(
             Some(port),
@@ -164,6 +167,7 @@ impl ZmqKvEventSink {
             dp_rank,
             block_size,
             kvcr_host_ownership,
+            topic,
         )
     }
 
@@ -175,7 +179,7 @@ impl ZmqKvEventSink {
         dp_rank: u32,
         block_size: u32,
     ) -> Result<Self> {
-        Self::bind_with_ownership(port, replay_port, dp_rank, block_size, false)
+        Self::bind_with_ownership(port, replay_port, dp_rank, block_size, false, String::new())
     }
 
     fn bind_with_ownership(
@@ -184,6 +188,7 @@ impl ZmqKvEventSink {
         dp_rank: u32,
         block_size: u32,
         kvcr_host_ownership: bool,
+        topic: String,
     ) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
             .context("ZmqKvEventSink::bind requires an active Tokio runtime")?;
@@ -299,7 +304,7 @@ impl ZmqKvEventSink {
                             let frames = vec![
                                 identity.clone().to_vec(),
                                 Vec::new(),
-                                Vec::new(),
+                                topic.as_bytes().to_vec(),
                                 seq.to_be_bytes().to_vec(),
                                 payload.to_vec(),
                             ];
@@ -345,7 +350,7 @@ impl ZmqKvEventSink {
                         }
 
                         let frames = vec![
-                            Vec::new(),
+                            topic.as_bytes().to_vec(),
                             seq_num.to_be_bytes().to_vec(),
                             payload.to_vec(),
                         ];
@@ -599,11 +604,16 @@ mod tests {
         assert_ne!(port, 0);
         assert_ne!(first.endpoint(), second.endpoint());
         assert_eq!(first.endpoint(), format!("tcp://0.0.0.0:{port}"));
-        assert!(ZmqKvEventSink::new(port, None, 0, 4, false).await.is_err());
+        assert!(
+            ZmqKvEventSink::new(port, None, 0, 4, false, String::new())
+                .await
+                .is_err()
+        );
         drop(first);
         let rebound = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Ok(sink) = ZmqKvEventSink::new(port, None, 0, 4, false).await {
+                if let Ok(sink) = ZmqKvEventSink::new(port, None, 0, 4, false, String::new()).await
+                {
                     break sink;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -617,20 +627,40 @@ mod tests {
     #[tokio::test]
     async fn automatic_replay_port_serves_events_and_rejects_a_second_bind() {
         use std::time::Duration;
-        use tmq::dealer::dealer;
+        use tmq::{dealer::dealer, subscribe::subscribe};
 
-        let sink = ZmqKvEventSink::bind(None, Some(0), 0, 4).unwrap();
+        const TOPIC: &str = "0123456789abcdef";
+        let sink =
+            ZmqKvEventSink::bind_with_ownership(None, Some(0), 0, 4, false, TOPIC.into()).unwrap();
         let replay_endpoint = sink.replay_endpoint().unwrap();
         let replay_port: u16 = replay_endpoint.rsplit_once(':').unwrap().1.parse().unwrap();
         assert_ne!(replay_port, 0);
         assert!(ZmqKvEventSink::bind(None, Some(replay_port), 0, 4).is_err());
-        sink.publish(RawKvEvent {
-            event: stored_event(),
-            block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
-            storage_tier: StorageTier::Device,
-        })
-        .unwrap();
         let ctx = Context::new();
+        // Live batches carry the topic frame, as vLLM's publisher does.
+        let mut live = subscribe(&ctx)
+            .connect(&sink.endpoint().replace("0.0.0.0", "127.0.0.1"))
+            .unwrap()
+            .subscribe(TOPIC.as_bytes())
+            .unwrap();
+        let live_frames = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                sink.publish(RawKvEvent {
+                    event: stored_event(),
+                    block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
+                    storage_tier: StorageTier::Device,
+                })
+                .unwrap();
+                if let Ok(Some(frames)) =
+                    tokio::time::timeout(Duration::from_millis(50), live.next()).await
+                {
+                    break multipart_message(frames.unwrap());
+                }
+            }
+        })
+        .await
+        .expect("a SUB on the topic must receive live batches");
+        assert_eq!(live_frames[0], TOPIC.as_bytes());
         let mut replay = dealer(&ctx)
             .set_linger(0)
             .connect(&replay_endpoint.replace("0.0.0.0", "127.0.0.1"))
@@ -654,6 +684,7 @@ mod tests {
         })
         .await
         .expect("replay must return the published event");
+        assert_eq!(frames[1], TOPIC.as_bytes());
         assert_eq!(frames[2], 0u64.to_be_bytes());
         let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&frames[3]).unwrap();
         assert_eq!(batch.data_parallel_rank, Some(0));

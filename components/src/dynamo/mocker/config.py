@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
+from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 
@@ -201,6 +202,7 @@ def apply_worker_engine_args_overrides(
     kv_bytes_per_token: int | None = None,
     bootstrap_port: int | None = None,
     zmq_kv_events_port: int | None = None,
+    zmq_kv_events_topic: str | None = None,
     zmq_replay_port: int | None = None,
     kv_state_agent: bool | None = None,
     ais_mtp_seed: int | None = None,
@@ -209,6 +211,7 @@ def apply_worker_engine_args_overrides(
     for key, value in (
         ("bootstrap_port", bootstrap_port),
         ("zmq_kv_events_port", zmq_kv_events_port),
+        ("zmq_kv_events_topic", zmq_kv_events_topic),
         ("zmq_replay_port", zmq_replay_port),
         ("kv_state_agent", kv_state_agent),
     ):
@@ -248,39 +251,52 @@ def build_runtime_config(
     return rank["block_size"], rc
 
 
+def kv_state_agent_cache_owner_ids(dp_size: int, first_slot: int) -> list[str]:
+    """CacheOwner IDs of one mocker worker, one per DP rank.
+
+    Operator-assigned durable slots in the canonical `domain/pool/slot` format
+    of the vLLM KVCR manifests, so a restarted worker reattaches to its slots.
+    """
+    return [
+        f"{_KV_STATE_AGENT_INDEXER_DOMAIN}/{_KV_STATE_AGENT_POOL}/{first_slot + rank:032x}"
+        for rank in range(dp_size)
+    ]
+
+
 def build_kv_state_agent_descriptors(
     engine_args: Mapping[str, Any],
     *,
+    cache_owner_ids: list[str],
     kv_state_endpoint: str,
+    raw_advertise_host: str,
     zmq_kv_events_port: int,
     router_hint_worker_type: str | None = None,
 ) -> list[dict]:
-    """KV state-agent attachment descriptors for one mocker worker, one per DP rank.
+    """KV state-agent attachment descriptors for one mocker worker, one per DP rank,
+    built as a vLLM state-agent worker builds them.
 
-    Each CacheOwner slot is its rank's ZMQ port: unique on the state agent's
-    host (raw endpoints are loopback) and stable across mocker restarts, so a
-    restarted worker reattaches to its durable slot. With
-    ``router_hint_worker_type``, each owner advertises a placeholder source
-    control endpoint: the router builds hints for it, and the mocker ignores them.
+    Every rank publishes the worker's raw topic. With ``router_hint_worker_type``,
+    each owner advertises a placeholder source control endpoint: the router builds
+    hints for it, and the mocker ignores them.
     """
+    raw_topic = worker_raw_topic(cache_owner_ids)
     descriptors = []
-    for rank in range(engine_args["dp_size"]):
-        port = zmq_kv_events_port + rank
+    for rank, cache_owner_id in enumerate(cache_owner_ids):
+        slot = cache_owner_id.rsplit("/", 1)[1]
         descriptors.append(
             {
-                "cache_owner_id": (
-                    f"{_KV_STATE_AGENT_INDEXER_DOMAIN}/{_KV_STATE_AGENT_POOL}/"
-                    f"{port:032x}"
-                ),
+                "cache_owner_id": cache_owner_id,
                 "global_dp_rank": rank,
                 "kv_state_endpoint": kv_state_endpoint,
-                "indexer_domain_id": _KV_STATE_AGENT_INDEXER_DOMAIN,
+                "indexer_domain_id": cache_owner_id.split("/", 1)[0],
                 "kv_block_size": engine_args["engine"]["block_size"],
-                "raw_zmq_endpoint": f"tcp://127.0.0.1:{port}",
-                "raw_topic": "",
+                "raw_zmq_endpoint": (
+                    f"tcp://{raw_advertise_host}:{zmq_kv_events_port + rank}"
+                ),
+                "raw_topic": raw_topic,
                 "router_hint_source": (
                     {
-                        "source_control_endpoint": f"tcp://mocker-{port}.invalid:1",
+                        "source_control_endpoint": f"tcp://mocker-{slot}.invalid:1",
                         "worker_type": router_hint_worker_type,
                     }
                     if router_hint_worker_type is not None

@@ -12,6 +12,7 @@ from dynamo.common.configuration.groups.router_args import (
     add_worker_router_arguments,
 )
 from dynamo.common.configuration.utils import Deprecated
+from dynamo.common.kv_state_agent import validate_advertise_host
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -578,6 +579,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "lookup. The mocker ignores the hints it receives.",
     )
     parser.add_argument(
+        "--kv-state-agent-raw-host",
+        type=str,
+        default=None,
+        help="With --kv-state-agent, the connectable host the KV state agent dials for "
+        "this process's raw KV event streams, as dynamo_state_agent.raw_advertise_host "
+        "for vLLM workers. Required with --kv-state-agent.",
+    )
+    parser.add_argument(
+        "--kv-state-agent-cache-slot",
+        type=int,
+        default=None,
+        help="With --kv-state-agent, the first CacheOwner slot of this process: worker i's "
+        "DP rank r owns slot (this + i * data-parallel-size + r), as KVCR_CACHE_SLOT in the "
+        "vLLM KVCR manifests. Give each mocker process a disjoint range. Required with "
+        "--kv-state-agent.",
+    )
+    parser.add_argument(
+        "--kv-state-endpoint",
+        type=str,
+        default=os.environ.get("DYN_KV_STATE_ENDPOINT"),
+        help="Endpoint identity that owns this worker's KV event and recovery state. "
+        "Defaults to the serving endpoint.",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -756,8 +781,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # An --extra-engine-args file carries its own native_host_offload.
         if args.num_host_blocks is None and args.extra_engine_args is None:
             raise ValueError("--kv-state-agent requires --num-host-blocks")
-    elif args.kv_state_agent_router_hints:
-        raise ValueError("--kv-state-agent-router-hints requires --kv-state-agent")
+        if args.kv_state_agent_raw_host is None:
+            raise ValueError("--kv-state-agent requires --kv-state-agent-raw-host")
+        validate_advertise_host(args.kv_state_agent_raw_host)
+        if args.kv_state_agent_cache_slot is None or args.kv_state_agent_cache_slot < 0:
+            raise ValueError(
+                "--kv-state-agent requires a non-negative --kv-state-agent-cache-slot"
+            )
+    else:
+        for flag, given in (
+            ("--kv-state-agent-router-hints", args.kv_state_agent_router_hints),
+            ("--kv-state-agent-raw-host", args.kv_state_agent_raw_host is not None),
+            ("--kv-state-agent-cache-slot", args.kv_state_agent_cache_slot is not None),
+        ):
+            if given:
+                raise ValueError(f"{flag} requires --kv-state-agent")
 
     # Set endpoint default based on worker type if not explicitly provided
     if args.endpoint is None:

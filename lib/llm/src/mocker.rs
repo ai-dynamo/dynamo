@@ -643,6 +643,7 @@ impl MockerExecutionContext {
                         dp_rank,
                         args.block_size as u32,
                         args.runtime.kv_state_agent,
+                        args.runtime.zmq_kv_events_topic.clone().unwrap_or_default(),
                     )
                     .await
                     {
