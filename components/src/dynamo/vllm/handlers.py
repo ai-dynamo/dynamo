@@ -6,10 +6,10 @@ import base64
 import functools
 import importlib
 import inspect
-import json
 import logging
 import math
 import os
+import sqlite3
 import struct
 import tempfile
 import time
@@ -98,6 +98,7 @@ from dynamo.vllm.kv_connector_protocols import (
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 from .args import Config
+from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
@@ -146,21 +147,6 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
-
-
-def _configured_artifact_router_profile(
-    configured: str | None,
-) -> tuple[tuple[int, int, int], ...]:
-    if configured is None:
-        return ()
-    from dynamo.artifacts.vllm.capture import _validated_router_profile
-
-    try:
-        return _validated_router_profile(json.loads(configured))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"invalid --artifact-router-profile / DYNAMO_ARTIFACT_ROUTER_PROFILE: {exc}"
-        ) from exc
 
 
 def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
@@ -2003,6 +1989,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return await asyncio.to_thread(authority.status, operation_id)
         except KeyError:
             return {"status": "error", "message": "operation not found"}
+        except sqlite3.Error as exc:
+            logger.warning(
+                "Artifact operation status unavailable (%s)", type(exc).__name__
+            )
+            return {"status": "error", "message": "artifact status unavailable"}
 
     async def liveness_probe(self, body: dict) -> dict:
         """Engine event-loop liveness probe."""
@@ -3593,8 +3584,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # every streamed chunk would be wasted work, since only the
                     # final value is emitted).
                     raw_routed_experts = getattr(output, "routed_experts", None)
-                    if artifact_session is not None:
-                        artifact_session.observe(output, res.prompt_token_ids)
+                    normalized_finish_reason = (
+                        normalize_finish_reason(finish_reason)
+                        if finish_reason
+                        else None
+                    )
+                    failed_artifact_terminal = normalized_finish_reason in (
+                        "cancelled",
+                        "error",
+                    ) or (normalized_finish_reason or "").startswith("error:")
+                    if artifact_session is not None and not failed_artifact_terminal:
+                        await artifact_session.observe_async(
+                            output, res.prompt_token_ids
+                        )
                     if raw_routed_experts is not None and emit_routed_experts:
                         raw_routed_experts_by_output[output_idx] = raw_routed_experts
                     raw_sampling_mask = getattr(output, "sampling_mask", None)
@@ -3612,7 +3614,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         out["top_logprobs"] = top_logprobs
 
                     if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
+                        out["finish_reason"] = normalized_finish_reason
                         if engine_prompt_token_ids is not None:
                             out["engine_data"] = {
                                 "prompt_token_ids": list(engine_prompt_token_ids)
@@ -3686,9 +3688,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             raw_routed_experts_by_output.pop(output_idx, None)
                             output.routed_experts = None
                             raw_routed_experts = None
-                            out.setdefault("engine_data", {})[
-                                "metadata_upload"
-                            ] = await artifact_session.finalize(release_capture=False)
+                            if not failed_artifact_terminal:
+                                out.setdefault("engine_data", {})[
+                                    "metadata_upload"
+                                ] = await artifact_session.finalize(
+                                    release_capture=False
+                                )
 
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
@@ -4103,6 +4108,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # For P/D, apply hints only to prefill workers (kv_params is None).
         kv_hints = _build_vllm_kv_hints(request) if kv_params is None else None
 
+        client_logprob_width = sampling_params.logprobs
+        artifact_forced_logprobs = False
         artifact_session = None
         artifact_settings = _backend_metadata_upload_settings(request)
         if artifact_settings is not None and "kind" in artifact_settings:
@@ -4128,6 +4135,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                 sampling_params.logprobs = max(1, sampling_params.logprobs or 0)
                 sampling_params.__post_init__()
+                artifact_forced_logprobs = (
+                    sampling_params.logprobs != client_logprob_width
+                )
             prompt_ids = (
                 prompt.get("prompt_token_ids") if isinstance(prompt, dict) else None
             )
@@ -4230,6 +4240,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         ):
                             if abort_guard is not None:
                                 abort_guard.signal_first_token()
+                            if artifact_forced_logprobs:
+                                if client_logprob_width is None:
+                                    tok = {
+                                        key: value
+                                        for key, value in tok.items()
+                                        if key not in ("log_probs", "top_logprobs")
+                                    }
+                                elif (
+                                    client_logprob_width == 0 and "top_logprobs" in tok
+                                ):
+                                    tok = {
+                                        **tok,
+                                        "top_logprobs": [[] for _ in tok["token_ids"]],
+                                    }
                             if prefill_result is not None and "completion_usage" in tok:
                                 tok["completion_usage"][
                                     "prompt_tokens_details"

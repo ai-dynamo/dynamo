@@ -61,6 +61,7 @@ from .args import (
     configure_rl_logprobs_mode,
     parse_args_with_model_fetch,
 )
+from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -190,6 +191,8 @@ async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     config = await parse_args_with_model_fetch(argv)
+    if config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(config.artifact_router_profile)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(

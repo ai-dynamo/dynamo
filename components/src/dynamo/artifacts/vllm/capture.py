@@ -273,6 +273,26 @@ class VllmArtifactSession:
         session.budget.reserve(session.reserved_bytes)
         return session
 
+    async def observe_async(self, output, prompt_token_ids):
+        native = getattr(output, "routed_experts", None)
+        if native is None or "moe_routes" not in self.contents:
+            self.observe(output, prompt_token_ids)
+            return
+        task = asyncio.create_task(
+            asyncio.to_thread(self.observe, output, prompt_token_ids)
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            if not task.cancelled():
+                task.exception()
+            raise
+
     def observe(self, output, prompt_token_ids):
         if self.error or self._closed:
             return

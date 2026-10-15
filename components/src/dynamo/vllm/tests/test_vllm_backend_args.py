@@ -11,6 +11,7 @@ need to add more tests to cover different code paths of DynamoVllmConfig.
 import argparse
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -70,6 +71,26 @@ def test_artifact_router_profile_accepts_cli_and_environment(monkeypatch):
         ).artifact_router_profile
         == "[[9, 16, 2]]"
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_artifact_router_profile_fails_before_metadata_fetch(monkeypatch):
+    from dynamo.vllm import args
+
+    config = SimpleNamespace(model="ngc://example/model", artifact_router_profile="bad")
+    engine_args = SimpleNamespace(model="ngc://example/model", served_model_name=None)
+    fetch = AsyncMock(return_value="/tmp/model")
+    monkeypatch.setattr(
+        args, "_parse_cli_args", Mock(return_value=(config, engine_args))
+    )
+    monkeypatch.setattr(args, "needs_local_model_path", Mock(return_value=True))
+    monkeypatch.setattr(args, "fetch_model", fetch)
+    monkeypatch.setattr(args, "_build_config", Mock())
+
+    with pytest.raises(ValueError, match="invalid --artifact-router-profile"):
+        await args.parse_args_with_model_fetch([])
+
+    fetch.assert_not_awaited()
 
 
 def write_benchmark_points(tmp_path):

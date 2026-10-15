@@ -58,6 +58,7 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
         dump_config_to=None,
         served_model_name="test-model",
         model=str(model_path),
+        artifact_router_profile=None,
         engine_args=SimpleNamespace(
             model=str(model_path), served_model_name="test-model"
         ),
@@ -95,19 +96,44 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
 
 
 @pytest.mark.asyncio
-async def test_shutdown_without_artifact_config_does_not_touch_runtime(
-    monkeypatch, vllm_main
+async def test_invalid_router_profile_fails_before_model_load(
+    monkeypatch, tmp_path, vllm_main
 ) -> None:
-    lifecycle = SimpleNamespace(close=AsyncMock())
+    _patch_worker_startup(
+        vllm_main, monkeypatch, tmp_path, factory_create=RuntimeError("unused")
+    )
+    config = vllm_main.parse_args_with_model_fetch.return_value
+    config.artifact_router_profile = "invalid json"
+    fetch_model = AsyncMock()
+    monkeypatch.setattr(vllm_main, "fetch_model", fetch_model)
+
+    with pytest.raises(ValueError, match="invalid --artifact-router-profile"):
+        await vllm_main.worker([])
+
+    fetch_model.assert_not_awaited()
+    vllm_main.prepare_snapshot_engine.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_without_artifact_config_does_not_touch_runtime(
+    monkeypatch, tmp_path, vllm_main
+) -> None:
+    async def serve_noop(*_args, **_kwargs):
+        return None
+
+    lifecycle, _ = _patch_worker_startup(
+        vllm_main, monkeypatch, tmp_path, factory_create=serve_noop
+    )
     close_artifact_runtime = AsyncMock()
     monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
     monkeypatch.setattr(
         vllm_main, "close_configured_artifact_runtime", close_artifact_runtime
     )
 
-    await vllm_main._close_worker_resources(lifecycle)
+    await vllm_main.worker([])
 
     lifecycle.close.assert_awaited_once_with()
+    vllm_main.initialize_configured_artifact_runtime.assert_not_awaited()
     close_artifact_runtime.assert_not_awaited()
 
 

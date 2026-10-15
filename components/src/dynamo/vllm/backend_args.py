@@ -4,6 +4,7 @@
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
 import argparse
+import json
 import logging
 import os
 import warnings
@@ -33,6 +34,21 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
+
+
+def _configured_artifact_router_profile(
+    configured: str | None,
+) -> tuple[tuple[int, int, int], ...]:
+    if configured is None:
+        return ()
+    from dynamo.artifacts.vllm.capture import _validated_router_profile
+
+    try:
+        return _validated_router_profile(json.loads(configured))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"invalid --artifact-router-profile / DYNAMO_ARTIFACT_ROUTER_PROFILE: {exc}"
+        ) from exc
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -644,6 +660,7 @@ class DynamoVllmConfig(ConfigBase):
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
+        _configured_artifact_router_profile(self.artifact_router_profile)
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
