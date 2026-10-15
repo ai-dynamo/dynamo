@@ -92,9 +92,9 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			for index, model := range test.models {
 				projection := &ModelProjection{model: model}
 				if !test.allLocal {
-					projection.configuredBuild.Partitions = []BuildPartition{
-						{SourcePartitionID: 7, PartPath: "part-7", NumChips: 16, topology: "topology-7", DevicesPerNode: 8},
-						{SourcePartitionID: 9, PartPath: "part-9", NumChips: 8, topology: "topology-9", DevicesPerNode: 8},
+					projection.configuredBuild.partitions = []buildPartition{
+						{sourcePartitionID: 7, partPath: "part-7", numChips: 16, topology: "topology-7", devicesPerNode: 8},
+						{sourcePartitionID: 9, partPath: "part-9", numChips: 8, topology: "topology-9", devicesPerNode: 8},
 					}
 				}
 				projections[index] = projection

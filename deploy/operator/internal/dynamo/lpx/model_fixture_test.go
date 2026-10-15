@@ -25,11 +25,11 @@ const registryTestTopology = "test-topology"
 const gbuildManifestJSONFile = "manifest.json"
 
 func normalizeRegistryFixtureBuild(ctx context.Context, registry ModelRegistry, id string) (*Build, error) {
-	snapshot, err := registry.AcquireBuildSnapshot(ctx, id)
+	snapshot, err := registry.AcquireBuild(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return snapshot.build, nil
+	return snapshot, nil
 }
 
 type fakeModelServiceClient struct {

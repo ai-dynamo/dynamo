@@ -24,58 +24,61 @@ const (
 
 // Build is the registry's source-independent view of an LPU build.
 //
-// The version 2 Cap'n Proto manifest populates this shape before deployment code
+// The validated compiler contract populates this shape before deployment code
 // derives placement and replica counts.
 type Build struct {
-	// Path is the absolute file or GCS reference of the build payload.
-	Path string
-	// Family is the physical LPU target family.
-	Family BuildFamily
-	// HasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
-	HasCUDAPartitions bool
-	// Partitions contains the normalized physical compiler partitions.
-	Partitions []BuildPartition
-	// SelectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
-	SelectedPropSyncChains [][]int
-	// StandaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
-	StandaloneTokenEmbeddings bool
-	// SupportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
-	SupportsCPUEmbeddings bool
-	// IOFPGACount is the number of I/O FPGA endpoints described by the build.
-	IOFPGACount int32
-	// IOFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
-	IOFanoutFactor int32
+	// contentID identifies the exact compiler contract used to acquire this build.
+	contentID      string
+	contractFormat buildContractFormat
+	// path is the absolute file or GCS reference of the build payload.
+	path string
+	// family is the physical LPU target family.
+	family BuildFamily
+	// hasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
+	hasCUDAPartitions bool
+	// partitions contains the normalized physical compiler partitions.
+	partitions []buildPartition
+	// selectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
+	selectedPropSyncChains [][]int
+	// standaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
+	standaloneTokenEmbeddings bool
+	// supportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
+	supportsCPUEmbeddings bool
+	// ioFPGACount is the number of I/O FPGA endpoints described by the build.
+	ioFPGACount int32
+	// ioFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
+	ioFanoutFactor int32
 }
 
-// BuildPartition describes one normalized physical compiler partition.
-type BuildPartition struct {
-	// SourcePartitionID is the compiler partition id used in artifacts and
+// buildPartition describes one normalized physical compiler partition.
+type buildPartition struct {
+	// sourcePartitionID is the compiler partition id used in artifacts and
 	// selected prop-sync chains. It is not the slice index after sorting/filtering.
-	SourcePartitionID int
-	// PartPath is the nonempty relative gas-dir fragment under the build payload.
-	PartPath string
-	// NumChips is the chip count declared by the compiler manifest.
-	NumChips int
+	sourcePartitionID int
+	// partPath is the nonempty relative gas-dir fragment under the build payload.
+	partPath string
+	// numChips is the chip count declared by the compiler manifest.
+	numChips int
 	// topology identifies compatible subnode stages for PropSync packing.
 	topology string
-	// DevicesPerNode is the number of chips per physical node in the compiler manifest.
-	DevicesPerNode int
-	// HXExtent is the scheduler-facing four-dimensional HX allocation.
-	HXExtent []int64
+	// devicesPerNode is the number of chips per physical node in the compiler manifest.
+	devicesPerNode int
+	// hxExtent is the scheduler-facing four-dimensional HX allocation.
+	hxExtent []int64
 
 	// runtimeNodeCount sums physical endpoints for a collapsed hybrid chain;
-	// NumChips retains the original root stage.
+	// numChips retains the original root stage.
 	runtimeNodeCount int
 }
 
 // effectiveNodeCount returns the number of Agent endpoints assigned to the
 // partition. Source partitions derive it from topology; collapsed runtime
 // partitions preserve the sum of their physical scheduler endpoints.
-func (p BuildPartition) effectiveNodeCount() int {
+func (p buildPartition) effectiveNodeCount() int {
 	if p.runtimeNodeCount > 0 {
 		return p.runtimeNodeCount
 	}
-	return max(1, p.NumChips/p.DevicesPerNode)
+	return max(1, p.numChips/p.devicesPerNode)
 }
 
 // buildRuntimePath resolves a snapshot reference to its runtime filesystem path.

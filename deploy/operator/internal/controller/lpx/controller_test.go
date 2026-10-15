@@ -855,7 +855,7 @@ func TestLPXDownloadsBeforePublication(t *testing.T) {
 				}
 				require.Empty(t, observedRegistry.calls)
 			}
-			require.Zero(t, observedRegistry.acquireBuildSnapshotCalls)
+			require.Zero(t, observedRegistry.acquireBuildCalls)
 			pcs := &grovev1alpha1.PodCliqueSetList{}
 			requests := &lpxv1alpha1.LPUPipelineRequestList{}
 			require.NoError(t, r.List(t.Context(), pcs))
@@ -2724,7 +2724,7 @@ type snapshotFailureRegistry struct {
 	err error
 }
 
-func (r *snapshotFailureRegistry) AcquireBuildSnapshot(context.Context, string) (*lpx.BuildSnapshot, error) {
+func (r *snapshotFailureRegistry) AcquireBuild(context.Context, string) (*lpx.Build, error) {
 	return nil, r.err
 }
 
@@ -2735,15 +2735,15 @@ type downloadOrderedLPXRegistry struct {
 	calls      []string
 }
 
-func (r *downloadOrderedLPXRegistry) AcquireBuildSnapshot(
+func (r *downloadOrderedLPXRegistry) AcquireBuild(
 	ctx context.Context,
 	buildID string,
-) (*lpx.BuildSnapshot, error) {
+) (*lpx.Build, error) {
 	r.calls = append(r.calls, "snapshot")
 	if !r.downloaded {
 		return nil, errors.New("LPX snapshot acquired before Model Express download")
 	}
-	return r.ModelRegistry.AcquireBuildSnapshot(ctx, buildID)
+	return r.ModelRegistry.AcquireBuild(ctx, buildID)
 }
 
 func (r *downloadOrderedLPXRegistry) BuildURL(string) (*url.URL, error) {

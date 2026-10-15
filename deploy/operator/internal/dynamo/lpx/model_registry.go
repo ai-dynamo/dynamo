@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +16,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -40,7 +44,7 @@ type defaultModelRegistry struct {
 type ModelRegistry interface {
 	BuildURL(id string) (*url.URL, error)
 	EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error)
-	AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error)
+	AcquireBuild(ctx context.Context, id string) (*Build, error)
 }
 
 // NewModelRegistry constructs a registry rooted at modelRegistryURL. An empty
@@ -321,4 +325,133 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 	default:
 		return nil, fmt.Errorf("unsupported build metadata scheme %q", buildURL.Scheme)
 	}
+}
+
+// errInvalidBuildManifest separates invalid compiler input from acquisition failures.
+var errInvalidBuildManifest = errors.New("invalid build manifest")
+
+const (
+	// This domain identifies snapshots of manifest bytes without a file inventory.
+	buildSnapshotIdentityVersion = "dynamo-lpx-compiler-snapshot/v4"
+	// Bound the single manifest to the Model Express transport's metadata ceiling.
+	maxBuildSnapshotMetadataBytes = modelExpressMaxMessageSize
+	buildSnapshotTimeout          = 30 * time.Second
+)
+
+// AcquireBuild reads and validates the immutable compiler manifest once.
+// The receiver must be non-nil and is not mutated. Payload files are not inspected.
+func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Build, error) {
+	// Bound the manifest read and resolve the build's provider-specific locator.
+	ctx, cancel := context.WithTimeout(ctx, buildSnapshotTimeout)
+	defer cancel()
+	refURL, err := r.BuildURL(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Discover only the two supported entry points; never inventory payload files.
+	entries, err := r.buildContractFiles(ctx, refURL)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("%w: missing build contract: require %s or %s", os.ErrNotExist, gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
+	}
+	format, err := selectBuildContract(entries)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errInvalidBuildManifest, err)
+	}
+	manifestPath, err := format.filename()
+	if err != nil {
+		return nil, err
+	}
+	manifestData, err := r.readBuildFileBounded(ctx, refURL, manifestPath, maxBuildSnapshotMetadataBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the selected contract exactly once, without fallback on invalid split bytes.
+	var build *Build
+	switch format {
+	case buildContractManifestV2:
+		manifest, decodeErr := decodeGbuildManifestV2(manifestData)
+		if decodeErr != nil {
+			err = decodeErr
+		} else {
+			build, err = buildFromGbuildManifestV2(refURL.String(), manifest)
+		}
+	case buildContractDeploymentV1:
+		deployment, decodeErr := decodeGbuildDeploymentV1(manifestData)
+		if decodeErr != nil {
+			err = decodeErr
+		} else {
+			build, err = buildFromGbuildDeploymentV1(refURL.String(), deployment)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
+	}
+
+	// Hash the exact manifest bytes in their own domain, bound to the schema filename and independent of the locator.
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(buildSnapshotIdentityVersion + "\x00"))
+	_, _ = hash.Write([]byte(manifestPath + "\x00"))
+	_, _ = hash.Write(manifestData)
+	build.contentID = fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	build.contractFormat = format
+	return build, nil
+}
+
+// buildContractFiles discovers supported entry points without scanning local payload trees.
+// The receiver and buildURL must be non-nil.
+func (r *defaultModelRegistry) buildContractFiles(ctx context.Context, buildURL *url.URL) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	candidates := []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}
+	if buildURL.Scheme == BuildSchemeFile {
+		var paths []string
+		for _, name := range candidates {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			_, err := os.Lstat(buildURL.JoinPath(name).Path)
+			if isDefinitiveBuildMemberAbsence(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			paths = append(paths, name)
+		}
+		return paths, nil
+	}
+	if r.mxClient == nil {
+		return nil, fmt.Errorf("Model Express client is required for GCS model registry reads of %q", buildURL.String())
+	}
+
+	// Probe alternatives separately because Model Express requires every selected path to exist.
+	var paths []string
+	for _, name := range candidates {
+		listed, err := r.mxClient.ListModelFiles(ctx, &modelpb.ModelFilesRequest{
+			ModelName: buildURL.String(), Provider: modelpb.ModelProvider_GCS,
+			FileSelector: &modelpb.ModelFileSelector{Paths: []string{name}},
+		})
+		if status.Code(err) == codes.NotFound {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range listed.GetFiles() {
+			if file.GetRelativePath() == name {
+				paths = append(paths, name)
+			}
+		}
+	}
+	return paths, nil
+}
+
+func isDefinitiveBuildMemberAbsence(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || status.Code(err) == codes.NotFound
 }
