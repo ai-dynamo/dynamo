@@ -115,19 +115,19 @@ func packPropSyncPartitions(partitions []BuildPartition) []BuildPartition {
 	// Shared-node stages need matching chip counts and, for XT, identical topology
 	// names. Decoding guarantees that every partition of a build has one node width.
 	root := partitions[0]
-	chips, chipsPerNode := root.Topology.ChipCount, root.DevicesPerNode
+	chips, chipsPerNode := root.NumChips, root.DevicesPerNode
 	if len(partitions) < 2 || chips >= chipsPerNode || chipsPerNode%chips != 0 {
 		return partitions
 	}
 	for _, partition := range partitions[1:] {
-		if partition.Topology.ChipCount != chips ||
-			(len(partition.HXExtent) == 0 && partition.Topology.Raw != root.Topology.Raw) {
+		if partition.NumChips != chips ||
+			(len(partition.HXExtent) == 0 && partition.topology != root.topology) {
 			return partitions
 		}
 	}
 
 	// Reserve the final node in full even when some of its chips are unused.
-	root.Topology = Topology{ChipCount: ((len(partitions)*chips + chipsPerNode - 1) / chipsPerNode) * chipsPerNode}
+	root.NumChips = ((len(partitions)*chips + chipsPerNode - 1) / chipsPerNode) * chipsPerNode
 	return []BuildPartition{root}
 }
 
