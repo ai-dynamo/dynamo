@@ -67,7 +67,6 @@ class _FakeDevice:
     """Device memory seen by one engine of a shadow-failover pair."""
 
     def __init__(self, total: int, peer_used: int):
-        """Start with peer memory resident and no local torch allocations."""
         self.total = total
         self.used = peer_used
         self.reserved = 0
@@ -101,7 +100,6 @@ _CUDAGRAPH = int(0.43 * _GIB)
 
 
 def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0, is_cuda=True):
-    """Run init_device and the scratch-KV budget beside a resident peer engine."""
     # The peer engine is already resident. On CUDA, this engine's context
     # also exists before init_device runs.
     context = _CONTEXT if is_cuda else 0
@@ -109,11 +107,9 @@ def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0, is_cuda=True):
     device = _FakeDevice(_TOTAL, peer_used=peer_used + context)
 
     def base_init_device(_worker):
-        """Allocate local buffers while the peer changes its memory use."""
         device.used += _NON_TORCH + peer_memory_delta
 
     def profile_run():
-        """Report the local activation peak without loading a model."""
         device.peak_allocated = _TORCH_PEAK
 
     monkeypatch.setattr(gms_worker, "torch_device", lambda: device)
@@ -157,8 +153,6 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
     """Reserve both engines' overhead while counting shared weights once."""
     kv_budget = _shadow_kv_budget(monkeypatch, tmp_path)
 
-    # The wake-time KV allocation, both engines' non-KV memory and the shared
-    # weights must fit within the requested share of the device.
     engine_non_kv = _CONTEXT + _TORCH_PEAK + _NON_TORCH + _CUDAGRAPH
     assert kv_budget + _WEIGHTS + 2 * engine_non_kv <= _REQUESTED
     assert kv_budget > 0
@@ -172,7 +166,6 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
 def test_shadow_kv_budget_ignores_peer_memory_changes(
     monkeypatch, tmp_path, peer_memory_delta
 ):
-    """Keep room for both engines when the peer allocates or frees memory."""
     kv_budget = _shadow_kv_budget(
         monkeypatch, tmp_path, peer_memory_delta=peer_memory_delta
     )
