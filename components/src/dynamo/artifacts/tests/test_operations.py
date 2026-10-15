@@ -4,13 +4,13 @@
 import asyncio
 import gc
 import hashlib
+import secrets
 import sqlite3
 import threading
 import time
 
 import pytest
 
-fernet = pytest.importorskip("cryptography.fernet")
 pytest.importorskip("opendal")
 
 from dynamo.artifacts.operations import (  # noqa: E402
@@ -18,8 +18,6 @@ from dynamo.artifacts.operations import (  # noqa: E402
     ArtifactService,
 )
 from dynamo.artifacts.storage import ArtifactStorageError  # noqa: E402
-
-Fernet = fernet.Fernet
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -33,7 +31,7 @@ pytestmark = [
 @pytest.mark.parametrize("times_out", [False, True])
 async def test_delivery_without_python311_timeout_api(tmp_path, monkeypatch, times_out):
     monkeypatch.delattr(asyncio, "timeout", raising=False)
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
 
     async def transfer(data, target):
         if times_out:
@@ -64,7 +62,7 @@ async def test_pending_operation_count_is_bounded(tmp_path):
         await release.wait()
         raise RuntimeError("stop")
 
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     service = ArtifactService(store, transfer, None, max_pending_operations=1)
     await service.submit(b"x", "owner", [], {})
     with pytest.raises(ValueError, match="capacity"):
@@ -78,7 +76,7 @@ async def test_pending_operation_count_is_bounded(tmp_path):
 
 @pytest.mark.asyncio
 async def test_queue_wait_does_not_consume_transfer_timeout(tmp_path):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -110,12 +108,12 @@ async def test_queue_wait_does_not_consume_transfer_timeout(tmp_path):
 
 @pytest.mark.asyncio
 async def test_ambiguous_timeout_gets_fresh_readback_budget(tmp_path):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     attempts = []
 
     async def transfer(data, target):
         attempts.append(data)
-        await asyncio.sleep(0.2)
+        await asyncio.Event().wait()
 
     async def verify(data, target, receipt):
         await asyncio.sleep(0.03)
@@ -125,7 +123,7 @@ async def test_ambiguous_timeout_gets_fresh_readback_budget(tmp_path):
             "sha256": hashlib.sha256(data).hexdigest(),
         }
 
-    service = ArtifactService(store, transfer, verify, timeout_seconds=0.05)
+    service = ArtifactService(store, transfer, verify, timeout_seconds=0.3)
     pending = await service.submit(b"opaque", "owner", [], {})
     await service.drain()
     assert len(attempts) == 1
@@ -134,7 +132,7 @@ async def test_ambiguous_timeout_gets_fresh_readback_budget(tmp_path):
 
 @pytest.mark.asyncio
 async def test_unresolved_ambiguous_write_records_commit_unknown(tmp_path):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
 
     async def transfer(data, target):
         raise ArtifactStorageError("commit_unknown", "ack lost", outcome="ambiguous")
@@ -143,6 +141,40 @@ async def test_unresolved_ambiguous_write_records_commit_unknown(tmp_path):
         await asyncio.Event().wait()
 
     service = ArtifactService(store, transfer, verify, timeout_seconds=0.01)
+    pending = await service.submit(b"opaque", "owner", [], {})
+    await service.drain()
+    result = store.get(pending["operation_id"], "owner")
+    assert result["state"] == "failed"
+    assert result["error_code"] == "commit_unknown"
+
+
+@pytest.mark.asyncio
+async def test_unlisted_transfer_exception_records_terminal_failure(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
+
+    async def transfer(data, target):
+        raise KeyError("provider failure")
+
+    service = ArtifactService(store, transfer, None)
+    pending = await service.submit(b"opaque", "owner", [], {})
+    await service.drain()
+    result = store.get(pending["operation_id"], "owner")
+    assert result["state"] == "failed"
+    assert result["error_code"] == "delivery_failed"
+    assert service.source_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_unlisted_verification_exception_preserves_ambiguous_outcome(tmp_path):
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
+
+    async def transfer(data, target):
+        raise ArtifactStorageError("commit_unknown", "ack lost", outcome="ambiguous")
+
+    async def verify(data, target, receipt):
+        raise KeyError("provider readback failed")
+
+    service = ArtifactService(store, transfer, verify)
     pending = await service.submit(b"opaque", "owner", [], {})
     await service.drain()
     result = store.get(pending["operation_id"], "owner")
@@ -175,7 +207,7 @@ def blocking_writer():
 
 def test_state_is_durable_without_persisting_grants(tmp_path):
     path = tmp_path / "operations.db"
-    key = Fernet.generate_key()
+    key = secrets.token_bytes(32)
     store = ArtifactOperationStore(path, key)
     pending = store.create("owner", ["moe_routes"], {"url": "SENTINEL_SECRET"})
     assert pending["state"] == "pending"
@@ -210,7 +242,7 @@ def test_legacy_grants_are_removed_on_migration(tmp_path):
                 time.time(),
             ),
         )
-    store = ArtifactOperationStore(path, Fernet.generate_key())
+    store = ArtifactOperationStore(path, secrets.token_bytes(32))
     with sqlite3.connect(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
         assert "grant" not in columns
@@ -232,7 +264,7 @@ async def test_pending_does_not_wait_for_transfer(tmp_path):
     async def verify(data, target, receipt):
         return {**receipt, "sha256": hashlib.sha256(data).hexdigest()}
 
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     service = ArtifactService(store, transfer, verify)
     result = await service.submit(b"opaque", "owner", [], {"kind": "managed_store"})
     assert result["state"] == "pending"
@@ -253,7 +285,7 @@ async def test_failed_verification_never_becomes_ready(tmp_path):
     async def verify(data, target, receipt):
         return {**receipt, "sha256": "incorrect"}
 
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     service = ArtifactService(store, transfer, verify)
     pending = await service.submit(b"opaque", "owner", [], {})
     await service.drain()
@@ -264,14 +296,14 @@ async def test_failed_verification_never_becomes_ready(tmp_path):
 
 
 def test_recovery_fails_lost_ephemeral_sources(tmp_path):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     pending = store.create("owner", [], {})
     assert store.recover() == 1
     assert store.get(pending["operation_id"], "owner")["error_code"] == "source_lost"
 
 
 def test_recovery_queries_indexed_pending_state(tmp_path):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     pending = store.create("owner", [], {})
     terminal = store.create("owner", [], {})
     store.finish(terminal["operation_id"], "failed", error_code="source_lost")
@@ -286,7 +318,7 @@ def test_terminal_receipts_expire_without_deleting_pending_rows(tmp_path, monkey
     clock = [time.time()]
     monkeypatch.setattr("dynamo.artifacts.operations.time.time", lambda: clock[0])
     store = ArtifactOperationStore(
-        tmp_path / "ops.db", Fernet.generate_key(), terminal_ttl_seconds=10
+        tmp_path / "ops.db", secrets.token_bytes(32), terminal_ttl_seconds=10
     )
     expired = store.create("owner", [], {})
     pending = store.create("owner", [], {})
@@ -314,7 +346,7 @@ async def test_queue_budget_releases_after_failure(tmp_path):
         await release.wait()
         raise RuntimeError("SENTINEL_SECRET")
 
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     service = ArtifactService(store, transfer, None, max_source_bytes=6)
     first = await service.submit(b"opaque", "owner", [], {})
     with pytest.raises(ValueError, match="capacity"):
@@ -341,7 +373,7 @@ async def test_ambiguous_commit_is_verified_without_a_second_put(tmp_path):
             "object_id": "bound-object",
         }
 
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     service = ArtifactService(store, transfer, verify)
     pending = await service.submit(b"captured", "owner", [], {"url": "SENTINEL"})
     await service.drain()
@@ -360,7 +392,7 @@ async def test_caller_cannot_mutate_a_handed_off_target(tmp_path):
         assert target["required_headers"]["signed"] == "original"
         raise RuntimeError("stop")
 
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     service = ArtifactService(store, transfer, None)
     target = {"required_headers": {"signed": "original"}}
     await service.submit(b"bytes", "owner", [], target)
@@ -375,7 +407,7 @@ async def test_caller_cannot_mutate_a_handed_off_target(tmp_path):
 async def test_repeated_create_cancellation_keeps_source_until_failed_commit(
     tmp_path, monkeypatch, blocking_writer
 ):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     created = []
     original_create = store.create
 
@@ -410,7 +442,7 @@ async def test_repeated_create_cancellation_keeps_source_until_failed_commit(
 async def test_cancelled_ready_writer_commits_ready_once(
     tmp_path, monkeypatch, blocking_writer
 ):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     writes = []
     original_finish = store.finish
 
@@ -451,7 +483,7 @@ async def test_cancelled_ready_writer_commits_ready_once(
 async def test_repeated_delivery_cancellation_settles_failed_writer(
     tmp_path, monkeypatch, blocking_writer
 ):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     writer, writer_entered, release = blocking_writer(store.finish)
     monkeypatch.setattr(store, "finish", writer)
     transfer_entered = asyncio.Event()
@@ -482,7 +514,7 @@ async def test_repeated_cancellation_drains_transfer_cleanup_before_release(tmp_
     entered = asyncio.Event()
     cleanup_entered = asyncio.Event()
     release_cleanup = asyncio.Event()
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
 
     async def transfer(data, target):
         entered.set()
@@ -517,7 +549,7 @@ async def test_repeated_cancellation_drains_transfer_cleanup_before_release(tmp_
 async def test_background_writer_exception_is_observed_without_secret_logs(
     tmp_path, monkeypatch, caplog
 ):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     incidents = []
     completed = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -552,7 +584,7 @@ async def test_background_writer_exception_is_observed_without_secret_logs(
 async def test_drain_owns_admission_through_delivery_handoff(
     tmp_path, monkeypatch, blocking_writer, cancel_drain
 ):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     writer, creation_entered, release_creation = blocking_writer(store.create)
     monkeypatch.setattr(store, "create", writer)
     transfer_entered = asyncio.Event()
@@ -595,7 +627,7 @@ async def test_drain_owns_admission_through_delivery_handoff(
 
 @pytest.mark.asyncio
 async def test_mutable_sources_are_rejected_before_admission(tmp_path):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
 
     async def transfer(data, target):
         pytest.fail("mutable source must not reach storage")
@@ -610,7 +642,7 @@ async def test_mutable_sources_are_rejected_before_admission(tmp_path):
 async def test_cancel_before_delivery_starts_settles_failed_without_budget_leak(
     tmp_path, monkeypatch, blocking_writer
 ):
-    store = ArtifactOperationStore(tmp_path / "ops.db", Fernet.generate_key())
+    store = ArtifactOperationStore(tmp_path / "ops.db", secrets.token_bytes(32))
     writer, entered, release = blocking_writer(store.finish)
     monkeypatch.setattr(store, "finish", writer)
 
