@@ -24,11 +24,6 @@ Composition does not modify the running frontend's `/openapi.json` or `/docs`.
 
 For the current source pin and SSE adapter recipe, see the
 [upstream vLLM response assessment](../../lib/llm/docs/dynamo-vllm-response-assessment.md).
-The [vLLM OpenAPI 3.2 experiment](../../lib/llm/docs/dynamo-vllm-openapi32-assessment.md)
-preserves historical deployment evidence.
-The [vLLM 0.30 recipe](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md)
-and its regression fragments remain historical request-only evidence.
-Historical profiles do not qualify the current source pin.
 
 ## Installation
 

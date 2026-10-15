@@ -51,7 +51,6 @@
     "paired_inference": "not_run",
     "assessment": "not_run",
     "environment": "Pinned upstream nightly wheel and recorded dependency freeze; no model, engine, CUDA initialization or native-kernel execution",
-    "note": "The source-only 7cd7982dfda0 pin had no matching wheel at selection. The available nightly resolves to its immediate parent 338dab077c18 and contains the merged response spec. Capture bytes and provenance are fresh; historical hashes and inference results are not reused."
-  },
-  "historical_profiles": ["vllm-openapi32.json", "vllm-0.30.0.json"]
+    "note": "Schema capture qualifies declarations only, not inference behavior or native-kernel execution. Verify each new capture against its own source, wheel and dependency pins."
+  }
 }

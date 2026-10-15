@@ -15,7 +15,7 @@ The selected source registers unary JSON and SSE contracts for
 `/v1/chat/completions` and `/v1/completions`. Its OpenAPI 3.1 SSE `schema` describes
 a parsed event envelope: string `data` contains a JSON chunk, JSON error or literal
 `[DONE]`; optional `event`, `id` and `retry` fields remain part of the declaration.
-Select `event-schema` explicitly. Do not treat this as the historical OpenAPI 3.2
+Select `event-schema` explicitly. Do not treat this as the OpenAPI 3.2
 `itemSchema` representation or as a decoded-chunk-only contract.
 
 ## Qualification boundary
@@ -28,9 +28,6 @@ uninitialized; no engine or model was started. The profile records the raw-byte
 checksum and immutable wheel URL/hash. Loaded Python source was checked against
 the pinned checkout, excluding generated `_version.py` (438 matching modules).
 
-The earlier source-only pin `7cd7982dfda0` had no matching wheel at selection.
-The available nightly resolves to its immediate parent `338dab077c18`; source and
-binary pins now agree. This is fresh evidence, not a relabeled historical capture.
 Upstream runtime tests, paired inference and a new full assessment remain **not
 run**. Importing native libraries does not establish kernel execution coverage.
 
@@ -110,11 +107,3 @@ Read `assessment-vllm-current/assessment/report.md` together with its retained
 inputs, source-selection audit and coverage gaps. Exit 1 means differences or
 gaps need review; it does not mean every difference is a defect. No exit code
 establishes stream ordering, termination, cancellation or inference compatibility.
-
-## Historical evidence
-
-The [OpenAPI 3.2 experiment](dynamo-vllm-openapi32-assessment.md) remains pinned to
-the earlier `b04e80127` development revision. Its environment, captures, counts and
-paired-server observations are historical and do not qualify this newer source.
-The [vLLM 0.30 recipe](dynamo-vllm-protocol-assessment.md) and five-field fixtures
-also remain unchanged as request-only regression evidence.
