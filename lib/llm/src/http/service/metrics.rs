@@ -2068,14 +2068,15 @@ impl ResponseMetricCollector {
     }
 
     /// One structured event for the same frozen durations sent to Prometheus.
-    /// Its dedicated target can be disabled without disabling metrics. The
-    /// tracing macro evaluates numeric fields only when this event is enabled.
+    /// DEBUG keeps it off at the default INFO level; enable its dedicated target
+    /// with DYN_LOG=info,dynamo_frontend::ttft=debug. Metrics are independent, and
+    /// the tracing macro evaluates numeric fields only when this event is enabled.
     fn log_ttft_stages(&self, total: Duration, stages: &[Duration; TtftStage::ALL.len()]) {
         let Some(request_id) = self.ttft_request_id.as_deref() else {
             return;
         };
         let ms = |stage: TtftStage| stages[stage as usize].as_secs_f64() * 1000.0;
-        tracing::info!(
+        tracing::debug!(
             target: "dynamo_frontend::ttft",
             request_id,
             model = self.model.as_str(),
@@ -2917,15 +2918,16 @@ mod tests {
     /// or adding a test-only logging dependency.
     #[derive(Clone)]
     struct TtftLogSubscriber {
-        info_enabled: bool,
+        filter: tracing_subscriber::filter::Targets,
         events: Arc<std::sync::Mutex<Vec<(tracing::Level, TtftLogFields)>>>,
     }
 
     impl tracing::Subscriber for TtftLogSubscriber {
         fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            self.info_enabled
-                && metadata.target() == "dynamo_frontend::ttft"
-                && *metadata.level() == tracing::Level::INFO
+            metadata.target() == "dynamo_frontend::ttft"
+                && self
+                    .filter
+                    .would_enable(metadata.target(), metadata.level())
         }
 
         fn register_callsite(
@@ -2935,14 +2937,6 @@ mod tests {
             // Tests install independent subscribers on different threads. Do
             // not cache one test's enabled/disabled setting for another test.
             tracing::subscriber::Interest::sometimes()
-        }
-
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(if self.info_enabled {
-                tracing::level_filters::LevelFilter::INFO
-            } else {
-                tracing::level_filters::LevelFilter::OFF
-            })
         }
 
         fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -2973,7 +2967,7 @@ mod tests {
     fn ttft_log_is_once_at_first_token_and_matches_histograms_and_request_identity() {
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = TtftLogSubscriber {
-            info_enabled: true,
+            filter: "info,dynamo_frontend::ttft=debug".parse().unwrap(),
             events: events.clone(),
         };
         let metrics = Arc::new(Metrics::new_with_prefix(None));
@@ -3035,7 +3029,7 @@ mod tests {
             "later tokens/drop/cancellation must not log"
         );
         let (level, fields) = &events[0];
-        assert_eq!(*level, tracing::Level::INFO);
+        assert_eq!(*level, tracing::Level::DEBUG);
         assert_eq!(fields.text["message"], "frontend first token");
         assert_eq!(fields.text["request_id"], "client-request-42");
         assert_eq!(fields.text["model"], model);
@@ -3073,28 +3067,30 @@ mod tests {
     }
 
     #[test]
-    fn ttft_log_disabled_does_not_change_metrics() {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = TtftLogSubscriber {
-            info_enabled: false,
-            events: events.clone(),
-        };
-        let metrics = Arc::new(Metrics::new_with_prefix(None));
-        let model = "ttft-disabled-log-model";
-        tracing::subscriber::with_default(subscriber, || {
-            let mut collector = metrics.clone().create_response_collector(model);
-            let mut request = dynamo_runtime::pipeline::Context::new(());
-            collector.attach_ttft_timeline(&mut request);
-            let timeline = request.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY).unwrap();
-            let route = timeline.start_span(TtftStage::RouteAggregated);
-            collector.observe_response(20, 0);
-            collector.observe_response(20, 1);
-            drop(route);
-            collector.observe_response(20, 2);
-            drop(collector);
-        });
-        assert!(events.lock().unwrap().is_empty());
-        assert_ttft_stage_cohort(&metrics, model, 1);
+    fn ttft_log_disabled_by_default_or_explicit_filter_does_not_change_metrics() {
+        for directive in ["info", "debug,dynamo_frontend::ttft=off"] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = TtftLogSubscriber {
+                filter: directive.parse().unwrap(),
+                events: events.clone(),
+            };
+            let metrics = Arc::new(Metrics::new_with_prefix(None));
+            let model = "ttft-disabled-log-model";
+            tracing::subscriber::with_default(subscriber, || {
+                let mut collector = metrics.clone().create_response_collector(model);
+                let mut request = dynamo_runtime::pipeline::Context::new(());
+                collector.attach_ttft_timeline(&mut request);
+                let timeline = request.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY).unwrap();
+                let route = timeline.start_span(TtftStage::RouteAggregated);
+                collector.observe_response(20, 0);
+                collector.observe_response(20, 1);
+                drop(route);
+                collector.observe_response(20, 2);
+                drop(collector);
+            });
+            assert!(events.lock().unwrap().is_empty());
+            assert_ttft_stage_cohort(&metrics, model, 1);
+        }
     }
 
     fn model_ready_value_with_name(

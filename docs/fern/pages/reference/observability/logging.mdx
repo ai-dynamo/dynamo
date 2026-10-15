@@ -65,8 +65,8 @@ export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 
 ## Per-Request First-Token Log
 
-For HTTP chat and text completion requests, the frontend emits one INFO event when it first observes a
-nonzero output token count. The target is `dynamo_frontend::ttft` and the message is
+When enabled, the frontend emits one DEBUG event for each HTTP chat or text completion request when
+it first observes a nonzero output token count. The target is `dynamo_frontend::ttft` and the message is
 `frontend first token`. Requests that end, fail, or are canceled before that observation do not
 emit the event. Later tokens do not emit additional TTFT events.
 
@@ -79,17 +79,19 @@ unused stages. These frozen values match the
 [TTFT stage histogram](metrics-catalog.mdx#ttft-stage-durations), and their sum equals `ttft_ms`,
 subject to floating-point rounding.
 
-The default INFO level includes these events. To disable them while retaining metrics and other
-INFO logs, set:
+These events are disabled at the default INFO level. TTFT timing and Prometheus stage histograms
+remain enabled regardless of the log filter. To enable TTFT events while keeping other logs at INFO,
+set this environment variable before starting the frontend:
 
 ```bash
-export DYN_LOG='info,dynamo_frontend::ttft=off'
+export DYN_LOG='info,dynamo_frontend::ttft=debug'
 ```
 
-To retain these events with a WARN default, set:
+A global DEBUG or TRACE level also enables these events. To disable them while retaining other
+DEBUG logs, set:
 
 ```bash
-export DYN_LOG='warn,dynamo_frontend::ttft=info'
+export DYN_LOG='debug,dynamo_frontend::ttft=off'
 ```
 
 Set `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for machine-readable records; duration fields remain JSON

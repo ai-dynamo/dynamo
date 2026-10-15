@@ -158,10 +158,11 @@ HTTP first-token observation, including any remaining overlapping work. If that 
 aborted or retried before HTTP observes a token, its postprocessing interval closes so the
 replacement attempt retains its own routing and backend contributions.
 
-The metric is enabled by default on the frontend's existing `/metrics` endpoint. The SGLang and
-vLLM Python chat processors and native Rust preprocessor provide preprocessing timings. Chat and
-text completions carry the HTTP timing context through the in-process routing host, including KV,
-round-robin, random, direct, and other built-in policies. These paths record worker selection,
+The metric is enabled by default on the frontend's existing `/metrics` endpoint, independently of
+the per-request TTFT log filter. The SGLang and vLLM Python chat processors and native Rust
+preprocessor provide preprocessing timings. Chat and text completions carry the HTTP timing context
+through the in-process routing host, including KV, round-robin, random, direct, and other built-in
+policies. These paths record worker selection,
 backend waits, and first-token postprocessing. The `kv_route` label also covers the built-in
 policies. Batched text completion children share the parent HTTP timeline, so overlapping child
 work is counted once.
