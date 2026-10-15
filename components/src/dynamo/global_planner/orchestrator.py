@@ -327,18 +327,13 @@ class Orchestrator:
         # correctly (e.g. component-name role hints for generic workers).
         self.capacity_manager.remember_roles(participant_id, targets)
 
-        # TODO(global-planner): Avoid full-cluster observation when budget
-        # enforcement is disabled, and do not hold the budget lock through
-        # blocking readiness waits.
-        # Read ALL known participants' current state once. Cross-participant
-        # partner search needs every pool's current replicas and gpu_per_replica;
-        # cross-participant budget math also consumes this. Run the synchronous
-        # backend reads off-thread so the event loop isn't blocked for the N
-        # round-trips. When budget is enforced, require a complete snapshot so a
-        # partial read can't under-count cluster usage.
-        all_pools = await asyncio.to_thread(
-            self.capacity_manager.observe, self.budget_enforcement_enabled()
-        )
+        # Cross-participant mediation needs a complete snapshot only when a
+        # budget is active. The unbounded mode approves without pool state and
+        # performs a targeted post-write readback for the response.
+        if self.budget_enforcement_enabled():
+            all_pools = await asyncio.to_thread(self.capacity_manager.observe, True)
+        else:
+            all_pools = {}
 
         result = self.mediate(
             participant_id,
@@ -509,10 +504,10 @@ class Orchestrator:
         )
         cancellation = asyncio.create_task(cancel_requested.wait())
         try:
-            done, _ = await asyncio.wait(
+            await asyncio.wait(
                 {readiness, cancellation}, return_when=asyncio.FIRST_COMPLETED
             )
-            if cancellation in done:
+            if cancel_requested.is_set():
                 raise asyncio.CancelledError
             await readiness
         finally:

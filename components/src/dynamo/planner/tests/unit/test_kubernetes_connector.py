@@ -1753,7 +1753,8 @@ async def test_set_component_replicas_unready_allows_strict_dgdsa_zero_to_one(
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
         "test-graph", "worker", 1, resource_version="101"
     )
-    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+    mock_kube_api.update_dgd_replica_targets.assert_not_called()
     mock_kube_api.wait_for_graph_deployment_ready.assert_awaited_once_with("test-graph")
     assert mock_kube_api.non_planner_components_stable.call_count == 2
     assert kubernetes_connector._startup_scale_down_targets == {}
@@ -2317,7 +2318,8 @@ async def test_set_component_replicas_ready_retries_adapter_conflict(
         call("test-graph", "worker", 1, resource_version="101"),
         call("test-graph", "worker", 1, resource_version="102"),
     ]
-    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+    mock_kube_api.update_dgd_replica_targets.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2397,9 +2399,9 @@ async def test_set_component_replicas_stops_authority_retry_after_prior_batch_wr
 
     assert mock_kube_api.update_scaling_adapter_replicas.call_args_list == [
         call("test-graph", "prefill", 2, resource_version="101"),
-        call("test-graph", "worker", 1, resource_version="101"),
     ]
     mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+    mock_kube_api.update_dgd_replica_targets.assert_not_called()
 
 
 @pytest.mark.asyncio

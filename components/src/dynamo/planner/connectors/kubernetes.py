@@ -135,8 +135,8 @@ class _ReplicaUpdateTracker:
             raise RuntimeError(
                 "replica update stopped after partial application; refusing to retry"
             ) from error
-        except ApiException as error:
-            if self.possibly_applied and error.status == 409:
+        except Exception as error:
+            if self.possibly_applied:
                 raise RuntimeError(
                     "replica update stopped after partial application; refusing to retry"
                 ) from error

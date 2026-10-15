@@ -58,6 +58,7 @@ class KubernetesCapacityManager(CapacityManager):
         # components need the role supplied by their Planner's TargetReplica;
         # specialized prefill/decode components do not need a hint.
         self._component_roles: dict[str, dict[str, str]] = {}
+        self._observe_all_deployments = False
 
     # ------------------------------------------------------------------ #
     # Discovery / registration                                           #
@@ -97,9 +98,20 @@ class KubernetesCapacityManager(CapacityManager):
         implicit mode (``None``) all deployments in the namespace are discovered.
         """
         managed_deployment_names = self._managed_deployment_names(managed_deployments)
+        self._observe_all_deployments = managed_deployment_names is None
         try:
             kube_api = KubernetesAPI(self.namespace)
-            dgds = kube_api.list_graph_deployments()
+            if managed_deployment_names is None:
+                dgds = kube_api.list_graph_deployments()
+            else:
+                dgds = []
+                for name in sorted(managed_deployment_names):
+                    try:
+                        dgds.append(kube_api.get_graph_deployment(name))
+                    except Exception as error:
+                        logger.warning(
+                            f"Failed to discover managed deployment {name!r}: {error}"
+                        )
             discovered: list[str] = []
             for dgd in dgds:
                 name = dgd.get("metadata", {}).get("name", "")
@@ -179,14 +191,26 @@ class KubernetesCapacityManager(CapacityManager):
         insertion races iteration.
         """
         all_pools: PoolSnapshot = {}
+        connectors_snapshot = list(self.connectors.items())
+        if not self._observe_all_deployments:
+            for key, connector in connectors_snapshot:
+                try:
+                    all_pools[key] = self._read_pools(
+                        connector, self._component_roles.get(key)
+                    )
+                except Exception as error:
+                    self._record_observation_failure(
+                        all_pools, key, error, require_complete
+                    )
+            return all_pools
+
         connectors_by_namespace: dict[str, list[tuple[str, KubernetesConnector]]] = {}
-        for key, connector in list(self.connectors.items()):
+        for key, connector in connectors_snapshot:
             namespace = connector.kube_api.current_namespace
             connectors_by_namespace.setdefault(namespace, []).append((key, connector))
 
-        # One namespace-scoped LIST replaces one serial GET per participant.
-        # Conflict retries still rebuild a fresh complete snapshot, but no
-        # longer multiply request count by the number of managed DGDs.
+        # Implicit mode manages every DGD in the namespace, so one namespace LIST
+        # is both the intended scope and cheaper than one GET per participant.
         for connectors in connectors_by_namespace.values():
             try:
                 deployments = connectors[0][1].kube_api.list_graph_deployments()

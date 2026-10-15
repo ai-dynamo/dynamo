@@ -156,11 +156,7 @@ def test_discover_explicit_mode():
     ):
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
-        mock_kube.list_graph_deployments.return_value = [
-            {"metadata": {"name": "model-a"}},
-            {"metadata": {"name": "model-b"}},
-            {"metadata": {"name": "gp-ctrl"}},
-        ]
+        mock_kube.get_graph_deployment.return_value = {"metadata": {"name": "model-a"}}
         mock_connector_cls.return_value = MagicMock()
 
         # Managed callers are namespaces; the deployment name is derived.
@@ -169,6 +165,9 @@ def test_discover_explicit_mode():
         assert discovered == ["model-a"]
         assert "default/model-a" in cm.connectors
         assert "default/model-b" not in cm.connectors
+        mock_kube.get_graph_deployment.assert_called_once_with("model-a")
+        mock_kube.list_graph_deployments.assert_not_called()
+        assert not cm._observe_all_deployments
         mock_connector_cls.assert_called_once_with(
             dynamo_namespace="discovered",
             k8s_namespace="default",
@@ -202,6 +201,7 @@ def test_discover_implicit_mode():
         assert "default/model-a" in cm.connectors
         assert "default/model-b" in cm.connectors
         assert mock_connector_cls.call_count == 2
+        assert cm._observe_all_deployments
 
 
 def test_discover_tolerates_api_failure():
@@ -449,8 +449,8 @@ def test_observe_tolerates_read_failure():
     snapshot = cm.observe()
     assert snapshot["default/good"]["prefill"].current_replicas == 1
     assert snapshot["default/bad"] == {}  # tolerated, empty
-    good.kube_api.list_graph_deployments.assert_called_once_with()
-    good.kube_api.get_graph_deployment.assert_not_called()
+    good.kube_api.get_graph_deployment.assert_called_once_with("good")
+    good.kube_api.list_graph_deployments.assert_not_called()
 
 
 def test_observe_require_complete_raises_on_read_failure():
@@ -459,14 +459,15 @@ def test_observe_require_complete_raises_on_read_failure():
     bad.parent_dgd_name = "bad"
     bad.kube_api = MagicMock()
     bad.kube_api.current_namespace = "default"
-    bad.kube_api.list_graph_deployments = MagicMock(side_effect=RuntimeError("boom"))
+    bad.kube_api.get_graph_deployment = MagicMock(side_effect=RuntimeError("boom"))
     cm.connectors["default/bad"] = bad
     with pytest.raises(RuntimeError):
         cm.observe(require_complete=True)
 
 
-def test_observe_lists_once_per_namespace():
+def test_observe_implicit_mode_lists_once_per_namespace():
     cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
     first = _install_connector(
         cm, "default/first", _dgd_spec(1, 1), parent_dgd_name="first"
     )

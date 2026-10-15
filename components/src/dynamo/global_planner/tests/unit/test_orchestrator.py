@@ -12,6 +12,7 @@ backend into the same orchestrator, including the ``use_lock`` toggle.
 
 import asyncio
 from threading import Event
+from unittest.mock import patch
 
 import pytest
 
@@ -386,7 +387,7 @@ async def test_cancelled_admitted_conflict_finishes_retry_before_propagating():
     cm.release_scale.set()
     with pytest.raises(asyncio.CancelledError):
         await scaling
-    assert cm.observe_calls == 2
+    assert cm.observe_calls == 0
     assert cm.scale_calls == 2
     assert cm.pools["default/a"]["decode"][0] == 2
 
@@ -636,6 +637,28 @@ async def test_cancelled_readiness_wait_releases_scale_lock():
 
 
 @pytest.mark.asyncio
+async def test_readiness_wait_observes_cancel_before_waiter_task_runs():
+    cm = FakeCapacityManager()
+    cm.add("default/a", prefill=1)
+    orch = _orch(cm)
+    cancel_requested = asyncio.Event()
+
+    async def readiness_wins_before_cancel_waiter(tasks, return_when):
+        assert return_when == asyncio.FIRST_COMPLETED
+        await asyncio.sleep(0)
+        readiness = next(task for task in tasks if task.done())
+        cancel_requested.set()
+        return {readiness}, tasks - {readiness}
+
+    with patch(
+        "dynamo.global_planner.orchestrator.asyncio.wait",
+        side_effect=readiness_wins_before_cancel_waiter,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await orch._wait_for_ready_or_cancel("default/a", cancel_requested)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_observation_releases_scale_lock():
     class BlockingFirstObserveCapacityManager(FakeCapacityManager):
         def __init__(self):
@@ -653,7 +676,7 @@ async def test_cancelled_observation_releases_scale_lock():
 
     cm = BlockingFirstObserveCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
-    orch = _orch(cm)
+    orch = _orch(cm, max_gpus=4)
     first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
     assert await asyncio.to_thread(cm.observe_started.wait, 1)
 
