@@ -31,8 +31,7 @@
     "sha256": "d983b1108fdd5024fb1b4fb3aa3159581a28075356dfe9e2c43498c5fe27f761",
     "variant": "cu130",
     "python": "3.12.3",
-    "platform": "Linux x86_64",
-    "constraints": "vllm-response-constraints.txt"
+    "platform": "Linux x86_64"
   },
   "capture": {
     "kind": "production_app_asgi_no_lifespan",

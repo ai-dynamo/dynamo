@@ -13,7 +13,7 @@ the moving `nightly` alias. This revision includes the merged response-schema ch
 
 Use this nightly pin temporarily. Once a stable vLLM release includes the
 response-schema change, update the profile to that release's exact source revision
-and wheel. Refresh the wheel checksum, dependency snapshot and schema capture;
+and wheel. Refresh the wheel checksum and schema capture;
 verify the SSE selectors against that release before using it for assessments.
 
 ## How SSE schemas become comparable
@@ -40,8 +40,8 @@ full assessment have **not been run** for this pin.
 ## Prepare inputs
 
 1. On Linux x86_64 with Python 3.12, install the exact wheel from the profile using
-   the commands below. The [dependency snapshot](../../../scripts/protocol_compatibility/frameworks/vllm-response-constraints.txt)
-   records the capture environment; it is not a serving compatibility guarantee.
+   the commands below. Dependencies are not pinned, so their versions can change
+   the exported schema. Retain the package freeze with each capture's evidence.
    Do not let an installer silently substitute another commit's wheel. Retain
    source identity, install commands, wheel hashes and the resulting package freeze.
 2. Run the capture helper below from the Dynamo checkout. It produces only
@@ -55,12 +55,11 @@ full assessment have **not been run** for this pin.
 
 ```sh
 PROFILE=scripts/protocol_compatibility/frameworks/vllm-response-openapi.json
-CONSTRAINTS=scripts/protocol_compatibility/frameworks/vllm-response-constraints.txt
 uv venv --python 3.12 .venv-vllm-schema
 WHEEL_URL=$(jq -r '.wheel.url' "$PROFILE")
 WHEEL_SHA256=$(jq -r '.wheel.sha256' "$PROFILE")
 uv pip install --python .venv-vllm-schema/bin/python --torch-backend=cu130 \
-  -c "$CONSTRAINTS" "${WHEEL_URL}#sha256=${WHEEL_SHA256}"
+  "${WHEEL_URL}#sha256=${WHEEL_SHA256}"
 uv pip check --python .venv-vllm-schema/bin/python
 ```
 
