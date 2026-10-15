@@ -60,6 +60,9 @@ struct SglangHicacheMooncakeConfig {
     key_prefix: Option<String>,
     #[serde(default)]
     kv_events_endpoint: Option<String>,
+    /// `hicache` (default) or `linker` for SGLang's direct external linker.
+    #[serde(default)]
+    key_layout: Option<String>,
 }
 
 impl SglangHicacheMooncakeConfig {
@@ -74,6 +77,11 @@ impl SglangHicacheMooncakeConfig {
             && self.should_split_heads == other.should_split_heads
             && self.extra_backend_tag == other.extra_backend_tag
             && self.key_prefix == other.key_prefix
+            && self.key_layout == other.key_layout
+    }
+
+    fn is_linker_layout(&self) -> bool {
+        self.key_layout.as_deref() == Some("linker")
     }
 
     /// Prefix used for both physical keys and group IDs. Older workers publish only the
@@ -98,6 +106,22 @@ struct MooncakeObjectEvent {
     group_id: Option<String>,
 }
 
+/// `{prefix}_{page_hash}` of a Mooncake object key: everything through the page's SHA-256
+/// hex, dropping the rank and component suffix. SGLang's direct linker writes one object
+/// per page component (for example DeepSeek-V4 `_cp0_pp0_deepseek_v4_c4`), so presence is
+/// tracked per page.
+fn mooncake_logical_key(object_key: &str) -> Option<&str> {
+    let mut offset = 0;
+    for part in object_key.split('_') {
+        offset += part.len();
+        if part.len() == 64 && part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Some(&object_key[..offset]);
+        }
+        offset += 1;
+    }
+    None
+}
+
 /// Mooncake KV publisher payload: `(timestamp_ms, events, dp_rank)` after the empty-topic and
 /// big-endian sequence ZMQ frames.
 type MooncakeEventBatch = (i64, Vec<MooncakeObjectEvent>, u32);
@@ -113,6 +137,8 @@ enum QueryToken {
 pub struct HicacheSharedKvCache {
     runtime_configs: RuntimeConfigWatch,
     present_keys: Arc<DashSet<String>>,
+    /// Linker layout: logical page keys with at least one stored component object.
+    present_pages: Arc<DashSet<String>>,
     group_states: Arc<DashMap<String, (u64, bool)>>,
     last_sequence: Arc<AtomicU64>,
     has_sequence: Arc<AtomicBool>,
@@ -141,6 +167,7 @@ impl HicacheSharedKvCache {
         Self {
             runtime_configs,
             present_keys: Arc::new(DashSet::new()),
+            present_pages: Arc::new(DashSet::new()),
             group_states: Arc::new(DashMap::new()),
             last_sequence: Arc::new(AtomicU64::new(0)),
             has_sequence: Arc::new(AtomicBool::new(false)),
@@ -236,6 +263,7 @@ impl HicacheSharedKvCache {
         }
         if has_previous && sequence != previous.wrapping_add(1) {
             self.present_keys.clear();
+            self.present_pages.clear();
             self.group_states.clear();
             tracing::warn!(
                 previous,
@@ -254,6 +282,18 @@ impl HicacheSharedKvCache {
                 continue;
             };
             let group_id = event.group_id.filter(|id| !id.is_empty());
+            if let Some(page) = mooncake_logical_key(&object_key) {
+                match event.event_type.as_str() {
+                    "stored" => {
+                        self.present_pages.insert(page.to_string());
+                    }
+                    "removed" => {
+                        // Any missing component makes the page unrestorable.
+                        self.present_pages.remove(page);
+                    }
+                    _ => {}
+                }
+            }
             match event.event_type.as_str() {
                 "stored" => {
                     self.present_keys.insert(object_key);
@@ -280,6 +320,7 @@ impl HicacheSharedKvCache {
 
     fn clear(&self) {
         self.present_keys.clear();
+        self.present_pages.clear();
         self.group_states.clear();
         self.last_sequence.store(0, Ordering::Release);
         self.has_sequence.store(false, Ordering::Release);
@@ -458,9 +499,14 @@ impl SharedKvCache for HicacheSharedKvCache {
                     return true;
                 }
 
-                let hit = expand_actual_query_keys(page_hash, &config)
-                    .iter()
-                    .all(|key| self.present_keys.contains(key));
+                let hit = if config.is_linker_layout() {
+                    self.present_pages
+                        .contains(&maybe_prefix_key(page_hash, config.effective_key_prefix()))
+                } else {
+                    expand_actual_query_keys(page_hash, &config)
+                        .iter()
+                        .all(|key| self.present_keys.contains(key))
+                };
                 if hit
                     && let Some((generation, _)) = generation
                     && let Some(mut state) = self.group_states.get_mut(&group_id)
@@ -642,6 +688,7 @@ mod tests {
             extra_backend_tag: None,
             key_prefix: None,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            key_layout: None,
         }
     }
 
@@ -712,6 +759,55 @@ mod tests {
                 "hash_1_1_k",
                 "hash_1_1_v",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_blocks_counts_linker_pages_with_any_component() {
+        let hash0 = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72".to_string();
+        let config = SglangHicacheMooncakeConfig {
+            key_layout: Some("linker".to_string()),
+            key_prefix: Some("Org-Model".to_string()),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        let component = |name: &str| format!("Org-Model_{hash0}_cp0_pp0_{name}");
+        let event = |event_type: &str, name: &str| MooncakeObjectEvent {
+            event_type: event_type.to_string(),
+            object_key: Some(component(name)),
+            tenant_id: "default".to_string(),
+            group_id: None,
+        };
+        cache.apply_batch(
+            1,
+            vec![event("stored", "deepseek_v4_c4"), event("stored", "swa")],
+        );
+        let hits = cache
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.ranges, vec![Range { start: 0, end: 1 }]);
+
+        // Losing any component makes the page unrestorable.
+        cache.apply_batch(2, vec![event("removed", "swa")]);
+        let hits = cache
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.total_hits, 0);
+    }
+
+    #[test]
+    fn test_mooncake_logical_key_drops_rank_and_component_suffix() {
+        let hash = "ab".repeat(32);
+        let key = format!("deepseek-ai-DeepSeek-V4-Flash_{hash}_cp0_pp0_deepseek_v4_c4_indexer");
+        assert_eq!(
+            mooncake_logical_key(&key),
+            Some(format!("deepseek-ai-DeepSeek-V4-Flash_{hash}").as_str())
+        );
+        assert_eq!(
+            mooncake_logical_key("sglang_mooncake_store_warmup_key0"),
+            None
         );
     }
 
