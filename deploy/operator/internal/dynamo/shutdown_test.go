@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
@@ -32,9 +31,11 @@ func TestShutdownBudgetWarningsPreserveExistingPodSpecs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					PodSpec:       &corev1.PodSpec{TerminationGracePeriodSeconds: tc.grace},
-					MainContainer: &corev1.Container{Image: "worker:test", Env: tc.env},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						TerminationGracePeriodSeconds: tc.grace,
+						Containers:                    []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:test", Env: tc.env}},
+					},
 				},
 			}
 			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{}, "dgd", "default", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))

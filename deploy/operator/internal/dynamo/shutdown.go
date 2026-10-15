@@ -16,8 +16,8 @@ import (
 // validateShutdownBudget validates worker budgets on the final pod spec,
 // using the runtime's 30-second default when no literal override is present.
 // podSpec must be non-nil. Runtime-only settings (envFrom, image ENV, command-line
-// exports) cannot be resolved here; deployments using them must also declare a
-// literal total budget in the pod template to validate their effective value.
+// exports) cannot be resolved here; operators must verify their effective values.
+// The renderer logs these diagnostics without rejecting or mutating the pod.
 // This is only a Dynamo worker lower bound, not a whole-pod shutdown guarantee.
 // Restartable init containers (including an external engine) terminate after
 // ordinary containers and need an additional, deployment-specific allowance.
@@ -54,7 +54,7 @@ func validateShutdownBudget(podSpec *corev1.PodSpec, isWorker bool) error {
 		if selected != nil && selected.ValueFrom != nil {
 			return fmt.Errorf("container %s: %s must be a literal to validate the shutdown budget", container.Name, selected.Name)
 		}
-		// Reject invalid configuration rather than silently validating a fallback.
+		// Report invalid configuration rather than silently validating a fallback.
 		total := int64(30)
 		if selected != nil && strings.TrimSpace(selected.Value) != "" {
 			var err error
