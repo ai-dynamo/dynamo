@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -35,14 +34,19 @@ const SnapshotFileName = "dgdr_run_snapshot.yaml"
 const maxObjectName = 253
 
 // RunStatus is the part of DynamoGraphDeploymentRun.status the publisher owns: the
-// ordered candidate references plus progress. CandidateNames is in rank order (best
-// first for scalar searches). LastProgress is the zero time when the snapshot carries
-// no usable timestamp, in which case the existing value is left untouched.
+// ordered candidate references, the number of published candidates
+// (status.progress.candidates.published) and the coarse progress time. CandidateNames is
+// in rank order (best first for scalar searches). Published always equals
+// len(CandidateNames) in a desired status; it is kept separately so a status whose
+// progress block was removed or edited by someone else is noticed and repaired.
+// LastProgress is the zero time when the snapshot carries no usable timestamp, in which
+// case the existing value is left untouched.
+//
+// The snapshot's round and evaluated counters have no counterpart in the Run status: it
+// reports per-branch rounds and outcome counters that the snapshot does not carry yet,
+// so they are not published rather than guessed.
 type RunStatus struct {
-	Message        string
-	HasProgress    bool
-	Round          int32
-	Evaluated      int32
+	Published      int32
 	LastProgress   time.Time
 	CandidateNames []string
 }
@@ -56,6 +60,9 @@ type DesiredState struct {
 	Status   RunStatus
 	Terminal bool
 	Phase    string
+	// Failed counts the candidates whose materialization failed. They are not created
+	// and the Run status has no field for them, so they are only logged.
+	Failed int
 }
 
 // CandidateName is the DGDC name for a candidate id. It depends only on the run
@@ -77,8 +84,8 @@ func CandidateName(runName, runUID, id string) string {
 }
 
 // Desire projects a snapshot onto the desired cluster state of one run incarnation.
-// Candidates whose materialization failed are not created; they are only counted in the
-// run message.
+// Candidates whose materialization failed are not created; they are only counted in
+// DesiredState.Failed.
 func Desire(runName, runUID string, snap *Snapshot) DesiredState {
 	state := DesiredState{
 		Names:    make(map[string]string, len(snap.Candidates)),
@@ -102,34 +109,13 @@ func Desire(runName, runUID string, snap *Snapshot) DesiredState {
 			Metrics:    candidate.Metrics,
 		})
 	}
+	state.Failed = failed
 	state.Status = RunStatus{
-		Message:        runMessage(snap, failed),
-		HasProgress:    true,
-		Round:          snap.Progress.Round,
-		Evaluated:      snap.Progress.Evaluated,
+		Published:      int32(len(names)),
 		LastProgress:   progressTime(snap),
 		CandidateNames: names,
 	}
 	return state
-}
-
-func runMessage(snap *Snapshot, failed int) string {
-	message := snap.Run.Message
-	if snap.Run.Error != "" {
-		message = snap.Run.Error
-	}
-	if failed > 0 {
-		suffix := fmtFailed(failed)
-		if message == "" {
-			return suffix
-		}
-		return message + "; " + suffix
-	}
-	return message
-}
-
-func fmtFailed(failed int) string {
-	return strconv.Itoa(failed) + " candidate(s) failed materialization"
 }
 
 // progressTime is the snapshot's own timestamp (written by the Sweeper container in the
@@ -159,10 +145,7 @@ func (desired RunStatus) WithPreservedProgress(known time.Time) RunStatus {
 // the status is only written when something changed. A zero desired LastProgress means
 // "leave the observed value alone".
 func (desired RunStatus) NeedsUpdate(observed RunStatus) bool {
-	if desired.Message != observed.Message || desired.HasProgress != observed.HasProgress {
-		return true
-	}
-	if desired.HasProgress && (desired.Round != observed.Round || desired.Evaluated != observed.Evaluated) {
+	if desired.Published != observed.Published {
 		return true
 	}
 	if !desired.LastProgress.IsZero() && !desired.LastProgress.Equal(observed.LastProgress) {

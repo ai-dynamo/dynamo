@@ -25,11 +25,10 @@ import (
 
 	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
-	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher/placeholderapi"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,8 +44,6 @@ const (
 	LabelRunUID = "nvidia.com/dgdr-run-uid"
 	// LabelCandidateID records the stable candidate id (the identity read back on list).
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
-
-	evaluatedCondition = "Evaluated"
 
 	// AnnotationAdditionalResources carries the companion resources (for example
 	// generated ConfigMaps) rendered next to the DGD, as multi-document YAML. It is the
@@ -197,6 +194,9 @@ func (r *Reconciler) retryOrFail(exited bool, err error) error {
 // the status of candidates that lack it, update the run, then delete obsolete candidates.
 // It is idempotent and safe to retry; existing candidate specs are never touched.
 func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired DesiredState) error {
+	if desired.Failed > 0 {
+		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
+	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
 	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace), client.MatchingLabels{LabelRunUID: r.RunUID}); err != nil {
 		return fmt.Errorf("listing candidates: %w", err)
@@ -209,7 +209,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		current = append(current, dgdcreconcile.CurrentDGDC{
 			Name:       item.Name,
 			ID:         item.Labels[LabelCandidateID],
-			Incomplete: !meta.IsStatusConditionTrue(item.Status.Conditions, evaluatedCondition),
+			Incomplete: item.Status.Metrics == nil,
 		})
 		uids[item.Name] = item.UID
 		versions[item.Name] = item.ResourceVersion
@@ -276,11 +276,9 @@ func (r *Reconciler) updateRunStatus(ctx context.Context, run *v1beta2.DynamoGra
 
 // observedStatus is the publisher-owned part of the run's current (cached) status.
 func observedStatus(run *v1beta2.DynamoGraphDeploymentRun) RunStatus {
-	observed := RunStatus{Message: run.Status.Message}
-	if progress := run.Status.Progress; progress != nil {
-		observed.HasProgress = true
-		observed.Round = progress.Round
-		observed.Evaluated = progress.Evaluated
+	var observed RunStatus
+	if progress := run.Status.Progress; progress != nil && progress.Candidates != nil {
+		observed.Published = progress.Candidates.Published
 	}
 	if run.Status.LastProgressTime != nil {
 		observed.LastProgress = run.Status.LastProgressTime.UTC()

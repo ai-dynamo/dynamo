@@ -22,9 +22,8 @@ import (
 	"encoding/json"
 	"time"
 
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
-	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher/placeholderapi"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,8 +36,9 @@ import (
 type StoredCandidate struct {
 	// ResourceVersion is the version a status write for this candidate is constrained to.
 	ResourceVersion string
-	// Populated reports that the candidate already has its evaluation status, for example
-	// when a stale cache led the reconciler to apply a candidate that exists.
+	// Populated reports that the candidate already has its evaluation status (a metrics
+	// object, possibly empty), for example when a stale cache led the reconciler to apply a
+	// candidate that exists.
 	Populated bool
 }
 
@@ -49,7 +49,7 @@ type writer interface {
 	// read after the apply. It must be idempotent: applying a candidate that already
 	// exists changes nothing.
 	CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error)
-	// PopulateStatus records the candidate's evaluation facts and marks it Evaluated. The
+	// PopulateStatus records the candidate's evaluation metrics. The
 	// write is constrained to resourceVersion, so a stale view of the candidate fails
 	// with a conflict instead of rewriting status that was already populated.
 	PopulateStatus(ctx context.Context, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate) error
@@ -69,8 +69,6 @@ type clientWriter struct {
 	Namespace string
 	RunName   string
 	RunUID    string
-	// Now stamps the Evaluated condition; tests replace it.
-	Now func() time.Time
 }
 
 var _ writer = (*clientWriter)(nil)
@@ -102,16 +100,12 @@ func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoG
 	}
 	return StoredCandidate{
 		ResourceVersion: stored.ResourceVersion,
-		Populated:       meta.IsStatusConditionTrue(stored.Status.Conditions, evaluatedCondition),
+		Populated:       stored.Status.Metrics != nil,
 	}, nil
 }
 
 func (w *clientWriter) PopulateStatus(ctx context.Context, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate) error {
-	now := time.Now
-	if w.Now != nil {
-		now = w.Now
-	}
-	object, err := buildCandidateStatusApply(w.Namespace, name, resourceVersion, candidate, now())
+	object, err := buildCandidateStatusApply(w.Namespace, name, resourceVersion, candidate)
 	if err != nil {
 		return err
 	}
@@ -167,7 +161,7 @@ func buildCandidateApply(scheme *runtime.Scheme, namespace, runUID string, run *
 		return nil, err
 	}
 	apply := &unstructured.Unstructured{Object: content}
-	apply.SetGroupVersionKind(v1beta2.GroupVersion.WithKind("DynamoGraphDeploymentCandidate"))
+	apply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentCandidateGVK)
 	return apply, nil
 }
 
@@ -180,32 +174,25 @@ func withResourceVersion(metadata map[string]any, resourceVersion string) map[st
 	return metadata
 }
 
-// buildCandidateStatusApply is the status payload of a candidate: the metrics and the
-// Evaluated condition. Candidate status is written once and then stays immutable, so the
-// payload carries the resourceVersion the "not populated yet" decision was based on.
-func buildCandidateStatusApply(namespace, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate, now time.Time) (*unstructured.Unstructured, error) {
+// buildCandidateStatusApply is the status payload of a candidate: the metrics. Metrics are
+// always written, even when empty, because their presence is what marks the candidate as
+// populated. Candidate status is written once and then stays immutable, so the payload
+// carries the resourceVersion the "not populated yet" decision was based on.
+func buildCandidateStatusApply(namespace, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate) (*unstructured.Unstructured, error) {
 	metrics, err := normalizeJSON(candidate.Metrics)
 	if err != nil {
 		return nil, err
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": withResourceVersion(map[string]any{"namespace": namespace, "name": name}, resourceVersion),
-		"status": map[string]any{
-			"metrics": metrics,
-			"conditions": []any{map[string]any{
-				"type":               evaluatedCondition,
-				"status":             string(metav1.ConditionTrue),
-				"reason":             evaluatedCondition,
-				"message":            "evaluated by the Sweeper",
-				"lastTransitionTime": now.UTC().Format(time.RFC3339),
-			}},
-		},
+		"status":   map[string]any{"metrics": metrics},
 	}}
-	apply.SetGroupVersionKind(v1beta2.GroupVersion.WithKind("DynamoGraphDeploymentCandidate"))
+	apply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentCandidateGVK)
 	return apply, nil
 }
 
-// buildRunStatusApply is the status payload of the run. It lists every publisher-owned
+// buildRunStatusApply is the status payload of the run: the candidate references, the
+// published-candidate count and the progress time. It lists every publisher-owned
 // field it wants to keep: under server-side apply a field this manager owns and omits
 // from the payload is removed. It carries the resourceVersion of the run the decision to
 // write was based on, so a decision made from a stale cached run conflicts instead of
@@ -216,11 +203,8 @@ func buildRunStatusApply(namespace, runName, resourceVersion string, status RunS
 		refs = append(refs, map[string]any{"name": name})
 	}
 	fields := map[string]any{
-		"message":       status.Message,
 		"candidateRefs": refs,
-	}
-	if status.HasProgress {
-		fields["progress"] = map[string]any{"round": int64(status.Round), "evaluated": int64(status.Evaluated)}
+		"progress":      map[string]any{"candidates": map[string]any{"published": int64(status.Published)}},
 	}
 	if !status.LastProgress.IsZero() {
 		fields["lastProgressTime"] = status.LastProgress.UTC().Format(time.RFC3339)
@@ -229,7 +213,7 @@ func buildRunStatusApply(namespace, runName, resourceVersion string, status RunS
 		"metadata": withResourceVersion(map[string]any{"namespace": namespace, "name": runName}, resourceVersion),
 		"status":   fields,
 	}}
-	apply.SetGroupVersionKind(v1beta2.GroupVersion.WithKind("DynamoGraphDeploymentRun"))
+	apply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentRunGVK)
 	return apply
 }
 
