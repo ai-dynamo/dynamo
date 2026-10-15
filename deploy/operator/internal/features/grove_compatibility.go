@@ -29,8 +29,7 @@ const (
 	// groveControllerName is the Deployment label value and container name
 	// used by every Grove operator chart from v0.1.0-alpha.11 on.
 	groveControllerName = "grove-operator"
-	// groveMinimumAlpha is N in GroveMinimumVersion.
-	groveMinimumAlpha = 14
+	groveMinimumAlpha   = 14
 
 	// groveCompatibilityTTL bounds how long a probe result is reused, so a
 	// Grove upgrade is noticed without restarting the operator.
@@ -46,8 +45,8 @@ const (
 	// GroveCompatible means the Grove CRDs are v0.1.0-alpha.14 or later and
 	// no older Grove controller was identified.
 	GroveCompatible GroveCompatibilityState = "Compatible"
-	// GroveIncompatible means the Grove controller or CRDs predate
-	// v0.1.0-alpha.14.
+	// GroveIncompatible means the controller or CRDs predate v0.1.0-alpha.14,
+	// or a recognized controller has not finished rolling out.
 	GroveIncompatible GroveCompatibilityState = "Incompatible"
 	// GroveUnverifiable means the Grove CRD is missing or not readable
 	// (NotFound or Forbidden).
@@ -68,9 +67,10 @@ type GroveCompatibilityProbe struct {
 	reader client.Reader
 	now    func() time.Time
 
-	mu        sync.Mutex
-	cached    GroveCompatibility
-	checkedAt time.Time
+	mu          sync.Mutex
+	cached      GroveCompatibility
+	nextCheckAt time.Time
+	lastErr     error
 }
 
 // NewGroveCompatibilityProbe returns a probe that reads CRDs and Deployments through
@@ -79,32 +79,42 @@ func NewGroveCompatibilityProbe(reader client.Reader) *GroveCompatibilityProbe {
 	return &GroveCompatibilityProbe{reader: reader, now: time.Now}
 }
 
-// Check returns the fresh cached result or probes. A transient read error is never cached:
-// Check returns the previous verdict, or the error, so one API hiccup cannot fail DGDs.
+// Check returns the cached result or probes once per TTL, including after failed reads.
+// A transient error preserves the previous verdict; without one, Check returns the error.
 func (p *GroveCompatibilityProbe) Check(ctx context.Context) (GroveCompatibility, error) {
 	if p == nil {
 		return GroveCompatibility{State: GroveCompatible}, nil
 	}
+
+	// Share one refresh attempt across DGDs, even while the API is unavailable.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	if !p.checkedAt.IsZero() && now.Sub(p.checkedAt) < groveCompatibilityTTL {
-		return p.cached, nil
+	if now.Before(p.nextCheckAt) {
+		return p.cached, p.lastErr
 	}
+
+	// Start the retry interval after the read finishes so slow failures are also throttled.
 	result, err := probeGroveCompatibility(ctx, p.reader)
+	p.nextCheckAt = p.now().Add(groveCompatibilityTTL)
 	if err != nil {
-		if !p.checkedAt.IsZero() {
-			return p.cached, nil
+		if p.cached.State == "" {
+			p.lastErr = err
 		}
-		return GroveCompatibility{}, err
+		return p.cached, p.lastErr
 	}
+
+	// Only a successful probe replaces the verdict and clears a prior read error.
 	p.cached = result
-	p.checkedAt = now
+	p.lastErr = nil
 	return p.cached, nil
 }
 
+// probeGroveCompatibility checks the controller rollout and the served CRD schema.
+// reader must be non-nil.
 func probeGroveCompatibility(ctx context.Context, reader client.Reader) (GroveCompatibility, error) {
-	controllerTag, controllerOld, err := groveControllerVersion(ctx, reader)
+	// Reject a known old controller before consulting CRDs that may already be upgraded.
+	controllerTag, controllerOld, rolloutPending, err := groveControllerVersion(ctx, reader)
 	if err != nil {
 		return GroveCompatibility{}, err
 	}
@@ -117,11 +127,25 @@ func probeGroveCompatibility(ctx context.Context, reader client.Reader) (GroveCo
 			),
 		}, nil
 	}
+
+	// A desired image tag is not proof that the new controller has taken over.
+	if rolloutPending {
+		return GroveCompatibility{
+			State: GroveIncompatible,
+			Message: fmt.Sprintf(
+				"The Grove controller rollout has not completed. Multinode workers require an available Grove controller at %s or later. Wait for the Grove controller Deployment to finish rolling out; the DGD reconciles automatically.",
+				GroveMinimumVersion,
+			),
+		}, nil
+	}
+
+	// Unknown image versions leave the decision to the CRD schema.
 	controllerNote := ""
 	if controllerTag == "" {
 		controllerNote = " The Grove controller version could not be identified (no grove-operator Deployment with a v0.1.0-alpha.N image tag was readable), so only the CRDs were checked."
 	}
 
+	// Missing or forbidden CRDs are unverifiable; other API errors are retried.
 	crd := &apiextensionsv1.CustomResourceDefinition{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: grovePodCliqueSetCRDName}, crd); err != nil {
 		var cause string
@@ -141,6 +165,8 @@ func probeGroveCompatibility(ctx context.Context, reader client.Reader) (GroveCo
 			),
 		}, nil
 	}
+
+	// The per-clique rollingUpdate field identifies the minimum supported CRD schema.
 	if !podCliqueSetHasCliqueRollingUpdate(crd) {
 		return GroveCompatibility{
 			State: GroveIncompatible,
@@ -153,19 +179,25 @@ func probeGroveCompatibility(ctx context.Context, reader client.Reader) (GroveCo
 	return GroveCompatibility{State: GroveCompatible, Message: strings.TrimSpace(controllerNote)}, nil
 }
 
-// groveControllerVersion returns the first release image tag of a Grove controller and whether
-// it predates GroveMinimumVersion; "" means unreadable or digest, -dev, or custom tags only.
-func groveControllerVersion(ctx context.Context, reader client.Reader) (string, bool, error) {
+// groveControllerVersion reports a release tag, whether any controller is too old,
+// and whether a recognized controller is still rolling out. reader must be non-nil.
+// An empty tag means unreadable Deployments or digest, -dev, or custom tags only.
+func groveControllerVersion(ctx context.Context, reader client.Reader) (string, bool, bool, error) {
+	// Read the chart-labelled Deployments without requiring pod-list permissions.
 	deployments := &appsv1.DeploymentList{}
 	if err := reader.List(ctx, deployments, client.MatchingLabels{"app.kubernetes.io/name": groveControllerName}); err != nil {
 		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
-			return "", false, nil
+			return "", false, false, nil
 		}
-		return "", false, fmt.Errorf("list %s Deployments: %w", groveControllerName, err)
+		return "", false, false, fmt.Errorf("list %s Deployments: %w", groveControllerName, err)
 	}
+
+	// Every recognized controller must finish replacing its old replicas.
 	identified := ""
+	rolloutPending := false
 	for i := range deployments.Items {
-		for _, container := range deployments.Items[i].Spec.Template.Spec.Containers {
+		deployment := &deployments.Items[i]
+		for _, container := range deployment.Spec.Template.Spec.Containers {
 			if container.Name != groveControllerName {
 				continue
 			}
@@ -175,18 +207,30 @@ func groveControllerVersion(ctx context.Context, reader client.Reader) (string, 
 				continue
 			}
 			if alpha < groveMinimumAlpha {
-				return tag, true, nil
+				return tag, true, false, nil
+			}
+
+			// Kubernetes defaults replicas to one; a scaled-down controller is not available.
+			desired := int32(1)
+			if deployment.Spec.Replicas != nil {
+				desired = *deployment.Spec.Replicas
+			}
+			status := deployment.Status
+			if desired == 0 || status.ObservedGeneration < deployment.Generation ||
+				status.UpdatedReplicas != desired || status.Replicas != desired || status.AvailableReplicas != desired ||
+				(status.TerminatingReplicas != nil && *status.TerminatingReplicas > 0) {
+				rolloutPending = true
 			}
 			identified = tag
 		}
 	}
-	return identified, false, nil
+	return identified, false, rolloutPending, nil
 }
 
-// imageTag returns the tag of an image reference, or "" when it has none.
+// imageTag returns an image tag, or "" for untagged or digest-pinned references.
 func imageTag(image string) string {
-	if i := strings.Index(image, "@"); i >= 0 {
-		image = image[:i]
+	if strings.Contains(image, "@") {
+		return ""
 	}
 	if i := strings.LastIndex(image, "/"); i >= 0 {
 		image = image[i+1:]
