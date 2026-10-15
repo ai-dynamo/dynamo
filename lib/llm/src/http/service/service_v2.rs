@@ -620,6 +620,10 @@ impl State {
             (model.has_images_engine(), EndpointType::Images),
             (model.has_videos_engine(), EndpointType::Videos),
             (model.has_audios_engine(), EndpointType::Audios),
+            (
+                model.has_transcriptions_engine(),
+                EndpointType::Transcriptions,
+            ),
             (model.has_realtime_engine(), EndpointType::Realtime),
             (model.has_generate_engine(), EndpointType::Generate),
         ];
@@ -2264,6 +2268,42 @@ mod tests {
         assert_eq!(
             client.get(&url).send().await.unwrap().status(),
             reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_transcriptions_route() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_transcriptions_model("whisper", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Transcriptions, false)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/whisper/ready");
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        control
+            .enable_model_endpoint(EndpointType::Transcriptions, true)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
         );
         handle.abort();
     }
