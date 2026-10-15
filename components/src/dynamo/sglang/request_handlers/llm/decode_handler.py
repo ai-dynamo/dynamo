@@ -239,7 +239,7 @@ def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | N
 def _native_terminal_fields(
     finish_reason: Mapping[str, Any],
     meta_info: Mapping[str, Any],
-    user_stop_token_ids: set[int] | None,
+    user_stop_token_ids: frozenset[int] | set[int],
 ) -> Dict[str, Any]:
     """Typed terminal fields for Dynamo's router and request tracking.
 
@@ -720,9 +720,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             context.id(),
         )
         if native_payload is not None:
+            native_sampling_params = native_payload.get("sampling_params")
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
-                native_payload.get("sampling_params"),
+                native_sampling_params,
                 supported=(
                     getattr(self, "_supports_ordered_cancellation", False)
                     # Session node IDs are caller-visible. Waiting for SGLang's
@@ -740,10 +741,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sglang_request_id,
                 priority,
             )
-            native_sampling_params = native_payload.get("sampling_params")
-            native_user_stop_token_ids = _native_user_stop_token_ids(
-                native_sampling_params
-            )
             async for output in self._process_native_generate_stream(
                 stream,
                 context,
@@ -753,7 +750,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 report_kv_cache_hit=not _has_parallel_prefix_warmup(
                     native_sampling_params
                 ),
-                user_stop_token_ids=native_user_stop_token_ids,
+                user_stop_token_ids=_native_user_stop_token_ids(native_sampling_params),
             ):
                 yield output
             return
@@ -970,7 +967,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
         report_kv_cache_hit: bool = True,
-        user_stop_token_ids: set[int] | None = None,
+        user_stop_token_ids: frozenset[int] | set[int] = frozenset(),
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
