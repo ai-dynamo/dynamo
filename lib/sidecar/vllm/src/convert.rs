@@ -570,6 +570,51 @@ pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::
         .any(|value| !value.is_null())
 }
 
+/// Reject vllm-proto 0.5 generation controls for a server that doesn't report
+/// 0.6.0 or later. Older schemas drop the new fields and read an explicit zero
+/// `top_k` or `min_p` as "use the model default", so the request would succeed
+/// without them.
+pub(crate) fn require_proto_0_6_controls(
+    request: &pb::GenerateRequest,
+    proto_version: &str,
+) -> Result<(), DynamoError> {
+    let sampling = request.sampling.as_ref();
+    let used = [
+        (
+            "bad_words_token_ids",
+            request
+                .decoding
+                .as_ref()
+                .is_some_and(|decoding| !decoding.bad_words_token_ids.is_empty()),
+        ),
+        (
+            "max_thinking_tokens",
+            request
+                .stopping
+                .as_ref()
+                .is_some_and(|stopping| stopping.thinking_token_budget.is_some()),
+        ),
+        (
+            "top_k=-1 or top_k=0",
+            sampling.is_some_and(|sampling| sampling.top_k == Some(0)),
+        ),
+        (
+            "min_p=0",
+            sampling.is_some_and(|sampling| sampling.min_p == Some(0.0)),
+        ),
+    ];
+    let Some((control, _)) = used.into_iter().find(|&(_, used)| used) else {
+        return Ok(());
+    };
+    let reported = match proto_version {
+        "" => "no version".to_string(),
+        version => format!("vllm-proto {version}"),
+    };
+    Err(client::invalid_argument(format!(
+        "{control} requires a vLLM gRPC server that reports vllm-proto 0.6.0 or later; this server reports {reported}"
+    )))
+}
+
 fn take_engine_reasoning_gate(
     extra_args: &mut Option<serde_json::Value>,
 ) -> Result<Option<pb::EngineReasoningGate>, DynamoError> {

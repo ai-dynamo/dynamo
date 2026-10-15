@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    normalize_response_options, request_has_multimodal_input,
+    normalize_response_options, request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -196,7 +196,7 @@ impl VllmSidecarEngine {
         if dynamo_parsers && let Some(parser) = model.reasoning_parser() {
             // vLLM's reasoning parser decides when structured output starts,
             // and needs Dynamo's per-request reasoning gate to decide correctly.
-            if !model.supports_engine_reasoning_gate() {
+            if !model.reports_proto_0_6() {
                 return Err(client::invalid_argument(format!(
                     "vLLM runs reasoning parser `{parser}`, but its gRPC server (vllm-proto {proto_version}) predates 0.6.0 and cannot receive Dynamo's reasoning gate; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
                 )));
@@ -209,7 +209,7 @@ impl VllmSidecarEngine {
         }
         match model.reasoning_parser() {
             None if dynamo_parsers => {
-                let advice = if model.supports_engine_reasoning_gate() {
+                let advice = if model.reports_proto_0_6() {
                     "Start vllm-rs with a reasoning parser"
                 } else {
                     "Upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with a reasoning parser"
@@ -241,7 +241,7 @@ impl VllmSidecarEngine {
             .transpose()?;
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
-            model.supports_engine_reasoning_gate() && model.reasoning_parser().is_some();
+            model.reports_proto_0_6() && model.reasoning_parser().is_some();
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -847,7 +847,7 @@ impl LLMEngine for VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
         let mut request = normalize_response_options(request)?;
-        if !self.model.supports_engine_reasoning_gate()
+        if !self.model.reports_proto_0_6()
             && consume_reasoning_parser_args(&mut request.extra_args)
             && let Some(parser) = self.model.reasoning_parser()
         {
@@ -857,9 +857,11 @@ impl LLMEngine for VllmSidecarEngine {
                 "vLLM runs reasoning parser `{parser}`, but its gRPC server predates vllm-proto 0.6.0 and cannot receive this request's reasoning settings; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
             )));
         }
-        if request.stop_conditions.max_thinking_tokens.is_some()
-            && !self.mode.is_prefill()
-            && !self.mode.is_encode()
+        // Prefill and encode legs don't sample the response.
+        let generates = !self.mode.is_prefill() && !self.mode.is_encode();
+        if generates
+            && request.stop_conditions.max_thinking_tokens.is_some()
+            && self.model.reports_proto_0_6()
             && self.model.reasoning_parser().is_none()
         {
             // The native gRPC path skips vLLM's frontend check and would
@@ -871,6 +873,9 @@ impl LLMEngine for VllmSidecarEngine {
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
+        if generates && !self.model.reports_proto_0_6() {
+            require_proto_0_6_controls(&proto_request, self.model.proto_version())?;
+        }
         proto_request.model.clone_from(&self.model.served_name);
         if self.model.is_base_model_name(&proto_request.lora_name) {
             // Routers may address the base model by name through the adapter field.

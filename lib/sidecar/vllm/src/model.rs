@@ -13,9 +13,10 @@ use crate::proto as pb;
 
 const SUPPORTED_API_VERSION: &str = "vllm";
 /// First schema that reports `ServerInfo.proto_version`. Earlier servers can't
-/// be told apart, so all of them are treated as unable to read
-/// `GenerateRequest.engine_reasoning_gate`.
-const ENGINE_REASONING_GATE_PROTO_VERSION: (u64, u64, u64) = (0, 6, 0);
+/// be told apart, so all of them are treated as unable to read the 0.5
+/// generation controls: the reasoning gate, thinking budgets, forbidden token
+/// sequences, and explicit sampling zeros.
+const PROTO_0_6: (u64, u64, u64) = (0, 6, 0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -109,9 +110,9 @@ impl DiscoveredModel {
                 self.server.rl_capabilities, observed.server.rl_capabilities
             )));
         }
-        if self.supports_engine_reasoning_gate() != observed.supports_engine_reasoning_gate() {
+        if self.reports_proto_0_6() != observed.reports_proto_0_6() {
             return Err(client::protocol_error(format!(
-                "reasoning-gate support changed between bootstrap and startup: vllm-proto `{}` became `{}`",
+                "vllm-proto 0.6 support changed between bootstrap and startup: `{}` became `{}`",
                 self.server.proto_version, observed.server.proto_version
             )));
         }
@@ -127,10 +128,9 @@ impl DiscoveredModel {
         &self.server.proto_version
     }
 
-    /// Whether vLLM reads Dynamo's per-request reasoning gate.
-    pub(crate) fn supports_engine_reasoning_gate(&self) -> bool {
-        parse_proto_version(&self.server.proto_version)
-            .is_some_and(|version| version >= ENGINE_REASONING_GATE_PROTO_VERSION)
+    /// Whether vLLM confirms it reads the vllm-proto 0.5 generation controls.
+    pub(crate) fn reports_proto_0_6(&self) -> bool {
+        parse_proto_version(&self.server.proto_version).is_some_and(|version| version >= PROTO_0_6)
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_compatibility_tracks_reasoning_gate_support() {
+    fn startup_compatibility_tracks_proto_0_6_support() {
         let bootstrap = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
         for (version, compatible) in [("0.6.1", true), ("", false)] {
             let mut server = server_info();
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_reasoning_gate_requires_reported_proto_0_6() {
+    fn proto_0_6_requires_a_reported_version() {
         for (version, supported) in [
             ("", false),
             ("0.5.0", false),
@@ -513,11 +513,7 @@ mod tests {
             let mut server = server_info();
             server.proto_version = version.to_string();
             let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
-            assert_eq!(
-                model.supports_engine_reasoning_gate(),
-                supported,
-                "{version}"
-            );
+            assert_eq!(model.reports_proto_0_6(), supported, "{version}");
         }
     }
 

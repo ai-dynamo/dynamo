@@ -1163,6 +1163,52 @@ async fn thinking_budget_requires_engine_reasoning_parser() {
     }
 }
 
+// Regression: servers before vllm-proto 0.6.0 drop the 0.5 generation controls
+// and read explicit sampling zeros as "use the model default". Requests that
+// rely on them must fail instead of silently generating without them.
+#[tokio::test]
+async fn proto_0_5_controls_require_a_server_reporting_proto_0_6() {
+    type Mutation = fn(&mut PreprocessedRequest);
+    let cases: &[(Option<&str>, Mutation)] = &[
+        (Some("bad_words_token_ids"), |r| {
+            r.extra_args.as_mut().unwrap()["sampling_options"] =
+                json!({"bad_words_token_ids": [[7]]})
+        }),
+        (Some("max_thinking_tokens"), |r| {
+            r.stop_conditions.max_thinking_tokens = Some(0)
+        }),
+        (Some("top_k=-1 or top_k=0"), |r| {
+            r.sampling_options.top_k = Some(-1)
+        }),
+        (Some("min_p=0"), |r| r.sampling_options.min_p = Some(0.0)),
+        // Nonzero top_k and min_p mean the same in both schemas.
+        (None, |_| {}),
+    ];
+    let mut old_server = server_info();
+    old_server.proto_version.clear();
+    // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+    let (fake, engine) = started_engine(model_info(), old_server).await;
+    for &(rejected, mutate) in cases {
+        let mut request = request();
+        mutate(&mut request);
+        let result = collect_result(&engine, request).await;
+        match rejected {
+            Some(control) => {
+                let error = result.expect_err(control).to_string();
+                assert!(
+                    error.contains(control) && error.contains("reports no version"),
+                    "{error}"
+                );
+            }
+            None => {
+                result.expect("compatible controls");
+            }
+        }
+    }
+    assert_eq!(fake.service.requests.lock().await.len(), 1);
+    engine.cleanup().await.expect("cleanup");
+}
+
 // Regression: the frontend must leave reasoning out of tool grammars only when
 // vLLM's reasoning parser gates them, which needs a vllm-proto 0.6 server.
 #[tokio::test]
