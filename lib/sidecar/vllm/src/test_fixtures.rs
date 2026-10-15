@@ -71,6 +71,7 @@ pub(crate) fn server_info() -> pb::ServerInfo {
             sleep_mode_enabled: true,
             draft_weight_updates_enabled: true,
         }),
+        proto_version: pb::VERSION.to_string(),
     }
 }
 

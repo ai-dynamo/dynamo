@@ -1083,6 +1083,40 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     );
 }
 
+// Regression: servers before vllm-proto 0.6.0 can't confirm they read the
+// reasoning gate, so the sidecar must forward it only to newer servers.
+#[tokio::test]
+async fn reasoning_gate_reaches_only_servers_reporting_proto_0_6() {
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+
+    let mut old_server = server_info();
+    old_server.proto_version.clear();
+    for (info, forwarded) in [(server_info(), true), (old_server, false)] {
+        let server = FakeServer::start(FakeVllm::default()).await;
+        *server.service.server_info_override.lock().await = Some(info.clone());
+        let engine = engine_with_server_info(
+            &server.endpoint,
+            DisaggregationMode::Aggregated,
+            1,
+            model_info(),
+            info,
+        );
+        engine.start(0).await.expect("start");
+        collect(&engine, request.clone()).await;
+        let gate = server.service.requests.lock().await[0]
+            .engine_reasoning_gate
+            .clone();
+        assert_eq!(
+            gate.and_then(|gate| gate.reasoning_ended),
+            forwarded.then_some(false)
+        );
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
 // Regression: a frontend hosting ranks 4..8 must register and route that local
 // range, or hybrid deployments reject discovery or advertise unreachable engines.
 #[tokio::test]

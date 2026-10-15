@@ -9688,9 +9688,9 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vllm-proto"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2995eb9ff015f306fc3060251b50f23fdb0ba2bd9bfe3ac01c44d6dafa9ebda"
+checksum = "556c39cab83e7b52b85503df323ea8bcc8a65a217be9bd4219d8d831ae20d31b"
 dependencies = [
  "prost 0.14.4",
  "prost-types 0.14.4",

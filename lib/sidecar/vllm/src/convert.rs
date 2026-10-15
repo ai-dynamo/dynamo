@@ -230,7 +230,10 @@ pub(crate) fn build_generate_request(
         extra.remove(MM_HASHES_KEY);
     }
     let engine_reasoning_gate = take_engine_reasoning_gate(&mut extra_args)?;
-    let bad_words_token_ids = take_bad_words_token_ids(&mut extra_args)?;
+    let SamplingExtensions {
+        bad_words_token_ids,
+        allowed_token_ids,
+    } = take_sampling_extensions(&mut extra_args)?;
     let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
@@ -252,7 +255,7 @@ pub(crate) fn build_generate_request(
             frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
             logit_bias: Default::default(),
-            allowed_token_ids: Vec::new(),
+            allowed_token_ids,
             structured_output: structured_output(sampling.guided_decoding)?,
             bad_words_token_ids,
         }),
@@ -551,6 +554,16 @@ fn consume_preprocessed_mm_routing_hashes(
     Ok(Some(hashes))
 }
 
+/// The frontend adds these for vLLM's structured-output reasoning gate. Drop
+/// them for servers that can't confirm they read the gate (before vllm-proto
+/// 0.6.0); `--reasoning-parser none` is then required, so nothing reads them.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
+}
+
 fn take_engine_reasoning_gate(
     extra_args: &mut Option<serde_json::Value>,
 ) -> Result<Option<pb::EngineReasoningGate>, DynamoError> {
@@ -588,36 +601,79 @@ fn take_engine_reasoning_gate(
     )
 }
 
-fn take_bad_words_token_ids(
+/// vLLM's defaults for `VLLM_MAX_NUM_BAD_WORDS` and
+/// `VLLM_MAX_BAD_WORDS_TOTAL_TOKENS`. Its model runner enforces them inside the
+/// engine worker, where an oversized request can fail the engine.
+const MAX_BAD_WORDS: usize = 128;
+const MAX_BAD_WORDS_TOKENS: usize = 1024;
+
+#[derive(Default)]
+struct SamplingExtensions {
+    bad_words_token_ids: Vec<pb::TokenIds>,
+    allowed_token_ids: Vec<u32>,
+}
+
+fn take_sampling_extensions(
     extra_args: &mut Option<serde_json::Value>,
-) -> Result<Vec<pb::TokenIds>, DynamoError> {
+) -> Result<SamplingExtensions, DynamoError> {
     let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
-        return Ok(Vec::new());
+        return Ok(SamplingExtensions::default());
     };
     let Some(value) = extra.remove("sampling_options") else {
-        return Ok(Vec::new());
+        return Ok(SamplingExtensions::default());
     };
+    // The frontend forwards exactly these vLLM sampling fields.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct SamplingExtensions {
+    struct Passthrough {
         bad_words_token_ids: Option<Vec<Vec<u32>>>,
+        allowed_token_ids: Option<Vec<u32>>,
+        detokenize: Option<bool>,
+        logprob_token_ids: Option<serde_json::Value>,
     }
-    let sampling: SamplingExtensions = serde_json::from_value(value).map_err(|error| {
+    let passthrough: Passthrough = serde_json::from_value(value).map_err(|error| {
         client::invalid_argument(format!("extra_args.sampling_options is invalid: {error}"))
     })?;
-    sampling
-        .bad_words_token_ids
-        .unwrap_or_default()
-        .into_iter()
-        .map(|ids| {
-            if ids.is_empty() {
-                return Err(client::invalid_argument(
-                    "bad_words_token_ids sequences must not be empty",
-                ));
-            }
-            Ok(pb::TokenIds { ids })
-        })
-        .collect()
+    if passthrough.detokenize == Some(false) {
+        return Err(client::invalid_argument(
+            "detokenize=false is not supported by vLLM gRPC",
+        ));
+    }
+    if passthrough.logprob_token_ids.is_some() {
+        return Err(client::invalid_argument(
+            "logprob_token_ids is not supported by vLLM gRPC",
+        ));
+    }
+    if passthrough
+        .allowed_token_ids
+        .as_ref()
+        .is_some_and(Vec::is_empty)
+    {
+        // An empty list would mean "unrestricted" on the wire.
+        return Err(client::invalid_argument(
+            "allowed_token_ids must not be empty",
+        ));
+    }
+    let bad_words = passthrough.bad_words_token_ids.unwrap_or_default();
+    if bad_words.iter().any(Vec::is_empty) {
+        return Err(client::invalid_argument(
+            "bad_words_token_ids sequences must not be empty",
+        ));
+    }
+    if bad_words.len() > MAX_BAD_WORDS
+        || bad_words.iter().map(Vec::len).sum::<usize>() > MAX_BAD_WORDS_TOKENS
+    {
+        return Err(client::invalid_argument(format!(
+            "bad_words_token_ids allows at most {MAX_BAD_WORDS} sequences and {MAX_BAD_WORDS_TOKENS} tokens in total"
+        )));
+    }
+    Ok(SamplingExtensions {
+        bad_words_token_ids: bad_words
+            .into_iter()
+            .map(|ids| pb::TokenIds { ids })
+            .collect(),
+        allowed_token_ids: passthrough.allowed_token_ids.unwrap_or_default(),
+    })
 }
 
 fn consume_redundant_nvext(

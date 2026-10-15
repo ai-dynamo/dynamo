@@ -12,6 +12,10 @@ use crate::client;
 use crate::proto as pb;
 
 const SUPPORTED_API_VERSION: &str = "vllm";
+/// First schema that reports `ServerInfo.proto_version`. Earlier servers can't
+/// be told apart, so all of them are treated as unable to read
+/// `GenerateRequest.engine_reasoning_gate`.
+const ENGINE_REASONING_GATE_PROTO_VERSION: (u64, u64, u64) = (0, 6, 0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -105,11 +109,28 @@ impl DiscoveredModel {
                 self.server.rl_capabilities, observed.server.rl_capabilities
             )));
         }
+        if self.server.proto_version != observed.server.proto_version {
+            return Err(client::protocol_error(format!(
+                "vllm-proto version changed between bootstrap and startup: expected `{}`, observed `{}`",
+                self.server.proto_version, observed.server.proto_version
+            )));
+        }
         Ok(())
     }
 
     pub(crate) fn reasoning_parser(&self) -> Option<&str> {
         self.identity.reasoning_parser.as_deref()
+    }
+
+    /// The `vllm-proto` schema version vLLM reports; empty before 0.6.0.
+    pub(crate) fn proto_version(&self) -> &str {
+        &self.server.proto_version
+    }
+
+    /// Whether vLLM reads Dynamo's per-request reasoning gate.
+    pub(crate) fn supports_engine_reasoning_gate(&self) -> bool {
+        parse_proto_version(&self.server.proto_version)
+            .is_some_and(|version| version >= ENGINE_REASONING_GATE_PROTO_VERSION)
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
@@ -335,6 +356,15 @@ fn nonempty(value: String) -> Option<String> {
     (!value.trim().is_empty()).then_some(value)
 }
 
+/// Parse `major.minor.patch`, ignoring semver pre-release and build suffixes.
+fn parse_proto_version(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
+}
+
 fn nonzero<T>(value: T) -> Option<T>
 where
     T: Default + PartialEq,
@@ -450,6 +480,28 @@ mod tests {
             assert!(
                 DiscoveredModel::from_proto(model, server).is_err(),
                 "{case} metadata should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_reasoning_gate_requires_reported_proto_0_6() {
+        for (version, supported) in [
+            ("", false),
+            ("0.5.0", false),
+            ("0.6", false),
+            ("not-a-version", false),
+            ("0.6.0", true),
+            ("0.6.1-rc.1", true),
+            ("1.0.0", true),
+        ] {
+            let mut server = server_info();
+            server.proto_version = version.to_string();
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            assert_eq!(
+                model.supports_engine_reasoning_gate(),
+                supported,
+                "{version}"
             );
         }
     }

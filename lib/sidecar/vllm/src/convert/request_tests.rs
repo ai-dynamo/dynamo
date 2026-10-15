@@ -511,6 +511,23 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         ("sampling_options", |r| {
             r.extra_args = Some(json!({"sampling_options": {"bad_words_token_ids": [[-1]]}}))
         }),
+        ("at most 128 sequences", |r| {
+            r.extra_args =
+                Some(json!({"sampling_options": {"bad_words_token_ids": vec![[1]; 129]}}))
+        }),
+        ("1024 tokens in total", |r| {
+            r.extra_args =
+                Some(json!({"sampling_options": {"bad_words_token_ids": [vec![1; 1025]]}}))
+        }),
+        ("allowed_token_ids must not be empty", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"allowed_token_ids": []}}))
+        }),
+        ("detokenize=false is not supported", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"detokenize": false}}))
+        }),
+        ("logprob_token_ids is not supported", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"logprob_token_ids": [1]}}))
+        }),
         ("mm_processor_kwargs", |r| {
             r.mm_processor_kwargs = Some(json!({}))
         }),
@@ -536,6 +553,22 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         assert!(error.to_string().contains(expected), "{expected}: {error}");
         assert_invalid(error);
     }
+}
+
+#[test]
+fn sampling_passthrough_reaches_decoding_parameters() {
+    let mut request = minimal_request();
+    request.extra_args = Some(json!({"sampling_options": {
+        "allowed_token_ids": [10, 11],
+        "bad_words_token_ids": vec![[1]; 128],
+        "detokenize": true,
+    }}));
+    let decoding = build_generate_request(request, "id".into(), DisaggregationMode::Aggregated)
+        .unwrap()
+        .decoding
+        .unwrap();
+    assert_eq!(decoding.allowed_token_ids, vec![10, 11]);
+    assert_eq!(decoding.bad_words_token_ids.len(), 128);
 }
 
 #[test]

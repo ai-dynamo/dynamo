@@ -157,6 +157,7 @@ impl VllmMockerService {
                 .unwrap_or_default(),
             effective_attention_block_size: Some(engine_args.block_size as u64),
             rl_capabilities: None,
+            proto_version: pb::VERSION.to_string(),
         };
         // The wire role is separate from the aggregated scheduler used to
         // emulate disaggregated requests.
