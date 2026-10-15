@@ -249,6 +249,18 @@ class WorkflowTests(unittest.TestCase):
                     assess(self.args)
                 self.assertFalse(self.args.output_dir.exists())
 
+    @patch(
+        "scripts.protocol_compatibility.__main__.assess",
+        side_effect=AttributeError("'NoneType' object has no attribute 'get'"),
+    )
+    def test_unexpected_exception_is_a_tool_failure(self, assess):
+        """Exit 1 means a completed assessment, so a crash must return 2."""
+        argv = ["assess", "--dynamo", str(self.args.dynamo)]
+        argv += ["--framework", str(self.args.framework)]
+        argv += ["--framework-name", "example-engine", "--openai", str(self.baseline)]
+        argv += ["--oasdiff", str(self.binary), "--output-dir", str(self.root / "out")]
+        self.assertEqual(main(argv), 2)
+
     @patch("scripts.protocol_compatibility.__main__.assess", return_value=0)
     def test_cli_accepts_framework_identity_without_backend_specific_flags(
         self, assess

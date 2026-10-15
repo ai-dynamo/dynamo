@@ -332,7 +332,9 @@ def compare(
     Inputs must be retained comparator projections. Set `flatten` only when their
     schema coverage permits allOf merging. The process cannot fetch external refs.
     Version mismatches, subprocess failures/timeouts, and invalid JSON raise;
-    files are not changed. Empty output means an empty delta, not runtime parity.
+    a failed diff raises ValueError with its exit status and up to 2,000 stderr
+    characters.
+    Files are not changed. Empty output means an empty delta, not runtime parity.
     """
     version = subprocess.run(
         [str(binary), "--version"],
@@ -358,9 +360,15 @@ def compare(
     if flatten:
         command.append("--flatten-allof")
     command.extend([str(native), str(dynamo)])
-    result = subprocess.run(
-        command, check=True, capture_output=True, text=True, timeout=120
-    )
+    try:
+        result = subprocess.run(
+            command, check=True, capture_output=True, text=True, timeout=120
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip()[-2000:]
+        raise ValueError(
+            f"oasdiff exited with status {error.returncode}: {detail}"
+        ) from error
     return json.loads(result.stdout or "{}"), command
 
 

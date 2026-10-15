@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run an offline Dynamo/framework assessment from local OpenAPI files.
 
-This CLI parses arguments and translates input/tool errors to exit code 2.
+This CLI parses arguments and translates assessment failures to exit code 2.
 assessment.openapi_workflow owns the assessment and its output directory;
 reporting.openapi provides a separate CLI to rebuild reports from saved evidence.
 See README.md for commands, input requirements, and output formats.
@@ -24,8 +24,8 @@ from .assessment.openapi_workflow import DEFAULT_MANIFEST, assess
 def main(argv=None) -> int:
     """Run assess with argument tokens, or process arguments when argv is None.
 
-    Return 0 for no differences/gaps, 1 for review findings, or 2 for caught
-    input/tool errors reported on stderr. argparse exits on help or invalid syntax.
+    Return 0 for no differences/gaps, 1 for review findings, or 2 for assessment
+    failures reported on stderr. argparse exits on help or invalid syntax.
     See assess for output writes and partial results after a failure.
     """
     parser = argparse.ArgumentParser(description=__doc__)
@@ -86,6 +86,13 @@ def main(argv=None) -> int:
         OpenAPIValidationError,
     ) as error:
         print(f"Protocol compatibility tool error: {error}", file=sys.stderr)
+        return 2
+    except Exception as error:
+        # CLI boundary only: exit 1 means a completed assessment, not a crash.
+        print(
+            f"Protocol compatibility tool error ({type(error).__name__}): {error}",
+            file=sys.stderr,
+        )
         return 2
 
 

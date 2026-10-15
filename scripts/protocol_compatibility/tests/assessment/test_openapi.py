@@ -240,6 +240,21 @@ class RequestProjectionTests(unittest.TestCase):
                 Path("/fixture/oasdiff"), Path("v.json"), Path("d.json"), flatten=True
             )
 
+    @patch("scripts.protocol_compatibility.assessment.openapi.subprocess.run")
+    def test_comparator_failure_keeps_bounded_stderr(self, run):
+        """Retain a failed comparator's diagnostic tail without dumping unbounded output."""
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "oasdiff version 1.33.0\n"),
+            subprocess.CalledProcessError(
+                102, ["oasdiff"], stderr="x" * 5000 + 'map key "examples" not found'
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "examples.*not found") as raised:
+            compare(
+                Path("/fixture/oasdiff"), Path("v.json"), Path("d.json"), flatten=False
+            )
+        self.assertLess(len(str(raised.exception)), 2100)
+
 
 class AliasMatchingTests(unittest.TestCase):
     def pair(self):
@@ -930,6 +945,40 @@ class FindingReportTests(unittest.TestCase):
         self.assertTrue(any(row["alias_report_pointers"] for row in result["findings"]))
         self.assertEqual(result["counts"]["categories"]["alias_evidence"], 1)
         self.assertEqual(result["counts"]["categories"]["intentional_exclusion"], 1)
+
+    def test_reported_change_text_is_escaped(self):
+        """Keep schema-provided member names from adding HTML or headings to the report."""
+        report, sources = self.fixture(
+            {"required": {"added": ["<script>x</script>\n## fake"]}}
+        )
+        inventory = build_findings(report, sources)
+        markdown = render({**report, "finding_inventory": inventory})
+        self.assertNotIn("<script>", markdown)
+        self.assertNotIn("\n## fake", markdown)
+
+    def test_accounting_rejects_double_ownership(self):
+        """Reject findings when the walker assigns one raw delta twice."""
+        report, sources = self.fixture({"properties": {"added": ["value"]}})
+
+        def twice(func, *bound):
+            """Replace partial with a callback that emits each finding twice."""
+            return lambda *args: (func(*bound, *args), func(*bound, *args))
+
+        with patch("scripts.protocol_compatibility.reporting.findings.partial", twice):
+            with self.assertRaisesRegex(ValueError, "exactly once"):
+                build_findings(report, sources)
+
+    def test_accounting_rejects_unowned_terminals(self):
+        """Reject findings when the walker leaves a raw delta unassigned."""
+        report, sources = self.fixture({"properties": {"added": ["value"]}})
+
+        def never(func, *bound):
+            """Replace partial with a callback that emits no findings."""
+            return lambda *args: None
+
+        with patch("scripts.protocol_compatibility.reporting.findings.partial", never):
+            with self.assertRaisesRegex(ValueError, "exactly once"):
+                build_findings(report, sources)
 
     def test_regeneration_is_portable_escaped_and_preserves_input(self):
         """Rendering copies frozen evidence, rejects overwrite/nesting, and escapes schema text."""

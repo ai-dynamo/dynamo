@@ -250,7 +250,7 @@ def render(
             )
             change = reported_change(row)
             if change:
-                lines.extend([change, ""])
+                lines.extend([prose(change), ""])
             if (
                 row["change"] in {"structure", "unknown", "default", "required"}
                 or row["category"]
