@@ -3663,13 +3663,15 @@ mod tests {
             let n_complete = tokens.len() / bs;
             assert_eq!(lineages.len(), n_complete);
 
-            for position in 0..n_complete {
+            for (position, lineage) in lineages.iter().enumerate() {
                 let block_offset = position * bs;
                 let block_tokens = &tokens[block_offset..block_offset + bs];
-                let expected_bytes = compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
+                let expected_bytes =
+                    compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
                 let expected_hash = compute_block_hash(&expected_bytes, salt);
                 assert_eq!(
-                    lineages[position].block_hash, expected_hash,
+                    lineage.block_hash,
+                    expected_hash,
                     "Cursor gate block hash mismatch at block position {position} [offset {block_offset}..{}) run layout: {:?}",
                     block_offset + bs,
                     mm_runs
@@ -3757,8 +3759,9 @@ mod tests {
                 if curr_offset + run_len > total_tokens {
                     break;
                 }
+                let mm_hash = next_rand(1 << 30) as u64;
                 fuzz_runs.push(TokenBlockMmInfo {
-                    mm_hash: rng_state,
+                    mm_hash,
                     offset: curr_offset,
                     length: run_len,
                 });
