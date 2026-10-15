@@ -5,6 +5,7 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 
 use anyhow::Result;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use ffmpeg_next::Rational;
 use memfile::{CreateOptions, MemFile, Seal};
 use ndarray::Array4;
@@ -216,15 +217,30 @@ fn video_open_error(error: ffmpeg_next::Error) -> anyhow::Error {
     )
 }
 
+/// Staging the bytes in a memfd fails only on host faults (for example, file
+/// descriptor exhaustion), never because of the client's media, so keep it a 500.
+fn memfile_error(error: std::io::Error) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::Internal)
+        .message(format!(
+            "failed to stage the video in an in-memory file: {error}"
+        ))
+        .build()
+        .into()
+}
+
 fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaData> {
     use ffmpeg_next::codec::context::Context;
     use ffmpeg_next::software::scaling::{Context as ScalingContext, Flags};
     use ffmpeg_next::util::format::pixel::Pixel;
 
-    let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))?;
-    mem_file.write_all(&bytes)?;
+    let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))
+        .map_err(memfile_error)?;
+    mem_file.write_all(&bytes).map_err(memfile_error)?;
     drop(bytes);
-    mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
+    mem_file
+        .add_seals(Seal::Write | Seal::Shrink | Seal::Grow)
+        .map_err(memfile_error)?;
     let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
     let mut input = ffmpeg_next::format::input(&fd_path).map_err(video_open_error)?;
 

@@ -140,10 +140,14 @@ fn policy_rejection(message: impl Into<String>) -> DynamoError {
         .build()
 }
 
-/// Classify a client-media fetch or decode failure as a 400; policy rejections pass through.
+/// Classify a client-media fetch or decode failure as a 400. Errors that already carry
+/// a class, such as policy rejections or the video decoder's host faults, pass through.
 /// The client sees only `public`; the cause may hold a presigned URL or decoder output.
 fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Error {
-    if MediaFetcher::is_policy_rejection(&error) {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<DynamoError>().is_some())
+    {
         return error;
     }
     DynamoError::builder()
@@ -667,8 +671,6 @@ impl MediaLoader {
                     // Use runtime decoder if provided, with MDC limits enforced
                     let decoder =
                         mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
-                    // Also classifies the decoder's rare in-memory file I/O
-                    // errors as 400; they cannot be told apart here.
                     decoder
                         .decode_async_with_video_hash(data, _hash_video)
                         .await
@@ -829,12 +831,21 @@ mod tests {
             ),
             ("image_url", format!("http://127.0.0.1:{closed_port}/x.png")),
         ];
-        if cfg!(feature = "media-ffmpeg") {
+        #[cfg(feature = "media-ffmpeg")]
+        {
             cases.push(("video_url", "data:video/mp4;base64,".to_string()));
-            cases.push((
-                "video_url",
-                format!("data:video/mp4;base64,{}", b64(b"not a video")),
-            ));
+            // The decoder stages video bytes in a memfd. Where memfd is forbidden, that
+            // host fault is a 500, so this case cannot reach the decoder.
+            let options = memfile::CreateOptions::new().allow_sealing(true);
+            match memfile::MemFile::create("probe", options) {
+                Ok(_) => cases.push((
+                    "video_url",
+                    format!("data:video/mp4;base64,{}", b64(b"not a video")),
+                )),
+                Err(e) => {
+                    println!("skipping the undecodable video case (memfd not available: {e})")
+                }
+            }
         }
 
         let media_decoder = MediaDecoder {
@@ -1119,6 +1130,23 @@ mod tests_non_nixl {
             current = cause.source();
         }
         panic!("error chain did not contain InvalidArgument: {error}");
+    }
+
+    #[test]
+    fn media_input_error_keeps_classified_errors() {
+        let bad_media = media_input_error(IMAGE_DECODE_FAILED, anyhow::anyhow!("bad bytes"));
+        assert_invalid_argument_in_chain(bad_media.as_ref());
+
+        let host_fault: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message("memfd failed")
+            .build()
+            .into();
+        let passed = media_input_error(IMAGE_DECODE_FAILED, host_fault);
+        let dynamo_error = passed
+            .downcast_ref::<DynamoError>()
+            .expect("classified error passes through");
+        assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
     }
 
     #[test]
