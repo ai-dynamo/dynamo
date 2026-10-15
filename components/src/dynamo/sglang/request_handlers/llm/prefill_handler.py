@@ -12,7 +12,10 @@ from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
-from dynamo.sglang._disagg import validate_disagg_parallel_sampling
+from dynamo.sglang._disagg import (
+    validate_disagg_parallel_sampling,
+    validate_disagg_routed_experts,
+)
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
@@ -228,6 +231,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
             results = native_generate_stream(self.engine, native_request)
         else:
+            # Reject before the handoff starts so decode is never left waiting.
+            if getattr(self.config.server_args, "enable_return_routed_experts", False):
+                validate_disagg_routed_experts(inner_request, input_param)
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
                 sampling_params,

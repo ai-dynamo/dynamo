@@ -2036,6 +2036,7 @@ impl OpenAIPreprocessor {
                 "allowed_token_ids",
                 "bad_words_token_ids",
                 "logprob_token_ids",
+                "routed_experts_start_len",
             ] {
                 if let Some(value) = fields.get(key) {
                     sampling_passthrough.insert(key.to_string(), value.clone());
@@ -12660,6 +12661,7 @@ mod tests {
             "allowed_token_ids": [10, 11],
             "bad_words_token_ids": [[12, 13]],
             "logprob_token_ids": [14, 15],
+            "routed_experts_start_len": 0,
             "nvext": {
                 "cache_salt": "step_7",
                 "extra_fields": ["completion_token_ids"],
@@ -12695,6 +12697,10 @@ mod tests {
         assert_eq!(
             extra_args["sampling_options"]["logprob_token_ids"],
             serde_json::json!([14, 15])
+        );
+        assert_eq!(
+            extra_args["sampling_options"]["routed_experts_start_len"],
+            serde_json::json!(0)
         );
     }
 

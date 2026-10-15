@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang._disagg import validate_disagg_routed_experts
 from dynamo.sglang.request_handlers import cancellation
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 
@@ -333,6 +335,53 @@ async def test_prefill_omits_kv_cache_hit_after_cancellation(
 
     assert len(chunks) == 1
     assert "disaggregated_params" in chunks[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "enabled,start_len,rejected",
+    [(True, None, True), (True, 2, True), (True, 3, False), (False, None, False)],
+)
+async def test_prefill_rejects_stale_prompt_routed_experts_before_handoff(
+    monkeypatch, prefill_responses, enabled, start_len, rejected
+):
+    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=False)
+    handler.config.server_args.enable_return_routed_experts = enabled
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    extra_args = {"nvext": {"extra_fields": ["routed_experts"]}}
+    if start_len is not None:
+        extra_args["sampling_options"] = {"routed_experts_start_len": start_len}
+    stream = handler.generate(
+        {
+            "request": {
+                "token_ids": [1, 2, 3],
+                "routing": {},
+                "extra_args": extra_args,
+            },
+            "sampling_params": {},
+        },
+        context,
+    )
+
+    if rejected:
+        with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
+            await anext(stream)
+    else:
+        assert "disaggregated_params" in (await _drain(stream))[0]
+
+
+def test_disagg_routed_experts_rejects_untokenized_prompt():
+    request = {
+        "nvext": {"extra_fields": ["routed_experts"]},
+        "extra_args": {"sampling_options": {"routed_experts_start_len": 100}},
+    }
+
+    with pytest.raises(InvalidArgument):
+        validate_disagg_routed_experts(request, {"prompt": "hello"})
+    validate_disagg_routed_experts({}, {"prompt": "hello"})
 
 
 async def _drain(stream):

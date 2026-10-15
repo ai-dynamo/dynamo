@@ -31,7 +31,10 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
     supports_external_mm_hashes,
 )
-from dynamo.sglang._disagg import validate_disagg_parallel_sampling
+from dynamo.sglang._disagg import (
+    validate_disagg_parallel_sampling,
+    validate_disagg_routed_experts,
+)
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
@@ -53,7 +56,11 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
     reject_unconsumed_media,
 )
-from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.request_utils import (
+    nvext_extra_field_requested,
+    request_cache_salt,
+    routed_experts_start_len,
+)
 from dynamo.sglang.thinking_budget import (
     apply_thinking_budget,
     thinking_budget_requested,
@@ -165,20 +172,6 @@ class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
 def _as_sglang_video(frames: Any, metadata: Dict[str, Any]) -> FrontendDecodedVideo:
     """Expose transferred frames through SGLang's predecoded video contract."""
     return FrontendDecodedVideo(frames, metadata)
-
-
-def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
-    nvext = request.get("nvext")
-    extra_args = request.get("extra_args") or {}
-    extra_nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
-
-    for source in (nvext, extra_nvext):
-        if not isinstance(source, dict):
-            continue
-        extra_fields = source.get("extra_fields")
-        if isinstance(extra_fields, list) and field in extra_fields:
-            return True
-    return False
 
 
 def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
@@ -455,6 +448,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine, {"return_routed_experts": True}
         )
 
+    def _request_routed_experts_kwargs(
+        self, request: Dict[str, Any], input_param: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Request routed experts only for callers that opted in via nvext."""
+        if not self._routed_experts_kwargs or not nvext_extra_field_requested(
+            request, "routed_experts"
+        ):
+            return {}
+        if self.serving_mode == DisaggregationMode.DECODE:
+            validate_disagg_routed_experts(request, input_param)
+        start_len = routed_experts_start_len(request)
+        if start_len is None:
+            return self._routed_experts_kwargs
+        kwargs = {**self._routed_experts_kwargs, "routed_experts_start_len": start_len}
+        if "routed_experts_start_len" not in filter_supported_async_generate_kwargs(
+            self.engine, kwargs
+        ):
+            raise InvalidArgument(
+                "routed_experts_start_len is not supported by the installed SGLang engine"
+            )
+        return kwargs
+
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
         """Prepare caller hashes when engine.async_generate accepts them.
@@ -697,10 +712,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             supported=getattr(self, "_supports_ordered_cancellation", False),
         )
         logprob_kwargs = self._build_logprob_kwargs(request)
-        routed_experts_kwargs = (
-            self._routed_experts_kwargs
-            if _nvext_extra_field_requested(request, "routed_experts")
-            else {}
+        routed_experts_kwargs = self._request_routed_experts_kwargs(
+            request, input_param
         )
         metadata_uploader = self._metadata_uploader_from_request(request)
 
@@ -1231,7 +1244,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "object": "chat.completion.chunk",
                 }
                 response_nvext: dict[str, Any] = {}
-                if stop_reason is not None and _nvext_extra_field_requested(
+                if stop_reason is not None and nvext_extra_field_requested(
                     request, "stop_reason"
                 ):
                     response_nvext["stop_reason"] = stop_reason
