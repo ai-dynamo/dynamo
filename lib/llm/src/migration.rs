@@ -105,6 +105,15 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
     )
 }
 
+fn has_generation_artifact(request: &PreprocessedRequest) -> bool {
+    request
+        .extra_args
+        .as_ref()
+        .and_then(|extra| extra.pointer("/nvext/metadata_upload/kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some("generation_artifact")
+}
+
 fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
     let mut migratable = None;
     let mut current = Some(err);
@@ -388,6 +397,14 @@ where
             if retries_left > 0 {
                 tracing::warn!(
                     "n>1 request: migration disabled - per-choice generation state is not transferable"
+                );
+            }
+            retries_left = 0;
+        }
+        if has_generation_artifact(&preprocessed_request) {
+            if retries_left > 0 {
+                tracing::warn!(
+                    "Generation-artifact request: migration disabled because capture state cannot be replayed"
                 );
             }
             retries_left = 0;
@@ -1116,6 +1133,38 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn generation_artifact_disables_request_migration() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(1);
+        request.extra_args = Some(serde_json::json!({
+            "nvext": {"metadata_upload": {"kind": "generation_artifact", "mode": "inline_base64", "contents": []}}
+        }));
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> = Arc::new(
+            MockEngine::new(MockBehavior::Success, 1, 100, context_id.clone()),
+        );
+        let manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            engine,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manager.retries_left, 0);
+        assert!(manager.request.migration_state.is_none());
+
+        let mut legacy = create_mock_request(1);
+        legacy.extra_args =
+            Some(serde_json::json!({"nvext": {"metadata_upload": {"url": "s3://bucket/key"}}}));
+        assert!(!has_generation_artifact(&legacy));
     }
 
     // Helper to create mock LLM engine output
