@@ -247,6 +247,7 @@
 /components/src/dynamo/common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_models_dir_flag.py                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/report_pytest_markers.py                                                                         @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/artifacts/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/multimodal_profiles/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_predownload_models.py                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/lora/                                                                     @ai-dynamo/dynamo-runtime-codeowners
@@ -550,6 +551,7 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/connector/                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/offload.rs                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/storage.rs                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/artifacts/vllm/                                                                  @ai-dynamo/dynamo-backend-vllm-codeowners
 /dev/observability/xpu-alert-rules.yml                                                                  @ai-dynamo/dynamo-xpu-codeowners
 /dev/observability/xpu_smi_exporter.py                                                                  @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/block_manager/controller/                                                                  @ai-dynamo/dynamo-kv-memory-codeowners
@@ -578,6 +580,8 @@ requirements.txt                                                                
 /components/src/dynamo/trtllm/request_handlers/diffusion/                                               @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/                                             @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/sglang/request_handlers/image_diffusion/                                         @ai-dynamo/dynamo-diffusion-codeowners
+/recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json                                        @ai-dynamo/dynamo-operator-codeowners
+/recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json                              @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/                     @ai-dynamo/dynamo-backend-triton-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---

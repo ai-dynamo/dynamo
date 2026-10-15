@@ -39,8 +39,8 @@ ENV PATH=/usr/local/bin/etcd:${PATH}
 
 {% if device != "cuda" %}
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
-ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
+ENV TORCH_LIB_DIR=/opt/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 # vLLM 0.27.1's XPU image installs the oneAPI runtime and SYCL headers in
@@ -48,6 +48,7 @@ ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 # removed /opt/intel/oneapi tree: Triton gives that variable priority over its
 # wheel-metadata fallback and would search a nonexistent compiler include path.
 {% elif device == "cpu" %}
+ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% endif %}
@@ -636,6 +637,7 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/artifacts /workspace/components/src/dynamo/artifacts
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chown=dynamo:0 lib /workspace/lib
 

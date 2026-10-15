@@ -13,7 +13,7 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 
 ## How the config is loaded
 
-Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--dyn-enable-structural-tag` sets it on, `--no-dyn-enable-structural-tag` sets it off.
+Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — for example, `--enable-local-indexer` sets it on and `--no-enable-local-indexer` sets it off.
 
 <Card>
 <Tabs>
@@ -296,26 +296,10 @@ address.
   Environment variable: `DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE`
 </ParamField>
 
-<ParamField path="--dyn-enable-structural-tag" type="boolean" default="true">
-  Enable structural tag guided decoding for tool calls when the configured parser and backend support it. The Rust, Python vLLM, and Python SGLang frontend preprocessing paths use this setting for `auto`, required, and named tool choices. Setting it to `false` disables optional guidance. Rust preserves native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out for all tool choices. Native Rust sidecars retain their conservative `off`/`auto` behavior, including this Kimi exception, and are not included in the default change.
+<ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Native Rust sidecars retain their conservative default. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
 
-  Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
-</ParamField>
-
-<ParamField path="--dyn-structural-tag-scope" type="string" default="always">
-  Controls when structural tags are activated. `always` activates them for supported `auto`, required, and named tool requests. `auto` preserves the legacy conditional behavior: required or named `tool_choice`, or automatic tool choice when any tool has `strict=true` or `parallel_tool_calls` is false. `tool_choice=none` is unaffected by either setting. Applies when structural tags are active.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>always</Badge></span>
-
-  Environment variable: `DYN_STRUCTURAL_TAG_SCOPE`
-</ParamField>
-
-<ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the declared parameter schema unless a tool explicitly sets `strict=false`; an omitted `strict` field is schema-enforced. `strict` applies the declared schema to every tool and overrides `strict=false`. Applies when structural tags are active.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
-
-  Environment variable: `DYN_STRUCTURAL_TAG_SCHEMA`
+  Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
 
 <ParamField path="--custom-jinja-template" type="string" default="null">
@@ -360,6 +344,17 @@ address.
   local inhibition. The process reads this value once when the first client initializes; restart the
   process after changing it. Discovery updates remain authoritative, and direct dispatch bypasses the
   local inhibited set while the selected worker remains in discovery.
+</ParamField>
+
+<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="0">
+  Seconds a frontend waits for a worker to establish its response stream after the worker
+  acknowledges a unary request. The timer starts at the acknowledgement, so waiting for local
+  admission, connecting, and sending does not count. It covers worker queueing and setup before the
+  response stream opens, and a worker that accepts requests but cannot connect back. Set it above the
+  worst-case time a healthy worker takes to start a response. On expiry the request fails with a
+  response timeout, or migrates when migration is enabled, and the worker is locally inhibited for
+  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Set to `0` or leave unset to disable. Routers without fault
+  detection and bidirectional requests do not apply this timeout.
 </ParamField>
 
 ## Operations
