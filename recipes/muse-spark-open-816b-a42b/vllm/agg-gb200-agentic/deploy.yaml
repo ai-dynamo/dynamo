@@ -64,7 +64,7 @@ spec:
             - name: model
               persistentVolumeClaim:
                 claimName: shared-model-cache
-    - name: Worker
+    - name: worker
       type: worker
       replicas: 1
       runtimeVersionOverride: 1.5.0
