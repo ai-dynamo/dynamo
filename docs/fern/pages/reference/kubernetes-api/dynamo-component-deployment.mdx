@@ -182,7 +182,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="globalDynamoNamespace" type="boolean" default="false">
-  Places the component in the global Dynamo namespace rather than the per-deployment namespace derived from the DGD name.
+  Places the component in the global Dynamo namespace (`dynamo`) rather than the per-deployment namespace. By default, the operator combines the Kubernetes namespace and DGD name with a hyphen and replaces dots in the DGD name with hyphens. If the result exceeds 63 characters, the operator shortens it and appends a 16-character hash derived from the original namespace/name pair. Values of 63 characters or fewer remain unchanged.
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">

@@ -2236,6 +2236,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health",
  "tonic-reflection",
+ "tower",
  "tower-http",
  "tracing",
  "url",
