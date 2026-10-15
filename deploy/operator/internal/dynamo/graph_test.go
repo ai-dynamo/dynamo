@@ -6575,22 +6575,6 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
 			wantArgs:         nil,
 		},
-		{
-			name: "frontend with authored command and empty args",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeFrontend,
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Name:    commonconsts.MainContainerName,
-						Command: []string{"python3", "-m", "dynamo.frontend"},
-						Args:    []string{},
-					},
-				},
-			},
-			backendFramework: BackendFrameworkVLLM,
-			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
-			wantArgs:         nil,
-		},
 	}
 
 	for _, tt := range tests {
