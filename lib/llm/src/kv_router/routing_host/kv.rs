@@ -309,6 +309,7 @@ impl RoutingHost {
             ..
         } = plan;
         let selected_target = route_target(selection.worker);
+        let phase = request.phase();
         let guard = match self
             .track_planned_selection(&request, &mut selection, cleanup, &budget)
             .await
@@ -331,7 +332,7 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        self.bind_affinity(affinity, selected_target, stream)
+        self.bind_affinity(affinity, phase, selected_target, stream)
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -697,7 +698,7 @@ impl RoutingHost {
         };
         Ok((
             metadata,
-            self.bind_affinity(operation, selected_target, stream)?,
+            self.bind_affinity(operation, phase, selected_target, stream)?,
         ))
     }
 }

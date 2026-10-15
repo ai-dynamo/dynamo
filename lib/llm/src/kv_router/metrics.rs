@@ -65,6 +65,7 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+use crate::session_affinity::AffinityDecision;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
@@ -1056,9 +1057,13 @@ pub struct RouterRequestMetrics {
     pub kv_selected_cached_prefix_tokens: IntCounterVec,
     /// Backend-reported reused tokens, counted once per attempt; same labels.
     pub kv_worker_reused_tokens: IntCounterVec,
+    /// Dispatched requests that have a session binding. Labels: `phase` and
+    /// `outcome` (`new`, `followed`, `rerouted`).
+    pub session_affinity_decisions_total: IntCounterVec,
 }
 
 const KV_PHASE_LABEL: &str = "phase";
+const AFFINITY_OUTCOME_LABEL: &str = "outcome";
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
@@ -1208,6 +1213,14 @@ impl RouterRequestMetrics {
             frontend_service::KV_WORKER_REUSED_TOKENS_TOTAL,
             "Worker-reported reused tokens per routing attempt",
         );
+        let session_affinity_decisions_total = metrics
+            .create_intcountervec(
+                &router_metric(frontend_service::SESSION_AFFINITY_DECISIONS_TOTAL),
+                "Dispatched session-affinity requests by outcome: new binding, followed binding, or rerouted from binding",
+                &[KV_PHASE_LABEL, AFFINITY_OUTCOME_LABEL],
+                extra_labels,
+            )
+            .expect("failed to create router_session_affinity_decisions_total");
         Self {
             requests_started_total,
             requests_total,
@@ -1224,6 +1237,7 @@ impl RouterRequestMetrics {
             kv_best_eligible_cached_prefix_tokens,
             kv_selected_cached_prefix_tokens,
             kv_worker_reused_tokens,
+            session_affinity_decisions_total,
         }
     }
 
@@ -1275,6 +1289,17 @@ impl RouterRequestMetrics {
             .with_label_values(labels)
             .inc_by(selected_tokens);
         self.kv_worker_reused_tokens.with_label_values(labels)
+    }
+
+    /// Count one dispatched session-affinity request.
+    pub(crate) fn observe_session_affinity_decision(
+        &self,
+        phase: RequestPhase,
+        decision: AffinityDecision,
+    ) {
+        self.session_affinity_decisions_total
+            .with_label_values(&[phase.as_str(), decision.as_str()])
+            .inc();
     }
 }
 
@@ -1578,6 +1603,21 @@ mod tests {
             assert!(output.contains(&format!("router_input_sequence_tokens_sum{{model=\"{model}\",phase=\"{phase}\"}} {input}\n")), "{output}");
             assert!(output.contains(&format!("router_kv_best_eligible_cached_prefix_tokens_total{{model=\"{model}\",phase=\"{phase}\"}} {best}\n")), "{output}");
         }
+    }
+
+    #[test]
+    fn session_affinity_decisions_are_labeled_by_phase_and_outcome() {
+        let registry = dynamo_runtime::MetricsRegistry::new();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        metrics
+            .observe_session_affinity_decision(RequestPhase::Prefill, AffinityDecision::Rerouted);
+        let output = registry.prometheus_expfmt_combined().unwrap();
+        assert!(
+            output.contains(
+                "router_session_affinity_decisions_total{outcome=\"rerouted\",phase=\"prefill\"} 1\n"
+            ),
+            "{output}"
+        );
     }
 
     fn gather_pef(registry: &prometheus::Registry) -> String {

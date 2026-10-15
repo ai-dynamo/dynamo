@@ -360,6 +360,13 @@ The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
 
+To see when the router makes a new routing decision and when it follows a
+binding, plot `dynamo_component_router_session_affinity_decisions_total` by the
+`outcome` label (`new`, `followed`, `rerouted`). For example:
+`sum by (phase, outcome) (rate(dynamo_component_router_session_affinity_decisions_total[5m]))`.
+The [metrics catalog](../../../../reference/observability/metrics-catalog.mdx)
+defines each label value.
+
 With `DYN_LORA_ENABLED`, session affinity is supported in KV mode. It is rejected
 at startup with random or round-robin routing; the other router modes are not
 LoRA-aware and are rejected independently.

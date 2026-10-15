@@ -522,7 +522,10 @@ impl RoutingHost {
         }
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
-        Ok((metadata, self.bind_affinity(operation, target, stream)?))
+        Ok((
+            metadata,
+            self.bind_affinity(operation, phase, target, stream)?,
+        ))
     }
 }
 

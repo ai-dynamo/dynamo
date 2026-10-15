@@ -336,6 +336,76 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 
 #[tokio::test]
 #[serial_test::serial]
+async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("session-affinity-decision-metrics".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let load_context = test_load_context(&client).await;
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let (host, affinity) = builtin_host_with_affinity(
+        inner,
+        load_context,
+        crate::session_affinity::SessionAffinityMode::Soft,
+    );
+    let outcomes = ["new", "followed", "rerouted"];
+    let decisions = || {
+        outcomes.map(|outcome| {
+            host.request_metrics
+                .session_affinity_decisions_total
+                .with_label_values(&[RequestPhase::Aggregated.as_str(), outcome])
+                .get()
+        })
+    };
+    let generate = async |request| {
+        let mut stream = host.generate(request).await.unwrap();
+        while stream.next().await.is_some() {}
+    };
+    let before = decisions();
+
+    generate(affinity_request("decision-session", None)).await;
+    generate(affinity_request("decision-session", None)).await;
+    // A request without a session does not count.
+    generate(Context::new(request())).await;
+    // A soft binding to a missing worker is rerouted. The binding moves to the dispatched worker.
+    let moved = SessionAffinityId::new("decision-moved");
+    bind_affinity_target(&host, &moved, AffinityTarget::worker(worker_id + 1)).await;
+    generate(affinity_request("decision-moved", None)).await;
+
+    let after = decisions();
+    let delta: Vec<_> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(delta, [1, 1, 1], "outcomes {outcomes:?}");
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id; 4]
+    );
+    assert_eq!(
+        affinity.query_target(&moved, None).unwrap(),
+        Some(AffinityTarget::worker(worker_id))
+    );
+
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn builtin_hard_affinity_ignores_local_inhibition() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -4433,6 +4503,7 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
     let mut stream = router
         .bind_affinity(
             hold,
+            RequestPhase::Aggregated,
             AffinityTarget::new(7, Some(0)),
             ResponseStream::new(
                 Box::pin(stream::iter([Annotated::from_data(

@@ -40,8 +40,8 @@ use crate::{
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        AffinityCoordinator, AffinityDecision, AffinityTarget, Hold, SessionAffinityMode,
+        affinity_id, explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -618,13 +618,18 @@ impl RoutingHost {
     fn bind_affinity(
         &self,
         hold: Option<Hold>,
+        phase: RequestPhase,
         dispatched_target: AffinityTarget,
         stream: ManyOut<Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
             return Ok(stream);
         };
-        affinity.commit_to_stream(hold, dispatched_target, stream)
+        let decision = AffinityDecision::classify(&hold, dispatched_target);
+        let stream = affinity.commit_to_stream(hold, dispatched_target, stream)?;
+        self.request_metrics
+            .observe_session_affinity_decision(phase, decision);
+        Ok(stream)
     }
 
     /// Check request-supplied targets only at initial selection, not after a route preview
@@ -921,7 +926,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 return Err(error);
             }
         };
-        self.bind_affinity(operation, selected_target, stream)
+        self.bind_affinity(operation, phase, selected_target, stream)
     }
 }
 

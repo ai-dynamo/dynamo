@@ -139,6 +139,8 @@ class frontend_service:
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
     OVERLAP_BLOCKS_LOST = "overlap_blocks_lost"
+    # Dispatched session-affinity requests by outcome (new, followed, rerouted)
+    SESSION_AFFINITY_DECISIONS_TOTAL = "session_affinity_decisions_total"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -502,6 +504,8 @@ class router:
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "router_non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
     OVERLAP_BLOCKS_LOST = "router_overlap_blocks_lost"
+    # Dispatched session-affinity requests by outcome (new, followed, rerouted)
+    SESSION_AFFINITY_DECISIONS_TOTAL = "router_session_affinity_decisions_total"
     # Whether the router currently has a worker/dp_rank registered (1 = registered)
     WORKER_REGISTERED = "router_worker_registered"
 

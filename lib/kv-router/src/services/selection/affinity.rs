@@ -998,34 +998,38 @@ pub fn validate_bound_target(
     }
 }
 
+/// True if the dispatch went to the bound worker and, for a ranked binding,
+/// to the bound DP rank.
+pub fn dispatch_follows(bound: AffinityTarget, dispatched: AffinityTarget) -> bool {
+    bound.worker_id == dispatched.worker_id
+        && bound
+            .dp_rank
+            .is_none_or(|rank| dispatched.dp_rank == Some(rank))
+}
+
 /// Hard mode: a bound session must have been dispatched where it is bound.
 pub fn validate_dispatch_target(
     session_id: &str,
     bound: AffinityTarget,
     dispatched: AffinityTarget,
 ) -> Result<(), AffinityError> {
-    if bound.worker_id != dispatched.worker_id {
-        return Err(AffinityError::InvalidArgument(format!(
+    if dispatch_follows(bound, dispatched) {
+        return Ok(());
+    }
+    let same_worker = bound.worker_id == dispatched.worker_id;
+    let message = match (bound.dp_rank, dispatched.dp_rank) {
+        (Some(bound_rank), Some(dispatched_rank)) if same_worker => {
+            format!("session {session_id} is bound to DP rank {bound_rank}, not {dispatched_rank}")
+        }
+        (Some(bound_rank), None) if same_worker => format!(
+            "session {session_id} is bound to DP rank {bound_rank}, but dispatch did not select a DP rank"
+        ),
+        _ => format!(
             "session {session_id} is bound to worker {}, not {}",
             bound.worker_id, dispatched.worker_id
-        )));
-    }
-    if let Some(bound_rank) = bound.dp_rank {
-        match dispatched.dp_rank {
-            Some(dispatched_rank) if dispatched_rank == bound_rank => {}
-            Some(dispatched_rank) => {
-                return Err(AffinityError::InvalidArgument(format!(
-                    "session {session_id} is bound to DP rank {bound_rank}, not {dispatched_rank}"
-                )));
-            }
-            None => {
-                return Err(AffinityError::InvalidArgument(format!(
-                    "session {session_id} is bound to DP rank {bound_rank}, but dispatch did not select a DP rank"
-                )));
-            }
-        }
-    }
-    Ok(())
+        ),
+    };
+    Err(AffinityError::InvalidArgument(message))
 }
 
 #[cfg(test)]

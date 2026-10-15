@@ -242,6 +242,9 @@ pub mod frontend_service {
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
 
+    /// Dispatched session-affinity requests by outcome (new, followed, rerouted)
+    pub const SESSION_AFFINITY_DECISIONS_TOTAL: &str = "session_affinity_decisions_total";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -709,6 +712,9 @@ pub mod router {
 
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
+
+    /// Dispatched session-affinity requests by outcome (new, followed, rerouted)
+    pub const SESSION_AFFINITY_DECISIONS_TOTAL: &str = "router_session_affinity_decisions_total";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";
