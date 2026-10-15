@@ -342,6 +342,36 @@ async def test_run_with_conflict_retry_restarts_complete_operation():
 
 
 @pytest.mark.asyncio
+async def test_run_with_conflict_retry_reuses_replica_identity_state():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    connector.set_component_replicas.side_effect = [
+        client.ApiException(status=409),
+        ReplicaUpdateResult(accepted=True, applied=True),
+    ]
+    targets = [
+        TargetReplica(
+            sub_component_type=SubComponentType.PREFILL,
+            desired_replicas=2,
+        )
+    ]
+
+    async def operation():
+        return await cm.scale("default/my-dgd", targets, blocking=False)
+
+    result = await cm.run_with_conflict_retry(operation)
+
+    assert result.applied
+    first_state = connector.set_component_replicas.await_args_list[0].kwargs[
+        "retry_state"
+    ]
+    second_state = connector.set_component_replicas.await_args_list[1].kwargs[
+        "retry_state"
+    ]
+    assert first_state is second_state
+
+
+@pytest.mark.asyncio
 async def test_wait_for_ready_calls_connector():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
@@ -512,7 +542,7 @@ def test_observe_require_complete_raises_on_read_failure():
         cm.observe(require_complete=True)
 
 
-def test_observe_require_complete_tolerates_managed_deployment_not_found():
+def test_observe_managed_deployment_not_found_fails_complete_snapshot():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
@@ -521,7 +551,10 @@ def test_observe_require_complete_tolerates_managed_deployment_not_found():
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
 
-    assert cm.observe(require_complete=True) == {"default/missing": {}}
+    assert cm.observe() == {"default/missing": {}}
+    with pytest.raises(RuntimeError) as error:
+        cm.observe(require_complete=True)
+    assert isinstance(error.value.__cause__, DynamoGraphDeploymentNotFoundError)
 
 
 def test_observe_implicit_mode_lists_once_per_namespace():

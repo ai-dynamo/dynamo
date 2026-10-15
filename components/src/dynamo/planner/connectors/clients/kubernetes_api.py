@@ -243,6 +243,38 @@ class KubernetesAPI:
             f"DynamoGraphDeploymentScalingAdapter {adapter_name}",
         )
 
+    def list_graph_deployment_scaling_adapters(
+        self, graph_deployment_name: str
+    ) -> dict[str, dict]:
+        """List one DGD's adapters using the operator-owned DGD label."""
+        result = _as_custom_object(
+            self.custom_api.list_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                label_selector=(f"{DYNAMO_DGD_NAME_LABEL}={graph_deployment_name}"),
+            ),
+            f"DynamoGraphDeploymentScalingAdapter list for {graph_deployment_name}",
+        )
+        items = result.get("items")
+        if not isinstance(items, list):
+            raise TypeError("DGDSA list response has no items list")
+
+        adapters: dict[str, dict] = {}
+        for item in items:
+            adapter = _as_custom_object(item, "DynamoGraphDeploymentScalingAdapter")
+            dgd_ref = adapter.get("spec", {}).get("dgdRef", {})
+            if dgd_ref.get("name") != graph_deployment_name:
+                continue
+            component_name = dgd_ref.get("componentName")
+            if not isinstance(component_name, str) or not component_name:
+                raise ValueError("DGDSA spec.dgdRef.componentName is unavailable")
+            if component_name in adapters:
+                raise ValueError(f"duplicate DGDSA for component {component_name!r}")
+            adapters[component_name] = adapter
+        return adapters
+
     @staticmethod
     def get_scaling_adapter_desired_replicas(adapter: dict) -> int:
         """Return a validated authoritative replica target from a DGDSA."""
@@ -291,8 +323,10 @@ class KubernetesAPI:
             # writer fence before using a new resource version.
             patch_scale(resource_version)
         else:
+            expected_uid: str | None = None
 
             def update_scale() -> None:
+                nonlocal expected_uid
                 scale = _as_custom_object(
                     self.custom_api.get_namespaced_custom_object_scale(
                         group=NVIDIA_API_GROUP,
@@ -303,6 +337,13 @@ class KubernetesAPI:
                     ),
                     f"DynamoGraphDeploymentScalingAdapter scale {adapter_name}",
                 )
+                current_uid = self._resource_uid(scale, adapter_name)
+                if expected_uid is None:
+                    expected_uid = current_uid
+                elif current_uid != expected_uid:
+                    raise RuntimeError(
+                        f"DGDSA {adapter_name!r} identity changed during retry"
+                    )
                 patch_scale(self._resource_version(scale, adapter_name))
 
             retry_kubernetes_write(update_scale)
@@ -415,9 +456,21 @@ class KubernetesAPI:
             )
 
         if deployment is None:
-            retry_kubernetes_write(
-                lambda: update(self.get_graph_deployment(graph_deployment_name))
-            )
+            expected_uid: str | None = None
+
+            def update_current() -> None:
+                nonlocal expected_uid
+                current = self.get_graph_deployment(graph_deployment_name)
+                current_uid = self._resource_uid(current, graph_deployment_name)
+                if expected_uid is None:
+                    expected_uid = current_uid
+                elif current_uid != expected_uid:
+                    raise RuntimeError(
+                        f"DGD {graph_deployment_name!r} identity changed during retry"
+                    )
+                update(current)
+
+            retry_kubernetes_write(update_current)
         else:
             update(deployment)
         logger.info(
@@ -434,6 +487,13 @@ class KubernetesAPI:
                 f"resource {resource_name!r} has no metadata.resourceVersion"
             )
         return resource_version
+
+    @staticmethod
+    def _resource_uid(resource: dict, resource_name: str) -> str:
+        uid = resource.get("metadata", {}).get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise KeyError(f"resource {resource_name!r} has no metadata.uid")
+        return uid
 
     @staticmethod
     def _dgd_components(deployment: dict, graph_deployment_name: str) -> list[dict]:

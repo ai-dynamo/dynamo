@@ -107,7 +107,10 @@ def mock_custom_api():
         "dynamo.planner.connectors.clients.kubernetes_api.client.CustomObjectsApi"
     ) as mock:
         mock.return_value.get_namespaced_custom_object_scale.return_value = {
-            "metadata": {"resourceVersion": "scale-rv-1"}
+            "metadata": {
+                "uid": "adapter-uid",
+                "resourceVersion": "scale-rv-1",
+            }
         }
         yield mock.return_value
 
@@ -219,6 +222,39 @@ def test_get_service_scaling_adapter_reads_named_dgdsa(k8s_api, mock_custom_api)
     )
 
 
+def test_list_graph_deployment_scaling_adapters_uses_dgd_label(
+    k8s_api, mock_custom_api
+):
+    matching = {
+        "metadata": {"name": "test-deployment-worker"},
+        "spec": {
+            "dgdRef": {"name": "test-deployment", "componentName": "worker"},
+            "replicas": 1,
+        },
+    }
+    mismatched = {
+        "metadata": {"name": "other-worker"},
+        "spec": {
+            "dgdRef": {"name": "other", "componentName": "worker"},
+            "replicas": 1,
+        },
+    }
+    mock_custom_api.list_namespaced_custom_object.return_value = {
+        "items": [matching, mismatched]
+    }
+
+    result = k8s_api.list_graph_deployment_scaling_adapters("test-deployment")
+
+    assert result == {"worker": matching}
+    mock_custom_api.list_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        label_selector=("nvidia.com/dynamo-graph-deployment-name=test-deployment"),
+    )
+
+
 @pytest.mark.parametrize("replicas", [False, -1, 1.5])
 def test_get_scaling_adapter_desired_replicas_rejects_invalid_values(replicas):
     adapter = {
@@ -267,8 +303,8 @@ def test_update_scaling_adapter_replicas_never_falls_back_on_404(
 
 def test_update_service_replicas_rereads_scale_on_conflict(k8s_api, mock_custom_api):
     mock_custom_api.get_namespaced_custom_object_scale.side_effect = [
-        {"metadata": {"resourceVersion": "scale-rv-1"}},
-        {"metadata": {"resourceVersion": "scale-rv-2"}},
+        {"metadata": {"uid": "adapter-uid", "resourceVersion": "scale-rv-1"}},
+        {"metadata": {"uid": "adapter-uid", "resourceVersion": "scale-rv-2"}},
     ]
     mock_custom_api.patch_namespaced_custom_object_scale.side_effect = [
         client.ApiException(status=409),
@@ -282,6 +318,23 @@ def test_update_service_replicas_rereads_scale_on_conflict(k8s_api, mock_custom_
         call.kwargs["body"]["metadata"]["resourceVersion"]
         for call in mock_custom_api.patch_namespaced_custom_object_scale.call_args_list
     ] == ["scale-rv-1", "scale-rv-2"]
+
+
+def test_update_service_replicas_stops_retry_after_adapter_recreation(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = [
+        {"metadata": {"uid": "adapter-old", "resourceVersion": "scale-rv-1"}},
+        {"metadata": {"uid": "adapter-new", "resourceVersion": "scale-rv-2"}},
+    ]
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=409)
+    )
+
+    with pytest.raises(RuntimeError, match="identity changed during retry"):
+        k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
 
 
 def test_update_service_replicas_retries_429_without_rereading_scale(
@@ -323,6 +376,7 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     mock_custom_api.get_namespaced_custom_object.return_value = {
         "metadata": {
             "name": "test-deployment",
+            "uid": "dgd-uid",
             "resourceVersion": "dgd-rv-1",
         },
         "spec": {
@@ -365,11 +419,11 @@ def test_update_service_replicas_rereads_dgd_on_conflict(k8s_api, mock_custom_ap
     )
     mock_custom_api.get_namespaced_custom_object.side_effect = [
         {
-            "metadata": {"resourceVersion": "dgd-rv-1"},
+            "metadata": {"uid": "dgd-uid", "resourceVersion": "dgd-rv-1"},
             "spec": {"components": [{"name": "target", "replicas": 0}]},
         },
         {
-            "metadata": {"resourceVersion": "dgd-rv-2"},
+            "metadata": {"uid": "dgd-uid", "resourceVersion": "dgd-rv-2"},
             "spec": {
                 "components": [
                     {"name": "other", "replicas": 1},
@@ -394,6 +448,32 @@ def test_update_service_replicas_rereads_dgd_on_conflict(k8s_api, mock_custom_ap
     assert bodies[0]["spec"]["components"][0]["replicas"] == 2
     assert bodies[1]["metadata"]["resourceVersion"] == "dgd-rv-2"
     assert bodies[1]["spec"]["components"][1]["replicas"] == 2
+
+
+def test_update_service_replicas_stops_retry_after_dgd_recreation(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.side_effect = [
+        {
+            "metadata": {"uid": "dgd-old", "resourceVersion": "dgd-rv-1"},
+            "spec": {"components": [{"name": "target", "replicas": 0}]},
+        },
+        {
+            "metadata": {"uid": "dgd-new", "resourceVersion": "dgd-rv-2"},
+            "spec": {"components": [{"name": "target", "replicas": 0}]},
+        },
+    ]
+    mock_custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(
+        status=409
+    )
+
+    with pytest.raises(RuntimeError, match="identity changed during retry"):
+        k8s_api.update_service_replicas("test-deployment", "target", 2)
+
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once()
 
 
 def test_update_service_replicas_preserves_dgd_not_found_error(
@@ -453,7 +533,11 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     """The strict DGD path never probes or writes a convention-named DGDSA."""
     component = {"name": "test-component", "type": "prefill", "replicas": 0}
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment", "resourceVersion": "42"},
+        "metadata": {
+            "name": "test-deployment",
+            "uid": "dgd-uid",
+            "resourceVersion": "42",
+        },
         "spec": {"components": [component]},
     }
     mock_custom_api.patch_namespaced_custom_object.return_value = None
@@ -524,7 +608,11 @@ def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
 ):
     """A DGDSA opt-in after connector preflight must stop the stale write."""
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment", "resourceVersion": "43"},
+        "metadata": {
+            "name": "test-deployment",
+            "uid": "dgd-uid",
+            "resourceVersion": "43",
+        },
         "spec": {
             "components": [
                 {

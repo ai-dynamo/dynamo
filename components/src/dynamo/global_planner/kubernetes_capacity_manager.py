@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Optional, TypeVar
 
 from kubernetes.aio.utils.retry import retry_on_conflict
@@ -30,7 +31,7 @@ from dynamo.global_planner.capacity_manager import (
 from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
-from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.connectors.kubernetes import ReplicaUpdateRetryState
 from dynamo.planner.monitoring.dgd_services import (
     V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
     Service,
@@ -60,6 +61,9 @@ class KubernetesCapacityManager(CapacityManager):
         # specialized prefill/decode components do not need a hint.
         self._component_roles: dict[str, dict[str, str]] = {}
         self._observe_all_deployments = False
+        self._replica_retry_states: ContextVar[
+            dict[str, ReplicaUpdateRetryState] | None
+        ] = ContextVar("global_planner_replica_retry_states", default=None)
 
     # ------------------------------------------------------------------ #
     # Discovery / registration                                           #
@@ -238,11 +242,6 @@ class KubernetesCapacityManager(CapacityManager):
         error: Exception,
         require_complete: bool,
     ) -> None:
-        if isinstance(error, DynamoGraphDeploymentNotFoundError):
-            logger.info(f"Managed deployment {participant_id} does not exist yet")
-            all_pools[participant_id] = {}
-            return
-
         if require_complete:
             raise RuntimeError(
                 f"Failed to read deployment for {participant_id}: {error}"
@@ -379,7 +378,18 @@ class KubernetesCapacityManager(CapacityManager):
         rejection.
         """
         connector = self.connectors[participant_id]
-        result = await connector.set_component_replicas(targets, blocking=blocking)
+        retry_states = self._replica_retry_states.get()
+        if retry_states is None:
+            result = await connector.set_component_replicas(targets, blocking=blocking)
+        else:
+            retry_state = retry_states.setdefault(
+                participant_id, ReplicaUpdateRetryState()
+            )
+            result = await connector.set_component_replicas(
+                targets,
+                blocking=blocking,
+                retry_state=retry_state,
+            )
         if isinstance(result, ReplicaUpdateResult):
             return result
 
@@ -399,7 +409,11 @@ class KubernetesCapacityManager(CapacityManager):
 
     async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Re-run the complete budget transaction after a Kubernetes conflict."""
-        return await retry_on_conflict(operation)
+        token = self._replica_retry_states.set({})
+        try:
+            return await retry_on_conflict(operation)
+        finally:
+            self._replica_retry_states.reset(token)
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         connector = self.connectors[participant_id]
