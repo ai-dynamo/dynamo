@@ -81,7 +81,7 @@ def test_matrix_names_missing_release_catalog_entry():
 
 
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])
-@pytest.mark.parametrize("worker_version", ["1.4.2", "1.5.0", "1.6.0"])
+@pytest.mark.parametrize("worker_version", ["1.4.2", "1.5.0", "1.5.1", "1.6.0"])
 def test_example_patching_preserves_command_and_sets_component_versions(
     scenario, worker_version
 ):
@@ -100,7 +100,7 @@ def test_example_patching_preserves_command_and_sets_component_versions(
         assert "--embedding-worker" in worker["args"]
         assert "--use-sglang-tokenizer" in worker["args"]
     payloads = [e for e in worker["env"] if e["name"] == "DYN_HEALTH_CHECK_PAYLOAD"]
-    if scenario == "embedding" and worker_version == "1.5.0":
+    if scenario == "embedding" and worker_version in ("1.5.0", "1.5.1"):
         assert len(payloads) == 1
         assert json.loads(payloads[0]["value"]) == {
             "model": MODELS[scenario][0],

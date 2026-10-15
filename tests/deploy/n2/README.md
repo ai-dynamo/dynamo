@@ -28,15 +28,15 @@ runner or per-test ResourceQuota.
 
 ## Version-specific configuration
 
-Dynamo 1.5.0 SGLang embedding workers require an explicit embedding-shaped
+Dynamo 1.5.x SGLang embedding workers require an explicit embedding-shaped
 `DYN_HEALTH_CHECK_PAYLOAD` when active health checks are enabled. Their default
 canary uses a generation-shaped payload and fails in the embedding handler.
 The suite applies the documented DGD configuration only to embedding workers
-with runtime version `1.5.0`, using the served model name and `input: "Test"`.
+with runtime version `1.5.x`, using the served model name and `input: "Test"`.
 It keeps readiness and API checks enabled. Chat workers and other worker
 versions receive no payload override.
 
-See the [SGLang 1.5.0 compatibility requirement](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/general/compatibility.mdx#sglang-150-embedding-workers).
+See the [SGLang 1.5.x compatibility requirement](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/general/compatibility.mdx#sglang-15x-embedding-workers).
 
 ## Run
 

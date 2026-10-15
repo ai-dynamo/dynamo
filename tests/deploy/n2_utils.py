@@ -88,9 +88,9 @@ def compatibility_spec(
         spec.set_service_env_var(service, "HF_HUB_OFFLINE", "1")
         spec.set_service_env_var(service, "TRANSFORMERS_OFFLINE", "1")
         spec.set_service_env_var(service, "DYN_REQUEST_PLANE", "tcp")
-    # Dynamo 1.5.0 embedding canaries need the explicit DGD payload documented
+    # Dynamo 1.5.x embedding canaries need the explicit DGD payload documented
     # in the compatibility guide; its default payload has a generation shape.
-    if scenario == "embedding" and runtime_version(pair.worker) == "1.5.0":
+    if scenario == "embedding" and runtime_version(pair.worker).startswith("1.5."):
         spec.set_service_env_var(
             "decode",
             "DYN_HEALTH_CHECK_PAYLOAD",
