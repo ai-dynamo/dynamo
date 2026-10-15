@@ -316,31 +316,7 @@ class KubernetesAPI:
         self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:
         """Update replicas directly in DGD when no DGDSA is available."""
-
-        def update_dgd() -> None:
-            try:
-                deployment = self._read_graph_deployment_once(graph_deployment_name)
-            except client.ApiException as error:
-                if error.status == 404:
-                    raise DynamoGraphDeploymentNotFoundError(
-                        deployment_name=graph_deployment_name,
-                        namespace=self.current_namespace,
-                    ) from error
-                raise
-            resource_version = self._resource_version(deployment, graph_deployment_name)
-            components = self._dgd_components(deployment, graph_deployment_name)
-            self._patch_component_replicas(
-                graph_deployment_name,
-                resource_version,
-                components,
-                service_name,
-                replicas,
-            )
-
-        retry_kubernetes_write(update_dgd)
-        logger.info(
-            f"Updated DGD {graph_deployment_name} component {service_name} to {replicas} replicas"
-        )
+        self.update_dgd_replica_targets(graph_deployment_name, {service_name: replicas})
 
     def update_dgd_replicas_directly(
         self,
@@ -360,26 +336,51 @@ class KubernetesAPI:
         write. Standalone callers get the same behavior through a complete
         read-modify-write retry.
         """
+        self.update_dgd_replica_targets(
+            graph_deployment_name,
+            {service_name: replicas},
+            deployment=deployment,
+        )
+
+    def update_dgd_replica_targets(
+        self,
+        graph_deployment_name: str,
+        replica_targets: Mapping[str, int],
+        *,
+        deployment: dict | None = None,
+    ) -> None:
+        """CAS-patch all direct-DGD replica targets in one object update."""
+        if not replica_targets:
+            return
 
         def update(snapshot: dict) -> None:
             resource_version = self._resource_version(snapshot, graph_deployment_name)
             components = self._dgd_components(snapshot, graph_deployment_name)
-            index = self._find_component_index(
-                graph_deployment_name, components, service_name
-            )
-            if "scalingAdapter" in components[index]:
-                raise client.ApiException(
-                    status=409,
-                    reason=(
-                        f"component {service_name!r} now declares a scalingAdapter"
-                    ),
+            updated_components = copy.deepcopy(components)
+            for service_name, replicas in replica_targets.items():
+                index = self._find_component_index(
+                    graph_deployment_name, components, service_name
                 )
-            self._patch_component_replicas(
-                graph_deployment_name,
-                resource_version,
-                components,
-                service_name,
-                replicas,
+                if "scalingAdapter" in components[index]:
+                    raise client.ApiException(
+                        status=409,
+                        reason=(
+                            f"component {service_name!r} now declares a scalingAdapter"
+                        ),
+                    )
+                updated_components[index]["replicas"] = replicas
+            retry_kubernetes_request(
+                lambda: self.custom_api.patch_namespaced_custom_object(
+                    group=NVIDIA_API_GROUP,
+                    version=DYNAMO_API_VERSION,
+                    namespace=self.current_namespace,
+                    plural=DGD_PLURAL,
+                    name=graph_deployment_name,
+                    body={
+                        "metadata": {"resourceVersion": resource_version},
+                        "spec": {"components": updated_components},
+                    },
+                )
             )
 
         if deployment is None:
@@ -389,10 +390,9 @@ class KubernetesAPI:
         else:
             update(deployment)
         logger.info(
-            "Updated DGD %s component %s to %s replicas",
+            "Updated DGD %s replica targets: %s",
             graph_deployment_name,
-            service_name,
-            replicas,
+            dict(replica_targets),
         )
 
     @staticmethod
@@ -416,33 +416,6 @@ class KubernetesAPI:
                 f"DGD {graph_deployment_name!r} spec.components must be a list"
             )
         return components
-
-    def _patch_component_replicas(
-        self,
-        graph_deployment_name: str,
-        resource_version: str,
-        components: list[dict],
-        component_name: str,
-        replicas: int,
-    ) -> None:
-        index = self._find_component_index(
-            graph_deployment_name, components, component_name
-        )
-        updated_components = copy.deepcopy(components)
-        updated_components[index]["replicas"] = replicas
-        retry_kubernetes_request(
-            lambda: self.custom_api.patch_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGD_PLURAL,
-                name=graph_deployment_name,
-                body={
-                    "metadata": {"resourceVersion": resource_version},
-                    "spec": {"components": updated_components},
-                },
-            )
-        )
 
     @staticmethod
     def _find_component_index(
@@ -918,7 +891,9 @@ class KubernetesAPI:
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
-            graph_deployment = self.get_graph_deployment(graph_deployment_name)
+            graph_deployment = await asyncio.to_thread(
+                self.get_graph_deployment, graph_deployment_name
+            )
 
             # Failed is a terminal rollout state; retrying until timeout (up to
             # 30 min) serves no purpose. Raise immediately so the operator can
@@ -948,8 +923,8 @@ class KubernetesAPI:
                 continue
 
             # Legacy exclude-planner path: replica-count stability only.
-            settlement_deployment = self.fetch_authoritative_replica_targets(
-                graph_deployment
+            settlement_deployment = await asyncio.to_thread(
+                self.fetch_authoritative_replica_targets, graph_deployment
             )
             all_stable, not_ready = self.non_planner_components_stable(
                 settlement_deployment
@@ -1002,8 +977,8 @@ class KubernetesAPI:
                 svc = Service(name=name, service=components_map.get(name, {}))
                 expected_power[name] = svc.get_gpu_power_limit_watts(graph_deployment)
 
-            pods_ok, pods_pending = self.worker_pods_settled(
-                graph_deployment, expected_power
+            pods_ok, pods_pending = await asyncio.to_thread(
+                self.worker_pods_settled, graph_deployment, expected_power
             )
             if not pods_ok:
                 logger.info(

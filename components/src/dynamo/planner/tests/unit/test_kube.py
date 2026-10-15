@@ -458,6 +458,43 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     mock_custom_api.api_client.call_api.assert_not_called()
 
 
+def test_update_dgd_replica_targets_uses_one_resource_version_patch(
+    k8s_api, mock_custom_api
+):
+    deployment = {
+        "metadata": {"name": "test-deployment", "resourceVersion": "42"},
+        "spec": {
+            "components": [
+                {"name": "prefill", "type": "prefill", "replicas": 1},
+                {"name": "decode", "type": "decode", "replicas": 2},
+            ]
+        },
+    }
+
+    k8s_api.update_dgd_replica_targets(
+        "test-deployment",
+        {"prefill": 3, "decode": 4},
+        deployment=deployment,
+    )
+
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeployments",
+        name="test-deployment",
+        body={
+            "metadata": {"resourceVersion": "42"},
+            "spec": {
+                "components": [
+                    {"name": "prefill", "type": "prefill", "replicas": 3},
+                    {"name": "decode", "type": "decode", "replicas": 4},
+                ]
+            },
+        },
+    )
+
+
 def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
     k8s_api, mock_custom_api
 ):
