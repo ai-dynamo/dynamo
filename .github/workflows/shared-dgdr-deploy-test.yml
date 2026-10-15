@@ -6,6 +6,11 @@ name: Shared DGDR Deploy Test
 on:
   workflow_call:
     inputs:
+      vcluster_host_priority_class:
+        description: 'Host PriorityClass for synced test workloads, including self-bootstrap reruns. auto preserves existing nightly behavior.'
+        required: false
+        type: string
+        default: 'auto'
       dd_env:
         description: 'Datadog env tag for test sessions (DD_ENV). Datadog Test Optimization settings (auto test retries, PR comments, etc.) are scoped per (service, env), so use a distinct value (e.g. "nightly", "post-merge") to configure those workflows independently of PR/pre-merge.'
         required: false
@@ -64,6 +69,7 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
+          vcluster_host_priority_class: ${{ inputs.vcluster_host_priority_class }}
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -106,6 +112,7 @@ jobs:
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: $/.github/actions/setup-dynamo-operator
         with:
+          vcluster_host_priority_class: ${{ inputs.vcluster_host_priority_class }}
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}

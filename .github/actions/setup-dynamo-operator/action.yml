@@ -51,7 +51,7 @@ inputs:
     required: false
     default: ''
   vcluster_host_priority_class:
-    description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-02 or aws-gb300; use an empty value to disable.'
+    description: 'Host PriorityClass to set on pods synced from the vCluster. Pre-merge deployment callers explicitly pass ci-pre-merge. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-02 or aws-gb300; use an empty value to disable.'
     required: false
     default: 'auto'
   reset_existing:
