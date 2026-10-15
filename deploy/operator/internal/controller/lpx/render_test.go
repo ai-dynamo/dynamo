@@ -99,7 +99,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			child := newLPXRenderDeployment(t, &dynamoDeployment)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, &dynamoDeployment)
 			require.NoError(t, err)
-			got, extraResources, err := r.renderPodCliqueSet(t.Context(), child, &dynamoDeployment, workloads, plans, nil)
+			got, extraResources, err := r.renderPodCliqueSet(t.Context(), child, &dynamoDeployment, workloads, plans)
 			require.NoError(t, err)
 			servingHash, err := dynamo.ComputeDGDWorkersSpecHash(&dynamoDeployment)
 			require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			before := dgd.DeepCopy()
 
 			t.Log("Render ConfigMaps and optional Services without writing resources or mutating the DGD")
-			pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+			pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 			require.NoError(t, err)
 			require.Equal(t, before, dgd)
 			serviceCount, configMapCount := 0, 0
@@ -225,7 +225,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 
 			t.Log("An image update retains discovery selectors for both serving revisions")
 			dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers[0].Image += "-next"
-			nextPCS, nextResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+			nextPCS, nextResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 			require.NoError(t, err)
 
 			t.Log("Only serving roles advertise model discovery")
@@ -284,14 +284,14 @@ func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 	runtimeConfig := &commoncontroller.RuntimeConfig{}
 	r := &graphReconciler{Client: newLPXGPUClient(t), config: config, runtimeConfig: runtimeConfig}
 	plan := mustPlanSelectedLPX(t, dgd, selected)
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan})
 	require.NoError(t, err)
 	serialized, err := json.Marshal(pcs)
 	require.NoError(t, err)
 
 	t.Log("Accept exactly one MiB including final identity, discovery and scheduler metadata")
 	dgd.Annotations["kai.scheduler/padding"] = strings.Repeat("x", lpx.MaxRenderedPodCliqueSetBytes-len(serialized))
-	pcs, _, err = r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+	pcs, _, err = r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan})
 	require.NoError(t, err)
 	serialized, err = json.Marshal(pcs)
 	require.NoError(t, err)
@@ -302,7 +302,7 @@ func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 
 	t.Log("Reject one additional final-metadata byte as a selected-render failure before publication")
 	dgd.Annotations["kai.scheduler/padding"] += "x"
-	pcs, resources, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+	pcs, resources, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan})
 	require.ErrorContains(t, err, "rendered LPX PodCliqueSet is 1048577 bytes; maximum is 1048576")
 	require.Nil(t, pcs)
 	require.Nil(t, resources)
@@ -343,7 +343,7 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	require.NoError(t, err)
 	plan := mustPlanSelectedLPX(t, dgd, selected)
 	r := &graphReconciler{Client: newLPXGPUClient(t), config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{}}
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan})
 	require.NoError(t, err)
 	cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
 		return clique.Name == plan.CyborgTemplate
@@ -412,9 +412,9 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			planBefore.Agents = slices.Clone(plan.Agents)
 
 			t.Log("Render twice and require identical independently owned output")
-			first, firstResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+			first, firstResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 			require.NoError(t, err)
-			second, secondResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+			second, secondResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 			require.NoError(t, err)
 			require.Equal(t, first, second)
 			require.Equal(t, firstResources, secondResources)
@@ -473,7 +473,7 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	require.Len(t, workloads, 2)
-	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 	require.NoError(t, err)
 	require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 2)
 
@@ -526,7 +526,7 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
-	before, beforeResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+	before, beforeResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 	require.NoError(t, err)
 	cyborgIndex := slices.IndexFunc(before.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
 		return clique.Name == plans["lpx"].CyborgTemplate
@@ -541,7 +541,7 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(8))
 	workloads, plans, err = r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
-	after, afterResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+	after, afterResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 	require.NoError(t, err)
 	require.EqualValues(t, 8, after.Spec.Template.Cliques[cyborgIndex].Spec.Replicas)
 	before.Spec.Template.Cliques[cyborgIndex].Spec.Replicas = 8
@@ -582,7 +582,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 
 	t.Log("Render one shared conductor without changing either component's Agent template")
 	r := &graphReconciler{Client: newLPXGPUClient(t), config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{}}
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan})
 	require.NoError(t, err)
 
 	t.Log("Keep Nova separate from Quasar and preserve each role's metadata and storage")
@@ -653,7 +653,7 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 		child := newLPXRenderDeployment(t, &deployment)
 		plan := mustPlanSelectedLPX(t, &deployment, selected)
 		r := &graphReconciler{Client: newLPXGPUClient(t), config: controllerConfig, runtimeConfig: &commoncontroller.RuntimeConfig{}}
-		pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, &deployment, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+		pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, &deployment, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan})
 		require.NoError(t, err)
 
 		t.Log("Keep authored environment values without changing shared partition files")
@@ -1051,7 +1051,7 @@ func renderLPXTestPodCliqueSet(
 	deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment, desired *lpxTestWorkload,
 ) *grovev1alpha1.PodCliqueSet {
 	t.Helper()
-	rendered, _, err := reconciler.renderPodCliqueSet(ctx, deployment, dgd, map[string]*lpx.Workload{desired.workload.ServingComponentName(): desired.workload}, map[string]*lpx.MaterializationPlan{desired.workload.ServingComponentName(): desired.plan}, nil)
+	rendered, _, err := reconciler.renderPodCliqueSet(ctx, deployment, dgd, map[string]*lpx.Workload{desired.workload.ServingComponentName(): desired.workload}, map[string]*lpx.MaterializationPlan{desired.workload.ServingComponentName(): desired.plan})
 	require.NoError(t, err)
 	return rendered
 }
@@ -1152,15 +1152,16 @@ func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 	t.Log("Resolve a hybrid workload with KAI integration enabled")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	r := newLPXTestReconciler(t, registry, child, dgd)
-	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
+	workloads, err := lpx.ResolveWorkloads(t.Context(), r.Client, dgd, dynamo.PCSNameForLPX(child), registry)
 	require.NoError(t, err)
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, KaiScheduler: true}}
 
 	t.Log("Use the LPX scheduler for every role and leave queue selection to the PCS")
-	rendered, err := dynamo.RenderLPXWorkloadTemplates(dgd, r.config, runtimeConfig, nil, workloads["lpx"], plans["lpx"])
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	_, err = dynamo.RenderLPXWorkload(pcs, dgd, r.config, runtimeConfig, nil, workloads[0])
 	require.NoError(t, err)
-	require.NotEmpty(t, rendered.Cliques)
-	for _, clique := range rendered.Cliques {
+	require.NotEmpty(t, pcs.Spec.Template.Cliques)
+	for _, clique := range pcs.Spec.Template.Cliques {
 		require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 		require.NotContains(t, clique.Labels, consts.KubeLabelKaiSchedulerQueue, "clique %s", clique.Name)
 	}

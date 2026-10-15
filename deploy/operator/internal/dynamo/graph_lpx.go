@@ -24,6 +24,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RenderLPXPodCliqueSet constructs the shared LPX Grove envelope without workload
@@ -67,14 +68,14 @@ func RenderLPXPodCliqueSet(
 // RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
 // Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
 // Inputs are not mutated.
-func RenderLPXWorkloadTemplates(
+func RenderLPXWorkload(
+	pcs *grovev1alpha1.PodCliqueSet,
 	source *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
 	secretsRetriever SecretsRetriever,
 	workload *dynamolpx.Workload,
-	plan *dynamolpx.MaterializationPlan,
-) (*dynamolpx.WorkloadTemplates, error) {
+) ([]client.Object, error) {
 	// Apply Dynamo defaults independently to the selected workload's authored roles.
 	component := source.GetComponentByName(workload.ServingComponentName())
 	input, err := renderLPXComponents(cliqueParams{
@@ -83,11 +84,11 @@ func RenderLPXWorkloadTemplates(
 		secretsRetriever: secretsRetriever,
 		discoveryBackend: controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, source.Annotations),
 		discoveryContext: NewDiscoveryContext(operatorConfig.Discovery.Backend, source.Annotations),
-	}, workload, plan)
+	}, workload)
 	if err != nil {
 		return nil, err
 	}
-	rendered, err := dynamolpx.RenderNodeLocal(workload, plan, *input)
+	rendered, err := workload.Render(pcs, *input)
 	if err != nil {
 		return nil, err
 	}
@@ -95,12 +96,12 @@ func RenderLPXWorkloadTemplates(
 	// The conductor component owns the complete workload's disruption budget.
 	if component.ProviderOverride != nil {
 		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
-			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(budget)}
+			pcs.Spec.Template.PodCliqueScalingGroupConfigs[len(pcs.Spec.Template.PodCliqueScalingGroupConfigs)-1].RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(budget)}
 		}
 	}
 
 	// Scope the rendered resources to the graph's Kubernetes namespace.
-	for _, resource := range rendered.Resources {
+	for _, resource := range rendered {
 		resource.SetNamespace(source.Namespace)
 	}
 	return rendered, nil
@@ -257,7 +258,7 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
 // Preflight supplies the non-nil validated workload and materialization plan.
-func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, error) {
+func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload) (*dynamolpx.RenderInput, error) {
 	// Cooperating workers use one serving revision; discovery labels keep the base namespace.
 	servingHash, err := ComputeDGDWorkersSpecHash(p.dynamoDeployment)
 	if err != nil {
@@ -315,7 +316,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: servingHash}
 		gpu := p
 		gpu.component = role
-		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
+		gpu.r = ServiceRole{Name: workload.ConductorTemplate(), Role: RoleMain, Replicas: replicas}
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults)
 		if err != nil {
