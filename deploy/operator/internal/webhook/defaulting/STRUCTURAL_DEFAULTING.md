@@ -1,15 +1,13 @@
 # Structural defaulting
 
-Structural defaulting is the operator's convention for custom-resource mutating
-webhooks. It mirrors the Go API type tree, keeps one semantic owner for each
-default, and leaves the admission handler as a narrow request boundary.
+Mutating admission mirrors the Go API type tree, keeps one semantic owner for
+each default, and leaves the webhook handler as a narrow request boundary.
 
 ## Contract
 
-- Keep generated CRD schema and CEL, mutating admission, validating admission,
-  and reconciliation as distinct layers. Put each default or invariant in the
-  earliest layer that has all required information, and do not duplicate it in
-  another layer as a fallback.
+- Keep CRD schema defaults, mutating admission, and reconciliation as distinct
+  layers. Put each default in the earliest layer that has all required information,
+  and do not duplicate it in another layer as a fallback.
 - Mirror the Go API type tree. A parent owns defaults coordinating its scalar
   fields or children and delegates local child behavior to functions named after
   the exact child Go type.
@@ -20,15 +18,15 @@ default, and leaves the admission handler as a narrow request boundary.
   hub representation and dispatch foreign-version behavior from the converted
   object shape, including version envelopes. Do not dispatch semantic behavior
   from the client's original `requestKind` alone.
-- Preserve explicit user values. Defaulting fills only absence defined by the API
-  and never silently rewrites an explicit value to make it valid.
+- Preserve explicit user values. Fill only absence defined by the API and never
+  silently rewrite an explicit value to make it valid.
 - Keep request-wide immutable dependencies on the admission receiver. Do not put
   the current API node, traversal path, derived scratch values, accumulated
   mutations, or accumulated errors in a generic context bag.
 
-## Defaulting migration status
+## Migration status
 
-Keep this table current whenever a resource defaulter is migrated.
+Keep this table current whenever a resource is migrated.
 
 | Resource | Status | Current implementation |
 | --- | --- | --- |
@@ -36,10 +34,10 @@ Keep this table current whenever a resource defaulter is migrated.
 | `DynamoComponentDeployment` | Transitional | `defaulting/dynamocomponentdeployment_handler.go` plus shared helpers |
 | `DynamoGraphDeploymentRequest` | Handler-local | `defaulting/dynamographdeploymentrequest_handler.go` |
 
-A defaulter is structural only after its handler delegates to a root function and
-nested API types are defaulted by their exact-type functions.
+A resource reaches Structural status only after its handler delegates to a root
+function and nested API types are handled by their exact-type functions.
 
-## Structural defaulting
+## Structure
 
 - Name each structural function after the exact Go API type it defaults, for
   example `defaultDynamoGraphDeploymentSpec`,
@@ -70,11 +68,10 @@ nested API types are defaulted by their exact-type functions.
 - Preserve explicit values across representations. When native parameters or a
   foreign-version envelope can own a field, determine effective ownership before
   applying typed defaults and never overwrite the authoritative representation.
-- Defaulting must not compensate for an invalid explicit value or an unresolved
-  required value. Leave those states visible so validating admission reports the
-  exact problem.
+- Do not compensate for an invalid explicit value or an unresolved required value.
+  Leave those states visible so validating admission reports the exact problem.
 
-## Defaulting signatures and context
+## Signatures and context
 
 - Keep the API value first in a structural `default...` signature, followed by
   direct typed context or one final sparse options struct.
@@ -85,18 +82,18 @@ nested API types are defaulted by their exact-type functions.
   At four or more, use one sparse type-specific options struct containing only
   facts the current API value cannot derive.
 - Construct child options afresh at the call site. Never copy, embed, mutate, or
-  extend a parent options struct, and do not introduce a generic defaulting context.
+  extend a parent options struct, and do not introduce a generic context bag.
 - Pass the admission operation only to the smallest function whose documented
   semantics actually differ between CREATE and UPDATE.
 - Keep request-wide clients, readers, feature configuration, operator version,
   and caller identity on the root defaulter receiver. Prefer standalone functions
   for pure nested defaults and explicit resolver interfaces for external reads.
-- Defaulting mutation is part of the function contract, but helper reads and
+- Mutation is part of the structural function contract, but helper reads and
   resolvers must not mutate their inputs.
 - Use standard `k8s.io/utils/ptr` helpers for pointer defaults and equality. Do not
   add one-line dereference, presence, or pointer-comparison helpers.
 
-## Defaulting files and shared types
+## Files and shared types
 
 - Keep registration, request decoding, GVK checks, and the call to the root
   traversal in `<owner>_handler.go`.
@@ -111,7 +108,7 @@ nested API types are defaulted by their exact-type functions.
 - Use one `<owner>_helpers.go` file across API versions; typed signatures make the
   applicable version explicit.
 
-## Default ownership
+## Ownership
 
 - Prefer CRD schema defaults for unconditional, context-free API defaults when
   applying them before admission does not destroy field-presence semantics needed
