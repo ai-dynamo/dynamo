@@ -16,7 +16,7 @@ import (
 const v2ProjectionVersion = "v2-xt-node-local/v1"
 
 //nolint:gocyclo // V2 projection validates one complete transformation.
-func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
+func projectV2Component(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
 	configured := *intent.Build
 	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
 		intent.Pipeline == PipelineSpecDecode
@@ -26,7 +26,7 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
 	if usesResolvedRuntime {
 		if err := configured.selectXTRuntimePartitions(); err != nil {
-			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
+			return ModelProjection{}, fmt.Errorf("resolving configured V2 build: %w", err)
 		}
 	}
 
@@ -38,22 +38,16 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		partitions = packPropSyncPartitions(partitions)
 	}
 
-	transcripts := newModelProjectionTranscripts(intent, v2ProjectionVersion)
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("input-embeddings-on-gpu", []byte{1})
-		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-	}
+	transcript.field("input-embeddings-on-gpu", []byte{1})
+	bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
 
 	partitions, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, &configured, partitions)
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
 	if len(localPartitionIDs) > 0 {
 		encoded, _ := json.Marshal(localPartitionIDs)
-		for index := range transcripts {
-			transcripts[index].field("local-partition-ids", encoded)
-		}
+		transcript.field("local-partition-ids", encoded)
 		configured.partitions = partitions
 	}
 
@@ -63,21 +57,19 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		compilerID := uint32(partition.sourcePartitionID)
 		shape, shapeErr := xtShape(partition)
 		if shapeErr != nil {
-			return nil, shapeErr
+			return ModelProjection{}, shapeErr
 		}
 		endpoints := int64(partition.effectiveNodeCount())
 		agentReplicas += int(endpoints)
-		for modelIndex := range transcripts {
-			transcripts[modelIndex].uint32Field("compiler-partition-id", compilerID)
-			transcripts[modelIndex].uint32Field("model-partition-id", uint32(index))
-			transcripts[modelIndex].intField("endpoint-count", endpoints)
-			transcripts[modelIndex].field("xt-shape", []byte(shape))
-		}
+		transcript.uint32Field("compiler-partition-id", compilerID)
+		transcript.uint32Field("model-partition-id", uint32(index))
+		transcript.intField("endpoint-count", endpoints)
+		transcript.field("xt-shape", []byte(shape))
 	}
 
 	connectors, err := v2Connectors(connectorBuild, partitions)
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
 
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
@@ -106,35 +98,21 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		configured.selectedPropSyncChains = nil
 	}
 
-	// Encode shared connectors once without changing any model's digest field order.
+	// Encode shared connectors once.
 	for _, connector := range connectors {
 		encoded, _ := json.Marshal(connector)
-		for index := range transcripts {
-			transcripts[index].field("connector", encoded)
-		}
+		transcript.field("connector", encoded)
 	}
 
-	// Publish distinct logical identities backed by the component's immutable configuration.
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("allocation-metadata", allocationMetadata)
-
-		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.Build.contentID,
-			contractFormat:         intent.Build.contractFormat,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        configured,
-			allocationMetadata:     allocationMetadata,
-			partitions:             partitions,
-			connectors:             connectors,
-			agentReplicas:          agentReplicas,
-			localPartitionIDs:      localPartitionIDs,
-		})
-	}
-	return dst, nil
+	transcript.field("allocation-metadata", allocationMetadata)
+	return ModelProjection{
+		configuredBuild:    configured,
+		allocationMetadata: allocationMetadata,
+		partitions:         partitions,
+		connectors:         connectors,
+		agentReplicas:      agentReplicas,
+		localPartitionIDs:  localPartitionIDs,
+	}, nil
 }
 
 func xtShape(partition buildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
