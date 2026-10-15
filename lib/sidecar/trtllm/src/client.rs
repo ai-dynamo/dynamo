@@ -27,8 +27,7 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Metadata resolved at startup from `--context-length` and
-/// `Control.GetModelInfo`, including limits and media capabilities.
+/// Startup metadata from `--context-length` and `Control.GetModelInfo`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ModelMetadata {
     /// Maximum input + output tokens; backs both the registered context window
@@ -38,10 +37,7 @@ pub(crate) struct ModelMetadata {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
-    /// Whether this loaded model advertises image input through both the
-    /// portable multimodal bit and TensorRT-LLM's modality list. Requiring both
-    /// fails closed when a server and client disagree about the finer-grained
-    /// capability.
+    /// True when both portable and engine-specific capabilities advertise images.
     pub(crate) supports_image: bool,
 }
 

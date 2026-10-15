@@ -4,10 +4,8 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
 //! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Scope: aggregated and disaggregated (prefill/decode) generation, including
-//! image inputs when the loaded model advertises them. Video, audio, LoRA,
-//! beam search, and `n > 1` are rejected before dispatch — the sidecar streams
-//! a single sequence.
+//! Supports aggregated and disaggregated image generation. Video, audio, LoRA,
+//! beam search, and `n > 1` are rejected before dispatch.
 //!
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
@@ -139,27 +137,10 @@ pub(crate) fn build_generate_request(
     })
 }
 
-// Temporary workaround: the OpenEngine contract makes `stopping.max_tokens`
-// optional. The Dynamo frontend forwards an omitted `max_tokens` as `None`
-// expecting the backend to default. For text requests we mirror the in-process
-// backend's default,
-// `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm
-// `_default_max_tokens`). For image requests, only TensorRT-LLM knows the true
-// prompt length after expanding image markers, so leave the field unset and let
-// the OpenEngine request mapper derive the budget from the expanded prompt.
-// `context_length` is resolved in
-// `engine::start`, where `--context-length` wins over the `GetModelInfo` report.
-// Only `/v1/chat/completions` and `/v1/responses` reach this fallback: they set
-// `PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY`, which stops the frontend supplying
-// its own default (`preprocessor::omitted_max_tokens_default`). `/v1/completions`
-// is already defaulted by the frontend and never lands here.
-//
-// Remove when https://github.com/NVIDIA/TensorRT-LLM/issues/16549 lands (gRPC
-// `max_tokens` made optional): drop this fallback and forward an omitted
-// `max_tokens` as unset. Keep `--context-length` and the plumbing in
-// `engine.rs` — they also feed `LlmRegistration.context_length`, which the
-// frontend registers as the served context window and which this fallback does
-// not govern.
+// Derive omitted text max_tokens from the context window. For media, only
+// TensorRT-LLM knows the prompt length after expansion, so leave it unset.
+// Remove this fallback when NVIDIA/TensorRT-LLM#16549 lands; context_length
+// remains necessary for LlmRegistration.
 fn max_tokens(
     request: &PreprocessedRequest,
     limits: Option<ModelMetadata>,
@@ -195,11 +176,8 @@ fn max_tokens(
 
 const IMAGE_KEY: &str = "image_url";
 
-/// Convert Dynamo's image-only execution payload into the ordered OpenEngine
-/// media list. The frontend groups content parts by modality, so ordering is
-/// retained within the image vector but not across different modalities. This
-/// PR therefore accepts images only and fails explicitly on every other
-/// non-empty modality instead of inventing a cross-modality order.
+/// Map Dynamo's image payload to OpenEngine media, rejecting other modalities.
+/// Per-modality vectors do not preserve cross-modality order.
 fn image_media(
     request: &PreprocessedRequest,
     limits: Option<ModelMetadata>,
@@ -207,6 +185,7 @@ fn image_media(
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
 
+    // mm_routing_info stays router-side; multi_modal_data is engine input.
     let media_map = request.multi_modal_data.as_ref();
     if let Some(media_map) = media_map {
         for (modality, items) in media_map {
@@ -276,14 +255,9 @@ fn image_media(
             Ok(pb::MediaItem {
                 modality: pb::Modality::Image as i32,
                 source: Some(source),
-                // Dynamo's frontend representation carries URL/data-URI
-                // sources, not raw bytes. MIME type is only meaningful for the
-                // OpenEngine raw_bytes source used by direct clients.
+                // MIME metadata belongs to raw_bytes, which this client does not send.
                 mime_type: String::new(),
-                // UUIDs are caller-owned cache identities and are optional per
-                // item. Dynamo's router hashes are deliberately not substituted
-                // here: their compatibility with TensorRT-LLM cache identity is
-                // owned and validated by the MM-aware routing work.
+                // Do not substitute router-owned mm_hashes for caller cache identities.
                 uuid: user_image_uuids
                     .and_then(|uuids| uuids[index].as_deref())
                     .unwrap_or_default()
@@ -486,9 +460,6 @@ fn validate_request(
             "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
-    // `mm_routing_info` is deliberately not forwarded: it is framework-owned
-    // metadata that the Dynamo router consumes before selecting this worker.
-    // The execution payload remains `multi_modal_data`, mapped by `image_media`.
     // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
     // means the frontend routed a decode request to the wrong worker role.
     if request.prefill_result.is_some() && !mode.is_decode() {
