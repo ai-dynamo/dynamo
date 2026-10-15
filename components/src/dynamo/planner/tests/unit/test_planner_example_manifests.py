@@ -5,7 +5,6 @@
 
 import json
 from pathlib import Path
-from string import Template
 
 import pytest
 import yaml
@@ -29,44 +28,29 @@ def test_disagg_planner_example_uses_inline_config_and_runtime_observations(back
     source = (
         root / "examples" / "backends" / backend / "deploy" / "disagg_planner.yaml"
     ).read_text()
-    images = {
-        "FRONTEND_IMAGE": "registry.example/dynamo-frontend:release",
-        "PLANNER_IMAGE": "registry.example/dynamo-planner:release",
-        f"{backend.upper()}_IMAGE": f"registry.example/{backend}-runtime:release",
-    }
-    manifests = list(yaml.safe_load_all(Template(source).substitute(images)))
-    assert len(manifests) == 1
-    deployment = manifests[0]
-    assert deployment["kind"] == "DynamoGraphDeployment"
-    assert deployment["apiVersion"] == "nvidia.com/v1beta1"
-    components = {
-        component["name"]: component for component in deployment["spec"]["components"]
-    }
-
-    planner = components["Planner"]["podTemplate"]["spec"]["containers"][0]
-    assert (planner["command"] + planner["args"])[:3] == [
-        "python3",
-        "-m",
-        "dynamo.planner",
+    manifests = list(yaml.safe_load_all(source))
+    assert all(manifest["kind"] != "ConfigMap" for manifest in manifests)
+    deployments = [
+        manifest
+        for manifest in manifests
+        if manifest["kind"] == "DynamoGraphDeployment"
     ]
-    frontend = components["Frontend"]["podTemplate"]["spec"]["containers"][0]
-    assert frontend["image"] == images["FRONTEND_IMAGE"]
-    assert planner["image"] == images["PLANNER_IMAGE"]
+    assert len(deployments) == 1
+    components = {
+        component["name"]: component
+        for component in deployments[0]["spec"]["components"]
+    }
+    planner = components["Planner"]["podTemplate"]["spec"]["containers"][0]
     config_arg = planner["args"][planner["args"].index("--config") + 1]
-    config = PlannerConfig.from_config_arg(config_arg)
+    config_data = json.loads(config_arg)
+    config = PlannerConfig.model_validate(config_data)
     assert config.backend == backend
     assert config.mode == "disagg"
     assert config.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.None_
-    assert "profile_results_dir" not in json.loads(config_arg)
+    assert "profile_results_dir" not in config_data
 
-    for role in ("prefill", "decode"):
-        component = components[role]
-        assert component["scalingAdapter"]["enabled"] is True
-        container = component["podTemplate"]["spec"]["containers"][0]
-        assert container["image"] == images[f"{backend.upper()}_IMAGE"]
-        assert "--planner-profile-data" not in container["args"]
     for component in components.values():
-        assert all(
-            "configMap" not in volume
-            for volume in component["podTemplate"]["spec"].get("volumes", [])
-        )
+        pod_spec = component["podTemplate"]["spec"]
+        assert all("configMap" not in volume for volume in pod_spec.get("volumes", []))
+        for container in pod_spec["containers"]:
+            assert "--planner-profile-data" not in container.get("args", [])

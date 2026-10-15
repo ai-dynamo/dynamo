@@ -11,7 +11,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: ${FRONTEND_IMAGE}
+        - image: my-registry/sglang-runtime:my-tag
           name: main
     replicas: 1
     type: frontend
@@ -21,14 +21,9 @@ spec:
         containers:
         - args:
           - --config
-          # Bootstrap from worker self-benchmarks or live FPM; no profile ConfigMap.
-          - >-
-            {"environment": "kubernetes", "backend": "sglang", "mode": "disagg",
-            "optimization_target": "sla", "ttft_ms": 500, "itl_ms": 50,
-            "enable_throughput_scaling": true, "enable_load_scaling": true,
-            "pre_deployment_sweeping_mode": "none", "min_endpoint": 1,
-            "max_gpu_budget": 8, "throughput_adjustment_interval_seconds": 60,
-            "load_adjustment_interval_seconds": 5}
+          - '{"environment": "kubernetes", "backend": "sglang", "optimization_target": "sla",
+            "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
+            "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
           command:
           - python3
           - -m
@@ -36,13 +31,18 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: ${PLANNER_IMAGE}
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     <registry>/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     <registry>/sglang-runtime:<version>.
+          image: my-registry/dynamo-planner:my-tag
           name: main
     replicas: 1
     type: planner
   - name: decode
-    scalingAdapter:
-      enabled: true
     podTemplate:
       spec:
         containers:
@@ -71,7 +71,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: ${SGLANG_IMAGE}
+          image: my-registry/sglang-runtime:my-tag
           name: main
           resources:
             limits:
@@ -80,8 +80,6 @@ spec:
     replicas: 2
     type: decode
   - name: prefill
-    scalingAdapter:
-      enabled: true
     podTemplate:
       spec:
         containers:
@@ -110,7 +108,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: ${SGLANG_IMAGE}
+          image: my-registry/sglang-runtime:my-tag
           name: main
           resources:
             limits:
