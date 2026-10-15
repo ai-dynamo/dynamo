@@ -231,7 +231,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
             results = native_generate_stream(self.engine, native_request)
         else:
-            # Reject before the handoff starts so decode is never left waiting.
+            # The router may dispatch decode concurrently; decode runs the same
+            # check, so neither side waits on a handoff the other never starts.
             if getattr(self.config.server_args, "enable_return_routed_experts", False):
                 validate_disagg_routed_experts(inner_request, input_param)
             submitted_request_id = _ordered_cancellation_request_id(
