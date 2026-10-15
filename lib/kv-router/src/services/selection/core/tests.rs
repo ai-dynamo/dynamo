@@ -8,7 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
-use crate::protocols::ActiveSequenceEventData;
+use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
 use crate::services::indexer::backend::test_util::store_event;
@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
     crate::config::KvRouterConfig {
@@ -862,15 +863,27 @@ async fn session_context_reaches_worker_selection() {
     let core = core_with_host_and_policy(SelectionHost::default(), Some(factory));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
 
-    let mut request = select_request();
-    request.session_id = Some("ignored-legacy".to_string());
-    request.session_context = Some(SelectionSessionContext {
+    let agent_headers = Arc::new(std::collections::BTreeMap::from([(
+        "x-claude-code-request-class".to_string(),
+        vec!["subagent".to_string(), "future-class".to_string()],
+    )]));
+    let session_context = SelectionSessionContext {
         session_id: "child-session".to_string(),
         parent_session_id: Some("root-session".to_string()),
         session_final: Some(true),
         input_trigger: Some(super::super::types::SelectionInputTrigger::ToolResult),
-    });
+        agent_headers: Some(Arc::clone(&agent_headers)),
+    };
+    let mut request = select_request();
+    request.session_id = Some("ignored-legacy".to_string());
+    request.session_context = Some(session_context.clone());
     core.select(request).await.expect("select");
+
+    let mut request = reserve_request("structured-session-reservation");
+    request.session_context = Some(session_context);
+    core.select_and_reserve(request)
+        .await
+        .expect("select and reserve with headers");
 
     let mut request = reserve_request("legacy-session-reservation");
     request.session_id = Some("legacy-only".to_string());
@@ -879,24 +892,31 @@ async fn session_context_reaches_worker_selection() {
         .expect("select and reserve");
 
     let observations = observed.lock();
-    let context = observations[0]
-        .session_context
-        .as_ref()
-        .expect("structured session context");
-    assert_eq!(context.session_id(), "child-session");
-    assert_eq!(context.parent_session_id(), Some("root-session"));
-    assert_eq!(context.session_final(), Some(true));
-    assert_eq!(
-        context.input_trigger(),
-        Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
-    );
+    for observation in &observations[..2] {
+        let context = observation
+            .session_context
+            .as_ref()
+            .expect("structured session context");
+        assert_eq!(context.session_id(), "child-session");
+        assert_eq!(context.parent_session_id(), Some("root-session"));
+        assert_eq!(context.session_final(), Some(true));
+        assert_eq!(
+            context.input_trigger(),
+            Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
+        );
+        assert!(std::ptr::eq(
+            context.agent_headers(),
+            agent_headers.as_ref()
+        ));
+    }
 
-    let legacy = observations[1]
+    let legacy = observations[2]
         .session_context
         .as_ref()
         .expect("legacy session context");
     assert_eq!(legacy.session_id(), "legacy-only");
     assert_eq!(legacy.parent_session_id(), None);
+    assert!(legacy.agent_headers().is_empty());
 }
 
 #[tokio::test]
@@ -2075,6 +2095,13 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     let mut request = worker(1);
     request.total_kv_blocks = Some(1000);
     core.upsert_worker(request).await.expect("worker upsert");
+    // The scheduler's watch task initializes worker load tracking asynchronously.
+    wait_until("worker load tracking", || {
+        !core.loads(Some("model"), Some("default"))[0]
+            .loads
+            .is_empty()
+    })
+    .await;
 
     // Admitted (queued) select: decode evaluation comes from the catalog's
     // total_kv_blocks; no load snapshot is taken.
@@ -2770,7 +2797,7 @@ async fn failed_replay_preserves_a_newer_cached_selection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancelled_free_releases_reservation_and_affinity() {
+async fn free_releases_reservation_and_affinity_without_actor_progress() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
     let core = core_with(
@@ -2793,9 +2820,12 @@ async fn cancelled_free_releases_reservation_and_affinity() {
 
     let mut freeing = Box::pin(core.free_reservation("r1"));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(freeing.as_mut().poll(&mut context).is_pending());
+    assert!(matches!(
+        freeing.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Ok(()))
+    ));
     assert!(!entry.scheduler.has_request("r1"));
-    // The queue actor has not acknowledged the release yet.
+    // No actor poll was needed to release state and its owner metadata.
     drop(freeing);
     assert!(!core.reservation_index.read().contains_key("r1"));
     assert_eq!(lease_count(&core, "s"), Some(0));
@@ -2804,7 +2834,7 @@ async fn cancelled_free_releases_reservation_and_affinity() {
     assert_eq!(bound_worker(&core, "s"), None);
     core.select_and_reserve(session_reservation("r1", "s"))
         .await
-        .expect("cancelled cleanup must not prevent ID reuse");
+        .expect("completed cleanup must not prevent ID reuse");
 }
 
 #[tokio::test]
@@ -3289,4 +3319,55 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+#[tokio::test]
+async fn overflowing_worker_dp_range_does_not_poison_batch() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let core = local_core(test_config(false));
+        let mut invalid = worker(1);
+        invalid.data_parallel_start_rank = Some(u32::MAX);
+        invalid.data_parallel_size = Some(1);
+        let mut results = core.upsert_workers(vec![invalid, worker(2)]).await;
+        let error = results.remove(0).expect_err("overflowing DP range");
+        assert_eq!(
+            error.status_code(),
+            400,
+            "error={error:?}, catalog={:?}",
+            core.list_workers(None, None)
+        );
+        assert!(core.catalog.get(1).is_none());
+        assert_eq!(results.remove(0).unwrap().worker_id, 2);
+        assert_eq!(core.select(select_request()).await.unwrap().worker_id, 2);
+        core.shutdown();
+    })
+    .await
+    .expect("invalid worker batch deadline");
+}
+
+#[tokio::test]
+async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let core = local_core(test_config(false));
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("live"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let booking = core.indexed_booking("live").unwrap().1;
+        let patch = serde_json::from_value(serde_json::json!({
+            "data_parallel_start_rank": u32::MAX,
+            "data_parallel_size": 1
+        }))
+        .unwrap();
+        let error = core.patch_worker(1, patch).await.unwrap_err();
+        assert_eq!(error.status_code(), 400, "{error:?}");
+        assert_eq!(core.catalog.get(1).unwrap().dp_start(), 0);
+        assert!(entry.scheduler.has_booking(&booking));
+        assert_eq!(core.select(select_request()).await.unwrap().worker_id, 1);
+        core.free_reservation("live").await.unwrap();
+        core.shutdown();
+    })
+    .await
+    .expect("invalid worker patch deadline");
 }

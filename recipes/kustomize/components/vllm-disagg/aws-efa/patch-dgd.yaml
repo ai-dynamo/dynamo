@@ -9,10 +9,12 @@ spec:
     PrefillWorker:
       extraPodSpec:
         mainContainer:
-          env: &efaEnvironment
+          env:
             - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
     DecodeWorker:
       extraPodSpec:
         mainContainer:
-          env: *efaEnvironment
+          env:
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'

@@ -11,7 +11,7 @@ Speculative decoding is an optimization technique that uses a smaller "draft" mo
 | Backend | Status | Notes |
 |---------|--------|-------|
 | vLLM | ✅ | Eagle3 draft model support |
-| SGLang | 🚧 | Not yet documented |
+| SGLang | ✅ | EAGLE3 draft model support |
 | TensorRT-LLM | 🚧 | Not yet documented |
 
 ## Overview
@@ -76,6 +76,7 @@ curl http://localhost:8000/v1/chat/completions \
 | Backend | Guide |
 |---------|-------|
 | vLLM | [speculative_decoding_vllm.md](speculative-decoding-with-vllm.md) |
+| SGLang | [Speculative Decoding with SGLang](speculative-decoding-with-sglang.md) |
 
 ## See Also
 

@@ -365,8 +365,10 @@ producer threads in `cleanup()`.
 
 Pick based on how the engine's KV event API is shaped:
 
-- `Zmq { endpoint, topic, dp_rank }` — engine already publishes to a
-  ZMQ PUB socket. `Worker` subscribes directly.
+- `Zmq { endpoint, topic, dp_rank, image_token_id }` — engine already
+  publishes to a ZMQ PUB socket. `Worker` subscribes directly. Set
+  `image_token_id` to the model's image placeholder token to enable exact
+  multimodal KV routing; `None` keeps text-prefix routing for images.
 - `Push { on_ready, dp_rank }` — engine has a programmatic event
   surface. `Worker` constructs the publisher, then calls
   `on_ready(publisher)` once during setup. The engine stashes the

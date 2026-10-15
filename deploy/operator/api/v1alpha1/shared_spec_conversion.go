@@ -186,6 +186,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 		dst.EPPConfig = &v1beta1.EPPConfig{}
 		ConvertFromEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
+	dst.LPX = src.LPX
 
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
 	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
@@ -565,7 +566,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		dst.EPPConfig = &EPPConfig{}
 		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
-
+	dst.LPX = src.LPX
 	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
 
@@ -589,9 +590,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
 	// Resources + Envs + Probes (+ FrontendSidecar).
-	if err := decomposePodTemplateFromHub(src, dst, restored); err != nil {
-		return err
-	}
+	decomposePodTemplateFromHub(src, dst, restored)
 
 	// Restore lossy cache flags before field-origin reconstruction so every
 	// compilation-cache mount is excluded from main-container origin matching.
@@ -618,7 +617,7 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 			return err
 		}
 	}
-	if experimentalIsHubOnlyShape(src.Experimental) {
+	if experimentalNeedsWholeHubPreservation(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
 	} else if src.Experimental != nil && src.Experimental.Grove != nil {
 		// The grove block has no v1alpha1 representation; preserve it sparsely
@@ -888,6 +887,9 @@ func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.Component
 		dst.ProviderOverride = &v1beta1.ProviderOverride{}
 		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
 	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
 }
 
 // ConvertToComponentRoleSpec converts one explicit component role from
@@ -906,6 +908,9 @@ func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRo
 	if src.ProviderOverride != nil {
 		dst.ProviderOverride = &ProviderOverride{}
 		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
 	}
 }
 
@@ -1502,6 +1507,9 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	// appended the dedicated service-level mounts. Preserve that ordering rather
 	// than allowing mergo to replace the VolumeMounts slice.
 	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
+	if main.Ports != nil {
+		mainBase.Ports = main.Ports
+	}
 	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
 	if main.StartupProbe != nil {
 		mainBase.StartupProbe = main.StartupProbe
@@ -1580,12 +1588,13 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 }
 
 // decomposePodTemplateFromHub inverts buildPodTemplateToHub.
-func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) error {
+func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) {
 	if src.PodTemplate == nil {
 		decomposeMissingPodTemplate(src, dst, restored)
-		return nil
+		return
 	}
 
+	// Split one owned copy so projected fields can be consumed without changing src.
 	podTpl := src.PodTemplate.DeepCopy()
 
 	// ExtraPodMetadata from podTemplate.metadata.
@@ -1596,8 +1605,8 @@ func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpe
 	other := make([]corev1.Container, 0, len(podTpl.Spec.Containers))
 	for i := range podTpl.Spec.Containers {
 		if podTpl.Spec.Containers[i].Name == mainContainerName && main == nil {
-			m := podTpl.Spec.Containers[i].DeepCopy()
-			main = m
+			m := podTpl.Spec.Containers[i]
+			main = &m
 			continue
 		}
 		other = append(other, podTpl.Spec.Containers[i])
@@ -1614,33 +1623,26 @@ func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpe
 	// that v1alpha1 can represent directly have already been moved into their
 	// dedicated fields and cleared from main, so ExtraPodSpec only carries the
 	// true escape-hatch remainder.
-	podSpecCopy := podTpl.Spec.DeepCopy()
-	podSpecCopy.Containers = other
+	podSpec := podTpl.Spec
+	podSpec.Containers = other
 	// The forward path (buildPodTemplateToHub) always emits a "main" container,
 	// even when v1alpha1 had no main-container fields set (e.g. only
 	// FrontendSidecar triggered hasAny). Skip recording it on the v1alpha1
 	// side when every field other than Name is zero-valued, so that
 	// ConvertFrom does not hallucinate an empty MainContainer.
-	var mainCopy *corev1.Container
 	if main != nil {
-		m := main.DeepCopy()
-		m.Name = "" // v1alpha1 MainContainer has no Name (it is always "main").
-		if !containerIsEmpty(m) {
-			mainCopy = m
+		main.Name = "" // v1alpha1 MainContainer has no Name (it is always "main").
+		if containerIsEmpty(main) {
+			main = nil
 		}
 	}
-	if !podSpecIsZero(podSpecCopy) || mainCopy != nil {
-		eps := &ExtraPodSpec{}
-		if !podSpecIsZero(podSpecCopy) {
-			eps.PodSpec = podSpecCopy
-		}
-		if mainCopy != nil {
-			eps.MainContainer = mainCopy
+	if !podSpecIsZero(&podSpec) || main != nil {
+		eps := &ExtraPodSpec{MainContainer: main}
+		if !podSpecIsZero(&podSpec) {
+			eps.PodSpec = &podSpec
 		}
 		dst.ExtraPodSpec = eps
 	}
-
-	return nil
 }
 
 func decomposeMissingPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) {
@@ -1702,8 +1704,9 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 		return err
 	}
 	dst.PodTemplate = podTemplate
+
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
-	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
+	if dst.Experimental == nil && experimentalNeedsWholeHubPreservation(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
 	} else if dst.Experimental != nil && preserved.Experimental != nil &&
 		dst.Experimental.Grove == nil && preserved.Experimental.Grove != nil {
@@ -2102,7 +2105,7 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 	return false
 }
 
-func experimentalIsHubOnlyShape(src *v1beta1.ExperimentalSpec) bool {
+func experimentalNeedsWholeHubPreservation(src *v1beta1.ExperimentalSpec) bool {
 	return src != nil &&
 		src.GPUMemoryService == nil &&
 		src.Failover == nil &&

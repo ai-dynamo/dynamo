@@ -35,6 +35,7 @@ pub struct SequenceTrace {
 /// Pre-computed metadata for a request, stored before submission so the
 /// output signal can look it up by UUID.
 struct RequestMetadata {
+    arrival_us: u64,
     block_hashes: Vec<SequenceHash>,
     isl: usize,
     output_length: u64,
@@ -42,6 +43,10 @@ struct RequestMetadata {
 
 /// Run requests through the mocker to produce sequence lifecycle events
 /// (add / prefill_complete / free) with realistic timing.
+///
+/// A router books a request when it routes it, so `Add` is placed at the
+/// request's engine arrival time, `PrefillComplete` at its first output, and
+/// `Free` at completion. Requests without any output are omitted.
 pub async fn generate_sequence_events(
     traces: &[Trace],
     num_gpu_blocks: usize,
@@ -66,6 +71,7 @@ pub async fn generate_sequence_events(
                 Ok((
                     request.uuid,
                     RequestMetadata {
+                        arrival_us: request.timestamp_us,
                         block_hashes: request.replay_hashes.sequence_hashes,
                         isl: request.input_length,
                         output_length: u64::try_from(request.output_length)?,
@@ -74,7 +80,10 @@ pub async fn generate_sequence_events(
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
-        let mut entries = Vec::new();
+        // Each request's events are pushed in lifecycle order with non-decreasing
+        // timestamps, so a stable timestamp sort keeps that order and leaves
+        // cross-request ties in emission order.
+        let mut timed_entries = Vec::new();
         let mut seen = HashMap::new();
 
         for timed_signal in artifact.output_signals {
@@ -86,32 +95,44 @@ pub async fn generate_sequence_events(
                 let meta = metadata.remove(&signal.uuid).ok_or_else(|| {
                     anyhow::anyhow!("output signal references unknown request {}", signal.uuid)
                 })?;
-                entries.push(SequenceTrace {
-                    entry: SequenceTraceEntry::Add {
+                if meta.arrival_us > timed_signal.timestamp_us {
+                    anyhow::bail!("request {} produced output before it arrived", signal.uuid);
+                }
+                timed_entries.push((
+                    meta.arrival_us,
+                    SequenceTraceEntry::Add {
                         request_id: request_id.clone(),
                         block_hashes: meta.block_hashes,
                         isl: meta.isl,
                         output_length: meta.output_length,
                     },
-                    timestamp_us: timed_signal.timestamp_us,
-                });
-                entries.push(SequenceTrace {
-                    entry: SequenceTraceEntry::PrefillComplete {
+                ));
+                timed_entries.push((
+                    timed_signal.timestamp_us,
+                    SequenceTraceEntry::PrefillComplete {
                         request_id: request_id.clone(),
                     },
-                    timestamp_us: timed_signal.timestamp_us,
-                });
+                ));
             }
 
             if signal.completed {
-                entries.push(SequenceTrace {
-                    entry: SequenceTraceEntry::Free { request_id },
-                    timestamp_us: timed_signal.timestamp_us,
-                });
+                timed_entries.push((
+                    timed_signal.timestamp_us,
+                    SequenceTraceEntry::Free { request_id },
+                ));
             }
         }
 
-        all_traces.push(entries);
+        timed_entries.sort_by_key(|&(timestamp_us, _)| timestamp_us);
+        all_traces.push(
+            timed_entries
+                .into_iter()
+                .map(|(timestamp_us, entry)| SequenceTrace {
+                    entry,
+                    timestamp_us,
+                })
+                .collect::<Vec<_>>(),
+        );
     }
 
     let total_adds = all_traces

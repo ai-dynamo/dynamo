@@ -62,3 +62,48 @@ fn normalized_effort_matches_the_reference_encoder_for_both_request_fields() {
         }
     }
 }
+
+#[test]
+fn image_blocks_preserve_text_order_and_reasoning_mode() {
+    for effort in ["high", "none"] {
+        let output = render(json!({
+            "reasoning_effort": effort,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "first:"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/first.png"}},
+                {"type": "text", "text": "second:"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "text", "text": "compare"}
+            ]}]
+        }))
+        .unwrap();
+        assert!(output.contains(
+            "first:\n\n<｜deepseek_image｜>\n\nsecond:\n\n<｜deepseek_image｜>\n\ncompare"
+        ));
+        assert_eq!(output.matches("<｜deepseek_image｜>").count(), 2);
+        assert!(!output.contains("https://example.com/first.png"));
+        assert!(!output.contains("data:image/png;base64,AAAA"));
+        assert!(output.ends_with(if effort == "none" {
+            "</think>"
+        } else {
+            "<think>"
+        }));
+    }
+}
+
+#[test]
+fn cached_images_render_in_user_and_tool_messages() {
+    for role in ["user", "tool"] {
+        let output = render(json!({
+            "reasoning_effort": "none",
+            "messages": [{"role": role, "tool_call_id": "screenshot", "content": [
+                {"type": "text", "text": "cached:"},
+                {"type": "image_url", "image_url": null, "uuid": "cached-screenshot"}
+            ]}]
+        }))
+        .unwrap();
+        assert!(output.contains("cached:\n\n<｜deepseek_image｜>"));
+        assert_eq!(output.matches("<｜deepseek_image｜>").count(), 1);
+        assert!(!output.contains("cached-screenshot"));
+    }
+}

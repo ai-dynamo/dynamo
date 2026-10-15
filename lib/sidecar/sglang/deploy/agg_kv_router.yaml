@@ -13,8 +13,8 @@
 # The sidecar connects over the downward-API pod IP so it can replace the ZMQ
 # wildcard with that routable address. Restrict both ports with NetworkPolicy.
 #
-# There is no published sidecar image yet: build the image from
-# lib/sidecar/Dockerfile and set <your-registry> below (see README).
+# Set the sidecar image below to nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>,
+# or build it from lib/sidecar/Dockerfile.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -42,7 +42,7 @@ spec:
         # separate pod network namespace.
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.19
+          image: lmsysorg/sglang:v0.5.21
           restartPolicy: Always
           startupProbe:
             exec:

@@ -351,14 +351,12 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
-    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
+    m.add_class::<llm::entrypoint::AisPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
-    m.add_class::<llm::replay::SglangArgs>()?;
-    m.add_class::<llm::replay::TrtllmArgs>()?;
-    m.add_class::<llm::replay::MockEngineArgs>()?;
+    m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -605,7 +603,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -630,6 +628,7 @@ fn register_model<'p>(
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
+    skip_model_assets: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -687,6 +686,7 @@ fn register_model<'p>(
 
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
+    let is_audios = model_type.inner.supports_audios();
     let is_videos = model_type.inner.supports_videos();
     let is_realtime = model_type.inner.supports_realtime();
 
@@ -793,11 +793,10 @@ fn register_model<'p>(
     crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
 
-        // For TensorBased, Images, Videos, and Realtime models, skip
-        // HuggingFace downloads and register directly. These model types
-        // handle model loading internally; no tokenizer extraction is
-        // needed and the source path is not required to be a HF repo.
-        if is_tensor_based || is_images || is_videos || is_realtime {
+        // These model types handle model loading internally. External adapters can
+        // opt into the same minimal card without resolving local or HF assets.
+        // Ordinary audio registrations retain the builder's metadata and checksum.
+        if is_tensor_based || is_images || is_videos || is_realtime || skip_model_assets {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).
@@ -818,13 +817,15 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
-            // Aliases are only honored on the LLM surfaces (their handlers
-            // canonicalize alias→primary); ignore them for these types.
-            if !model_aliases.is_empty() {
+            // The audio handler resolves aliases to the primary model name.
+            // Preserve the existing alias behavior for other minimal-card types.
+            if is_audios {
+                card.set_aliases(model_aliases);
+            } else if !model_aliases.is_empty() {
                 tracing::warn!(
                     model_name = %model_name,
                     "Ignoring served-model-name aliases: not supported for \
-                     tensor/images/videos/realtime models"
+                     non-audio minimal model cards"
                 );
             }
 
@@ -1902,7 +1903,7 @@ impl Client {
         let inner = self.router.client.clone();
         crate::future_into_py(py, async move {
             inner
-                .wait_for_instances()
+                .wait_for_routable_instances()
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)

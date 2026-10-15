@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
-    completion_usage_to_anthropic, new_tool_use_id,
+    anthropic_stop_fields, completion_usage_to_anthropic, new_tool_use_id,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -45,12 +45,24 @@ pub struct AnthropicStreamConverter {
     saw_backend_usage: bool,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
+    // Text that arrived after a tool call. Tool blocks stream only once their
+    // call is complete, so this text waits and streams in arrival order.
+    pending_text: Vec<PendingText>,
     tool_blocks_flushed: bool,
     tool_flush_requested: bool,
     // Block index counter
     next_block_index: u32,
     // Stop reason
     stop_reason: Option<AnthropicStopReason>,
+    stop_sequence: Option<String>,
+    backend_stop_reason: Option<serde_json::Value>,
+}
+
+/// Text that arrived after `after_calls` tool calls had started.
+struct PendingText {
+    after_calls: usize,
+    /// Each fragment with the cumulative usage when its chunk was processed.
+    fragments: Vec<(String, AnthropicUsage)>,
 }
 
 struct ToolCallState {
@@ -98,10 +110,13 @@ impl AnthropicStreamConverter {
             },
             saw_backend_usage: false,
             tool_call_states: Vec::new(),
+            pending_text: Vec::new(),
             tool_blocks_flushed: false,
             tool_flush_requested: false,
             next_block_index: 0,
             stop_reason: None,
+            stop_sequence: None,
+            backend_stop_reason: None,
         }
     }
 
@@ -171,6 +186,18 @@ impl AnthropicStreamConverter {
         }
     }
 
+    fn buffer_text(&mut self, text: &str, usage_snapshot: &AnthropicUsage) {
+        let after_calls = self.tool_call_states.len();
+        let fragment = (text.to_owned(), usage_snapshot.clone());
+        match self.pending_text.last_mut() {
+            Some(pending) if pending.after_calls == after_calls => pending.fragments.push(fragment),
+            _ => self.pending_text.push(PendingText {
+                after_calls,
+                fragments: vec![fragment],
+            }),
+        }
+    }
+
     /// Drain buffered tool blocks into taggable events. Each event carries an
     /// optional usage override: `Some` for `input_json_delta` fragments (the
     /// per-fragment snapshot taken at record time), `None` for the surrounding
@@ -198,24 +225,21 @@ impl AnthropicStreamConverter {
         let last_call = self.tool_call_states.len().checked_sub(1);
 
         let mut has_emitted = self.tool_call_states.iter().any(|call| call.has_emitted);
-        let call_limit = if self
+        let single_tool = self
             .api_context
             .as_ref()
-            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
-        {
-            usize::from(!has_emitted)
-        } else {
-            usize::MAX
-        };
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use);
 
         for (call_index, tool_call) in self
             .tool_call_states
             .iter_mut()
             .enumerate()
             .filter(|(_, tool_call)| tool_call.is_emit_ready())
-            .take(call_limit)
             .filter(|(_, tool_call)| !tool_call.has_emitted && (is_final || tool_call.needs_flush))
         {
+            if single_tool && has_emitted {
+                break;
+            }
             let raw: String = tool_call
                 .argument_fragments
                 .iter()
@@ -226,7 +250,15 @@ impl AnthropicStreamConverter {
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
             if !is_final && raw.is_empty() {
+                if single_tool {
+                    break;
+                }
                 continue;
+            }
+            let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
+            // Keep an earlier incomplete call pending; it may still become valid.
+            if single_tool && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
+                break;
             }
             tool_call.needs_flush = false;
             let arguments_are_valid = if raw.is_empty() {
@@ -235,7 +267,7 @@ impl AnthropicStreamConverter {
                 // the name. Keep the terminal rule aligned with the unary converter.
                 !(truncated && Some(call_index) == last_call)
             } else {
-                serde_json::from_str::<serde_json::Value>(&raw).is_ok()
+                parsed.is_ok()
             };
             let repair =
                 is_final && truncated && Some(call_index) == last_call && !arguments_are_valid;
@@ -245,6 +277,12 @@ impl AnthropicStreamConverter {
             if !arguments_are_valid && repaired_input.is_none() {
                 continue;
             }
+            drain_pending_text(
+                &mut self.pending_text,
+                Some(call_index),
+                &mut block_index,
+                &mut events,
+            );
             let emitted_id = new_tool_use_id();
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
@@ -312,6 +350,9 @@ impl AnthropicStreamConverter {
             self.stop_reason = Some(AnthropicStopReason::EndTurn);
         }
 
+        if is_final {
+            drain_pending_text(&mut self.pending_text, None, &mut block_index, &mut events);
+        }
         self.next_block_index = block_index;
         events
     }
@@ -340,6 +381,14 @@ impl AnthropicStreamConverter {
         self.usage = completion_usage_to_anthropic(usage);
         self.usage.output_tokens = self.usage.output_tokens.max(running);
         self.saw_backend_usage = true;
+    }
+
+    /// Keep the latest backend stop metadata across chunks. A tool parser can
+    /// release it on an earlier chunk than the finish reason.
+    fn record_backend_stop_reason(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        if let Some(stop_reason) = chunk.nvext.as_ref().and_then(|ext| ext.get("stop_reason")) {
+            self.backend_stop_reason = Some(stop_reason.clone());
+        }
     }
 
     /// Serialize an event to SSE, stamping the current cumulative `usage` onto
@@ -460,6 +509,7 @@ impl AnthropicStreamConverter {
         // not the final count at flush time. `self.usage` is stable for the rest
         // of this call (record_usage / the fallback above already ran).
         let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
 
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
@@ -471,19 +521,10 @@ impl AnthropicStreamConverter {
                     dynamo_protocols::types::FinishReason::ToolCalls
                         | dynamo_protocols::types::FinishReason::FunctionCall
                 );
-                self.stop_reason = Some(match fr {
-                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-                    dynamo_protocols::types::FinishReason::ToolCalls => {
-                        AnthropicStopReason::ToolUse
-                    }
-                    dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::Refusal
-                    }
-                    dynamo_protocols::types::FinishReason::FunctionCall => {
-                        AnthropicStopReason::ToolUse
-                    }
-                });
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
+                self.stop_reason = Some(stop_reason);
+                self.stop_sequence = stop_sequence;
             }
 
             // Handle reasoning/thinking content deltas
@@ -550,30 +591,35 @@ impl AnthropicStreamConverter {
                     events.push(make_sse_event("content_block_stop", &block_stop));
                 }
 
-                // Emit content_block_start on first text
-                if !self.text_block_started {
-                    self.text_block_started = true;
-                    self.text_block_index = self.next_block_index;
-                    self.next_block_index += 1;
+                if self.text_block_closed || !self.tool_call_states.is_empty() {
+                    // Text after a tool call streams after that call's block.
+                    self.buffer_text(text, &usage_snapshot);
+                } else {
+                    // Emit content_block_start on first text
+                    if !self.text_block_started {
+                        self.text_block_started = true;
+                        self.text_block_index = self.next_block_index;
+                        self.next_block_index += 1;
 
-                    let block_start = AnthropicStreamEvent::ContentBlockStart {
+                        let block_start = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.text_block_index,
+                            content_block: AnthropicResponseContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                        };
+                        events.push(make_sse_event("content_block_start", &block_start));
+                    }
+
+                    // Emit text delta
+                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.text_block_index,
-                        content_block: AnthropicResponseContentBlock::Text {
-                            text: String::new(),
-                            citations: None,
+                        delta: AnthropicDelta::TextDelta {
+                            text: text.to_string(),
                         },
                     };
-                    events.push(make_sse_event("content_block_start", &block_start));
+                    events.push(self.serialize_event("content_block_delta", &block_delta));
                 }
-
-                // Emit text delta
-                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.text_block_index,
-                    delta: AnthropicDelta::TextDelta {
-                        text: text.to_string(),
-                    },
-                };
-                events.push(self.serialize_event("content_block_delta", &block_delta));
             }
 
             // Handle tool call deltas
@@ -662,7 +708,7 @@ impl AnthropicStreamConverter {
         let message_delta = AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {
                 stop_reason: self.stop_reason.clone(),
-                stop_sequence: None,
+                stop_sequence: self.stop_sequence.clone(),
             },
             usage: self.usage.clone(),
         };
@@ -699,6 +745,55 @@ impl AnthropicStreamConverter {
     ) {
         let error_event = AnthropicStreamEvent::Error { error };
         events.push(make_sse_event("error", &error_event));
+    }
+}
+
+/// Moves held text into `events` as text blocks: the text that arrived before
+/// tool call `before_call`, or all of it when `None`.
+#[allow(clippy::type_complexity)]
+fn drain_pending_text(
+    pending_text: &mut Vec<PendingText>,
+    before_call: Option<usize>,
+    block_index: &mut u32,
+    events: &mut Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)>,
+) {
+    let count = match before_call {
+        Some(call_index) => pending_text
+            .iter()
+            .take_while(|text| text.after_calls <= call_index)
+            .count(),
+        None => pending_text.len(),
+    };
+    for text in pending_text.drain(..count) {
+        events.push((
+            "content_block_start",
+            AnthropicStreamEvent::ContentBlockStart {
+                index: *block_index,
+                content_block: AnthropicResponseContentBlock::Text {
+                    text: String::new(),
+                    citations: None,
+                },
+            },
+            None,
+        ));
+        for (fragment, usage) in text.fragments {
+            events.push((
+                "content_block_delta",
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *block_index,
+                    delta: AnthropicDelta::TextDelta { text: fragment },
+                },
+                Some(usage),
+            ));
+        }
+        events.push((
+            "content_block_stop",
+            AnthropicStreamEvent::ContentBlockStop {
+                index: *block_index,
+            },
+            None,
+        ));
+        *block_index += 1;
     }
 }
 
@@ -777,6 +872,7 @@ impl AnthropicStreamConverter {
         }
 
         let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
 
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
@@ -787,19 +883,10 @@ impl AnthropicStreamConverter {
                     dynamo_protocols::types::FinishReason::ToolCalls
                         | dynamo_protocols::types::FinishReason::FunctionCall
                 );
-                self.stop_reason = Some(match fr {
-                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-                    dynamo_protocols::types::FinishReason::ToolCalls => {
-                        AnthropicStopReason::ToolUse
-                    }
-                    dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::Refusal
-                    }
-                    dynamo_protocols::types::FinishReason::FunctionCall => {
-                        AnthropicStopReason::ToolUse
-                    }
-                });
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
+                self.stop_reason = Some(stop_reason);
+                self.stop_sequence = stop_sequence;
             }
 
             // Handle reasoning/thinking content deltas
@@ -854,29 +941,33 @@ impl AnthropicStreamConverter {
                     events.push(make_tagged_event("content_block_stop", &ev));
                 }
 
-                if !self.text_block_started {
-                    self.text_block_started = true;
-                    self.text_block_index = self.next_block_index;
-                    self.next_block_index += 1;
+                self.usage.output_tokens += 1;
+                if self.text_block_closed || !self.tool_call_states.is_empty() {
+                    self.buffer_text(text, &usage_snapshot);
+                } else {
+                    if !self.text_block_started {
+                        self.text_block_started = true;
+                        self.text_block_index = self.next_block_index;
+                        self.next_block_index += 1;
 
-                    let ev = AnthropicStreamEvent::ContentBlockStart {
+                        let ev = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.text_block_index,
+                            content_block: AnthropicResponseContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                        };
+                        events.push(make_tagged_event("content_block_start", &ev));
+                    }
+
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.text_block_index,
-                        content_block: AnthropicResponseContentBlock::Text {
-                            text: String::new(),
-                            citations: None,
+                        delta: AnthropicDelta::TextDelta {
+                            text: text.to_string(),
                         },
                     };
-                    events.push(make_tagged_event("content_block_start", &ev));
+                    events.push(make_tagged_event("content_block_delta", &ev));
                 }
-
-                self.usage.output_tokens += 1;
-                let ev = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.text_block_index,
-                    delta: AnthropicDelta::TextDelta {
-                        text: text.to_string(),
-                    },
-                };
-                events.push(make_tagged_event("content_block_delta", &ev));
             }
 
             if let Some(tool_calls) = &delta.tool_calls {
@@ -957,7 +1048,7 @@ impl AnthropicStreamConverter {
         let ev = AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {
                 stop_reason: self.stop_reason.clone(),
-                stop_sequence: None,
+                stop_sequence: self.stop_sequence.clone(),
             },
             usage: self.usage.clone(),
         };
@@ -1004,7 +1095,9 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1047,7 +1140,9 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1088,6 +1183,153 @@ mod tests {
             .filter_map(|line| line.strip_prefix("data: "))
             .map(|data| serde_json::from_str(data).unwrap())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn test_stream_stop_sequence_metadata() {
+        for (finish, matched, expected_reason, expected_sequence) in [
+            (
+                FinishReason::Stop,
+                serde_json::json!("</answer>"),
+                "stop_sequence",
+                Some("</answer>"),
+            ),
+            (
+                FinishReason::Stop,
+                serde_json::json!("\n\nHuman:"),
+                "stop_sequence",
+                Some("\n\nHuman:"),
+            ),
+            (FinishReason::Stop, serde_json::json!(42), "end_turn", None),
+            (
+                FinishReason::Length,
+                serde_json::json!("</answer>"),
+                "max_tokens",
+                None,
+            ),
+            (
+                FinishReason::ContentFilter,
+                serde_json::json!("</answer>"),
+                "refusal",
+                None,
+            ),
+            (
+                FinishReason::ToolCalls,
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+            (
+                FinishReason::FunctionCall,
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+        ] {
+            let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+            let mut events = converter.emit_start_events();
+            let content = if expected_reason == "tool_use" {
+                tool_call_chunk(0, Some("call-1"), Some("calculate"), Some("{}"))
+            } else {
+                text_chunk("<answer>2 plus 3 is 5")
+            };
+            converter.append_chunk_events(&content, &mut events);
+            let mut terminal = finish_chunk(finish);
+            terminal.nvext = Some(serde_json::json!({"stop_reason": matched}));
+            converter.append_chunk_events(&terminal, &mut events);
+            converter.append_end_events(&mut events);
+            let values = sse_values(events).await;
+            let terminal = values
+                .iter()
+                .find(|event| event["type"] == "message_delta")
+                .unwrap();
+            assert_eq!(
+                terminal["delta"]["stop_reason"], expected_reason,
+                "{finish:?}: {matched}"
+            );
+            assert_eq!(
+                terminal["delta"]["stop_sequence"],
+                serde_json::json!(expected_sequence),
+                "{finish:?}: {matched}"
+            );
+            assert_eq!(
+                values
+                    .iter()
+                    .filter(|event| event["type"] == "message_delta")
+                    .count(),
+                1
+            );
+            assert_eq!(values.last().unwrap()["type"], "message_stop");
+        }
+    }
+
+    /// A tool parser can hold a possible call opener past the chunk that
+    /// carries the matched stop, then release it with the finish reason.
+    #[tokio::test]
+    async fn test_stream_stop_sequence_survives_tool_parser_split() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::preprocessor::OpenAIPreprocessor;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        let request: crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+                "tools": [{"type": "function", "function": {"name": "calculate"}}]
+            }))
+            .unwrap();
+        for parser in ["hermes", "glm47"] {
+            for text in ["hello<", "hello<tool"] {
+                let mut card = ModelDeploymentCard::load_from_disk(
+                    "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                    None,
+                )
+                .unwrap();
+                card.runtime_config.tool_call_parser = Some(parser.to_string());
+                let mut terminal = text_chunk(text);
+                terminal.inner.choices[0].finish_reason = Some(FinishReason::Stop);
+                terminal.nvext = Some(serde_json::json!({"stop_reason": "</answer>"}));
+                let parsed: Vec<_> = OpenAIPreprocessor::new(card)
+                    .unwrap()
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter([Annotated::from_data(terminal)]),
+                        &request,
+                        false,
+                        false,
+                    )
+                    .unwrap()
+                    .filter_map(|chunk| async move { chunk.data })
+                    .collect()
+                    .await;
+
+                let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = converter.emit_start_events();
+                for chunk in &parsed {
+                    converter.append_chunk_events(chunk, &mut events);
+                }
+                converter.append_end_events(&mut events);
+                let values = sse_values(events).await;
+                let streamed: String = values
+                    .iter()
+                    .filter_map(|event| event["delta"]["text"].as_str())
+                    .collect();
+                assert_eq!(streamed, text, "{parser}");
+                let terminal = values
+                    .iter()
+                    .find(|event| event["type"] == "message_delta")
+                    .unwrap();
+                assert_eq!(
+                    terminal["delta"]["stop_reason"], "stop_sequence",
+                    "{parser}: {text}"
+                );
+                assert_eq!(
+                    terminal["delta"]["stop_sequence"], "</answer>",
+                    "{parser}: {text}"
+                );
+            }
+        }
     }
 
     #[rstest::rstest]
@@ -1162,6 +1404,58 @@ mod tests {
         assert_eq!(values[0]["delta"]["stop_reason"], "tool_use");
         assert_eq!(values[0]["usage"]["output_tokens"], 9);
         assert_eq!(values[1]["type"], "message_stop");
+    }
+
+    #[test]
+    fn test_single_valid_tool_limit_survives_multiple_flushes() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use: true,
+                ..Default::default()
+            },
+        );
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call_0"),
+            Some("invalid"),
+            Some("[]"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call_1"),
+            Some("valid"),
+            Some("{}"),
+        ));
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { name, .. },
+                    ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["valid"]);
+        let later = conv.process_chunk_tagged(&tool_call_chunk(
+            2,
+            Some("call_2"),
+            Some("later"),
+            Some("{}"),
+        ));
+        assert!(later.is_empty());
+        events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(events.is_empty());
+        events.extend(conv.emit_end_events_tagged());
+        assert!(
+            events.iter().all(|event| !matches!(
+                &event.data,
+                AnthropicStreamEvent::ContentBlockStart { .. }
+            ))
+        );
     }
 
     #[rstest::rstest]
@@ -1467,13 +1761,16 @@ mod tests {
                         dynamo_protocols::types::PromptTokensDetails {
                             audio_tokens: None,
                             cached_tokens: Some(c),
+                            ..Default::default()
                         }
                     }),
                     completion_tokens_details: None,
                 }),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1966,6 +2263,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_stream_suppresses_non_object_inputs() {
+        for arguments in ["[]", "null", "42", "true", r#""hello""#] {
+            for reason in [FinishReason::ToolCalls, FinishReason::Length] {
+                let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = conv.process_chunk_tagged(&tool_call_chunk(
+                    0,
+                    Some("call-1"),
+                    Some("record_literal"),
+                    Some(arguments),
+                ));
+                events.extend(conv.process_chunk_tagged(&finish_chunk(reason)));
+                events.extend(conv.emit_end_events_tagged());
+                assert!(
+                    events.iter().all(|event| !matches!(
+                        &event.data,
+                        AnthropicStreamEvent::ContentBlockStart {
+                            content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                            ..
+                        } | AnthropicStreamEvent::ContentBlockDelta {
+                            delta: AnthropicDelta::InputJsonDelta { .. },
+                            ..
+                        }
+                    )),
+                    "{arguments} with {reason:?}"
+                );
+                let expected = if reason == FinishReason::Length {
+                    AnthropicStopReason::MaxTokens
+                } else {
+                    AnthropicStopReason::EndTurn
+                };
+                assert!(events.iter().any(|event| matches!(
+                    &event.data,
+                    AnthropicStreamEvent::MessageDelta { delta, .. }
+                        if delta.stop_reason.as_ref() == Some(&expected)
+                )));
+            }
+        }
+    }
+
     /// `tool_use` is an instruction to run a tool. With every call suppressed the
     /// client has nothing to run, and Anthropic rejects the turn when it is sent back.
     #[test]
@@ -2169,8 +2506,96 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
+    }
+
+    /// Asserts the Anthropic block protocol: blocks start one at a time at
+    /// consecutive indices, and deltas and stops target the open block.
+    /// Returns each block's type in order.
+    fn block_types(values: &[serde_json::Value]) -> Vec<String> {
+        let mut open = None;
+        let mut types = Vec::new();
+        for value in values {
+            let index = value["index"].as_u64();
+            match value["type"].as_str().unwrap() {
+                "content_block_start" => {
+                    assert_eq!(open, None, "block started while another is open: {value}");
+                    assert_eq!(index, Some(types.len() as u64), "non-consecutive: {value}");
+                    open = index;
+                    types.push(value["content_block"]["type"].as_str().unwrap().to_owned());
+                }
+                "content_block_delta" => {
+                    assert_eq!(index, open, "delta outside its block: {value}")
+                }
+                "content_block_stop" => {
+                    assert_eq!(index, open, "stop outside its block: {value}");
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(open, None, "a block was left open");
+        types
+    }
+
+    /// Text after a tool call keeps its place among the tool blocks, in a text
+    /// block of its own. The first case is Qwen3.8 output from SGLang, which
+    /// writes text between parallel calls.
+    #[rstest::rstest]
+    #[case::between_calls(
+        vec![
+            reasoning_chunk("Run both."),
+            text_chunk("\n\n"),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["thinking", "text", "tool_use", "text", "tool_use"],
+        "\n\n\n"
+    )]
+    #[case::after_last_call(
+        vec![
+            text_chunk("Checking."),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["text", "tool_use", "text"],
+        "Checking.\n"
+    )]
+    #[case::no_text_before_calls(
+        vec![
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("Now the sandbox."),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["tool_use", "text", "tool_use"],
+        "Now the sandbox."
+    )]
+    #[tokio::test]
+    async fn test_text_after_tool_call_keeps_its_place(
+        #[case] chunks: Vec<NvCreateChatCompletionStreamResponse>,
+        #[case] expected: &[&str],
+        #[case] text: &str,
+    ) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        for chunk in &chunks {
+            conv.append_chunk_events(chunk, &mut events);
+        }
+        conv.append_end_events(&mut events);
+        let values = sse_values(events).await;
+        assert_eq!(block_types(&values), expected);
+        let streamed: String = values
+            .iter()
+            .filter_map(|value| value["delta"]["text"].as_str())
+            .collect();
+        assert_eq!(streamed, text);
     }
 
     /// Full reasoning flow: thinking → text → tool_use.

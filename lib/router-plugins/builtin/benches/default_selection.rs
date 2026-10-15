@@ -202,7 +202,7 @@ fn shared_cache(c: &mut Criterion) {
                         ));
                     let policy = default_policy(
                         KvRouterConfig {
-                            shared_cache_multiplier: credit,
+                            shared_cache_multiplier: Some(credit),
                             overlap_score_credit_decay: 0.6,
                             ..Default::default()
                         },

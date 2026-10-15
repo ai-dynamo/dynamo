@@ -140,7 +140,9 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         self.prepared = PreparedRequest {
             min_prefill: 0,
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
-            request_blocks: IntegerDivisor::new(context.request_blocks()),
+            // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
+            // clamp so a worker at the load floor does not compute 0/0.
+            request_blocks: IntegerDivisor::new(context.request_blocks().max(1)),
             overlap_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
             needs_decode_subtraction: self.is_decode
