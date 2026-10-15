@@ -206,6 +206,9 @@ fn convert_ffmpeg_frame_to_rgb(
 }
 
 fn video_open_error(error: ffmpeg_next::Error) -> anyhow::Error {
+    if let Some(error) = ffmpeg_host_fault("open the video for decoding", &error) {
+        return error;
+    }
     anyhow::anyhow!(
         "failed to open the video for decoding: {error}. If the input uses a \
          codec other than VP8/VP9 (e.g. H.264 or H.265), note this \
@@ -215,6 +218,27 @@ fn video_open_error(error: ffmpeg_next::Error) -> anyhow::Error {
          decode in hardware via NVDEC. Otherwise the input may be \
          malformed or not a video."
     )
+}
+
+/// FFmpeg errors that report a host fault (memory, file descriptors, or I/O on the
+/// frontend's own memfd) or an FFmpeg defect, not a problem with the client's media.
+/// These stay 500; every other FFmpeg error is a format or codec rejection.
+fn ffmpeg_host_fault(action: &str, error: &ffmpeg_next::Error) -> Option<anyhow::Error> {
+    let host_fault = match error {
+        ffmpeg_next::Error::Bug | ffmpeg_next::Error::Bug2 => true,
+        ffmpeg_next::Error::Other { errno } => matches!(
+            *errno,
+            libc::ENOMEM | libc::EMFILE | libc::ENFILE | libc::EIO | libc::EACCES | libc::EPERM
+        ),
+        _ => false,
+    };
+    host_fault.then(|| {
+        DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message(format!("FFmpeg failed to {action}: {error}"))
+            .build()
+            .into()
+    })
 }
 
 /// Staging the bytes in a memfd fails only on host faults (for example, file
@@ -272,7 +296,12 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
 
     let mut decoder_context = Context::new();
     decoder_context.set_time_base(stream_time_base);
-    decoder_context.set_parameters(parameters)?;
+    decoder_context
+        .set_parameters(parameters)
+        .map_err(|error| {
+            ffmpeg_host_fault("set the decoder parameters", &error)
+                .unwrap_or_else(|| anyhow::Error::from(error))
+        })?;
     let mut decoder = decoder_context
         .decoder()
         .video()
@@ -329,6 +358,12 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
                         &mut rgb_frame,
                         &mut all_frames[offset..offset + frame_size],
                     ) {
+                        if let Some(ffmpeg_error) = error.downcast_ref::<ffmpeg_next::Error>()
+                            && let Some(error) =
+                                ffmpeg_host_fault("convert a frame to RGB", ffmpeg_error)
+                        {
+                            return Err(error);
+                        }
                         let error = anyhow::anyhow!(
                             "FFmpeg RGB conversion error at timestamp {timestamp:.3}s: {error:?}"
                         );
@@ -348,6 +383,9 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
                 })
                 | Err(ffmpeg_next::Error::Eof) => return Ok(false),
                 Err(error) => {
+                    if let Some(error) = ffmpeg_host_fault("decode a frame", &error) {
+                        return Err(error);
+                    }
                     let error = anyhow::anyhow!("FFmpeg frame decode error: {error:?}");
                     if handle_sample_error(config, target_index, target_times.len(), error)? {
                         return Ok(true);
@@ -365,6 +403,9 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         }
         packet.rescale_ts(stream.time_base(), decoder_time_base);
         if let Err(error) = decoder.send_packet(&packet) {
+            if let Some(error) = ffmpeg_host_fault("send a packet to the decoder", &error) {
+                return Err(error);
+            }
             let error = anyhow::anyhow!("FFmpeg packet decode error: {error:?}");
             if handle_sample_error(config, &mut target_index, target_times.len(), error)? {
                 finished = true;
@@ -385,6 +426,9 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
                     receive_frames(&mut decoder, &mut target_index, &mut sampled_timestamps)?;
             }
             Err(error) => {
+                if let Some(error) = ffmpeg_host_fault("flush the decoder", &error) {
+                    return Err(error);
+                }
                 let error = anyhow::anyhow!("FFmpeg decoder flush error: {error:?}");
                 finished =
                     handle_sample_error(config, &mut target_index, target_times.len(), error)?;
@@ -805,5 +849,34 @@ mod tests {
 
         // Check that other fields are overridden
         assert_eq!(merged.fps, Some(60.0));
+    }
+
+    #[rstest]
+    #[case(ffmpeg_next::Error::Other { errno: libc::ENOMEM }, true)]
+    #[case(ffmpeg_next::Error::Other { errno: libc::EMFILE }, true)]
+    #[case(ffmpeg_next::Error::Other { errno: libc::EIO }, true)]
+    #[case(ffmpeg_next::Error::Bug, true)]
+    #[case(ffmpeg_next::Error::InvalidData, false)]
+    #[case(ffmpeg_next::Error::DecoderNotFound, false)]
+    #[case(ffmpeg_next::Error::Other { errno: libc::EINVAL }, false)]
+    fn test_ffmpeg_host_fault_classification(
+        #[case] error: ffmpeg_next::Error,
+        #[case] host_fault: bool,
+    ) {
+        let classified = ffmpeg_host_fault("decode a frame", &error);
+        assert_eq!(classified.is_some(), host_fault, "{error:?}");
+        if let Some(classified) = classified {
+            let dynamo_error = classified
+                .downcast_ref::<DynamoError>()
+                .expect("host fault is classified");
+            assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
+        }
+        // The open path keeps its codec hint for media errors.
+        let opened = video_open_error(error);
+        assert_eq!(
+            opened.downcast_ref::<DynamoError>().is_some(),
+            host_fault,
+            "{opened:#}"
+        );
     }
 }

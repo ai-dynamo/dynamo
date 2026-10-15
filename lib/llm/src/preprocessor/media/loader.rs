@@ -28,7 +28,6 @@ const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
-// Client-visible texts for media the frontend could not fetch or decode.
 const IMAGE_FETCH_FAILED: &str = "Failed to fetch the image_url media";
 const IMAGE_DECODE_FAILED: &str =
     "Failed to decode the image_url data: it is not a valid or supported image";
