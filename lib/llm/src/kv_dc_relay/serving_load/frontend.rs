@@ -549,6 +549,31 @@ mod tests {
         assert!(matches!(model.gauges, Coverage::Complete(_)));
     }
 
+    /// An alias leaving the frame lowers the frontend's total; that is not a
+    /// restart, so nothing is counted again.
+    #[test]
+    fn totals_that_drop_within_an_incarnation_count_nothing_again() {
+        let mut reports = FrontendReports::default();
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 1, vec![model_load("a", 1, 1500)]),
+        );
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 2, vec![model_load("a", 1, 1000)]),
+        );
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 3, vec![model_load("a", 1, 1001)]),
+        );
+
+        let model = only_model(&reports, &listed(&[PUBLISHER]));
+        assert_eq!(model.totals.requests_started, 1501);
+    }
+
     #[test]
     fn incarnation_flip_flop_does_not_double_count_late_frames() {
         let mut reports = FrontendReports::default();

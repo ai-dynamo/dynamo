@@ -127,10 +127,11 @@ impl RequestTotals {
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
     }
 
-    /// Growth since `previous`. A counter that went backwards restarted, so its
-    /// whole current value is growth.
+    /// Growth since `previous`, from the same frontend incarnation. A total that
+    /// went backwards (an alias unregistered, say) grows by nothing; a restart
+    /// arrives as a new incarnation and starts from a fresh baseline instead.
     pub(crate) fn growth_since(&self, previous: &Self) -> Self {
-        let grow = |current: u64, previous: u64| current.checked_sub(previous).unwrap_or(current);
+        let grow = |current: u64, previous: u64| current.saturating_sub(previous);
         Self {
             requests_started: grow(self.requests_started, previous.requests_started),
             requests_completed: grow(self.requests_completed, previous.requests_completed),
