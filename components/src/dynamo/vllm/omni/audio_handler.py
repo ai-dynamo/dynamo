@@ -21,7 +21,8 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
-from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.common.http import HttpStatusError, HttpTimeoutError, fetch_bytes
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -100,6 +101,8 @@ class AudioGenerationHandler:
         self.media_output_http_url = media_output_http_url
         self._tts_tokenizer: Any = None
         self.audex = AudexRequestAdapter(config, engine_client)
+        # The DYN_MM_* media URL policy, which ImageLoader applies too.
+        self._url_policy = UrlValidationPolicy.from_env()
 
         # Cache TTS capabilities from model config at init.
         self._tts_supported_speakers: set = self._load_supported_speakers()
@@ -447,43 +450,24 @@ class AudioGenerationHandler:
         import soundfile as sf
 
         if ref_audio_str.startswith(("http://", "https://")):
-            import ipaddress
-            import socket
-            from urllib.parse import urlparse
-
-            import aiohttp
-
-            parsed = urlparse(ref_audio_str)
-            if not parsed.hostname:
-                raise ValueError("Invalid ref_audio URL")
-            for info in socket.getaddrinfo(
-                parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
-            ):
-                ip_str = str(info[4][0]).split("%", 1)[0]
-                addr = ipaddress.ip_address(ip_str)
-                if addr.is_private or addr.is_loopback:
-                    raise ValueError(
-                        f"ref_audio URL resolves to blocked address: {addr}"
-                    )
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            # The shared client checks the URL and each redirect hop against
+            # the policy, filters blocked addresses again when it connects, and
+            # stops reading past the size cap.
+            try:
+                audio_bytes = await fetch_bytes(
                     ref_audio_str,
-                    timeout=aiohttp.ClientTimeout(
-                        total=self.config.tts_ref_audio_timeout
-                    ),
-                ) as resp:
-                    if resp.status != 200:
-                        raise ValueError(
-                            f"Failed to download ref_audio: HTTP {resp.status}"
-                        )
-                    audio_bytes = await resp.read()
-                    if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
-                        raise ValueError(
-                            f"ref_audio too large "
-                            f"({len(audio_bytes)} bytes, "
-                            f"max {self.config.tts_ref_audio_max_bytes})"
-                        )
+                    self.config.tts_ref_audio_timeout,
+                    policy=self._url_policy,
+                    max_bytes=self.config.tts_ref_audio_max_bytes,
+                )
+            except HttpStatusError as exc:
+                raise ValueError(
+                    f"Failed to download ref_audio: HTTP {exc.status}"
+                ) from exc
+            except HttpTimeoutError as exc:
+                # A builtin TimeoutError reaches the client as a 504, and an
+                # HttpTimeoutError as a 500.
+                raise TimeoutError("Timed out downloading ref_audio") from exc
         elif ref_audio_str.startswith("data:"):
             max_bytes = self.config.tts_ref_audio_max_bytes
             # Bound the *encoded* input separately from the decoded limit. A

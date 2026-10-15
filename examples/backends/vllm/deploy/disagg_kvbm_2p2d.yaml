@@ -26,7 +26,7 @@ spec:
           - decode
           - --disable-hybrid-kv-cache-manager
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - --max-model-len
           - "32000"
           - --enforce-eager
@@ -59,7 +59,7 @@ spec:
           - "32000"
           - --enforce-eager
           - --kv-transfer-config
-          - '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
+          - '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
           command:
           - python3
           - -m

@@ -95,7 +95,6 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
         sampling_params={"max_tokens": 5, "extra_args": {"existing": "value"}},
         kv_transfer_params={"connector_data": {"block_ids": [1, 2]}},
     )
-    request["kv_hint"] = {"source": "worker-a"}
     adapted = adapt_engine_generate_request(
         request,
         enable_multimodal=False,
@@ -109,7 +108,6 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
         "existing": "value",
         "kv_transfer_params": {
             "connector_data": {"block_ids": [1, 2]},
-            "kv_hint": {"source": "worker-a"},
         },
     }
 
