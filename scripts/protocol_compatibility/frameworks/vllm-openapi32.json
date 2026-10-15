@@ -1,6 +1,6 @@
 {
   "framework_name": "vllm",
-  "purpose": "Pinned request/response candidate discovery; not a complete compatibility certification",
+  "purpose": "Historical b04e request/response experiment; use vllm-response-openapi.json for new comparisons",
   "source": {
     "repository": "https://github.com/vllm-project/vllm",
     "revision": "b04e80127bea278758743ca3277d40a234f73b09",

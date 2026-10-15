@@ -104,6 +104,24 @@ impl NodeChildren {
         }
     }
 
+    /// Visits each child by reference, without cloning its `Arc`.
+    pub(super) fn for_each_child(&self, mut visit: impl FnMut(LocalBlockHash, &SharedNode)) {
+        match &**self.state.load() {
+            ChildrenState::Empty => {}
+            ChildrenState::Singleton(entry) => visit(entry.hash, &entry.node),
+            ChildrenState::Small(children) => {
+                for entry in children.iter() {
+                    visit(entry.hash, &entry.node);
+                }
+            }
+            ChildrenState::Sharded(children) => {
+                for entry in children.iter() {
+                    visit(*entry.key(), entry.value());
+                }
+            }
+        }
+    }
+
     pub(super) fn values_snapshot(&self) -> Vec<SharedNode> {
         match &**self.state.load() {
             ChildrenState::Empty => Vec::new(),
@@ -117,6 +135,7 @@ impl NodeChildren {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn entries_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
         match &**self.state.load() {
             ChildrenState::Empty => Vec::new(),

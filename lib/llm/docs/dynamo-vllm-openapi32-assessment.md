@@ -3,7 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Pinned vLLM OpenAPI 3.2 assessment
+# Historical vLLM OpenAPI 3.2 assessment
+
+For new comparisons, use the [current upstream recipe](dynamo-vllm-response-assessment.md).
+The profile and results below remain historical; they have not been rerun on the
+new source pin.
 
 The [response-capable profile](../../../scripts/protocol_compatibility/frameworks/vllm-openapi32.json)
 pins the recorded request **and response** assessment to vLLM source

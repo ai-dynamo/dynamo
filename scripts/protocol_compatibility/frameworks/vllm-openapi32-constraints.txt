@@ -1,4 +1,6 @@
-# Observed Linux/Python 3.12.3 environment for vLLM b04e801 + Dynamo 10641b.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Historical Linux/Python 3.12.3 environment for vLLM b04e801 + Dynamo 10641b.
 # Version constraints, not a hash-locked installer or a portable wheel guarantee.
 # vLLM, ai-dynamo and ai-dynamo-runtime are source-built separately; see profile.
 absl-py==2.5.1

@@ -1121,7 +1121,6 @@ impl SyncIndexer for LowerTierIndexer {
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
-                WorkerTask::CleanupStaleChildren => {}
                 WorkerTask::Terminate => {
                     break;
                 }

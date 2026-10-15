@@ -40,15 +40,15 @@ def check(spec: dict) -> int:
         for path in ("/v1/chat/completions", "/v1/completions")
     }
     validate(scoped)
-    assert not any(
-        MARKER in schema for schema in spec["components"]["schemas"].values()
-    ), "Unresolved dependency import"
+    if any(MARKER in schema for schema in spec["components"]["schemas"].values()):
+        raise AssertionError("Unresolved dependency import")
     # These fixtures cover successful serialization only. Description-only error
     # responses remain coverage gaps in the full assessment, not in this suite.
     for path in scoped["paths"].values():
         path["post"]["responses"] = {"200": path["post"]["responses"]["200"]}
     projected, gaps = response_document(scoped)
-    assert not gaps, gaps
+    if gaps:
+        raise AssertionError(gaps)
     resource = Resource.from_contents(projected, default_specification=DRAFT202012)
     registry = Registry().with_resource("urn:dynamo:response", resource)
     validators = {}
@@ -98,7 +98,8 @@ def check(spec: dict) -> int:
         # The schema must reject omission of the shared required envelope key.
         invalid = copy.deepcopy(case["output"])
         del invalid["id"]
-        assert not validator.is_valid(payload(case["kind"], invalid)), case["name"]
+        if validator.is_valid(payload(case["kind"], invalid)):
+            raise AssertionError(case["name"])
     # Required-and-nullable is different from optional: these keys must exist.
     for case_index, pointer in (
         (0, ("choices", 0, "message", "refusal")),
@@ -113,9 +114,8 @@ def check(spec: dict) -> int:
         for part in pointer[:-1]:
             parent = parent[part]
         del parent[pointer[-1]]
-        assert not validators[case["kind"]].is_valid(
-            payload(case["kind"], invalid)
-        ), pointer
+        if validators[case["kind"]].is_valid(payload(case["kind"], invalid)):
+            raise AssertionError(pointer)
     return len(cases)
 
 

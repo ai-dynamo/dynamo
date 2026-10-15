@@ -5,10 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo versus vLLM request-contract assessment
 
-This is the historical vLLM 0.30 request-only recipe. For the separately pinned
-response-capable build and paired-server investigation, use the
-[OpenAPI 3.2 assessment](dynamo-vllm-openapi32-assessment.md). The fixtures below
-remain useful regression inputs but do not qualify the newer build.
+This is the historical vLLM 0.30 request-only recipe. For new comparisons, use the
+[current upstream response recipe](dynamo-vllm-response-assessment.md). The
+[OpenAPI 3.2 assessment](dynamo-vllm-openapi32-assessment.md) retains a separate
+historical paired-server investigation. Neither qualifies the current source pin.
 
 Use the [OpenAPI request-contract comparison guide](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md) to compare
 Dynamo with vLLM serve. This recipe supplies one recorded vLLM configuration,

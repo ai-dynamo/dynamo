@@ -7,6 +7,7 @@ import hashlib
 import json
 import unittest
 
+import yaml
 from jsonschema import Draft202012Validator, ValidationError
 
 from scripts.protocol_compatibility.assessment.responses import (
@@ -18,6 +19,7 @@ from scripts.protocol_compatibility.assessment.responses import (
     response_document,
     validate_sse_event,
 )
+from scripts.protocol_compatibility.inputs import parse_document
 from scripts.protocol_compatibility.tests.assessment.test_openapi import document
 
 
@@ -78,6 +80,27 @@ def stream_selection(raw, mode, *, chunk=False):
 
 
 class ResponseProjectionTests(unittest.TestCase):
+    def test_yaml_integer_statuses_preserve_response_contracts(self):
+        """Unquoted YAML codes match quoted codes without changing the source."""
+        quoted = streaming_document()
+        for path in quoted["paths"].values():
+            path["post"]["responses"].update(
+                {
+                    "204": {"description": "No content"},
+                    "304": {"description": "Not modified"},
+                    "default": {"description": "Undeclared error body"},
+                    "x-note": "Ignored extension",
+                }
+            )
+        unquoted = copy.deepcopy(quoted)
+        for path in unquoted["paths"].values():
+            responses = path["post"]["responses"]
+            for status in ("200", "204", "304"):
+                responses[int(status)] = responses.pop(status)
+        raw = parse_document(yaml.safe_dump(unquoted).encode())
+        self.assertEqual(response_document(raw), response_document(quoted))
+        self.assertEqual(raw, unquoted)
+
     def test_qualified_envelope_reuses_decoder_and_keeps_original_input(self):
         """Equivalent 3.1 envelope and 3.2 itemSchema forms produce equal projections."""
         native = streaming_document()

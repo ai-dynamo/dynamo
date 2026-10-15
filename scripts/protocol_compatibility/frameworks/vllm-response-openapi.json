@@ -1,0 +1,38 @@
+{
+  "framework_name": "vllm",
+  "purpose": "Current source pin for request/response schema assessment; not a serving qualification",
+  "source": {
+    "repository": "https://github.com/vllm-project/vllm",
+    "revision": "7cd7982dfda0d29c68f73c54cd343b674b290a47",
+    "tree": "059a94c49a1819b3a742275a5a4c2ef121cfa8ce",
+    "selection": "Latest main observed on 2026-10-15; immutable snapshot, not an automatically updated release pin",
+    "response_spec_pull_request": "https://github.com/vllm-project/vllm/pull/60926",
+    "response_spec_merge_revision": "6d1daa9fe53f39a7b494cf6c8e433a73eec78a76"
+  },
+  "response_contract": {
+    "openapi": "3.1.0",
+    "evidence_kind": "source_inspection",
+    "registration": "vllm/entrypoints/serve/utils/api_utils.py",
+    "upstream_test": "tests/entrypoints/openai/test_openai_schema.py::test_openapi_exposes_completion_response_schemas",
+    "streams": [
+      {
+        "pointer": "#/paths/~1v1~1chat~1completions/post/responses/200/content/text~1event-stream/schema",
+        "interpretation": "event-schema"
+      },
+      {
+        "pointer": "#/paths/~1v1~1completions/post/responses/200/content/text~1event-stream/schema",
+        "interpretation": "event-schema"
+      }
+    ]
+  },
+  "qualification": {
+    "source_contains_response_spec": true,
+    "fresh_schema_capture": "not_run",
+    "upstream_runtime_tests": "not_run",
+    "paired_inference": "not_run",
+    "assessment": "not_run",
+    "environment": "No new wheel, kernel, dependency freeze or model configuration is qualified by this profile",
+    "note": "Matching precompiled wheel indexes were unavailable at selection time. Build the exact source or obtain its matching wheel before capturing. Record fresh bytes and SHA256; never reuse historical capture hashes or results."
+  },
+  "historical_profiles": ["vllm-openapi32.json", "vllm-0.30.0.json"]
+}

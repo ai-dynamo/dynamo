@@ -405,7 +405,8 @@ def response_document(
 ) -> tuple[dict, list[dict]]:
     """Copy scoped POST response contracts into comparator inputs and return gaps.
 
-    Keep status/media distinctions and reachable payload components. JSON bodies
+    Keep status/media distinctions and reachable payload components. Convert YAML
+    integer status keys to strings in the projection. JSON bodies
     retain their schemas; SSE itemSchema becomes a decoded-event comparison schema.
     `streams` must contain hash-qualified selections from prepare_response_source.
     Explicit event-schema selections reuse the native decoder; decoded-chunk
@@ -438,6 +439,7 @@ def response_document(
                 }
             )
         for status, response in originals.items():
+            status = str(status)
             if status.startswith("x-"):
                 continue
             location = pointer("paths", endpoint, "post", "responses", status)
