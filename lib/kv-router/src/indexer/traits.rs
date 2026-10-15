@@ -253,16 +253,15 @@ pub trait SyncIndexer: Send + Sync + 'static {
         ))
     }
 
-    /// Returns true when a maintenance task should be enqueued.
-    fn try_schedule_cleanup(&self) -> bool {
-        false
+    /// How often [`ThreadPoolIndexer`](super::ThreadPoolIndexer) should call
+    /// [`Self::run_background_maintenance`] on a dedicated thread off the event lanes, or
+    /// `None` for no maintenance thread.
+    fn background_maintenance_interval(&self) -> Option<std::time::Duration> {
+        None
     }
 
-    /// Rolls back a scheduled cleanup when enqueueing the task fails.
-    fn cancel_scheduled_cleanup(&self) {}
-
-    /// Executes a maintenance task on a worker thread.
-    fn run_cleanup_task(&self) {}
+    /// One tick of best-effort maintenance for shared-state backends.
+    fn run_background_maintenance(&self) {}
 
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
