@@ -2,10 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Model-aware admission and ordered loading for image edit references."""
 
+import os
+from dataclasses import dataclass
 from numbers import Integral
 from typing import TYPE_CHECKING
 
 from PIL import Image
+
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import MediaSizeError
 
 if TYPE_CHECKING:
     from dynamo.common.multimodal import ImageLoader
@@ -22,6 +27,40 @@ except ModuleNotFoundError as error:
     ):
         raise
     get_diffusion_model_metadata = None
+
+
+@dataclass(frozen=True)
+class ImageEditLimits:
+    images: int = 4
+    pixels: int = 16_000_000
+    total_pixels: int = 32_000_000
+
+    @classmethod
+    def from_env(cls) -> "ImageEditLimits":
+        values = {}
+        for field, name in (
+            ("images", "DYN_IMAGE_EDIT_MAX_IMAGES"),
+            ("pixels", "DYN_IMAGE_EDIT_MAX_PIXELS"),
+            ("total_pixels", "DYN_IMAGE_EDIT_MAX_TOTAL_PIXELS"),
+        ):
+            raw = os.environ.get(name)
+            if raw is None:
+                continue
+            if not raw.isascii() or not raw.isdecimal() or int(raw) < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            values[field] = int(raw)
+        return cls(**values)
+
+
+def image_edit_capability(
+    model_class_name: str | None, limits: ImageEditLimits
+) -> dict:
+    return {
+        "schema_version": 1,
+        "max_input_images": image_edit_input_limit(
+            model_class_name, operator_limit=limits.images
+        ),
+    }
 
 
 def image_edit_input_limit(
@@ -67,6 +106,7 @@ async def load_image_edit_references(
     image_loader: "ImageLoader",
     model_class_name: str | None,
     operator_limit: int = 4,
+    max_total_pixels: int = 32_000_000,
 ) -> list[Image.Image]:
     """Check count before I/O, then decode every reference in request order.
 
@@ -93,11 +133,47 @@ async def load_image_edit_references(
             raise ValueError(f"Failed to load {field}")
 
     images: list[Image.Image] = []
+    total_pixels = 0
     try:
         for index, reference in enumerate(references):
+            field = (
+                "input_reference"
+                if len(references) == 1
+                else f"input_reference[{index}]"
+            )
             try:
-                images.append(await image_loader.load_image(reference))
-            except (ValueError, Image.DecompressionBombError) as error:
+                image = await image_loader.load_image(
+                    reference, max_pixels=max_total_pixels - total_pixels
+                )
+                total_pixels += image.width * image.height
+                if total_pixels > max_total_pixels:
+                    del image
+                    raise HttpStatusError(
+                        413, "Image edit exceeds aggregate decoded pixels", "image edit"
+                    )
+                images.append(image)
+                del image
+            except MediaSizeError as error:
+                raise HttpStatusError(
+                    413,
+                    f"{field} exceeds the configured media byte limit",
+                    "image edit",
+                ) from error
+            except Image.DecompressionBombError as error:
+                raise HttpStatusError(
+                    413, f"{field} exceeds the decoded pixel limit", "image edit"
+                ) from error
+            except HttpStatusError as error:
+                # Preserve status without forwarding origin messages or signed URLs.
+                detail = (
+                    "exceeds a configured image resource limit"
+                    if error.status == 413
+                    else "could not be loaded"
+                )
+                raise HttpStatusError(
+                    error.status, f"{field} {detail}", "image edit"
+                ) from error
+            except ValueError as error:
                 # Preserve the legacy single-reference error and keep payloads
                 # and signed URLs out of multi-reference errors as well.
                 field = (

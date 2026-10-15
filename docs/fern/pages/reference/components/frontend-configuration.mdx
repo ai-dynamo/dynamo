@@ -823,22 +823,90 @@ The frontend exposes the following HTTP endpoints.
 
 ### Image API Compatibility
 
-The built-in image routes use JSON requests. Route availability does not imply that every
-backend or model supports reference-image conditioning.
+**Experimental.** The image edit route accepts uploaded PNG, JPEG, or WebP files
+and the existing JSON reference extension. Editing requires a backend and model
+that support reference-image conditioning.
 
 | Endpoint | Request contract | Support |
 |---|---|---|
-| `POST /v1/images/generations` | JSON with a text `prompt`; optional `input_reference` for a reference-capable backend/model | Supported |
-| `POST /v1/images/edits` | JSON with a `prompt` and required `input_reference` | Requires a reference-capable backend/model; see the version requirements in the image-edit example |
+| `POST /v1/images/generations` | JSON with a text `prompt`; optional `input_reference` | Reference-capable models can also accept edits through this JSON endpoint. |
+| `POST /v1/images/edits` | Multipart files or JSON references, with a required `prompt` | One or more ordered inputs, subject to the serving deployment's capabilities and limits. |
 | `POST /v1/images/variations` | Legacy image-variation API | Unsupported (HTTP 404) and [deprecated by OpenAI](https://developers.openai.com/api/reference/resources/images/methods/create_variation); use `/v1/images/edits` instead. |
 
-With vLLM-Omni, `input_reference` is a single HTTP(S) image URL or a base64 data URL such as
-`data:image/png;base64,...`. It is not an uploaded file or a local filesystem path. The
-frontend rejects multipart image edits with HTTP 415; direct uploads are tracked in
-[#15818](https://github.com/ai-dynamo/dynamo/issues/15818).
+For multipart requests, use `image` for a file, or repeat `image` or `image[]` for
+multiple files. Input order is multipart part order. Do not mix the two names.
+File contents determine the image format; filenames and supplied MIME types do
+not override validation. Files mixed with `input_reference`, `url`, or `url[]`,
+mask fields (`mask` or `mask_image`), duplicate scalar fields, and unknown form
+fields return HTTP 400.
 
-See [Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
-for a reference-image-plus-prompt example.
+The supported scalar fields are `prompt`, `model`, `n`, `quality`, `background`,
+`output_format`, `response_format`, `size`, `style`, `user`, and `moderation`.
+Backend validation still determines which controls are supported. `n` is the
+number of output images, independent of the number of inputs. Encode `nvext`
+as one form field containing a JSON object. No additional controls are inferred
+from arbitrary form fields.
+
+JSON `input_reference` accepts an HTTP(S) image URL, a base64 data URL such as
+`data:image/png;base64,...`, or an ordered array of those strings. Empty arrays
+and blank references return HTTP 400. Filesystem paths are unsupported. The
+worker applies its existing URL policy, redirect checks, timeouts, and media
+limits. Both endpoints apply the same image count and serialized-request limits.
+
+#### Image Edit Limits
+
+Set these environment variables before starting the frontend or worker. Values
+must be positive decimal integers; invalid values fail startup. Byte values are
+bytes, and pixel values are width multiplied by height, before RGB expansion.
+
+| Variable | Default | Enforcement |
+|---|---:|---|
+| `DYN_IMAGE_EDIT_MAX_IMAGES` | 4 | Frontend and Omni worker; reduced by model capability. |
+| `DYN_IMAGE_EDIT_MAX_FILE_BYTES` | 10485760 (10 MiB) | Frontend, per uploaded file. |
+| `DYN_IMAGE_EDIT_MAX_TOTAL_BYTES` | 20971520 (20 MiB) | Frontend, aggregate uploaded image bytes. |
+| `DYN_IMAGE_EDIT_MAX_TEXT_BYTES` | 65536 (64 KiB) | Frontend, aggregate multipart scalar bytes. |
+| `DYN_IMAGE_EDIT_MAX_PARTS` | 32 | Frontend, all multipart parts. |
+| `DYN_IMAGE_EDIT_MAX_PIXELS` | 16000000 | Frontend for uploads; Omni worker for every reference. |
+| `DYN_IMAGE_EDIT_MAX_TOTAL_PIXELS` | 32000000 | Frontend for uploads; Omni worker across all references. |
+| `DYN_IMAGE_EDIT_MAX_REQUEST_BYTES` | 29360128 (28 MiB) | Frontend, serialized normalized worker request, including base64 expansion and other fields. |
+
+`DYN_HTTP_BODY_LIMIT_MB` independently caps the complete HTTP body, including
+multipart framing, even for chunked uploads. `DYN_MM_MAX_DATA_URL_MB` and
+`DYN_MM_MAX_FILE_SIZE_MB` remain worker limits. Configure frontend and worker
+limits together: the lower applicable limit wins. A 10 MiB upload becomes about
+13.34 MiB as a data URL, below the worker's default 16 MiB data URL cap.
+
+The default request budget leaves room below the default 32 MiB TCP frame cap.
+If increasing it, also account for the request-plane envelope and configure
+`DYN_TCP_MAX_MESSAGE_SIZE` on both sides. The request plane applies its own
+validation; a lower transport cap can reject a request that fits the image
+limits. Per-request limits do not bound process memory under arbitrary
+concurrency or guarantee that a model fits GPU memory.
+
+Oversized bytes or decoded pixels return HTTP 413. Malformed input and unsupported
+combinations return 400; unsupported media types return 415. A failing reference
+stops the edit before generation. Cancelling a request stops pending uploads and
+private URL fetches; a bounded decode already executing in a Python thread can
+finish, but no subsequent reference is loaded.
+
+#### Capabilities and Rolling Upgrades
+
+The frontend uses the conservative capability of the selected serving worker
+set. A legacy worker or unknown capability limits that set to one input. An
+explicit zero capability rejects edits. The worker rechecks the actual loaded
+pipeline and operator limit before fetching or decoding images. A custom served
+model name cannot increase that limit. A membership change between selection
+and dispatch can return HTTP 503; retry after serving capacity stabilizes.
+
+Single references use the legacy string wire format; multiple references use
+an array under the same `input_reference` field. Older workers reject that array
+instead of silently using only its first image. Upgrade every member of a
+worker set before using multi-image edits. Custom in-process engines must opt
+into the versioned `user_data.image_edits` capability to accept multiple inputs.
+
+See [Omni Image Edit Capabilities](../backends/vllm-omni-configuration.mdx#image-edit-capabilities)
+for model qualification and [Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
+for upload and JSON examples.
 
 ### Anthropic (Experimental)
 

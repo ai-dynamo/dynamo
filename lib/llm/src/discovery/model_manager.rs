@@ -1485,6 +1485,19 @@ impl ModelManager {
             .get_images_engine()
     }
 
+    pub(crate) fn select_image_edit_engine(
+        &self,
+        model: &str,
+        count: usize,
+    ) -> Result<Option<super::image_edits::ImageEngineSelection>, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .select_image_edit_engine(count)
+    }
+
     pub fn get_videos_engine(
         &self,
         model: &str,

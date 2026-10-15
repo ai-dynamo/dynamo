@@ -4,8 +4,13 @@
 """Unit tests for dynamo.common.protocols.image_protocol module."""
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
-from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.image_protocol import (
+    ImageData,
+    NvCreateImageRequest,
+    NvImagesResponse,
+)
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 
 pytestmark = [
@@ -63,3 +68,26 @@ def test_image_request_parsing_preserves_output_format_and_unsupported_controls(
     assert request.output_format == "jpeg"
     assert request.quality == "high"
     assert request.background == "transparent"
+
+
+@pytest.mark.parametrize("reference", ["first", ["first"], ["first", "second"]])
+def test_image_reference_normalization_and_n2_serialization(reference):
+    class LegacyImageRequest(BaseModel):
+        input_reference: str | None = None
+
+    request = NvCreateImageRequest(prompt="edit", input_reference=reference)
+    expected = [reference] if isinstance(reference, str) else reference
+    assert request.input_reference == expected
+    wire = request.model_dump(exclude_none=True)
+    assert wire["input_reference"] == (expected[0] if len(expected) == 1 else expected)
+    if len(expected) == 1:
+        assert LegacyImageRequest.model_validate(wire).input_reference == expected[0]
+    else:
+        with pytest.raises(ValidationError):
+            LegacyImageRequest.model_validate(wire)
+
+
+@pytest.mark.parametrize("reference", [[], " ", ["first", ""], ["first", 2]])
+def test_invalid_image_reference_shape_fails_at_boundary(reference):
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="edit", input_reference=reference)
