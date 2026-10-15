@@ -122,7 +122,18 @@ class KubernetesAPI:
             ),
             "DynamoGraphDeployment list",
         )
-        return result.get("items", [])
+        items = result.get("items")
+        if not isinstance(items, list):
+            raise TypeError(
+                "Kubernetes API returned a malformed DGD list: items is not a list"
+            )
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise TypeError(
+                    "Kubernetes API returned a malformed DGD list: "
+                    f"items[{index}] is not an object"
+                )
+        return items
 
     def list_worker_metadata(self) -> list[dict]:
         """List all DynamoWorkerMetadata resources in the current namespace."""
@@ -863,6 +874,16 @@ class KubernetesAPI:
             self.core_api.list_namespaced_pod(
                 namespace=self.current_namespace,
                 label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
+            ).items
+            or []
+        )
+
+    def list_graph_pods(self) -> list:
+        """List Pods carrying the stable DGD label in this namespace."""
+        return (
+            self.core_api.list_namespaced_pod(
+                namespace=self.current_namespace,
+                label_selector=DYNAMO_DGD_NAME_LABEL,
             ).items
             or []
         )

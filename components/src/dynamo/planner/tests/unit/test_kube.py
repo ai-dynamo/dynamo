@@ -142,6 +142,23 @@ def k8s_api_with_namespace(mock_custom_api, mock_config):
     return KubernetesAPI(k8s_namespace="test-namespace")
 
 
+@pytest.mark.parametrize("response", [{}, {"items": None}, {"items": {}}])
+def test_list_graph_deployments_rejects_malformed_items(
+    k8s_api, mock_custom_api, response
+):
+    mock_custom_api.list_namespaced_custom_object.return_value = response
+
+    with pytest.raises(TypeError, match="items is not a list"):
+        k8s_api.list_graph_deployments()
+
+
+def test_list_graph_deployments_rejects_non_object_item(k8s_api, mock_custom_api):
+    mock_custom_api.list_namespaced_custom_object.return_value = {"items": [None]}
+
+    with pytest.raises(TypeError, match=r"items\[0\] is not an object"):
+        k8s_api.list_graph_deployments()
+
+
 def _dgd_json_patch_bodies(mock_custom_api):
     calls = mock_custom_api.patch_namespaced_custom_object.call_args_list
     for api_call in calls:
@@ -1856,6 +1873,19 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
         "prefill": [prefill],
         "decode": [decode],
     }
+
+
+def test_list_graph_pods_uses_label_existence_selector(k8s_api, mock_core_api):
+    pod = _make_pod("prefill-0", component="prefill")
+    result = MagicMock()
+    result.items = [pod]
+    mock_core_api.list_namespaced_pod.return_value = result
+
+    assert k8s_api.list_graph_pods() == [pod]
+    mock_core_api.list_namespaced_pod.assert_called_once_with(
+        namespace="default",
+        label_selector="nvidia.com/dynamo-graph-deployment-name",
+    )
 
 
 def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(

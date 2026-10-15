@@ -291,29 +291,38 @@ class Orchestrator:
                     )[0]
                 raise
 
-        async def execute() -> ScaleOutcome:
+        async def execute_transaction() -> tuple[
+            Optional[ScaleOutcome], Callable[[], dict[str, int]] | None
+        ]:
             terminal = await run_async_to_completion(
                 transaction(), complete_on_cancel=complete_after_cancel
             )
             if terminal is not None:
-                return terminal
+                return terminal, None
 
-            # Preserve the response contract: current_replicas is an observed
-            # post-transaction snapshot, not the requested desired state.
-            current_replicas = await run_sync_in_thread(
-                self.capacity_manager.current_replicas, participant_id
-            )
-            logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
-            return ScaleOutcome(
-                status=ScaleStatus.SUCCESS,
-                message=f"Scaled {deployment_name} successfully",
-                current_replicas=current_replicas,
-            )
+            # Freeze backend identity under the transaction lock, but do not
+            # hold the global lock across the potentially unbounded read GET.
+            return None, self.capacity_manager.capture_current_replicas(participant_id)
 
         if self._scale_lock is not None:
             async with self._scale_lock:
-                return await execute()
-        return await execute()
+                terminal, readback = await execute_transaction()
+        else:
+            terminal, readback = await execute_transaction()
+
+        if terminal is not None:
+            return terminal
+        assert readback is not None
+
+        # Preserve the response contract: current_replicas is an observed
+        # post-transaction snapshot, not the requested desired state.
+        current_replicas = await run_sync_in_thread(readback)
+        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
+        return ScaleOutcome(
+            status=ScaleStatus.SUCCESS,
+            message=f"Scaled {deployment_name} successfully",
+            current_replicas=current_replicas,
+        )
 
     async def _observe_decide_apply(
         self,

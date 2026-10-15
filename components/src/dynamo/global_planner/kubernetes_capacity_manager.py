@@ -17,8 +17,9 @@ a generic ``worker`` — the role hinted by its Planner's
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from functools import partial
 from typing import Optional, TypeVar
 
 from kubernetes import client
@@ -31,7 +32,10 @@ from dynamo.global_planner.capacity_manager import (
 )
 from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
-from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.clients.kubernetes_api import (
+    DYNAMO_DGD_NAME_LABEL,
+    KubernetesAPI,
+)
 from dynamo.planner.connectors.kubernetes import ReplicaUpdateRetryState
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.planner.monitoring.dgd_services import (
@@ -65,8 +69,8 @@ class KubernetesCapacityManager(CapacityManager):
         self._observe_all_deployments = False
         self._configured_deployment_names: set[str] | None = set()
         self._inventory_api: KubernetesAPI | None = None
-        # Configured DGDs that returned 404 after their labeled Pods drained.
-        # Their exact GET remains the recreation probe; their Pod LIST does not.
+        # DGDs whose exact GET returned 404. Explicit-mode and cross-namespace
+        # tombstones remain recreation probes and are checked for Pods each pass.
         self._missing_participants: set[str] = set()
         self._replica_retry_states: ContextVar[
             dict[str, ReplicaUpdateRetryState] | None
@@ -206,6 +210,8 @@ class KubernetesCapacityManager(CapacityManager):
         retain: bool = False,
     ) -> RuntimeError | None:
         """Mark or evict a missing DGD after its labeled Pods have drained."""
+        if retain and self.connectors.get(participant_id) is connector:
+            self._missing_participants.add(participant_id)
         try:
             pods = connector.kube_api.list_pods_for_graph(connector.parent_dgd_name)
         except Exception as error:
@@ -216,19 +222,85 @@ class KubernetesCapacityManager(CapacityManager):
         active_pods = [
             pod
             for pod in pods
-            if getattr(getattr(pod, "status", None), "phase", None)
-            not in ("Succeeded", "Failed")
+            if pod.status is None or pod.status.phase not in ("Succeeded", "Failed")
         ]
         if active_pods:
             return RuntimeError(
                 f"DGD for {participant_id} is missing while {len(active_pods)} "
                 "nonterminal labeled Pods remain"
             )
-        if retain:
-            self._missing_participants.add(participant_id)
-        else:
+        if not retain:
             self._discard_connector(participant_id, connector)
         return None
+
+    @staticmethod
+    def _active_graph_pod_counts(kube_api: KubernetesAPI) -> dict[str, int]:
+        """Count nonterminal Pods by their stable DGD label."""
+        counts: dict[str, int] = {}
+        for index, pod in enumerate(kube_api.list_graph_pods()):
+            phase = pod.status.phase if pod.status is not None else None
+            if phase in ("Succeeded", "Failed"):
+                continue
+            labels = pod.metadata.labels
+            if not isinstance(labels, Mapping):
+                raise ValueError(f"labeled Pod at index {index} has malformed labels")
+            deployment_name = labels.get(DYNAMO_DGD_NAME_LABEL)
+            if not isinstance(deployment_name, str) or not deployment_name:
+                raise ValueError(
+                    f"labeled Pod at index {index} has no usable DGD label"
+                )
+            counts[deployment_name] = counts.get(deployment_name, 0) + 1
+        return counts
+
+    def _reconcile_missing_deployments(
+        self,
+        all_pools: PoolSnapshot,
+        missing: list[tuple[str, KubernetesConnector, bool]],
+        require_complete: bool,
+        pod_counts_by_namespace: dict[str, dict[str, int]] | None = None,
+    ) -> None:
+        """Reconcile missing DGDs with one label-filtered Pod LIST per namespace."""
+        cached_counts = dict(pod_counts_by_namespace or {})
+        by_namespace: dict[str, list[tuple[str, KubernetesConnector, bool]]] = {}
+        for key, connector, retain in missing:
+            if self.connectors.get(key) is connector:
+                self._missing_participants.add(key)
+            namespace = connector.kube_api.current_namespace
+            by_namespace.setdefault(namespace, []).append((key, connector, retain))
+
+        for namespace, entries in by_namespace.items():
+            try:
+                counts = cached_counts.get(namespace)
+                if counts is None:
+                    counts = self._active_graph_pod_counts(entries[0][1].kube_api)
+                    cached_counts[namespace] = counts
+            except Exception as error:
+                drain_error = RuntimeError(
+                    f"Pod drain in namespace {namespace} could not be verified: {error}"
+                )
+                for key, _, _ in entries:
+                    self._record_observation_failure(
+                        all_pools, key, drain_error, require_complete
+                    )
+                continue
+
+            for key, connector, retain in entries:
+                active_pods = counts.get(connector.parent_dgd_name, 0)
+                if active_pods:
+                    self._record_observation_failure(
+                        all_pools,
+                        key,
+                        RuntimeError(
+                            f"DGD for {key} is missing while {active_pods} "
+                            "nonterminal labeled Pods remain"
+                        ),
+                        require_complete,
+                    )
+                elif retain:
+                    if self.connectors.get(key) is connector:
+                        self._missing_participants.add(key)
+                else:
+                    self._discard_connector(key, connector)
 
     def ensure_participant(
         self,
@@ -279,45 +351,43 @@ class KubernetesCapacityManager(CapacityManager):
         all_pools: PoolSnapshot = {}
         connectors_snapshot = list(self.connectors.items())
         if not self._observe_all_deployments:
+            missing: list[tuple[str, KubernetesConnector, bool]] = []
             for key, connector in connectors_snapshot:
                 try:
                     all_pools[key] = self._read_pools(
                         connector, self._component_roles.get(key)
                     )
-                    self._missing_participants.discard(key)
+                    if self.connectors.get(key) is connector:
+                        self._missing_participants.discard(key)
                 except DynamoGraphDeploymentNotFoundError:
-                    if key in self._missing_participants:
-                        continue
-                    configured_key = f"{self.namespace}/{connector.parent_dgd_name}"
-                    retain = key == configured_key and connector.parent_dgd_name in (
-                        self._configured_deployment_names or ()
-                    )
-                    drain_error = self._deployment_drain_error(
-                        key, connector, retain=retain
-                    )
-                    if drain_error is not None:
-                        self._record_observation_failure(
-                            all_pools, key, drain_error, require_complete
-                        )
+                    # Keep every known identity as a recreation probe. A single
+                    # namespace-scoped Pod LIST checks all missing DGDs each pass.
+                    missing.append((key, connector, True))
                 except Exception as error:
                     self._record_observation_failure(
                         all_pools, key, error, require_complete
                     )
+            self._reconcile_missing_deployments(all_pools, missing, require_complete)
             return all_pools
 
         # Implicit mode manages every DGD in the planner namespace, so one
         # namespace LIST is both the intended scope and cheaper than per-DGD GETs.
         try:
-            deployments = self._get_inventory_api().list_graph_deployments()
+            inventory_api = self._get_inventory_api()
+            deployments = inventory_api.list_graph_deployments()
             deployments_by_key: dict[str, dict] = {}
-            for deployment in deployments:
-                name = (deployment.get("metadata", {}) or {}).get("name")
+            for index, deployment in enumerate(deployments):
+                metadata = deployment.get("metadata")
+                if not isinstance(metadata, Mapping):
+                    raise ValueError(f"DGD list item {index} has malformed metadata")
+                name = metadata.get("name")
                 if not isinstance(name, str) or not name:
-                    continue
+                    raise ValueError(f"DGD list item {index} has no usable name")
                 key = f"{self.namespace}/{name}"
                 if key in deployments_by_key:
                     raise ValueError(f"duplicate DGD {name!r} in list response")
                 deployments_by_key[key] = deployment
+            local_pod_counts = self._active_graph_pod_counts(inventory_api)
         except Exception as error:
             if require_complete:
                 raise RuntimeError(
@@ -328,6 +398,22 @@ class KubernetesCapacityManager(CapacityManager):
             )
             return {key: {} for key, _ in connectors_snapshot}
 
+        deployment_names = {key.split("/", 1)[1] for key in deployments_by_key}
+        for name, active_pods in local_pod_counts.items():
+            if name not in deployment_names:
+                key = f"{self.namespace}/{name}"
+                if key in self.connectors:
+                    self._missing_participants.add(key)
+                self._record_observation_failure(
+                    all_pools,
+                    key,
+                    RuntimeError(
+                        f"DGD for {key} is missing while "
+                        f"{active_pods} nonterminal labeled Pods remain"
+                    ),
+                    require_complete,
+                )
+
         for key in deployments_by_key:
             if key not in self.connectors:
                 _, name = key.split("/", 1)
@@ -335,31 +421,35 @@ class KubernetesCapacityManager(CapacityManager):
                     "discovered", self.namespace, name
                 )
 
+        local_missing: list[tuple[str, KubernetesConnector, bool]] = []
+        remote_missing: list[tuple[str, KubernetesConnector, bool]] = []
         for key, connector in connectors_snapshot:
             if key in deployments_by_key:
                 continue
             connector_namespace = key.partition("/")[0]
             if connector_namespace == self.namespace:
-                drain_error = self._deployment_drain_error(key, connector)
-                if drain_error is not None:
-                    self._record_observation_failure(
-                        all_pools, key, drain_error, require_complete
-                    )
+                local_missing.append((key, connector, False))
                 continue
             try:
                 all_pools[key] = self._read_pools(
                     connector, self._component_roles.get(key)
                 )
+                if self.connectors.get(key) is connector:
+                    self._missing_participants.discard(key)
             except DynamoGraphDeploymentNotFoundError:
-                drain_error = self._deployment_drain_error(key, connector)
-                if drain_error is not None:
-                    self._record_observation_failure(
-                        all_pools, key, drain_error, require_complete
-                    )
+                remote_missing.append((key, connector, True))
             except Exception as error:
                 self._record_observation_failure(
                     all_pools, key, error, require_complete
                 )
+
+        self._reconcile_missing_deployments(
+            all_pools,
+            local_missing,
+            require_complete,
+            {self.namespace: local_pod_counts},
+        )
+        self._reconcile_missing_deployments(all_pools, remote_missing, require_complete)
 
         for key, deployment in deployments_by_key.items():
             connector = self.connectors[key]
@@ -369,6 +459,8 @@ class KubernetesCapacityManager(CapacityManager):
                     deployment,
                     self._component_roles.get(key),
                 )
+                if self.connectors.get(key) is connector:
+                    self._missing_participants.discard(key)
             except Exception as error:
                 self._record_observation_failure(
                     all_pools, key, error, require_complete
@@ -555,7 +647,19 @@ class KubernetesCapacityManager(CapacityManager):
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         connector = self.connectors[participant_id]
-        role_hints = self._component_roles.get(participant_id, {})
+        role_hints = dict(self._component_roles.get(participant_id, {}))
+        return self._current_replicas(connector, role_hints)
+
+    def capture_current_replicas(
+        self, participant_id: str
+    ) -> Callable[[], dict[str, int]]:
+        connector = self.connectors[participant_id]
+        role_hints = dict(self._component_roles.get(participant_id, {}))
+        return partial(self._current_replicas, connector, role_hints)
+
+    def _current_replicas(
+        self, connector: KubernetesConnector, role_hints: dict[str, str]
+    ) -> dict[str, int]:
         current_replicas: dict[str, int] = {}
         components_by_pool: dict[str, str] = {}
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)

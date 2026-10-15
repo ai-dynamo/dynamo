@@ -59,3 +59,12 @@ def test_kubernetes_requirements_preserve_google_auth_extra() -> None:
         requirement.specifier == SpecifierSet("==37.0.1")
         for requirement in requirements[1:3]
     )
+
+
+def test_nemotron_recipe_uses_selected_wheel_kubernetes_requirement() -> None:
+    dockerfile = (ROOT / "recipes/nemotron-3-nano-omni/Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from importlib.metadata import requires" in dockerfile
+    assert '"${KUBERNETES_REQUIREMENT}"' in dockerfile

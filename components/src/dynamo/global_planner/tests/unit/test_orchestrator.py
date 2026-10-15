@@ -826,7 +826,7 @@ async def test_cancelled_observation_joins_worker_before_releasing_scale_lock():
 
 
 @pytest.mark.asyncio
-async def test_post_write_readback_holds_scale_lock():
+async def test_post_write_readback_releases_scale_lock():
     class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
         def __init__(self):
             super().__init__()
@@ -854,9 +854,11 @@ async def test_post_write_readback_holds_scale_lock():
 
     second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
     try:
-        await asyncio.sleep(0)
-        assert cm.scale_calls == 1
-        assert not second.done()
+        for _ in range(100):
+            if cm.scale_calls == 2:
+                break
+            await asyncio.sleep(0)
+        assert cm.scale_calls == 2
     finally:
         cm.release_readback.set()
 

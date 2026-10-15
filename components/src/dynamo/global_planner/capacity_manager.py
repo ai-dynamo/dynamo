@@ -8,7 +8,8 @@
 current pool state and **scale** replicas. It defines a neutral,
 infrastructure-agnostic surface (``observe`` / ``scale`` / ``wait_for_ready`` /
 ``discover`` / ``ensure_participant`` / ``participant_exists`` /
-``remember_roles`` / ``current_replicas``) keyed by opaque ``participant_id``;
+``remember_roles`` / ``current_replicas`` / ``capture_current_replicas``) keyed
+by opaque ``participant_id``;
 the orchestrator never sees Kubernetes concepts.
 
 The concrete Kubernetes backend is
@@ -121,3 +122,14 @@ class CapacityManager:
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         """Read back current replica counts as ``{sub_type: replicas}``."""
         raise NotImplementedError
+
+    def capture_current_replicas(
+        self, participant_id: str
+    ) -> Callable[[], dict[str, int]]:
+        """Capture a post-write readback while transaction state is serialized.
+
+        Backends with mutable participant registries should override this method
+        and freeze the participant identity needed by the returned callable.
+        """
+
+        return lambda: self.current_replicas(participant_id)
