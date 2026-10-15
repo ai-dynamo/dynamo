@@ -155,7 +155,9 @@ def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
 
 @pytest.fixture
 def clean_coredump_env(monkeypatch):
-    monkeypatch.delenv(CUDA_COREDUMP_WAIT_ENV, raising=False)
+    # Register the key so teardown removes the value the helper writes.
+    monkeypatch.setenv(CUDA_COREDUMP_WAIT_ENV, "")
+    monkeypatch.delenv(CUDA_COREDUMP_WAIT_ENV)
     monkeypatch.delenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", raising=False)
     return monkeypatch
 
