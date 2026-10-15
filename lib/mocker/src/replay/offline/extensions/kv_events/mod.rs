@@ -274,7 +274,7 @@ mod tests {
                     tokens_hash: 7,
                     token_ids: None,
                 }],
-                session_id: (tier == KvEventTier::Device).then(|| "session-1".to_owned()),
+                session_id: Some("session-1".to_owned()),
             }),
         }
     }
@@ -331,7 +331,10 @@ mod tests {
                     _ => None,
                 };
                 let batch = RouterEventObservation::observe_engine_events(stage, 3, 0, vec![event]);
-                assert_eq!(batch.0[0].session_id, expected_session);
+                assert_eq!(
+                    batch.0[0].session_id, expected_session,
+                    "{transition}: preserve session attribution"
+                );
                 assert_eq!(batch.0.len(), 1, "{transition}: retain the router event");
                 assert_eq!(
                     batch.0[0].storage_tier, expected_tier,
