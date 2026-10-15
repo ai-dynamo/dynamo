@@ -460,7 +460,7 @@ async fn refusal_fragments_reach_responses_content_and_events() {
                 .await;
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let body: Value = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_responses_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     let refusal_events: Vec<_> = events
