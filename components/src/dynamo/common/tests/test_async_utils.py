@@ -67,6 +67,29 @@ async def test_run_async_to_completion_joins_task_before_propagating_cancellatio
 
 
 @pytest.mark.asyncio
+async def test_run_async_to_completion_cancels_work_before_admission():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def operation() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    task = asyncio.create_task(
+        run_async_to_completion(operation(), complete_on_cancel=lambda: False)
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_run_sync_in_thread_reports_failure_after_cancellation():
     started = Event()
     release = Event()

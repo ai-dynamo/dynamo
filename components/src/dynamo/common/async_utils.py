@@ -49,13 +49,24 @@ async def run_sync_in_thread(
         raise
 
 
-async def run_async_to_completion(awaitable: Awaitable[T]) -> T:
-    """Finish an admitted async operation before propagating cancellation."""
+async def run_async_to_completion(
+    awaitable: Awaitable[T],
+    *,
+    complete_on_cancel: Callable[[], bool] | None = None,
+) -> T:
+    """Conditionally finish async work before propagating cancellation.
+
+    By default the operation is always joined. When ``complete_on_cancel`` is
+    provided, a false result cancels the operation instead; callers can use this
+    to cross an admission boundary without making pre-admission work sticky.
+    """
 
     task = asyncio.ensure_future(awaitable)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
+        if complete_on_cancel is not None and not complete_on_cancel():
+            task.cancel()
         while not task.done():
             try:
                 await asyncio.wait({task})

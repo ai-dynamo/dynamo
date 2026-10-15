@@ -20,6 +20,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Optional, TypeVar
 
+from kubernetes.aio.utils.retry import retry_on_conflict
+
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -177,19 +179,59 @@ class KubernetesCapacityManager(CapacityManager):
         insertion races iteration.
         """
         all_pools: PoolSnapshot = {}
+        connectors_by_namespace: dict[str, list[tuple[str, KubernetesConnector]]] = {}
         for key, connector in list(self.connectors.items()):
+            namespace = connector.kube_api.current_namespace
+            connectors_by_namespace.setdefault(namespace, []).append((key, connector))
+
+        # One namespace-scoped LIST replaces one serial GET per participant.
+        # Conflict retries still rebuild a fresh complete snapshot, but no
+        # longer multiply request count by the number of managed DGDs.
+        for connectors in connectors_by_namespace.values():
             try:
-                all_pools[key] = self._read_pools(
-                    connector, self._component_roles.get(key)
-                )
-            except Exception as e:
-                if require_complete:
-                    raise RuntimeError(
-                        f"Failed to read deployment for {key}: {e}"
-                    ) from e
-                logger.warning(f"Failed to read deployment for {key}: {e}")
-                all_pools[key] = {}
+                deployments = connectors[0][1].kube_api.list_graph_deployments()
+                deployments_by_name: dict[str, dict] = {}
+                for deployment in deployments:
+                    name = (deployment.get("metadata", {}) or {}).get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    if name in deployments_by_name:
+                        raise ValueError(f"duplicate DGD {name!r} in list response")
+                    deployments_by_name[name] = deployment
+            except Exception as error:
+                for key, _ in connectors:
+                    self._record_observation_failure(
+                        all_pools, key, error, require_complete
+                    )
+                continue
+
+            for key, connector in connectors:
+                try:
+                    deployment = deployments_by_name[connector.parent_dgd_name]
+                    all_pools[key] = self._pools_from_deployment(
+                        connector,
+                        deployment,
+                        self._component_roles.get(key),
+                    )
+                except Exception as error:
+                    self._record_observation_failure(
+                        all_pools, key, error, require_complete
+                    )
         return all_pools
+
+    @staticmethod
+    def _record_observation_failure(
+        all_pools: PoolSnapshot,
+        participant_id: str,
+        error: Exception,
+        require_complete: bool,
+    ) -> None:
+        if require_complete:
+            raise RuntimeError(
+                f"Failed to read deployment for {participant_id}: {error}"
+            ) from error
+        logger.warning(f"Failed to read deployment for {participant_id}: {error}")
+        all_pools[participant_id] = {}
 
     def _component_role(
         self,
@@ -245,6 +287,15 @@ class KubernetesCapacityManager(CapacityManager):
         component-name hint replaces that key with its prefill/decode role.
         """
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+        return self._pools_from_deployment(connector, deployment, role_hints)
+
+    def _pools_from_deployment(
+        self,
+        connector: KubernetesConnector,
+        deployment: dict,
+        role_hints: Optional[dict[str, str]] = None,
+    ) -> dict[str, PoolSpec]:
+        """Build one participant's pools from a listed DGD object."""
         pools: dict[str, PoolSpec] = {}
         components_by_pool: dict[str, str] = {}
         role_hints = role_hints or {}
@@ -315,8 +366,12 @@ class KubernetesCapacityManager(CapacityManager):
         if isinstance(result, ReplicaUpdateResult):
             return result
 
-        # Keep test doubles and older out-of-tree connectors conservative: a
-        # truthy legacy result may have written and therefore blocks replay.
+        # A legacy clean return was the success contract and may have written.
+        if result is None:
+            return ReplicaUpdateResult(accepted=True, applied=True)
+
+        # Keep explicit legacy booleans conservative: a true result may have
+        # written and therefore blocks replay.
         accepted = bool(result)
         return ReplicaUpdateResult(accepted=accepted, applied=accepted)
 
@@ -327,8 +382,6 @@ class KubernetesCapacityManager(CapacityManager):
 
     async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Re-run the complete budget transaction after a Kubernetes conflict."""
-        from kubernetes.aio.utils.retry import retry_on_conflict
-
         return await retry_on_conflict(operation)
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:

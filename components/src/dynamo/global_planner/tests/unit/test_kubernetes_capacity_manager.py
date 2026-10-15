@@ -6,6 +6,7 @@
 Pool state is read from the v1beta1 DGD component model (``spec.components[]``).
 """
 
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -90,7 +91,24 @@ def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
     connector.set_component_replicas = AsyncMock(return_value=True)
     connector.wait_for_deployment_ready = AsyncMock()
     connector.kube_api = MagicMock()
+    connector.kube_api.current_namespace = key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
+    connector._test_deployment = spec
+
+    def list_deployments():
+        deployments = []
+        for participant, candidate in cm.connectors.items():
+            if participant.split("/", 1)[0] != connector.kube_api.current_namespace:
+                continue
+            candidate_spec = getattr(candidate, "_test_deployment", None)
+            if not isinstance(candidate_spec, dict):
+                continue
+            item = deepcopy(candidate_spec)
+            item.setdefault("metadata", {})["name"] = candidate.parent_dgd_name
+            deployments.append(item)
+        return deployments
+
+    connector.kube_api.list_graph_deployments = MagicMock(side_effect=list_deployments)
     cm.connectors[key] = connector
     return connector
 
@@ -237,6 +255,27 @@ async def test_scale_calls_connector():
     assert result.accepted
     assert result.applied
     connector.set_component_replicas.assert_awaited_once_with(targets, blocking=True)
+
+
+@pytest.mark.asyncio
+async def test_scale_treats_legacy_none_result_as_applied():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    connector.set_component_replicas.return_value = None
+
+    result = await cm.scale(
+        "default/my-dgd",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                desired_replicas=3,
+            )
+        ],
+        blocking=True,
+    )
+
+    assert result.accepted
+    assert result.applied
 
 
 @pytest.mark.asyncio
@@ -404,13 +443,14 @@ def test_observe_tolerates_read_failure():
     bad = MagicMock()
     bad.parent_dgd_name = "bad"
     bad.kube_api = MagicMock()
-    bad.kube_api.get_graph_deployment = MagicMock(side_effect=RuntimeError("boom"))
+    bad.kube_api.current_namespace = "default"
     cm.connectors["default/bad"] = bad
 
     snapshot = cm.observe()
     assert snapshot["default/good"]["prefill"].current_replicas == 1
     assert snapshot["default/bad"] == {}  # tolerated, empty
-    assert good.kube_api.get_graph_deployment.called
+    good.kube_api.list_graph_deployments.assert_called_once_with()
+    good.kube_api.get_graph_deployment.assert_not_called()
 
 
 def test_observe_require_complete_raises_on_read_failure():
@@ -418,10 +458,30 @@ def test_observe_require_complete_raises_on_read_failure():
     bad = MagicMock()
     bad.parent_dgd_name = "bad"
     bad.kube_api = MagicMock()
-    bad.kube_api.get_graph_deployment = MagicMock(side_effect=RuntimeError("boom"))
+    bad.kube_api.current_namespace = "default"
+    bad.kube_api.list_graph_deployments = MagicMock(side_effect=RuntimeError("boom"))
     cm.connectors["default/bad"] = bad
     with pytest.raises(RuntimeError):
         cm.observe(require_complete=True)
+
+
+def test_observe_lists_once_per_namespace():
+    cm = KubernetesCapacityManager("default")
+    first = _install_connector(
+        cm, "default/first", _dgd_spec(1, 1), parent_dgd_name="first"
+    )
+    second = _install_connector(
+        cm, "default/second", _dgd_spec(2, 2), parent_dgd_name="second"
+    )
+
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/first"]["prefill"].current_replicas == 1
+    assert snapshot["default/second"]["prefill"].current_replicas == 2
+    first.kube_api.list_graph_deployments.assert_called_once_with()
+    second.kube_api.list_graph_deployments.assert_not_called()
+    first.kube_api.get_graph_deployment.assert_not_called()
+    second.kube_api.get_graph_deployment.assert_not_called()
 
 
 def test_current_replicas():

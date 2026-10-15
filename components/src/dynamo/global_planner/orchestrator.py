@@ -262,15 +262,44 @@ class Orchestrator:
         ERROR).
         """
 
-        async def operation() -> ScaleOutcome:
+        admitted = asyncio.Event()
+
+        async def operation() -> Optional[ScaleOutcome]:
             return await self._observe_decide_apply(
-                participant_id, targets, blocking, deployment_name, caller_name
+                participant_id,
+                targets,
+                blocking,
+                deployment_name,
+                caller_name,
+                admitted,
             )
+
+        async def transaction() -> Optional[ScaleOutcome]:
+            return await self.capacity_manager.run_with_conflict_retry(operation)
 
         if self._scale_lock is not None:
             async with self._scale_lock:
-                return await self.capacity_manager.run_with_conflict_retry(operation)
-        return await self.capacity_manager.run_with_conflict_retry(operation)
+                terminal = await run_async_to_completion(
+                    transaction(), complete_on_cancel=admitted.is_set
+                )
+        else:
+            terminal = await run_async_to_completion(
+                transaction(), complete_on_cancel=admitted.is_set
+            )
+        if terminal is not None:
+            return terminal
+
+        # Preserve the response contract: current_replicas is an observed
+        # post-transaction snapshot, not the requested desired state.
+        current_replicas = await asyncio.to_thread(
+            self.capacity_manager.current_replicas, participant_id
+        )
+        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
+        return ScaleOutcome(
+            status=ScaleStatus.SUCCESS,
+            message=f"Scaled {deployment_name} successfully",
+            current_replicas=current_replicas,
+        )
 
     async def _observe_decide_apply(
         self,
@@ -279,7 +308,8 @@ class Orchestrator:
         blocking: bool,
         deployment_name: str,
         caller_name: str,
-    ) -> ScaleOutcome:
+        admitted: asyncio.Event,
+    ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
 
         Returns the result from the serialized observation and accepted absolute
@@ -318,6 +348,7 @@ class Orchestrator:
                 message=result.reject_message or "",
                 current_replicas={},
             )
+        admitted.set()
 
         # TODO(global-planner): Make an approved plan equivalent to execution:
         # apply same-DGD targets atomically and confirm downscale capacity is
@@ -356,31 +387,12 @@ class Orchestrator:
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
 
-        apply = self._apply_approved_targets(
+        terminal, _ = await self._apply_approved_targets(
             grouped_targets, ordered_participants, blocking=blocking
         )
-        if blocking:
-            terminal, completed = await apply
-        else:
-            terminal, completed = await run_async_to_completion(apply)
         if terminal is not None:
             return terminal
-
-        current_replicas = {
-            sub_type: spec.current_replicas
-            for sub_type, spec in all_pools.get(participant_id, {}).items()
-        }
-        if participant_id in completed:
-            for target in grouped_targets[participant_id]:
-                current_replicas[
-                    target.sub_component_type.value
-                ] = target.desired_replicas
-        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
-        return ScaleOutcome(
-            status=ScaleStatus.SUCCESS,
-            message=f"Scaled {deployment_name} successfully",
-            current_replicas=current_replicas,
-        )
+        return None
 
     async def _apply_approved_targets(
         self,
@@ -464,7 +476,7 @@ class Orchestrator:
             completed.append(pid)
             if result.applied:
                 applied.append(pid)
-            if blocking and result.applied:
+            if blocking:
                 await self.capacity_manager.wait_for_ready(pid)
 
         return None, completed

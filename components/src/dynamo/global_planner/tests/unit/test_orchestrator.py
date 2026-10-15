@@ -332,18 +332,63 @@ async def test_noop_before_conflict_retries_complete_budget_transaction():
 
 
 @pytest.mark.asyncio
-async def test_submit_does_not_issue_post_write_readback():
-    class NoReadbackCapacityManager(FakeCapacityManager):
-        def current_replicas(self, participant_id):
-            raise AssertionError("post-write readback must not run")
-
-    cm = NoReadbackCapacityManager()
+async def test_submit_returns_post_write_readback():
+    cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
     orch = _orch(cm)
 
     result = await _submit(orch, "default/a", _targets(prefill=2))
 
     assert result.current_replicas == {"prefill": 2, "decode": 1}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admitted_conflict_finishes_retry_before_propagating():
+    class ConflictError(Exception):
+        pass
+
+    class BlockingConflictCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.observe_calls = 0
+            self.scale_calls = 0
+            self.scale_started = asyncio.Event()
+            self.release_scale = asyncio.Event()
+
+        def observe(self, require_complete=False):
+            self.observe_calls += 1
+            return super().observe(require_complete)
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            if self.scale_calls == 1:
+                self.scale_started.set()
+                await self.release_scale.wait()
+                raise ConflictError()
+            return await super().scale(participant_id, targets, blocking)
+
+        async def run_with_conflict_retry(self, operation):
+            try:
+                return await operation()
+            except ConflictError:
+                return await operation()
+
+    cm = BlockingConflictCapacityManager()
+    cm.add("default/a", decode=1)
+    orch = _orch(cm)
+
+    scaling = asyncio.create_task(_submit(orch, "default/a", _targets(decode=2)))
+    await cm.scale_started.wait()
+    scaling.cancel()
+    await asyncio.sleep(0)
+    assert not scaling.done()
+
+    cm.release_scale.set()
+    with pytest.raises(asyncio.CancelledError):
+        await scaling
+    assert cm.observe_calls == 2
+    assert cm.scale_calls == 2
+    assert cm.pools["default/a"]["decode"][0] == 2
 
 
 @pytest.mark.asyncio
@@ -413,6 +458,51 @@ async def test_blocking_transfer_settles_downscale_before_upscale():
     )
     await cm.downscale_wait_started.wait()
     assert cm.pools["default/a"]["decode"][0] == 1
+    assert cm.pools["default/b"]["decode"][0] == 2
+
+    cm.release_downscale.set()
+    result = await transfer
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
+async def test_blocking_transfer_settles_accepted_noop_before_upscale():
+    class NoopDownscaleCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.downscale_wait_started = asyncio.Event()
+            self.release_downscale = asyncio.Event()
+
+        async def scale(self, participant_id, targets, blocking):
+            if participant_id == "default/a":
+                self.pools[participant_id]["decode"][0] = 1
+                return ReplicaUpdateResult(accepted=True, applied=False)
+            return await super().scale(participant_id, targets, blocking)
+
+        async def wait_for_ready(self, participant_id):
+            if participant_id == "default/a":
+                self.downscale_wait_started.set()
+                await self.release_downscale.wait()
+
+    cm = NoopDownscaleCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    transfer = asyncio.create_task(
+        orch.submit(
+            "default/b",
+            _targets(decode=3),
+            blocking=True,
+            deployment_name="default/b",
+            caller_name="default/b",
+        )
+    )
+    await cm.downscale_wait_started.wait()
     assert cm.pools["default/b"]["decode"][0] == 2
 
     cm.release_downscale.set()

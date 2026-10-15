@@ -4,6 +4,7 @@
 """Unit tests for ScaleRequestHandler."""
 
 import time
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,9 +25,7 @@ pytestmark = [
 
 # TODO(global-planner): Add invariant coverage for HA/shared state, cancellation
 # and intermediate PATCH failure, out-of-bound recovery, selected-only tolerance,
-# and duplicate-target execution; patch discovery by default in handler unit
-# tests and repair the concurrent-insert test so its _read_pools monkeypatch
-# accepts role_hints and actually runs instead of having TypeError swallowed.
+# and duplicate-target execution; patch discovery by default in handler unit tests.
 
 
 @pytest.fixture
@@ -62,9 +61,13 @@ async def test_handler_authorization_success(mock_runtime):
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas = AsyncMock(return_value=True)
         mock_connector.kube_api = MagicMock()
+        mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=_dgd_spec(prefill_replicas=3, decode_replicas=5)
         )
+        mock_connector.kube_api.list_graph_deployments.return_value = [
+            _listed_dgd(_dgd_spec(prefill_replicas=3, decode_replicas=5), "my-dgd")
+        ]
 
         # Process request (pass as dict to match endpoint behavior)
         results = []
@@ -148,9 +151,11 @@ async def test_handler_multiple_dgds(mock_runtime):
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas = AsyncMock(return_value=True)
         mock_connector.kube_api = MagicMock()
+        mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={"spec": {"components": []}}
         )
+        mock_connector.kube_api.list_graph_deployments.return_value = []
 
         # Process both requests
         async for _ in handler.scale_request(request1.model_dump()):
@@ -305,9 +310,11 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas = AsyncMock(return_value=True)
         mock_connector.kube_api = MagicMock()
+        mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={"spec": {"components": []}}
         )
+        mock_connector.kube_api.list_graph_deployments.return_value = []
 
         # Process request (pass as dict to match endpoint behavior)
         async for _ in handler.scale_request(request.model_dump()):
@@ -393,6 +400,26 @@ def _dgd_spec(
     )
 
 
+def _listed_dgd(spec, name):
+    item = deepcopy(spec)
+    item.setdefault("metadata", {})["name"] = name
+    return item
+
+
+def _listed_deployments(handler, namespace):
+    deployments = []
+    for (
+        participant,
+        connector,
+    ) in handler.orchestrator.capacity_manager.connectors.items():
+        if participant.split("/", 1)[0] != namespace:
+            continue
+        spec = getattr(connector, "_test_deployment", None)
+        if isinstance(spec, dict):
+            deployments.append(_listed_dgd(spec, connector.parent_dgd_name))
+    return deployments
+
+
 def _worker_dgd_spec(
     replicas, gpu=1, component_name="worker-svc", component_type="worker"
 ):
@@ -431,7 +458,14 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
     connector.set_component_replicas = AsyncMock(return_value=True)
     connector.parent_dgd_name = parent_dgd_name
     connector.kube_api = MagicMock()
+    connector.kube_api.current_namespace = dgd_key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=dgd_spec_dict)
+    connector._test_deployment = dgd_spec_dict
+    connector.kube_api.list_graph_deployments = MagicMock(
+        side_effect=lambda: _listed_deployments(
+            handler, connector.kube_api.current_namespace
+        )
+    )
     handler.orchestrator.capacity_manager.connectors[dgd_key] = connector
     return connector
 
@@ -446,6 +480,11 @@ def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my
             retry_conflicts=False,
         )
     connector.kube_api.get_graph_deployment.return_value = dgd_spec_dict
+    connector.kube_api.current_namespace = dgd_key.split("/", 1)[0]
+    connector._test_deployment = dgd_spec_dict
+    connector.kube_api.list_graph_deployments.side_effect = lambda: _listed_deployments(
+        handler, connector.kube_api.current_namespace
+    )
     connector.kube_api.is_deployment_ready.return_value = True
     connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()
     handler.orchestrator.capacity_manager.connectors[dgd_key] = connector
@@ -1024,9 +1063,13 @@ async def test_initial_below_floor_logs_warning(mock_runtime):
         mock_connector = MagicMock()
         mock_connector.parent_dgd_name = "my-dgd"
         mock_connector.kube_api = MagicMock()
+        mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=_dgd_spec(prefill_replicas=1, decode_replicas=1)
         )
+        mock_connector.kube_api.list_graph_deployments.return_value = [
+            _listed_dgd(_dgd_spec(prefill_replicas=1, decode_replicas=1), "my-dgd")
+        ]
         mock_connector_cls.return_value = mock_connector
 
         with patch("dynamo.global_planner.orchestrator.logger") as mock_logger:
@@ -1271,25 +1314,25 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
         handler, "default/my-dgd", _dgd_spec(prefill_replicas=1, decode_replicas=1)
     )
 
-    # _read_dgd_pools is called per item; mutate self.connectors during
-    # the iteration to simulate a concurrent first-time request.
-    original = handler.orchestrator.capacity_manager._read_pools
+    connector = handler.orchestrator.capacity_manager.connectors["default/my-dgd"]
+    original = connector.kube_api.list_graph_deployments.side_effect
 
-    def _mutating_read(connector):
+    def _mutating_list():
         # Inject a new connector mid-iteration. Without the list() snapshot
         # this raises RuntimeError: dictionary changed size during iteration.
         new_conn = MagicMock()
         new_conn.parent_dgd_name = "racy-dgd"
         new_conn.kube_api = MagicMock()
+        new_conn.kube_api.current_namespace = "default"
         new_conn.kube_api.get_graph_deployment = MagicMock(
             return_value=_dgd_spec(prefill_replicas=1, decode_replicas=1)
         )
         handler.orchestrator.capacity_manager.connectors.setdefault(
             "default/racy-dgd", new_conn
         )
-        return original(connector)
+        return original()
 
-    handler.orchestrator.capacity_manager._read_pools = _mutating_read  # type: ignore[method-assign]
+    connector.kube_api.list_graph_deployments.side_effect = _mutating_list
 
     # Should not raise.
     snapshot = handler.orchestrator.capacity_manager.observe()
@@ -1617,7 +1660,7 @@ async def test_pair_packing_direction_aware_order_multi_dgd(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_generic_worker_role_used_for_budget_and_response(mock_runtime):
+async def test_generic_worker_role_used_for_budget_and_readback(mock_runtime):
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-my-dgd"],
@@ -1632,7 +1675,7 @@ async def test_generic_worker_role_used_for_budget_and_response(mock_runtime):
     )
     results = await _run(handler, req)
     assert results[0]["status"] == "success"
-    assert results[0]["current_replicas"] == {"decode": 2}
+    assert results[0]["current_replicas"] == {"decode": 1}
     connector.set_component_replicas.assert_called_once()
 
 
@@ -1737,10 +1780,7 @@ async def test_duplicate_resolved_pool_rejected_during_readback(mock_runtime):
         _worker_dgd_spec(replicas=1, component_name="worker-a"),
     )
     # Clean read for the budget snapshot, duplicate roles for the read-back.
-    connector.kube_api.get_graph_deployment.side_effect = [
-        _worker_dgd_spec(replicas=1, component_name="worker-a"),
-        _two_worker_dgd_spec(),
-    ]
+    connector.kube_api.get_graph_deployment.return_value = _two_worker_dgd_spec()
     handler.orchestrator.capacity_manager._component_roles["default/my-dgd"] = {
         "worker-a": "decode",
         "worker-b": "decode",

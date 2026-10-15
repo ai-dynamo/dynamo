@@ -1424,15 +1424,28 @@ class KubernetesConnector(PlannerConnector):
                 )
             )
 
+        committed_adapter_plans = list(adapter_reductions)
         for plan in adapter_increases:
-            transaction.run(
-                lambda plan=plan: self._write_preflighted_replica_target(
-                    plan.deployment,
-                    plan.service,
-                    plan.target.desired_replicas,
-                    plan.scaling_adapter,
+            if transaction.possibly_applied:
+                transaction.run(
+                    lambda plan=plan: self._write_adapter_stage_after_prior_updates(
+                        deployment,
+                        plans,
+                        committed_adapter_plans,
+                        dgd_mutations,
+                        plan,
+                    )
                 )
-            )
+            else:
+                transaction.run(
+                    lambda plan=plan: self._write_preflighted_replica_target(
+                        plan.deployment,
+                        plan.service,
+                        plan.target.desired_replicas,
+                        plan.scaling_adapter,
+                    )
+                )
+            committed_adapter_plans.append(plan)
 
         for plan in plans:
             if plan.current_replicas == plan.target.desired_replicas:
@@ -1631,8 +1644,11 @@ class KubernetesConnector(PlannerConnector):
                 raise RuntimeError(
                     "DGD identity changed after adapter replica reductions"
                 )
-            self._validate_dgd_spec_after_adapter_reductions(
-                deployment, refreshed, committed_adapter_targets
+            self._validate_dgd_spec_after_replica_updates(
+                deployment,
+                refreshed,
+                flexible_adapter_targets=committed_adapter_targets,
+                direct_targets={},
             )
             refreshed_plans = self._preflight_replica_updates(refreshed, targets)
             for plan in refreshed_plans:
@@ -1671,37 +1687,125 @@ class KubernetesConnector(PlannerConnector):
 
         retry_kubernetes_write(write)
 
+    def _write_adapter_stage_after_prior_updates(
+        self,
+        deployment: dict,
+        plans: list[_ReplicaUpdatePlan],
+        committed_adapter_plans: list[_ReplicaUpdatePlan],
+        committed_direct_plans: list[_ReplicaUpdatePlan],
+        pending_plan: _ReplicaUpdatePlan,
+    ) -> None:
+        """Retry one unapplied DGDSA stage without replaying prior writes."""
+        expected_uid = (deployment.get("metadata", {}) or {}).get("uid")
+        expected_authorities = {
+            plan.service.name: self._replica_authority_identity(
+                plan.service, plan.scaling_adapter
+            )
+            for plan in plans
+        }
+        initial_replicas = {plan.service.name: plan.current_replicas for plan in plans}
+        committed_adapter_targets = {
+            plan.service.name: plan.target.desired_replicas
+            for plan in committed_adapter_plans
+        }
+        committed_direct_targets = {
+            plan.service.name: plan.target.desired_replicas
+            for plan in committed_direct_plans
+        }
+        pending_name = pending_plan.service.name
+        pending_target = pending_plan.target.desired_replicas
+        targets = [plan.target for plan in plans]
+
+        def write() -> None:
+            refreshed = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            if (refreshed.get("metadata", {}) or {}).get("uid") != expected_uid:
+                raise RuntimeError("DGD identity changed after prior replica updates")
+            self._validate_dgd_spec_after_replica_updates(
+                deployment,
+                refreshed,
+                flexible_adapter_targets={
+                    **committed_adapter_targets,
+                    pending_name: pending_target,
+                },
+                direct_targets=committed_direct_targets,
+            )
+            refreshed_plans = self._preflight_replica_updates(refreshed, targets)
+            refreshed_by_name = {plan.service.name: plan for plan in refreshed_plans}
+            if set(refreshed_by_name) != set(expected_authorities):
+                raise RuntimeError("component identity changed after prior updates")
+
+            for name, plan in refreshed_by_name.items():
+                if (
+                    self._replica_authority_identity(plan.service, plan.scaling_adapter)
+                    != expected_authorities[name]
+                ):
+                    raise RuntimeError(
+                        "replica authority identity changed after prior updates"
+                    )
+                expected = initial_replicas[name]
+                if name in committed_adapter_targets:
+                    expected = committed_adapter_targets[name]
+                elif name in committed_direct_targets:
+                    expected = committed_direct_targets[name]
+                elif name == pending_name and plan.current_replicas == pending_target:
+                    continue
+                if plan.current_replicas != expected:
+                    raise RuntimeError(
+                        f"replica target for component {name!r} changed after "
+                        "prior updates"
+                    )
+
+            current = refreshed_by_name[pending_name]
+            if current.current_replicas == pending_target:
+                return
+            try:
+                self._write_preflighted_replica_target(
+                    refreshed,
+                    current.service,
+                    pending_target,
+                    current.scaling_adapter,
+                )
+            except (_ReplicaAuthorityChanged, _ReplicaTargetCommittedConflict) as error:
+                raise RuntimeError(
+                    "adapter stage stopped after prior replica updates"
+                ) from error
+
+        retry_kubernetes_write(write)
+
     @staticmethod
-    def _validate_dgd_spec_after_adapter_reductions(
+    def _validate_dgd_spec_after_replica_updates(
         expected: dict,
         current: dict,
-        committed_adapter_targets: Mapping[str, int],
+        flexible_adapter_targets: Mapping[str, int],
+        direct_targets: Mapping[str, int],
     ) -> None:
-        """Allow only the operator propagation of committed DGDSA targets."""
+        """Validate DGD spec after committed writes through separate authorities."""
         expected_copy = {"spec": copy.deepcopy(expected.get("spec", {}))}
         current_copy = {"spec": copy.deepcopy(current.get("spec", {}))}
         expected_components = get_components_by_name(expected_copy)
         current_components = get_components_by_name(current_copy)
-        for name, target in committed_adapter_targets.items():
+        for name, target in {
+            **flexible_adapter_targets,
+            **direct_targets,
+        }.items():
             expected_component = expected_components.get(name)
             current_component = current_components.get(name)
             if expected_component is None or current_component is None:
-                raise RuntimeError(
-                    f"component {name!r} changed after adapter reductions"
-                )
+                raise RuntimeError(f"component {name!r} changed after replica updates")
             initial = Service(name=name, service=expected_component).number_replicas()
             observed = Service(name=name, service=current_component).number_replicas()
-            if observed not in (initial, target):
+            allowed = (target,) if name in direct_targets else (initial, target)
+            if observed not in allowed:
                 raise RuntimeError(
                     f"DGD replica projection for component {name!r} changed "
-                    "unexpectedly after adapter reductions"
+                    "unexpectedly after replica updates"
                 )
             if "replicas" in expected_component:
                 current_component["replicas"] = expected_component["replicas"]
             else:
                 current_component.pop("replicas", None)
         if current_copy["spec"] != expected_copy["spec"]:
-            raise RuntimeError("DGD spec changed after adapter replica reductions")
+            raise RuntimeError("DGD spec changed after replica updates")
 
     def _authoritative_replica_state(
         self, deployment: dict, service: Service
