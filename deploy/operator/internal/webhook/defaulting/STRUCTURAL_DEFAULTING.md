@@ -5,9 +5,6 @@ each default, and leaves the webhook handler as a narrow request boundary.
 
 ## Contract
 
-- Keep CRD schema defaults, mutating admission, and reconciliation as distinct
-  layers. Put each default in the earliest layer that has all required information,
-  and do not duplicate it in another layer as a fallback.
 - Mirror the Go API type tree. A parent owns defaults coordinating its scalar
   fields or children and delegates local child behavior to functions named after
   the exact child Go type.
@@ -16,30 +13,30 @@ each default, and leaves the webhook handler as a narrow request boundary.
   Put each field default in the structural function for the API type that declares
   that field.
 - Apply defaults to the canonical API representation whenever conversion preserves
-  the required field presence and semantics. Use version-specific behavior only
-  when conversion cannot represent the information the rule needs.
+  the required field presence and semantics. Version-specific behavior is an
+  exception for information that conversion cannot represent.
 - Preserve explicit user values. Fill only absence defined by the API and never
-  silently rewrite an explicit value to make it valid.
+  rewrite an explicit value to make it valid.
 - Do not infer or track value provenance. Treat the decoded object as authoritative:
-  a value supplied by the user and the same value applied by CRD schema defaulting
-  are indistinguishable. Do not inspect the raw admission request, compare against
-  a known default, consult annotations, or use another side channel to reconstruct
-  whether a field was user supplied. If a rule needs to observe absence,
-  leave the field unset until mutating admission or model presence explicitly in the
-  API.
+  a user-supplied value and the same value applied by CRD schema defaulting are
+  indistinguishable. Do not inspect the raw admission request, compare against a
+  known default, consult annotations, or use another side channel to reconstruct
+  whether a field was user supplied. If a rule needs to observe absence, leave the
+  field unset until the owning layer applies the default or model presence explicitly
+  in the API.
 
-## Migration status
+## Ownership
 
-Keep this table current whenever a resource is migrated.
-
-| Resource | Status | Current implementation |
-| --- | --- | --- |
-| `DynamoGraphDeployment` | Transitional | `defaulting/dynamographdeployment_handler.go` plus shared helpers |
-| `DynamoComponentDeployment` | Transitional | `defaulting/dynamocomponentdeployment_handler.go` plus shared helpers |
-| `DynamoGraphDeploymentRequest` | Handler-local | `defaulting/dynamographdeploymentrequest_handler.go` |
-
-A resource reaches Structural status only after its handler delegates to a root
-function and nested API types are handled by their exact-type functions.
+- Prefer CRD schema defaults for unconditional, context-free API defaults when
+  applying them before admission preserves every presence distinction needed by
+  later rules.
+- Use mutating admission for conditional, cross-field, version-aware, or
+  environment-derived defaults that must be persisted in the API object.
+- Use reconciliation only for runtime state that cannot be known at admission.
+  Do not make a controller repair an omitted field that admission promises to
+  persist.
+- Assign every default one owner. Do not apply the same default independently in
+  CRD schema, mutating admission, and reconciliation.
 
 ## Structure
 
@@ -48,72 +45,52 @@ function and nested API types are handled by their exact-type functions.
   `defaultDynamoComponentDeploymentSharedSpec`, and `defaultComponentRoleSpec`.
 - A parent defaults its own scalar fields and calls child defaulters in API
   declaration order. Traverse every list element, including elements introduced
-  by an UPDATE. Sort map keys before behavior depends on traversal order.
-- Structural defaulters intentionally mutate only the API value passed to them.
-  They must be idempotent: a second pass over the result produces no additional
-  mutation.
+  by an UPDATE.
+- Structural functions must be idempotent: applying them twice produces no
+  additional mutation.
 - Default only a field whose API-defined absence is observable. Preserve explicit
   zero, `false`, empty collections, empty objects, and empty strings whenever they
   are valid user choices. Use pointer presence or an explicit presence signal when
   zero values are meaningful.
 - Apply operation-independent defaults on CREATE and UPDATE. A CREATE-only or
-  UPDATE-only default is exceptional: document the API reason beside the rule and
-  cover the opposite operation in tests.
+  UPDATE-only default is exceptional: document the API reason and cover the
+  opposite operation in tests.
 - For an optional child pointer, the parent checks for nil and creates the child
   only when the child object itself has a documented default. Otherwise it leaves
   the pointer absent and skips child traversal.
-- When omission creates a default object but explicit `{}` opts out, put the
-  complete CRD default on the object field. Do not default its child fields in the
-  schema or mutating admission; treat an explicit empty object as authoritative.
-
-For example, DGDR v1beta2 defines these whole-object opt-outs:
-
-```yaml
-spec:
-  workload: {}       # no workload defaults
-  objective:
-    sla: {}          # no SLA bounds and no derived strict_sla
-```
-
-- Keep cross-field defaults at the lowest common API-type ancestor. Pass a small
-  typed ancestor fact into a child only when the child's local default remains
-  understandable in isolation.
-- Resolve environment-dependent inputs before applying them. A resolver is
-  read-only and returns focused typed data; the structural defaulter decides which
-  absent API fields receive that data. Do not mix Kubernetes discovery, policy,
-  recursive traversal, and mutation in one helper.
-- Never infer field ownership or caller intent from a value, including equality
-  with a documented default. Use only API-defined presence and deterministic
-  precedence between representations. When the API defines a typed underlay plus
-  a native overlay, default the typed representation structurally and apply the
-  native overlay afterward; the overlay wins without conflict detection.
+- Keep cross-field defaults at the lowest common API-type ancestor of the fields
+  they coordinate.
+- Separate environment-dependent resolution from mutation. A resolver reads
+  external state and returns focused typed data; the structural function decides
+  which absent API fields receive it.
 - Do not compensate for an invalid explicit value or an unresolved required value.
   Leave those states visible so validating admission reports the exact problem.
 
-## Signatures and context
+## Signatures and files
 
-- Keep the API value first in a structural `default...` signature, followed by
-  direct typed context or one final sparse options struct.
-- Pure structural defaults return no value. Return an error only when the rule
-  performs an operation that can genuinely fail; do not turn ordinary absence
-  into an error or silently swallow a failed required resolution.
-- Pass up to three ancestor-derived contextual values as direct typed parameters.
-  At four or more, use one sparse type-specific options struct containing only
-  facts the current API value cannot derive.
-- Construct child options afresh at the call site. Never copy, embed, mutate, or
-  extend a parent options struct, and do not introduce a generic context bag.
+- Keep registration, request decoding, GVK checks, and the call to the root
+  traversal in `<owner>_handler.go`.
+- Keep the API value first in a structural `default...` signature. Pass additional
+  context as direct typed values or one type-specific options struct.
+- Pure structural functions return no value. Return an error only for an operation
+  that can genuinely fail; ordinary absence is not an error.
 - Pass the admission operation only to the smallest function whose documented
-  semantics actually differ between CREATE and UPDATE.
-- Request-wide clients, readers, feature configuration, operator version, and
-  caller identity may live on the root defaulter receiver or in a small typed
-  request context. Prefer standalone functions for pure nested defaults and explicit
-  resolver interfaces for external reads.
-- Mutation is part of the structural function contract, but helper reads and
-  resolvers must not mutate their inputs.
+  semantics differ between CREATE and UPDATE.
+- Helpers and external resolvers must not mutate their inputs.
 - Use standard `k8s.io/utils/ptr` helpers for pointer defaults and equality. Do not
   add one-line dereference, presence, or pointer-comparison helpers.
+- Keep structural functions for the canonical API version in `<owner>.go` and
+  lookup, derivation, sorting, normalization, and resolver helpers in
+  `<owner>_helpers.go`.
+- Put defaults for API types shared by multiple resources in `shared_<version>.go`
+  and call the same function from every resource traversal.
+- Put exceptional version-specific behavior in `<owner>_<version>.go` and document
+  why conversion cannot carry the required semantics. Keep canonical function and
+  options names unsuffixed; suffix non-canonical names with the Go API version, for
+  example `defaultDynamoGraphDeploymentSpecV1alpha1` and
+  `dynamoGraphDeploymentV1alpha1DefaultOptions`.
 
-### Signature examples
+### Examples
 
 Representative signatures, with function bodies omitted:
 
@@ -144,63 +121,21 @@ func defaultDynamoGraphDeploymentSpecV1alpha1(
 )
 ```
 
-## Files and shared types
-
-- Keep registration, request decoding, GVK checks, and the call to the root
-  traversal in `<owner>_handler.go`.
-- Keep every structural `default<Type>` function in the type and version's main
-  `<owner>.go` file. Put only lookup, derivation, sorting, normalization, and
-  resolver helpers in `<owner>_helpers.go`.
-- Put defaults for API types shared by multiple resources in the corresponding
-  `shared_<version>.go` file and call the same function from every resource
-  traversal. Do not duplicate a shared default under each handler.
-- Version-specific defaults are exceptional. Document why conversion cannot carry
-  the required semantics, keep the rule in `<owner>_<version>.go`, and test its
-  conversion behavior independently.
-- Keep canonical-version structural function and options names unsuffixed. Suffix
-  every non-canonical version-specific function and options type with the Go API
-  version, for example `defaultDynamoGraphDeploymentSpecV1alpha1` and
-  `dynamoGraphDeploymentV1alpha1DefaultOptions`; do not prefix the version.
-- Use one `<owner>_helpers.go` file across API versions; typed signatures make the
-  applicable version explicit.
-
-## Ownership
-
-- Prefer CRD schema defaults for unconditional, context-free API defaults when
-  applying them before admission does not destroy field-presence semantics needed
-  by later rules.
-- Use mutating admission for conditional, cross-field, version-aware, or
-  environment-derived defaults that must be persisted in the API object.
-- Use reconciliation only for runtime state that cannot be known at admission.
-  Do not make a controller repair an omitted field that admission promises to
-  persist.
-- Assign every default one canonical owner and document its CREATE/UPDATE and
-  conversion behavior. Never apply the same default independently in CRD schema,
-  admission, and reconciliation.
-
 ## Tests
 
-- Keep one table-driven admission-chain test per resource. Exercise the generated
-  source-version schema defaults first, convert through the production path when
-  versions differ, then invoke the public mutating webhook handler.
-- Prove that a user-supplied value and an identical value applied by CRD schema
-  defaulting produce the same webhook result.
-- For every whole-object opt-out, include separate admission-chain rows for an
-  omitted object and explicit `{}`. Assert that omission receives the complete
-  object default while explicit `{}` remains empty through schema defaulting,
-  conversion, and the mutating webhook.
-- Cover CREATE and UPDATE explicitly. For every operation-specific default, include
-  the opposite operation and prove that its behavior is intentional.
+- Keep one table-driven admission-chain test per resource. Exercise source-version
+  schema defaults first, convert through the production path when versions differ,
+  then invoke the public mutating webhook handler.
 - Prove idempotence by applying defaulting twice and comparing the complete object
   after the first and second pass.
-- Cover absent values, every meaningful explicit zero value, explicit non-default
-  values, empty nested objects, newly added list elements, and shared nested types.
-- Cover conversion in both directions when a resource has multiple served versions.
-  Assert that native and envelope-backed representations receive equivalent semantic
-  defaults and round-trip without losing explicit values.
+- Cover absent values, meaningful explicit zero values, explicit non-default values,
+  empty nested objects, newly added list elements, and shared nested types.
+- Prove that a user-supplied value and an identical value applied by CRD schema
+  defaulting produce the same webhook result.
+- Cover CREATE and UPDATE explicitly when behavior differs by operation.
+- When a resource has multiple served versions, cover conversion in both directions
+  and assert that explicit values survive the round trip.
 - For environment-derived defaults, test resolution separately from structural
-  application, then cover the real admission composition with the production
-  resolver boundary. Prove that partial explicit input resolves only missing fields.
+  application and cover their composition through the production admission path.
 - Assert the complete mutated object or a focused typed subtree. Do not test only a
-  rendered patch or log message, and do not duplicate behavior already covered by
-  the resource's admission table.
+  rendered patch or log message.
