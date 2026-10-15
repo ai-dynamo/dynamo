@@ -1552,8 +1552,8 @@ async fn start_vllm_listener(
             pool.register_raw(route_id, &source.endpoint, &source.topic, generation)
                 .await?,
         ),
-        // Sources without a topic (vLLM workers that predate per-worker topics)
-        // keep today's SUB with its own context.
+        // Without a pool, or for a source without a topic (vLLM workers that
+        // predate per-worker topics), connect a dedicated SUB with its own context.
         None => RawSubscription::Dedicated(
             connect_sub_socket(&source.endpoint, Some(&source.topic)).await?,
         ),

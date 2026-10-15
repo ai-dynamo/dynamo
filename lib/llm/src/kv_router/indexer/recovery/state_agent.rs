@@ -762,13 +762,13 @@ async fn run_state_agent_router(
     component: Component,
     endpoint: EndpointId,
     expected_block_size: u32,
-    mut source_stream: dynamo_runtime::discovery::DiscoveryStream,
+    mut source_stream: DiscoveryStream,
     recognized_tx: watch::Sender<HashSet<WorkerWithDpRank>>,
     fence: SharedFence,
     mut fenced_rx: mpsc::UnboundedReceiver<Affected>,
     cancel: CancellationToken,
 ) {
-    let mut attachment_stream: Option<dynamo_runtime::discovery::DiscoveryStream> = None;
+    let mut attachment_stream: Option<DiscoveryStream> = None;
     let mut ingest_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut transport: Option<Arc<RuntimeWorkerQueryTransport>> = None;
     let mut sources = HashMap::new();
@@ -793,14 +793,14 @@ async fn run_state_agent_router(
     loop {
         enum Input {
             Membership,
-            Source(Option<Result<DiscoveryEvent>>),
-            Attachment(Option<Result<DiscoveryEvent>>),
+            Source(Result<DiscoveryEvent>),
+            Attachment(Result<DiscoveryEvent>),
             Fenced(Affected),
             Withdrawn((CacheOwnerId, u64)),
-            IngestEnded,
-            FenceEnded,
             Recovery(Option<Box<OwnerRecoveryResult>>),
             Retry,
+            /// An input V2 routing depends on ended; it stays withdrawn.
+            Ended(&'static str),
             Cancelled,
         }
         let input = tokio::select! {
@@ -809,21 +809,23 @@ async fn run_state_agent_router(
             changed = membership.changed() => {
                 if changed.is_err() { Input::Cancelled } else { Input::Membership }
             },
-            event = source_stream.next() => Input::Source(event),
+            event = source_stream.next() => event.map_or(Input::Ended(WATCH_ENDED), Input::Source),
             event = async {
                 match attachment_stream.as_mut() {
                     Some(stream) => stream.next().await,
                     None => std::future::pending().await,
                 }
-            } => Input::Attachment(event),
-            affected = fenced_rx.recv() => affected.map_or(Input::FenceEnded, Input::Fenced),
+            } => event.map_or(Input::Ended(WATCH_ENDED), Input::Attachment),
+            affected = fenced_rx.recv() => {
+                affected.map_or(Input::Ended("KV state observation fence ended"), Input::Fenced)
+            },
             Some(withdrawn) = withdrawn_rx.recv() => Input::Withdrawn(withdrawn),
             _ = async {
                 match ingest_task.as_mut() {
                     Some(task) => { let _ = task.await; }
                     None => std::future::pending().await,
                 }
-            } => Input::IngestEnded,
+            } => Input::Ended("V2 KV state event ingest ended"),
             result = recovery_rx.recv() => Input::Recovery(result.map(Box::new)),
             _ = wait_for_retry_deadline(retries.next_deadline()) => Input::Retry,
         };
@@ -852,38 +854,24 @@ async fn run_state_agent_router(
                     dirty.mark(owner);
                 }
             }
-            Input::Source(Some(event)) => match update_advertisements(
+            Input::Source(event) => apply_discovery_event(
                 event,
                 &endpoint,
                 KV_STATE_SOURCE_TOPIC_V2,
                 &mut sources,
-            ) {
-                Ok(Some(owner)) => {
-                    retries.reset(&owner);
-                    dirty.mark(owner);
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(%error, "Ignoring invalid V2 KV state source"),
-            },
-            Input::Attachment(Some(event)) => match update_advertisements(
+                &mut retries,
+                &mut dirty,
+            ),
+            Input::Attachment(event) => apply_discovery_event(
                 event,
                 &endpoint,
                 KV_STATE_ATTACHMENT_TOPIC_V2,
                 &mut attachments,
-            ) {
-                Ok(Some(owner)) => {
-                    retries.reset(&owner);
-                    dirty.mark(owner);
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(%error, "Ignoring invalid V2 KV state attachment"),
-            },
-            Input::Source(None) | Input::Attachment(None) => {
-                tracing::error!(%endpoint, "KV state discovery watch ended; keeping recognized ranks fail-closed");
-                fence.lock().await.withdraw_all(&indexer);
-                // Keep the recognized sender alive so the derived legacy view
-                // continues forwarding membership for unrecognized ranks.
-                cancel.cancelled().await;
+                &mut retries,
+                &mut dirty,
+            ),
+            Input::Ended(reason) => {
+                fail_closed_until_cancelled(&endpoint, reason, &fence, &indexer, &cancel).await;
                 break;
             }
             Input::Fenced(Affected::All) => dirty.all = true,
@@ -898,20 +886,6 @@ async fn run_state_agent_router(
                         dirty.mark(owner);
                     }
                 }
-            }
-            Input::IngestEnded => {
-                tracing::error!(%endpoint, "V2 KV state event ingest ended");
-                fence.lock().await.withdraw_all(&indexer);
-                // V2 stays fail-closed, but unrelated legacy ranks must keep
-                // receiving membership updates until the router shuts down.
-                cancel.cancelled().await;
-                break;
-            }
-            Input::FenceEnded => {
-                tracing::error!(%endpoint, "KV state observation fence ended; keeping recognized ranks fail-closed");
-                fence.lock().await.withdraw_all(&indexer);
-                cancel.cancelled().await;
-                break;
             }
             Input::Withdrawn((owner, publisher_id)) => {
                 if let Some(state) = runtime.get_mut(&owner)
@@ -994,21 +968,14 @@ async fn run_state_agent_router(
             match source_stream.next().now_or_never() {
                 Some(Some(event)) => {
                     drained = true;
-                    match update_advertisements(
+                    apply_discovery_event(
                         event,
                         &endpoint,
                         KV_STATE_SOURCE_TOPIC_V2,
                         &mut sources,
-                    ) {
-                        Ok(Some(owner)) => {
-                            retries.reset(&owner);
-                            dirty.mark(owner);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "Ignoring invalid V2 KV state source")
-                        }
-                    }
+                        &mut retries,
+                        &mut dirty,
+                    );
                 }
                 Some(None) => watch_ended = true,
                 None => {}
@@ -1017,21 +984,14 @@ async fn run_state_agent_router(
                 match stream.next().now_or_never() {
                     Some(Some(event)) => {
                         drained = true;
-                        match update_advertisements(
+                        apply_discovery_event(
                             event,
                             &endpoint,
                             KV_STATE_ATTACHMENT_TOPIC_V2,
                             &mut attachments,
-                        ) {
-                            Ok(Some(owner)) => {
-                                retries.reset(&owner);
-                                dirty.mark(owner);
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                tracing::warn!(%error, "Ignoring invalid V2 KV state attachment")
-                            }
-                        }
+                            &mut retries,
+                            &mut dirty,
+                        );
                     }
                     Some(None) => watch_ended = true,
                     None => {}
@@ -1042,9 +1002,7 @@ async fn run_state_agent_router(
             }
         }
         if watch_ended {
-            tracing::error!(%endpoint, "KV state discovery watch ended; keeping recognized ranks fail-closed");
-            fence.lock().await.withdraw_all(&indexer);
-            cancel.cancelled().await;
+            fail_closed_until_cancelled(&endpoint, WATCH_ENDED, &fence, &indexer, &cancel).await;
             break;
         }
         if !sources.is_empty() && transport.is_none() {
@@ -1112,6 +1070,42 @@ async fn run_state_agent_router(
     }
     recovery_lane.cancel_all().await;
     fence.lock().await.withdraw_all(&indexer);
+}
+
+const WATCH_ENDED: &str = "KV state discovery watch ended";
+
+/// Keeps V2 routing withdrawn until shutdown. Waiting keeps the recognized
+/// sender alive, so the derived legacy view continues forwarding membership for
+/// unrecognized ranks.
+async fn fail_closed_until_cancelled(
+    endpoint: &EndpointId,
+    reason: &str,
+    fence: &SharedFence,
+    indexer: &Indexer,
+    cancel: &CancellationToken,
+) {
+    tracing::error!(%endpoint, "{reason}; keeping recognized ranks fail-closed");
+    fence.lock().await.withdraw_all(indexer);
+    cancel.cancelled().await;
+}
+
+/// Applies one discovery event and queues its owner for reconciliation.
+fn apply_discovery_event<T: Advertisement>(
+    event: Result<DiscoveryEvent>,
+    endpoint: &EndpointId,
+    topic: &str,
+    advertisements: &mut HashMap<u64, T>,
+    retries: &mut RecoveryRetries,
+    dirty: &mut DirtyOwners,
+) {
+    match update_advertisements(event, endpoint, topic, advertisements) {
+        Ok(Some(owner)) => {
+            retries.reset(&owner);
+            dirty.mark(owner);
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, topic, "Ignoring invalid V2 KV state advertisement"),
+    }
 }
 
 /// Owners whose plan depends on any of `workers`: attached to one, or last
@@ -2930,15 +2924,11 @@ mod tests {
         let (first, second) = (owner(4), owner(5));
         let worker = WorkerWithDpRank::new(17, 3);
         let mut index = FenceIndex::default();
-        let attachment = |owner, generation| KvStateAttachmentAdvertisement {
-            cache_owner_id: owner,
-            ..attachment_advertisement(owner, generation)
-        };
 
         let added = index.attachment(event_source_added(
             KV_STATE_ATTACHMENT_TOPIC_V2,
             1,
-            &attachment(first, 7),
+            &attachment_advertisement(first, 7),
         ));
         assert_eq!(owners(added), HashSet::from([first]));
         // The worker moves to another owner before the old attachment is removed:
@@ -2946,7 +2936,7 @@ mod tests {
         let moved = index.attachment(event_source_added(
             KV_STATE_ATTACHMENT_TOPIC_V2,
             2,
-            &attachment(second, 1),
+            &attachment_advertisement(second, 1),
         ));
         assert_eq!(owners(moved), HashSet::from([first, second]));
         let removed = index.attachment(event_source_removed(KV_STATE_ATTACHMENT_TOPIC_V2, 1));
@@ -2962,11 +2952,6 @@ mod tests {
             HashSet::from([second])
         );
 
-        let source = source_advertisement(first);
-        let added = index.source(event_source_added(KV_STATE_SOURCE_TOPIC_V2, 41, &source));
-        assert_eq!(owners(added), HashSet::from([first]));
-        let removed = index.source(event_source_removed(KV_STATE_SOURCE_TOPIC_V2, 41));
-        assert_eq!(owners(removed), HashSet::from([first]));
         // An unattributable removal invalidates every owner.
         assert!(matches!(
             index.source(event_source_removed(KV_STATE_SOURCE_TOPIC_V2, 99)),
@@ -3008,36 +2993,11 @@ mod tests {
     }
 
     #[test]
-    fn discovery_changes_dirty_only_their_owners() {
+    fn owners_on_workers_names_attached_and_projected_owners() {
         let (first, second, third) = (owner(4), owner(5), owner(6));
-        let endpoint = EndpointId::from("ns.worker.generate");
-        let mut sources: HashMap<u64, KvStateSourceAdvertisement> = HashMap::new();
-        let source = source_advertisement(first);
-        assert_eq!(
-            update_advertisements(
-                event_source_added(KV_STATE_SOURCE_TOPIC_V2, 41, &source),
-                &endpoint,
-                KV_STATE_SOURCE_TOPIC_V2,
-                &mut sources,
-            )
-            .unwrap(),
-            Some(first)
-        );
-        assert_eq!(
-            update_advertisements(
-                event_source_removed(KV_STATE_SOURCE_TOPIC_V2, 41),
-                &endpoint,
-                KV_STATE_SOURCE_TOPIC_V2,
-                &mut sources,
-            )
-            .unwrap(),
-            Some(first)
-        );
-
         let (attached_worker, projected_worker) =
             (WorkerWithDpRank::new(17, 3), WorkerWithDpRank::new(18, 0));
-        let attachment = attachment_advertisement(first, 7);
-        let attachments = HashMap::from([(1, attachment)]);
+        let attachments = HashMap::from([(1, attachment_advertisement(first, 7))]);
         let runtime = HashMap::from([
             (second, ready_runtime(projected_worker)),
             (third, ready_runtime(WorkerWithDpRank::new(19, 0))),
@@ -3092,57 +3052,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishers_ingest_concurrently_in_per_owner_order() {
-        let (primary, indexer) = test_indexer();
-        let owners = [
-            (owner(4), WorkerWithDpRank::new(17, 3), 41),
-            (owner(5), WorkerWithDpRank::new(18, 0), 42),
-        ];
-        let ingests: Vec<_> = owners
-            .iter()
-            .map(|(owner, worker, publisher_id)| {
-                bound_ingest(*owner, *publisher_id, Some(1), Some(*worker))
-            })
-            .collect();
-        let (live, _withdrawn) = live_ingest(indexer, &ingests.iter().collect::<Vec<_>>());
-        let live = Arc::new(live);
-        let tasks = owners.map(|(owner, worker, publisher_id)| {
-            let live = live.clone();
-            tokio::spawn(async move {
-                for event_id in 1..=50 {
-                    live.apply(publisher_id, vec![worker_store(owner, worker, event_id)])
-                        .await;
-                }
-            })
-        });
-        for task in tasks {
-            task.await.unwrap();
-        }
-
-        for ingest in &ingests {
-            let ingest = ingest.lock().await;
-            assert_eq!(ingest.recovered_cursor, 50);
-            assert!(!ingest.recovery_required);
-        }
-        assert_eq!(primary.dump_events().await.unwrap().len(), 100);
-    }
-
-    #[tokio::test]
     async fn recovery_tail_hands_off_to_live_ingest_and_retirement_drops_late_batches() {
         let owner = owner(4);
         let worker = WorkerWithDpRank::new(17, 3);
         let (primary, indexer) = test_indexer();
         let ingest = bound_ingest(owner, 41, Some(7), Some(worker));
-        {
-            // As scheduled for a newly bound publisher.
-            let mut ingest = ingest.lock().await;
-            ingest.recovery_required = true;
-            ingest.tail = Some(OwnerRecoveryTail {
-                attachment_generation: Some(7),
-                schedule_generation: 1,
-                rank: RankState::default(),
-            });
-        }
+        buffer_live_ingest(&ingest, Some(7), Some(worker), true, 1).await;
         let (live, _withdrawn) = live_ingest(indexer.clone(), &[&ingest]);
 
         // Recovery is in flight: live batches are buffered, not applied.

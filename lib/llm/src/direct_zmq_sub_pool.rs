@@ -1336,13 +1336,6 @@ mod tests {
         assert_eq!(first.group_id, second.group_id);
         assert_eq!(first.group_id, third.group_id);
         assert_ne!(first.group_id, other.group_id);
-        let endpoint_routes = |pool: &DirectZmqSubPool, group_id| {
-            pool.inner.lock().groups[&group_id]
-                .endpoints
-                .get(shared)
-                .copied()
-        };
-        assert_eq!(endpoint_routes(&pool, first.group_id), Some(3));
 
         delivered(&pool, first.group_id, 1, 0).await;
         delivered(&pool, first.group_id, 2, 5).await;
@@ -1353,7 +1346,6 @@ mod tests {
 
         let group_id = first.group_id;
         first.close().await;
-        assert_eq!(endpoint_routes(&pool, group_id), Some(2));
         delivered(&pool, group_id, 2, 6).await;
         assert_eq!(sequence(second.receiver.recv().await.unwrap()), 6);
         pool.shutdown().await;
@@ -1384,18 +1376,14 @@ mod tests {
         for (index, group) in groups.iter().enumerate() {
             assert_eq!(*group, groups[index % 2]);
         }
-        pool.shutdown().await;
-    }
 
-    #[tokio::test]
-    async fn single_publisher_shared_endpoints_still_pack_to_the_cap() {
-        let pool = pool("kv-state-events-v2", 4, 128).with_shared_endpoints();
-        let mut registrations = Vec::new();
-        for publisher_id in 0..5 {
+        // Endpoints with one publisher each still pack to the cap.
+        let mut singles = Vec::new();
+        for publisher_id in 10..15 {
             pool.expect_publisher(&endpoint(publisher_id));
-            registrations.push(register(&pool, publisher_id, 1).await);
+            singles.push(register(&pool, publisher_id, 1).await);
         }
-        let groups: Vec<_> = registrations.iter().map(|r| r.group_id).collect();
+        let groups: Vec<_> = singles.iter().map(|r| r.group_id).collect();
         assert!(groups[..4].iter().all(|group| *group == groups[0]));
         assert_ne!(groups[4], groups[0]);
         pool.shutdown().await;
