@@ -224,6 +224,7 @@ struct KvTransfer {
     moved_same_host_tokens: u64,
     follow_up_turns: usize,
     moved_turns: usize,
+    moved_same_host_turns: usize,
 }
 
 impl KvTransfer {
@@ -257,6 +258,7 @@ impl KvTransfer {
                             && prev.rank.1 / ranks_per_host == turn.rank.1 / ranks_per_host
                         {
                             transfer.moved_same_host_tokens += turn.input_length as u64;
+                            transfer.moved_same_host_turns += 1;
                         }
                     }
                 }
@@ -740,8 +742,8 @@ impl Args {
 
 fn parse_on_off(flag: &str, value: &str) -> Result<bool> {
     match value {
-        "on" | "true" | "1" => Ok(true),
-        "off" | "false" | "0" => Ok(false),
+        "on" => Ok(true),
+        "off" => Ok(false),
         other => bail!("{flag} expects on|off, got {other}"),
     }
 }
