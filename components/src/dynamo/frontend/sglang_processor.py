@@ -324,14 +324,13 @@ class SglangPreprocessWorkerResult:
 
 
 class _WorkerPreprocessTiming:
-    """Collect template boundaries in the preprocessing process pool."""
-
     def __init__(self) -> None:
         self.intervals_ns: list[tuple[int, int]] = []
 
     @contextmanager
     def start_ttft_stage(self, stage: str):
-        assert stage == "template_tokenize"
+        if stage != "template_tokenize":
+            raise ValueError(f"Unsupported TTFT stage: {stage}")
         start_ns = time.monotonic_ns()
         try:
             yield

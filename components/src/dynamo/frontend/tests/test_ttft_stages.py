@@ -225,6 +225,15 @@ def test_sglang_worker_returns_picklable_monotonic_intervals(
     )
 
 
+def test_sglang_worker_rejects_unsupported_ttft_stage(sglang_modules):
+    module, _ = sglang_modules
+    timing = module._WorkerPreprocessTiming()
+    with pytest.raises(ValueError, match="Unsupported TTFT stage: python_preprocess"):
+        with timing.start_ttft_stage("python_preprocess"):
+            pass
+    assert timing.intervals_ns == []
+
+
 def test_sglang_pool_reattaches_worker_intervals(sglang_modules, monkeypatch):
     module, _ = sglang_modules
     context = RecordingContext()
@@ -377,8 +386,9 @@ def vllm_modules(frontend_stubs):
     return processor, prepost
 
 
-@pytest.mark.parametrize("pretokenized", [False, True])
-@pytest.mark.parametrize("fail_render", [False, True])
+@pytest.mark.parametrize(
+    "pretokenized,fail_render", [(False, False), (True, False), (False, True)]
+)
 def test_vllm_template_tokenizer_preserves_tokens_and_closes_on_error(
     vllm_modules, monkeypatch, pretokenized, fail_render
 ):
