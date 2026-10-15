@@ -3238,9 +3238,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
-            # Static public message: decoder text is library-internal and is
-            # logged above. A plain ValueError would reach the client as a
-            # generic "Invalid request".
+            # Static message keeps library-internal decoder text (logged above)
+            # private; a plain ValueError would reach the client as "Invalid request".
             raise InvalidArgument(
                 "Failed to decode prompt_embeds as PyTorch tensor"
             ) from e
