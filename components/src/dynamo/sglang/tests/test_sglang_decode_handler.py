@@ -2735,6 +2735,62 @@ async def test_parallel_sampling_omits_kv_cache_hit(n):
     assert reports == [expected] * n
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
+)
+@pytest.mark.parametrize(
+    "nvext,expected",
+    [
+        (None, False),
+        ({"nvext": {"extra_fields": ["stop_reason"]}}, False),
+        ({"nvext": {"extra_fields": ["routed_experts"]}}, True),
+        ({"extra_args": {"nvext": {"extra_fields": ["routed_experts"]}}}, True),
+    ],
+)
+async def test_routed_experts_requested_only_when_extra_field_opted_in(
+    mode, nvext, expected
+):
+    handler = _new_decode_handler()
+    handler.serving_mode = mode
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {"return_routed_experts": True}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunk = {
+        "index": 0,
+        "output_ids": [42],
+        "meta_info": {"id": "sample-0", "finish_reason": {"type": "length"}},
+    }
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream([chunk]))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "sampling_options": {"n": 1},
+        "stop_conditions": {"max_tokens": 1},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 23,
+        },
+        **(nvext or {}),
+    }
+
+    [output async for output in handler.generate(request, context)]
+
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    assert kwargs.get("return_routed_experts", False) is expected
+
+
 def test_prefill_dp_rank_kwargs_follows_engine_signature():
     from dynamo.sglang._compat import prefill_dp_rank_kwargs
 

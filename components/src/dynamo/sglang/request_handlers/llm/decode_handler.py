@@ -697,6 +697,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             supported=getattr(self, "_supports_ordered_cancellation", False),
         )
         logprob_kwargs = self._build_logprob_kwargs(request)
+        routed_experts_kwargs = (
+            self._routed_experts_kwargs
+            if _nvext_extra_field_requested(request, "routed_experts")
+            else {}
+        )
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
@@ -751,7 +756,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request,
                     thinking_budget_requested=thinking_budget_requested(request),
                 ),
-                **self._routed_experts_kwargs,
+                **routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -854,7 +859,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request,
                     thinking_budget_requested=thinking_budget_requested(request),
                 ),
-                **self._routed_experts_kwargs,
+                **routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
