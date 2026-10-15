@@ -2,27 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs one pytest stage inside a shared-test.yml job container.
+# Runs one pytest stage of a shared-test.yml job, inside the job container.
+# It replaces the former .github/actions/pytest-local composite action: loading
+# that action made the runner download the whole repository for every job, and
+# the k8s-novolume hook then copied it into the GPU pod file by file.
 #
-# This replaces the former composite action .github/actions/pytest-local. The
-# runner coordinator has to load a composite action's action.yml, and on the
-# k8s-novolume GPU runners the coordinator has no checkout. Referencing the
-# action with `$/` therefore made the runner download the whole repository into
-# _work before every test job, and the no-volume hook then copied all of _work
-# into the job pod and verified it file by file. A script run from the job
-# pod's checkout needs neither.
-#
-# Keep the test run a single shell step: each step in a `container:` job is a
-# separate exec into the job pod with significant fixed overhead.
-#
-# Inputs come from the step environment set in shared-test.yml; never
-# interpolate workflow expressions into this file (zizmor "template-injection").
-# Names and defaults match the former action inputs:
-#   PYTEST_MARKS CONTAINER_WORKSPACE TEST_SUITE_NAME TEST_TYPE PLATFORM_ARCH
-#   DYNAMO_TEST_FRAMEWORK JOB_CHECK_RUN_ID HF_TOKEN ENABLE_COVERAGE PARALLEL_MODE
-#   MAX_VRAM_GIB GPU_TESTS VERIFY_GPU PYTEST_DD_FLAKY_RETRY_ENABLED
-#   TRITON_ARTIFACTORY_USER TRITON_ARTIFACTORY_TOKEN DRY_RUN NVME_DIR
-#   REQUESTED_HF_HOME
+# Inputs come from the step environment; never interpolate workflow expressions
+# here (zizmor "template-injection"). Names and defaults match the old inputs.
 set -eo pipefail
 
 # Defaults apply only when the caller did not set a variable, as action input

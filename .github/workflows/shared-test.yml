@@ -315,17 +315,10 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
-      # Each test stage runs .github/scripts/pytest-local.sh from the checkout,
-      # then uploads its per-test logs (on failure), coverage and Allure results.
-      # These were the steps of the former pytest-local composite action. The
-      # runner coordinator has to load a composite action, which on the
-      # k8s-novolume GPU runners meant downloading the whole repository into
-      # _work for every job (`$/` syntax); the hook then copied it into the job pod.
-      #
-      # Allure results and coverage data are uploaded per stage, under the artifact
-      # names an external CI-metrics pipeline consumes. The stage's test type is the
-      # only part of those names that distinguishes the stages of one job, and
-      # upload-artifact rejects a duplicate name with a non-retryable 409.
+      # Test stages. Each runs .github/scripts/pytest-local.sh from the checkout,
+      # then uploads its coverage and Allure results under the per-stage artifact
+      # names an external CI-metrics pipeline consumes (upload-artifact rejects a
+      # duplicate name with a non-retryable 409).
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
@@ -344,23 +337,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: bash .github/scripts/pytest-local.sh
-      - name: Collect per-test log files (CPU-only)
-        if: ${{ !cancelled() && steps.cpu-only-tests.outcome == 'failure' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results/dynamo-tests-logs
-          if [ -d /tmp/dynamo_tests ]; then
-            cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
-          fi
-      - name: Upload per-test log files (CPU-only)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: ${{ !cancelled() && steps.cpu-only-tests.outcome == 'failure' }}
-        with:
-          name: dynamo-tests-logs-${{ inputs.test_suite_name }}-pre_merge_cpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/dynamo-tests-logs/
-          retention-days: 7
-          if-no-files-found: ignore
       - name: Upload Coverage Data (CPU-only)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.cpu-only-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
@@ -398,23 +374,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: bash .github/scripts/pytest-local.sh
-      - name: Collect per-test log files (CPU end-to-end)
-        if: ${{ !cancelled() && steps.cpu-e2e-tests.outcome == 'failure' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results/dynamo-tests-logs
-          if [ -d /tmp/dynamo_tests ]; then
-            cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
-          fi
-      - name: Upload per-test log files (CPU end-to-end)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: ${{ !cancelled() && steps.cpu-e2e-tests.outcome == 'failure' }}
-        with:
-          name: dynamo-tests-logs-${{ inputs.test_suite_name }}-pre_merge_cpu_e2e-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/dynamo-tests-logs/
-          retention-days: 7
-          if-no-files-found: ignore
       - name: Upload Coverage Data (CPU end-to-end)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.cpu-e2e-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
@@ -453,23 +412,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: bash .github/scripts/pytest-local.sh
-      - name: Collect per-test log files (GPU parallel)
-        if: ${{ !cancelled() && steps.gpu-parallel-tests.outcome == 'failure' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results/dynamo-tests-logs
-          if [ -d /tmp/dynamo_tests ]; then
-            cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
-          fi
-      - name: Upload per-test log files (GPU parallel)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: ${{ !cancelled() && steps.gpu-parallel-tests.outcome == 'failure' }}
-        with:
-          name: dynamo-tests-logs-${{ inputs.test_suite_name }}-pre_merge_gpu_parallel-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/dynamo-tests-logs/
-          retention-days: 7
-          if-no-files-found: ignore
       - name: Upload Coverage Data (GPU parallel)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.gpu-parallel-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
@@ -512,23 +454,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: bash .github/scripts/pytest-local.sh
-      - name: Collect per-test log files (GPU sequential)
-        if: ${{ !cancelled() && steps.gpu-sequential-tests.outcome == 'failure' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results/dynamo-tests-logs
-          if [ -d /tmp/dynamo_tests ]; then
-            cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
-          fi
-      - name: Upload per-test log files (GPU sequential)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: ${{ !cancelled() && steps.gpu-sequential-tests.outcome == 'failure' }}
-        with:
-          name: dynamo-tests-logs-${{ inputs.test_suite_name }}-pre_merge_gpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/dynamo-tests-logs/
-          retention-days: 7
-          if-no-files-found: ignore
       - name: Upload Coverage Data (GPU sequential)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.gpu-sequential-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
@@ -543,6 +468,25 @@ jobs:
         with:
           name: allure-results-${{ inputs.framework }}-pre_merge_gpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
           path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      # conftest.py's autouse `logger` fixture writes each test's full log to
+      # /tmp/dynamo_tests. Upload it once per job when any step failed.
+      - name: Collect per-test log files
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/dynamo-tests-logs
+          if [ -d /tmp/dynamo_tests ]; then
+            cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
+          fi
+      - name: Upload per-test log files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: dynamo-tests-logs-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/dynamo-tests-logs/
           retention-days: 7
           if-no-files-found: ignore
 
