@@ -386,6 +386,7 @@ impl PendingRequest {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             worker_loads,
+            busy_thresholds: Default::default(),
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             lora_name: None,

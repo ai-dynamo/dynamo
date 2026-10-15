@@ -5,7 +5,7 @@
 
 use super::SessionContext;
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
-use crate::scheduling::SchedulingRequest;
+use crate::scheduling::{BusyThresholds, SchedulingRequest};
 
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
@@ -36,6 +36,18 @@ impl WorkerSelectionContext<'_> {
     /// [`prompt_tokens`](Self::prompt_tokens) is zero.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
+    }
+
+    /// Busy thresholds of this request's policy class. The router queue held the request
+    /// while every eligible worker was past them; selection may still pick such a worker.
+    pub fn queue_thresholds(&self) -> BusyThresholds {
+        self.request.busy_thresholds.queue
+    }
+
+    /// Router-wide busy thresholds read at this selection. Workers past them are already
+    /// excluded from the candidates.
+    pub fn reject_thresholds(&self) -> BusyThresholds {
+        self.request.busy_thresholds.reject
     }
 
     /// Return the number of tokens in one KV block.

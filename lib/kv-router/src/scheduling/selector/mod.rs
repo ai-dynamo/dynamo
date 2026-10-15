@@ -220,7 +220,7 @@ fn cache_snapshot(request: &SchedulingRequest) -> CacheSnapshot<'_> {
 /// Build one worker's input row. Worker selection and request classification share this
 /// builder, so each input group carries the same values in both.
 #[inline(always)]
-fn worker_input_row(
+pub(crate) fn worker_input_row(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
@@ -570,6 +570,7 @@ mod test_support {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
+            busy_thresholds: Default::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,

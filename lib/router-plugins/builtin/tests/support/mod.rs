@@ -47,6 +47,7 @@ pub fn fixture(
         retain_kv_transfer_chain: false,
         shared_cache_hits: None,
         worker_loads: Default::default(),
+        busy_thresholds: Default::default(),
         resp_tx: None,
     };
     let workers = (0..count as u64).map(|id| (id, TestWorker)).collect();

@@ -600,6 +600,22 @@ fn collect_overloaded_workers(
         .collect()
 }
 
+/// Thresholds the monitor applies: none once a KV router's queue enforces them.
+struct MonitorThresholds {
+    handle: LoadThresholdHandle,
+    routed: Arc<AtomicBool>,
+}
+
+impl MonitorThresholds {
+    fn get(&self) -> LoadThresholdConfig {
+        if self.routed.load(Ordering::Acquire) {
+            LoadThresholdConfig::default()
+        } else {
+            self.handle.get()
+        }
+    }
+}
+
 /// Worker monitor for tracking KV cache usage and overload states.
 ///
 /// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
@@ -619,6 +635,9 @@ pub struct KvWorkerMonitor {
     /// means the corresponding check in `is_overloaded` is skipped. If all three are
     /// `None`, rejection is fully disabled.
     thresholds: LoadThresholdHandle,
+    /// Set once a KV router's queue enforces `thresholds` on its own booked load; the
+    /// monitor then derives no overloaded set from them.
+    thresholds_routed: Arc<AtomicBool>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
     start_lock: Arc<tokio::sync::Mutex<()>>,
@@ -651,6 +670,7 @@ impl KvWorkerMonitor {
             scheduler_load_rx: Arc::new(tokio::sync::Mutex::new(Some(scheduler_load_rx))),
             worker_load_states: Arc::new(DashMap::new()),
             thresholds,
+            thresholds_routed: Arc::new(AtomicBool::new(false)),
             started: Arc::new(AtomicBool::new(false)),
             start_lock: Arc::new(tokio::sync::Mutex::new(())),
             lifecycle: Arc::new(MonitorLifecycle {
@@ -658,6 +678,11 @@ impl KvWorkerMonitor {
                 task_guard,
             }),
         }
+    }
+
+    /// The flag a KV router sets when its queue takes over threshold enforcement.
+    pub(crate) fn thresholds_routed(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.thresholds_routed)
     }
 
     /// Returns true iff the user explicitly configured at least one threshold.
@@ -775,7 +800,10 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
         let source = self.source;
-        let thresholds = self.thresholds.clone();
+        let thresholds = MonitorThresholds {
+            handle: self.thresholds.clone(),
+            routed: self.thresholds_routed.clone(),
+        };
         let started = self.started.clone();
         let task_guard = self.lifecycle.task_guard.clone();
 
@@ -1136,13 +1164,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadObservation, LoadThresholdConfig, OverloadedWorkerTracker, RemoteActiveLoadSnapshot,
-        WORKER_LOAD_METRICS, WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
-        overload_reconciliation_needed, publish_overloaded_instances_if_needed,
+        LoadObservation, LoadThresholdConfig, LoadThresholdHandle, MonitorThresholds,
+        OverloadedWorkerTracker, RemoteActiveLoadSnapshot, WORKER_LOAD_METRICS, WorkerLoadState,
+        cleanup_worker_metrics, collect_overloaded_workers, overload_reconciliation_needed,
+        publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
     use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {
@@ -1575,6 +1606,23 @@ mod tests {
             Some(0.6),
         );
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+    }
+
+    #[test]
+    fn routed_monitor_applies_no_thresholds() {
+        let handle = LoadThresholdHandle::new(LoadThresholdConfig {
+            active_prefill_tokens_threshold_frac: Some(0.5),
+            ..Default::default()
+        });
+        let thresholds = MonitorThresholds {
+            handle: handle.clone(),
+            routed: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(thresholds.get(), handle.get());
+
+        thresholds.routed.store(true, Ordering::Release);
+        assert_eq!(thresholds.get(), LoadThresholdConfig::default());
+        assert!(handle.is_configured(), "the live handle keeps its values");
     }
 
     #[test]
