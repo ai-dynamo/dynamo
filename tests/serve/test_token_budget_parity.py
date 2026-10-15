@@ -23,6 +23,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 MODEL = "Qwen/Qwen3-0.6B"
 CONTEXT_LIMIT = 128
+SGLANG_KV_TOKENS = 2048
 
 
 @dataclass(frozen=True)
@@ -88,7 +89,7 @@ PARITY_SPECS = (
         marks=[
             pytest.mark.sglang,
             pytest.mark.profiled_vram_gib(8.0),
-            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.requested_sglang_kv_tokens(SGLANG_KV_TOKENS),
         ],
     ),
     pytest.param(
@@ -102,7 +103,7 @@ PARITY_SPECS = (
         marks=[
             pytest.mark.sglang,
             pytest.mark.profiled_vram_gib(8.0),
-            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.requested_sglang_kv_tokens(SGLANG_KV_TOKENS),
         ],
     ),
     pytest.param(
@@ -198,8 +199,17 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
             str(port),
             "--context-length",
             str(CONTEXT_LIMIT),
+            # Size the KV pool by token count, as build_sglang_gpu_mem_args in
+            # examples/common/gpu_utils.sh does for the Dynamo worker. With a
+            # low --mem-fraction-static alone, SGLang reserves slack from the
+            # free memory it saw before weight load; co-tenants that allocate
+            # during startup make the KV budget negative and SGLang exits -9.
+            "--max-total-tokens",
+            os.environ.get(
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS", str(SGLANG_KV_TOKENS)
+            ),
             "--mem-fraction-static",
-            "0.2",
+            "0.9",
             "--max-running-requests",
             "2",
             "--skip-server-warmup",
