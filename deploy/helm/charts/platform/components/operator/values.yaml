@@ -30,6 +30,16 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
+dgdrV1Beta2:
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
+  # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
+  # created through these schemas are persisted in etcd. Incompatible schema changes
+  # may make stored objects unreadable or block future CRD upgrades. When false, the
+  # CRD init container omits those resources and removes v1beta2 from
+  # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
+  # v1beta2 resources.
+  enabled: false
+
 # Environment variables to pass to operator Deployment.
 env: []
 
@@ -52,6 +62,21 @@ gpuDiscovery:
 controllerManager:
   tolerations: []
   affinity: {}
+  # Soft spread of controller-manager replicas across nodes (ScheduleAnyway
+  # never blocks small clusters). Hostname-only on purpose: bare-metal nodes
+  # without zone labels would otherwise be excluded from spread scoring. Set []
+  # to restore scheduler defaults; add a zone constraint for zoned clusters.
+  #
+  # matchLabelKeys is deliberately omitted: pod-spec rewriters that inject
+  # pod-template-hash into the labelSelector (e.g. vcluster's syncer) fail
+  # the API validation forbidding matchLabelKeys/labelSelector overlap.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          control-plane: controller-manager
 
   # -- Extra labels to add to the controller-manager pod template.
   # Useful for unified service tagging conventions

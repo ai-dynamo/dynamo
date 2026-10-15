@@ -47,6 +47,18 @@ deny_globs:
   - "**/libswresample-*.so*"
   - "**/libpostproc.so*"
   - "**/libpostproc-*.so*"
+  # Our in-tree build carries --build-suffix=_dynamo so its SONAMEs cannot collide
+  # with the FFmpeg a wheel vendors (see wheel_builder.Dockerfile). The suffix is
+  # part of the library name, so none of the globs above reach it, and each
+  # suffixed family needs the same plain and auditwheel hash-renamed pair.
+  # allow_paths re-permits ours by path prefix, so a third-party suffixed library
+  # still fails.
+  - "**/libav*_dynamo.so*"
+  - "**/libav*_dynamo-*.so*"
+  - "**/libsw*_dynamo.so*"
+  - "**/libsw*_dynamo-*.so*"
+  - "**/libpostproc_dynamo.so*"
+  - "**/libpostproc_dynamo-*.so*"
   # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own copy
   # at /usr/local/bin/ffmpeg is re-permitted by allow_paths below.
   - "**/bin/ffmpeg"
@@ -59,7 +71,7 @@ deny_globs:
 # ffmpeg maintenance releases.
 deny_components:
   - name: ffmpeg
-    min_fixed_version: "8.1.2"
+    min_fixed_version: "9.0.1"
   - name: x264
   - name: x265
   - name: fdk-aac

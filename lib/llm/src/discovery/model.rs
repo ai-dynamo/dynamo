@@ -6,9 +6,10 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use arc_swap::ArcSwap;
 use rand::Rng;
 use serde::Serialize;
 
@@ -98,18 +99,33 @@ struct NamespaceReadinessEval {
     ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
 }
 
+type WorkerSetMap = HashMap<String, Arc<WorkerSet>>;
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
-    worker_sets: DashMap<String, Arc<WorkerSet>>,
+    /// Copy-on-write membership. Membership changes only on discovery events, while the
+    /// request path reads it several times per request, so readers load the current map
+    /// without writing shared state and writers publish a modified copy.
+    worker_sets: ArcSwap<WorkerSetMap>,
+    update_lock: parking_lot::Mutex<()>,
 }
 
 impl Model {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            worker_sets: DashMap::new(),
+            worker_sets: ArcSwap::from_pointee(WorkerSetMap::new()),
+            update_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    fn update_worker_sets<R>(&self, update: impl FnOnce(&mut WorkerSetMap) -> R) -> R {
+        let _guard = self.update_lock.lock();
+        let mut worker_sets = WorkerSetMap::clone(&self.worker_sets.load());
+        let result = update(&mut worker_sets);
+        self.worker_sets.store(Arc::new(worker_sets));
+        result
     }
 
     pub fn name(&self) -> &str {
@@ -123,25 +139,28 @@ impl Model {
             namespace = %namespace,
             "Adding worker set to model"
         );
-        self.worker_sets.insert(namespace, worker_set);
+        self.update_worker_sets(|worker_sets| {
+            worker_sets.insert(namespace, worker_set);
+        });
     }
 
     /// Check whether a candidate checksum is compatible with an existing WorkerSet
     /// identified by `ws_key`.
     pub fn is_checksum_compatible(&self, ws_key: &str, candidate_checksum: &str) -> bool {
-        match self.worker_sets.get(ws_key) {
+        match self.worker_sets.load().get(ws_key) {
             Some(existing_ws) => existing_ws.mdcsum() == candidate_checksum,
             None => true,
         }
     }
 
     pub fn remove_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
-        let removed = self.worker_sets.remove(namespace).map(|(_, ws)| ws);
+        let (removed, remaining_sets) = self
+            .update_worker_sets(|worker_sets| (worker_sets.remove(namespace), worker_sets.len()));
         if removed.is_some() {
             tracing::info!(
                 model = %self.name,
                 namespace = %namespace,
-                remaining_sets = self.worker_sets.len(),
+                remaining_sets,
                 "Removed worker set from model"
             );
         }
@@ -149,150 +168,156 @@ impl Model {
     }
 
     pub fn has_worker_set(&self, namespace: &str) -> bool {
-        self.worker_sets.contains_key(namespace)
+        self.worker_sets.load().contains_key(namespace)
     }
 
     pub fn get_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
-        self.worker_sets
-            .get(namespace)
-            .map(|entry| entry.value().clone())
+        self.worker_sets.load().get(namespace).cloned()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.worker_sets.is_empty()
+        self.worker_sets.load().is_empty()
     }
 
     pub fn worker_set_count(&self) -> usize {
-        self.worker_sets.len()
+        self.worker_sets.load().len()
     }
 
     /// Snapshot all WorkerSets. Used by cross-role lifecycle coordination
     /// where storage keys include role/surface suffixes but deployment
     /// matching is based on `WorkerSet::namespace()`.
     pub(crate) fn worker_sets(&self) -> Vec<Arc<WorkerSet>> {
-        self.worker_sets
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
+        self.worker_sets.load().values().cloned().collect()
     }
 
     /// Build an immutable membership snapshot for request-plane publication.
     ///
     /// WorkerSets themselves are shared because their engines and routing lifecycle are
-    /// long-lived. The membership map is copied so later discovery mutations cannot leak
-    /// through an older published catalog.
+    /// long-lived. The membership map is shared too: discovery mutations publish a new map,
+    /// so they cannot leak through an older published catalog.
     pub(crate) fn snapshot(&self) -> Self {
-        let snapshot = Self::new(self.name.clone());
-        for entry in &self.worker_sets {
-            snapshot
-                .worker_sets
-                .insert(entry.key().clone(), entry.value().clone());
+        Self {
+            name: self.name.clone(),
+            worker_sets: ArcSwap::new(self.worker_sets.load_full()),
+            update_lock: parking_lot::Mutex::new(()),
         }
-        snapshot
     }
 
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_decode_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_decode_engine())
     }
 
     /// Check if this model tracks prefill (any WorkerSet is a prefill set).
     pub fn has_prefill(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().is_prefill_set())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.is_prefill_set())
     }
 
     /// Check if any WorkerSet has a chat engine.
     pub fn has_chat_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_chat_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_chat_engine())
     }
 
     /// Check if any WorkerSet has a completions engine.
     pub fn has_completions_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_completions_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_completions_engine())
     }
 
     /// Check if any WorkerSet has an embeddings engine.
     pub fn has_embeddings_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_embeddings_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_embeddings_engine())
     }
 
     /// Check if any WorkerSet has a classify engine.
     pub fn has_classify_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_classify_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_classify_engine())
     }
 
     /// Check if any WorkerSet has a pooling engine.
     pub fn has_pooling_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_pooling_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_pooling_engine())
     }
 
     /// Check if any WorkerSet has a rerank engine.
     pub fn has_rerank_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_rerank_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_rerank_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
     pub fn has_tensor_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_tensor_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_tensor_engine())
     }
 
     /// Check if any WorkerSet has an images engine.
     pub fn has_images_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_images_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_images_engine())
     }
 
     /// Check if any WorkerSet has a videos engine.
     pub fn has_videos_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_videos_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_videos_engine())
     }
 
     /// Check if any WorkerSet has an audios engine.
     pub fn has_audios_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_audios_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_audios_engine())
     }
 
     /// Check if any WorkerSet has a realtime engine.
     pub fn has_realtime_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_realtime_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_realtime_engine())
     }
 
     /// Check if any WorkerSet has a generate engine.
     pub fn has_generate_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_generate_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_generate_engine())
     }
 
     /// Check whether a Generate worker also advertises `capability`.
     pub fn has_generate_engine_for_capability(&self, capability: &str) -> bool {
-        self.worker_sets.iter().any(|entry| {
-            let worker_set = entry.value();
+        self.worker_sets.load().values().any(|worker_set| {
             worker_set.has_generate_engine() && worker_set.supports_runtime_capability(capability)
         })
     }
@@ -310,14 +335,25 @@ impl Model {
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one deployment of the model.
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
-        let mut ns: Vec<String> = self
-            .worker_sets
-            .iter()
-            .map(|entry| entry.value().namespace().to_string())
-            .collect();
-        ns.sort();
-        ns.dedup();
-        ns
+        Self::sorted_namespaces(&self.worker_sets.load())
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn sorted_namespaces(worker_sets: &WorkerSetMap) -> Vec<&str> {
+        let mut namespaces: Vec<&str> = worker_sets.values().map(|ws| ws.namespace()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        namespaces
+    }
+
+    fn sets_in_namespace<'a>(worker_sets: &'a WorkerSetMap, namespace: &str) -> Vec<&'a WorkerSet> {
+        worker_sets
+            .values()
+            .map(Arc::as_ref)
+            .filter(|ws| ws.namespace() == namespace)
+            .collect()
     }
 
     /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
@@ -353,13 +389,12 @@ impl Model {
     /// TODO(v1.5): Remove this branch with the legacy MDC topology shims after
     /// the v1.2 compatibility window expires.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
-        let wsets: Vec<Arc<WorkerSet>> = self
-            .worker_sets
-            .iter()
-            .filter(|entry| entry.value().namespace() == namespace)
-            .map(|entry| entry.value().clone())
-            .collect();
-        self.evaluate_namespace(&wsets).ready
+        self.namespace_ready(&self.worker_sets.load(), namespace)
+    }
+
+    fn namespace_ready(&self, worker_sets: &WorkerSetMap, namespace: &str) -> bool {
+        self.evaluate_namespace(&Self::sets_in_namespace(worker_sets, namespace))
+            .ready
     }
 
     /// Evaluate readiness for one namespace's WorkerSets — the shared check
@@ -371,7 +406,7 @@ impl Model {
     /// WorkerSet's needs are ignored (a live sibling of the same type carries
     /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
     /// check: ready iff any worker is live. Empty `wsets` is not ready.
-    fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
+    fn evaluate_namespace(&self, wsets: &[&WorkerSet]) -> NamespaceReadinessEval {
         let units = wsets
             .iter()
             .map(|ws| match Self::ws_type_and_needs(ws) {
@@ -404,9 +439,11 @@ impl Model {
     /// Return the namespace identifier of the first ready set of workers (in
     /// sorted order), or `None` if none are ready.
     pub fn first_ready_workers(&self) -> Option<String> {
-        self.distinct_namespaces_sorted()
+        let worker_sets = self.worker_sets.load();
+        Self::sorted_namespaces(&worker_sets)
             .into_iter()
-            .find(|ns| self.is_workers_ready(ns))
+            .find(|ns| self.namespace_ready(&worker_sets, ns))
+            .map(str::to_string)
     }
 
     /// Whether at least one namespace's worker set in this model is ready to
@@ -423,14 +460,10 @@ impl Model {
     /// this method only layers display data (per-type counts, reason strings).
     pub fn namespace_readiness(&self) -> ModelReadiness {
         let mut namespaces = std::collections::BTreeMap::new();
+        let worker_sets = self.worker_sets.load();
 
-        for ns in self.distinct_namespaces_sorted() {
-            let wsets: Vec<Arc<WorkerSet>> = self
-                .worker_sets
-                .iter()
-                .filter(|entry| entry.value().namespace() == ns)
-                .map(|entry| entry.value().clone())
-                .collect();
+        for ns in Self::sorted_namespaces(&worker_sets) {
+            let wsets = Self::sets_in_namespace(&worker_sets, ns);
 
             // Authoritative readiness facts (shared with the serving gate).
             let eval = self.evaluate_namespace(&wsets);
@@ -493,7 +526,7 @@ impl Model {
             };
 
             namespaces.insert(
-                ns.clone(),
+                ns.to_string(),
                 NamespaceReadiness {
                     ready: eval.ready,
                     reason,
@@ -538,13 +571,12 @@ impl Model {
 
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
-        let any_set_has_engine = self
-            .worker_sets
-            .iter()
-            .any(|entry| entry.value().has_any_serving_engine());
+        let worker_sets = self.worker_sets.load();
+        let any_set_has_engine = worker_sets
+            .values()
+            .any(|worker_set| worker_set.has_any_serving_engine());
 
-        self.worker_sets.iter().any(|entry| {
-            let ws = entry.value();
+        worker_sets.values().any(|ws| {
             if ws.worker_count() == 0 {
                 return false;
             }
@@ -697,8 +729,8 @@ impl Model {
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
         let mut result = None;
-        for entry in self.worker_sets.iter() {
-            if let Some(ref thresholds) = entry.value().load_thresholds {
+        for worker_set in self.worker_sets.load().values() {
+            if let Some(ref thresholds) = worker_set.load_thresholds {
                 if let Some(cfg) = config {
                     thresholds.update(cfg);
                 }
@@ -713,8 +745,9 @@ impl Model {
     /// Total worker count across all WorkerSets.
     pub fn total_workers(&self) -> usize {
         self.worker_sets
-            .iter()
-            .map(|entry| entry.value().worker_count())
+            .load()
+            .values()
+            .map(|worker_set| worker_set.worker_count())
             .sum()
     }
 
@@ -746,15 +779,11 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
-        // One snapshot drives both the readiness filter and candidate
-        // eligibility, so a concurrent add/remove can't make us treat a
-        // namespace as complete while routing to a set that lost a peer. It also
-        // avoids re-entering the DashMap mid-iteration, which can deadlock.
-        let snapshot: Vec<Arc<WorkerSet>> = self
-            .worker_sets
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
+        // One immutable membership map drives both the readiness filter and
+        // candidate eligibility, so a concurrent add/remove can't make us treat a
+        // namespace as complete while routing to a set that lost a peer.
+        let worker_sets = self.worker_sets.load();
+        let snapshot: Vec<&WorkerSet> = worker_sets.values().map(Arc::as_ref).collect();
 
         // Namespaces whose worker set is complete, evaluated against the snapshot.
         let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
@@ -763,10 +792,10 @@ impl Model {
         let ready_namespaces: std::collections::HashSet<&str> = namespaces
             .into_iter()
             .filter(|ns| {
-                let in_ns: Vec<Arc<WorkerSet>> = snapshot
+                let in_ns: Vec<&WorkerSet> = snapshot
                     .iter()
                     .filter(|ws| ws.namespace() == *ns)
-                    .cloned()
+                    .copied()
                     .collect();
                 self.evaluate_namespace(&in_ns).ready
             })
@@ -774,7 +803,7 @@ impl Model {
 
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
-            let ws = &snapshot[0];
+            let ws = snapshot[0];
             if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
@@ -787,7 +816,7 @@ impl Model {
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
-            .filter_map(|ws| {
+            .filter_map(|&ws| {
                 let count = ws.worker_count();
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
@@ -929,6 +958,22 @@ mod tests {
 
         let removed_again = model.remove_worker_set("ns1");
         assert!(removed_again.is_none());
+    }
+
+    #[test]
+    fn snapshot_is_isolated_from_later_membership_changes() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        let snapshot = model.snapshot();
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
+        model.remove_worker_set("ns1");
+
+        assert_eq!(snapshot.worker_set_count(), 1);
+        assert!(snapshot.has_worker_set("ns1"));
+        assert!(!snapshot.has_worker_set("ns2"));
+        assert_eq!(model.worker_set_count(), 1);
+        assert!(model.has_worker_set("ns2"));
     }
 
     #[test]
