@@ -278,6 +278,8 @@ def collect(
                 text = "\n\n".join(dict.fromkeys(x[1] for x in candidates))
                 source = f"https://github.com/astral-sh/uv/tree/{min(versions)}"
             else:
+                if a.get("metadata", {}).get("source") != "crates.io":
+                    raise ValueError(f"unrecognized Rust source for {name}@{version}")
                 meta_url = (
                     "https://crates.io/api/v1/crates/"
                     f"{name}/{urllib.parse.quote(version, safe='')}"
