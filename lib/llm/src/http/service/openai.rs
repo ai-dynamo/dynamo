@@ -1112,6 +1112,21 @@ where
     Ok(request)
 }
 
+/// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
+///
+/// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
+/// (`attach_agent_context_from_context`). Native generate routes skip the preprocessor, yet the
+/// router's request classifier (e.g. ThunderAgent) reads the session only from the request field,
+/// so without this every native generate request is classified as session-less.
+pub(super) fn preprocessed_context_from_headers(
+    mut request: crate::preprocessor::PreprocessedRequest,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<crate::preprocessor::PreprocessedRequest>, ErrorResponse> {
+    request.agent_context = agent_context_from_headers(headers);
+    context_from_headers(request, request_id, headers)
+}
+
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
@@ -6585,6 +6600,56 @@ mod tests {
             agent_context.agent_headers["x-codex-turn-metadata"],
             [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
+    }
+
+    #[test]
+    fn test_preprocessed_context_from_headers_attaches_agent_context_to_request() {
+        let request = || {
+            crate::preprocessor::PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
+        headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+        let context =
+            preprocessed_context_from_headers(request(), "request-1".to_string(), &headers)
+                .unwrap();
+
+        // The router reads the request field; the context key must carry the same identity.
+        let on_request = context
+            .content()
+            .agent_context
+            .clone()
+            .expect("request agent_context");
+        assert_eq!(on_request.session_id, "session-123");
+        assert_eq!(on_request.parent_session_id.as_deref(), Some("parent-456"));
+        assert_eq!(on_request.session_final, Some(true));
+        let in_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("context agent_context");
+        assert_eq!(in_context.session_id, on_request.session_id);
+        assert!(
+            context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .is_ok(),
+            "session affinity still keyed from the same headers"
+        );
+
+        let context = preprocessed_context_from_headers(
+            request(),
+            "request-2".to_string(),
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert!(context.content().agent_context.is_none());
     }
 
     #[test]
