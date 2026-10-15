@@ -390,9 +390,10 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 	return nil
 }
 
-// usesSupportedDynamoRestoreEntrypoint recognizes direct Python module
-// invocations (python -m <module>); the module name is not restricted. Shell and
-// custom wrappers are rejected because admission cannot prove they honor it.
+// usesSupportedDynamoRestoreEntrypoint reports whether the container directly
+// runs `python -m <module>`. The module is not inspected. Shell and other
+// non-python launchers are rejected because admission cannot prove they honor
+// SNAPSHOT_RESTORE_STANDBY.
 func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 	if len(container.Command) == 0 {
 		return false
@@ -415,7 +416,9 @@ func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 		return false
 	}
 
-	return true
+	// An empty or option-like token is not a module name and fails at startup.
+	module := arguments[moduleFlagIndex+1]
+	return module != "" && !strings.HasPrefix(module, "-")
 }
 
 // isOperandFreePythonInterpreterFlag recognizes options that cannot consume

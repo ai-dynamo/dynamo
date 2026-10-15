@@ -398,6 +398,14 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 			command:   []string{"python3", "-m", "dynamo.frontend"},
 			supported: true,
 		},
+		{
+			name:    "empty module name",
+			command: []string{"python3", "-m", ""},
+		},
+		{
+			name:    "option-like module name",
+			command: []string{"python3", "-m", "-c"},
+		},
 	}
 
 	for _, test := range tests {
@@ -405,7 +413,7 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 			t.Log("Given a restore destination with an explicit container entrypoint")
 			container := &corev1.Container{Command: test.command, Args: test.args}
 
-			t.Log("Then any direct python -m invocation is accepted")
+			t.Log("Then only a direct python -m <module> invocation is accepted")
 			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container))
 		})
 	}
