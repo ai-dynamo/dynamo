@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="580" viewBox="0 0 1000 580" role="img" aria-labelledby="title description">
+  <title id="title">Offline batch inference through the Dynamo frontend</title>
+  <desc id="description">Client and DGD frontend are on the left. The frontend proxies files and batches to an internal Batch API. A batch processor sends work to Async, which submits chat completions back to the same frontend. The frontend routes inference to workers.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="return-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0369a1"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="580" fill="#ffffff"/>
+  <rect x="570" y="125" width="400" height="415" rx="20" fill="#f1f5f9"/>
+  <g fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)">
+    <path d="M 170 100 V 150"/>
+    <path d="M 300 190 H 600"/>
+    <path d="M 170 260 V 390"/>
+    <path d="M 765 240 V 295"/>
+    <path d="M 765 375 V 430"/>
+  </g>
+  <path d="M 600 470 H 380 V 235 H 300" fill="none" stroke="#0369a1" stroke-width="2.5" marker-end="url(#return-arrow)"/>
+  <g stroke="#94a3b8" stroke-width="1.5">
+    <rect x="40" y="30" width="260" height="70" rx="14" fill="#f8fafc"/>
+    <rect x="40" y="150" width="260" height="110" rx="14" fill="#e0f2fe" stroke="#0284c7"/>
+    <rect x="40" y="390" width="260" height="90" rx="14" fill="#e0f2fe" stroke="#0284c7"/>
+    <rect x="600" y="160" width="330" height="80" rx="14" fill="#ffffff"/>
+    <rect x="600" y="295" width="330" height="80" rx="14" fill="#ffffff"/>
+    <rect x="600" y="430" width="330" height="80" rx="14" fill="#ffffff"/>
+  </g>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#0f172a" text-anchor="middle">
+    <g font-size="22" font-weight="600">
+      <text x="170" y="73">Client</text>
+      <text x="170" y="196">DGD frontend</text>
+      <text x="170" y="443">Inference workers</text>
+      <text x="765" y="208">Internal Batch API</text>
+      <text x="765" y="343">Batch processor</text>
+      <text x="765" y="478">Async dispatch</text>
+    </g>
+    <g font-size="15">
+      <text x="170" y="226">One client-facing API surface</text>
+      <text x="450" y="178">/v1/files · /v1/batches</text>
+      <text x="190" y="330" text-anchor="start">Normal inference routing</text>
+      <text x="765" y="146" fill="#475569">Internal batch services for this DGD</text>
+      <text x="485" y="330" fill="#0369a1">Internal inference</text>
+      <text x="485" y="353" fill="#0369a1">/v1/chat/completions</text>
+      <text x="500" y="567" fill="#475569">Async returns through the frontend; it does not call inference workers directly.</text>
+    </g>
+  </g>
+</svg>

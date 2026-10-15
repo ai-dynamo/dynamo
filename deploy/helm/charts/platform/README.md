@@ -62,6 +62,16 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### CRD and admission breaking changes
 
+##### Complete health probes
+
+**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only probes and probes with multiple handlers. An authored probe replaces the applicable operator default as a complete value.
+
+**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main containers, sidecars, and role templates.
+
+**Action:** Before upgrading, supply a complete handler with any custom timing settings, or omit the probe to use the applicable operator default.
+
+**Existing deployments:** Installing the CRDs does not rewrite stored probes. Correct invalid probes before the next specification update; new and updated manifests must satisfy the validation rules.
+
 ##### Reserved runtime init container name
 
 **Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
@@ -355,6 +365,7 @@ Kubernetes: `>=1.30.0-0`
 | global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
+| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2 API schemas. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. The operator does not reconcile v1beta2 resources. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |

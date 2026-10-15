@@ -185,6 +185,9 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'http://localhost:9000' || '' }}
+        DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'minioadmin' || '' }}
+        DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'minioadmin' || '' }}
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
@@ -314,6 +317,19 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
+
+      - name: Wait for MinIO before vLLM artifact tests
+        if: ${{ inputs.framework == 'vllm' && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
+        shell: bash
+        run: |
+          for ((attempt = 0; attempt < 30; attempt++)); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::MinIO was not ready before vLLM CPU tests"
+          exit 1
 
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
