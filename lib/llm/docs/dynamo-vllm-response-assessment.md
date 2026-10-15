@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # Pinned upstream vLLM response assessment
 
 Use [vllm-response-openapi.json](../../../scripts/protocol_compatibility/frameworks/vllm-response-openapi.json)
-for new request/response assessments. It pins `7cd7982dfda0d29c68f73c54cd343b674b290a47`,
-the latest vLLM `main` observed on 2026-10-15, rather than a moving branch or release
-tag. This revision includes the merged response-schema change
+for new request/response assessments. It pins `338dab077c187e1bd421c4624af1169f95f60e06`,
+the source of the latest cu130 nightly wheel observed on 2026-10-15, rather than
+the moving `nightly` alias. This revision includes the merged response-schema change
 [#60926](https://github.com/vllm-project/vllm/pull/60926).
 
 The selected source registers unary JSON and SSE contracts for
@@ -20,12 +20,19 @@ Select `event-schema` explicitly. Do not treat this as the historical OpenAPI 3.
 
 ## Qualification boundary
 
-The pin and response registration were checked against upstream source. A fresh
-production-app capture, upstream runtime tests, paired inference and a new full
-assessment have **not** been run for this revision. Matching precompiled wheel
-indexes were unavailable when this pin was selected. No kernel build, installed
-environment, model configuration, capture checksum or finding count is carried
-forward from an older revision.
+The upstream nightly wheel produced a fresh HTTP 200 capture through the production
+app's in-process `/openapi.json` route, without entering lifespan. The document has
+400 component schemas, 23 paths and 642 locally resolved reference occurrences.
+Both unary responses and SSE event envelopes were checked. CUDA remained
+uninitialized; no engine or model was started. The profile records the raw-byte
+checksum and immutable wheel URL/hash. Loaded Python source was checked against
+the pinned checkout, excluding generated `_version.py` (438 matching modules).
+
+The earlier source-only pin `7cd7982dfda0` had no matching wheel at selection.
+The available nightly resolves to its immediate parent `338dab077c18`; source and
+binary pins now agree. This is fresh evidence, not a relabeled historical capture.
+Upstream runtime tests, paired inference and a new full assessment remain **not
+run**. Importing native libraries does not establish kernel execution coverage.
 
 The recipe's synthetic integration tests exercise these selectors through the
 generic adapter and comparator. They do not validate the current vLLM app or prove
@@ -33,10 +40,11 @@ that a particular installation produces the expected schema.
 
 ## Prepare inputs
 
-1. Build/install the exact profile revision, using its own dependency requirements
-   and either matching native artifacts or a recorded source build. Do not let an
-   installer silently substitute another commit's precompiled wheel. Retain source
-   status, build commands, wheel hashes and the installed dependency freeze.
+1. On Linux x86_64 with Python 3.12, install the exact wheel from the profile using
+   the commands below. The [dependency snapshot](../../../scripts/protocol_compatibility/frameworks/vllm-response-constraints.txt)
+   records the capture environment; it is not a serving compatibility guarantee.
+   Do not let an installer silently substitute another commit's wheel. Retain
+   source identity, install commands, wheel hashes and the resulting package freeze.
 2. Obtain its complete OpenAPI document. A production-app ASGI capture without
    lifespan can collect declarations without loading a model; label it as such,
    not as a running inference-server capture. An HTTP capture from a deployment
@@ -49,6 +57,26 @@ that a particular installation produces the expected schema.
    the [generic instructions](../../../scripts/protocol_compatibility/README.md).
    Retain its exact source independently. Schema-only comparison does not establish
    that Dynamo can serve with this vLLM revision.
+
+```sh
+PROFILE=scripts/protocol_compatibility/frameworks/vllm-response-openapi.json
+CONSTRAINTS=scripts/protocol_compatibility/frameworks/vllm-response-constraints.txt
+uv venv --python 3.12 .venv-vllm-schema
+WHEEL_URL=$(jq -r '.wheel.url' "$PROFILE")
+WHEEL_SHA256=$(jq -r '.wheel.sha256' "$PROFILE")
+uv pip install --python .venv-vllm-schema/bin/python --torch-backend=cu130 \
+  -c "$CONSTRAINTS" "${WHEEL_URL}#sha256=${WHEEL_SHA256}"
+uv pip check --python .venv-vllm-schema/bin/python
+```
+
+For schema-only capture, use the pinned upstream
+[production-app schema test](https://github.com/vllm-project/vllm/blob/338dab077c187e1bd421c4624af1169f95f60e06/tests/entrypoints/openai/test_openai_schema.py#L32-L63)
+as the app configuration: `build_app(args, supported_tasks=("generate",))`, then
+`TestClient(app).get("/openapi.json")`. Do not enter the client's context manager;
+that starts lifespan. Close the client afterward. Keep `CUDA_VISIBLE_DEVICES` and
+`VLLM_PLUGINS` empty and set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
+Import from the installed wheel, not an uninstalled source checkout. Dependencies
+and enabled routes affect the document, so verify each new capture independently.
 
 ## Select the source-qualified SSE interpretation
 
