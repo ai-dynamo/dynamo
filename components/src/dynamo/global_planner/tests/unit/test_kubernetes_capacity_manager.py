@@ -86,7 +86,7 @@ def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
     connector = MagicMock()
     connector.parent_dgd_name = parent_dgd_name
-    connector.set_component_replicas = AsyncMock()
+    connector.set_component_replicas = AsyncMock(return_value=True)
     connector.wait_for_deployment_ready = AsyncMock()
     connector.kube_api = MagicMock()
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
@@ -225,7 +225,9 @@ async def test_scale_calls_connector():
     targets = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3)
     ]
-    await cm.scale("default/my-dgd", targets, blocking=True)
+    accepted = await cm.scale("default/my-dgd", targets, blocking=True)
+
+    assert accepted
     connector.set_component_replicas.assert_awaited_once_with(targets, blocking=True)
 
 

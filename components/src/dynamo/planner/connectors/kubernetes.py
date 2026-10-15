@@ -82,7 +82,7 @@ class _ReplicaTargetCommittedConflict(ApiException):
 
 
 class _ReplicaAuthorityChanged(ApiException):
-    """A committed write targeted an object that is no longer authoritative."""
+    """The selected replica authority disappeared before the write committed."""
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,9 @@ class _ReplicaUpdateTracker:
                 raise RuntimeError(
                     "replica update stopped after partial application; refusing to retry"
                 ) from error
-            raise
+            raise RuntimeError(
+                "replica authority changed during update; refusing to retry"
+            ) from error
         except (
             AmbiguousKubernetesWriteError,
             _ReplicaTargetCommittedConflict,
@@ -1117,13 +1119,14 @@ class KubernetesConnector(PlannerConnector):
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
-    ):
+    ) -> bool:
         """Set the replicas for multiple components at once"""
         if not target_replicas:
             raise EmptyTargetReplicasError()
 
         unset_uid = object()
         expected_uid: object = unset_uid
+        retry_authorities: list[tuple[str, bool, str | None]] = []
         startup_reductions = _StartupReductionTracker()
         transaction = _ReplicaUpdateTracker()
 
@@ -1137,7 +1140,11 @@ class KubernetesConnector(PlannerConnector):
                 startup_reductions.clear()
                 raise RuntimeError("DGD identity changed during replica update retry")
             should_wait = self._set_component_replicas_once(
-                deployment, target_replicas, startup_reductions, transaction
+                deployment,
+                target_replicas,
+                startup_reductions,
+                transaction,
+                retry_authorities,
             )
             if not should_wait and transaction.possibly_applied:
                 raise RuntimeError(
@@ -1153,6 +1160,7 @@ class KubernetesConnector(PlannerConnector):
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )
+        return should_wait
 
     def _set_component_replicas_once(
         self,
@@ -1160,6 +1168,7 @@ class KubernetesConnector(PlannerConnector):
         target_replicas: list[TargetReplica],
         startup_reductions: _StartupReductionTracker,
         transaction: _ReplicaUpdateTracker,
+        retry_authorities: list[tuple[str, bool, str | None]],
     ) -> bool:
         """Validate and apply one conflict-free replica update attempt."""
         deployment_ready = self.kube_api.is_deployment_ready(deployment)
@@ -1185,6 +1194,16 @@ class KubernetesConnector(PlannerConnector):
                 )
                 return False
             raise
+        current_authorities = [
+            self._replica_authority_identity(plan.service, plan.scaling_adapter)
+            for plan in plans
+        ]
+        if not retry_authorities:
+            retry_authorities.extend(current_authorities)
+        elif current_authorities != retry_authorities:
+            raise RuntimeError(
+                "component identity or replica authority changed during retry"
+            )
         mutations = [
             plan
             for plan in plans
@@ -1584,6 +1603,20 @@ class KubernetesConnector(PlannerConnector):
             return "DGDSA Planner writer fence is missing or owned by another writer"
         return None
 
+    @staticmethod
+    def _replica_authority_identity(
+        service: Service, scaling_adapter: dict | None
+    ) -> tuple[str, bool, str | None]:
+        """Return the component and immutable identity of its replica authority."""
+        if scaling_adapter is None:
+            return service.name, False, None
+        uid = (scaling_adapter.get("metadata", {}) or {}).get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise ValueError(
+                f"DGDSA metadata.uid for component {service.name!r} is unavailable"
+            )
+        return service.name, True, uid
+
     def _change_component_replicas(
         self,
         sub_component_type: SubComponentType,
@@ -1593,9 +1626,10 @@ class KubernetesConnector(PlannerConnector):
         unset_uid = object()
         expected_uid: object = unset_uid
         attempted_component: str | None = None
+        expected_authority: tuple[str, bool, str | None] | None = None
 
         def write() -> bool:
-            nonlocal attempted_component, expected_uid
+            nonlocal attempted_component, expected_authority, expected_uid
             current_deployment = self.kube_api.get_graph_deployment(
                 self.graph_deployment_name
             )
@@ -1617,6 +1651,13 @@ class KubernetesConnector(PlannerConnector):
             current_replicas, current_adapter = self._authoritative_replica_state(
                 current_deployment, current_service
             )
+            current_authority = self._replica_authority_identity(
+                current_service, current_adapter
+            )
+            if expected_authority is None:
+                expected_authority = current_authority
+            elif current_authority != expected_authority:
+                raise RuntimeError("replica authority identity changed during retry")
             replicas = current_replicas + delta
             if replicas < 0:
                 return False
@@ -1628,9 +1669,12 @@ class KubernetesConnector(PlannerConnector):
                     replicas,
                     current_adapter,
                 )
+            except _ReplicaAuthorityChanged as error:
+                raise RuntimeError(
+                    "replica authority changed during update; refusing to retry"
+                ) from error
             except (
                 AmbiguousKubernetesWriteError,
-                _ReplicaAuthorityChanged,
                 _ReplicaTargetCommittedConflict,
             ) as error:
                 raise RuntimeError(
@@ -1687,7 +1731,7 @@ class KubernetesConnector(PlannerConnector):
             )
             if rejection is None:
                 raise
-            raise ApiException(status=409, reason=rejection) from error
+            raise _ReplicaAuthorityChanged(status=409, reason=rejection) from error
 
         # DGDSA and DGD are separate objects. Verify that the parent snapshot
         # still assigns authority to the adapter after the Scale PATCH.
@@ -1702,10 +1746,6 @@ class KubernetesConnector(PlannerConnector):
                 reason="DGD authority could not be verified after DGDSA Scale PATCH committed",
             ) from error
         if rejection is not None:
-            expected_uid = (deployment.get("metadata", {}) or {}).get("uid")
-            current_uid = (refreshed.get("metadata", {}) or {}).get("uid")
-            if isinstance(expected_uid, str) and current_uid == expected_uid:
-                raise _ReplicaAuthorityChanged(status=409, reason=rejection)
             raise _ReplicaTargetCommittedConflict(status=409, reason=rejection)
 
     @staticmethod

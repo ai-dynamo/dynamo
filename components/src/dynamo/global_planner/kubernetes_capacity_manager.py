@@ -297,7 +297,7 @@ class KubernetesCapacityManager(CapacityManager):
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
-    ) -> None:
+    ) -> bool:
         """Apply desired replica targets to one participant.
 
         Raises ``DynamoGraphDeploymentNotReadyError`` when the participant is not
@@ -305,7 +305,7 @@ class KubernetesCapacityManager(CapacityManager):
         rejection.
         """
         connector = self.connectors[participant_id]
-        await connector.set_component_replicas(targets, blocking=blocking)
+        return await connector.set_component_replicas(targets, blocking=blocking)
 
     async def wait_for_ready(self, participant_id: str) -> None:
         """Wait for one participant without repeating its accepted write."""

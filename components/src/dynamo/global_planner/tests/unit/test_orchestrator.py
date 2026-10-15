@@ -11,7 +11,7 @@ backend into the same orchestrator, including the ``use_lock`` toggle.
 """
 
 import asyncio
-from threading import Event, get_ident
+from threading import Event
 
 import pytest
 
@@ -176,7 +176,6 @@ class FakeCapacityManager(CapacityManager):
     def __init__(self):
         # participant_id -> {sub_type: [current_replicas, gpu_per_replica]}
         self.pools: dict[str, dict[str, list]] = {}
-        self.current_replicas_thread_id = None
 
     def add(self, key, prefill=None, decode=None, gpu=1):
         entry = {}
@@ -205,12 +204,12 @@ class FakeCapacityManager(CapacityManager):
             st = t.sub_component_type.value
             if st in self.pools[participant_id]:
                 self.pools[participant_id][st][0] = t.desired_replicas
+        return True
 
     async def wait_for_ready(self, participant_id):
         return None
 
     def current_replicas(self, participant_id):
-        self.current_replicas_thread_id = get_ident()
         return {st: r for st, (r, _g) in self.pools[participant_id].items()}
 
 
@@ -233,7 +232,6 @@ async def _submit(orch, key, targets):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_lock", [True, False])
 async def test_submit_approves_and_actuates(use_lock):
-    event_loop_thread = get_ident()
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
     orch = _orch(cm, use_lock=use_lock)
@@ -243,40 +241,21 @@ async def test_submit_approves_and_actuates(use_lock):
     assert out.status == ScaleStatus.SUCCESS
     assert cm.pools["default/a"]["prefill"][0] == 3  # actuated
     assert out.current_replicas == {"prefill": 3, "decode": 1}
-    assert cm.current_replicas_thread_id != event_loop_thread
 
 
 @pytest.mark.asyncio
-async def test_submit_readback_stays_ordered_under_scale_lock():
-    class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
-        def __init__(self):
-            super().__init__()
-            self.readback_started = Event()
-            self.release_readback = Event()
-            self.readback_calls = 0
-
+async def test_submit_does_not_issue_post_write_readback():
+    class NoReadbackCapacityManager(FakeCapacityManager):
         def current_replicas(self, participant_id):
-            self.readback_calls += 1
-            if self.readback_calls == 1:
-                self.readback_started.set()
-                self.release_readback.wait()
-            return super().current_replicas(participant_id)
+            raise AssertionError("post-write readback must not run")
 
-    cm = BlockingFirstReadbackCapacityManager()
+    cm = NoReadbackCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
     orch = _orch(cm)
-    first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
-    assert await asyncio.to_thread(cm.readback_started.wait, 1)
-    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
 
-    await asyncio.sleep(0)
-    assert cm.pools["default/a"]["prefill"][0] == 2
-    assert not second.done()
-    cm.release_readback.set()
+    result = await _submit(orch, "default/a", _targets(prefill=2))
 
-    first_result, second_result = await asyncio.gather(first, second)
-    assert first_result.current_replicas["prefill"] == 2
-    assert second_result.current_replicas["prefill"] == 3
+    assert result.current_replicas == {"prefill": 2, "decode": 1}
 
 
 @pytest.mark.asyncio
@@ -291,7 +270,7 @@ async def test_cancelled_cross_participant_transfer_finishes_admitted_plan():
             if participant_id == "default/a":
                 self.first_scale_started.set()
                 await self.release_first_scale.wait()
-            await super().scale(participant_id, targets, blocking)
+            return await super().scale(participant_id, targets, blocking)
 
     cm = BlockingFirstScaleCapacityManager()
     cm.add("default/a", decode=2)
@@ -312,6 +291,134 @@ async def test_cancelled_cross_participant_transfer_finishes_admitted_plan():
         await transfer
     assert cm.pools["default/a"]["decode"][0] == 1
     assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
+async def test_blocking_transfer_settles_downscale_before_upscale():
+    class BlockingDownscaleSettlementCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.downscale_wait_started = asyncio.Event()
+            self.release_downscale = asyncio.Event()
+
+        async def wait_for_ready(self, participant_id):
+            if participant_id == "default/a":
+                self.downscale_wait_started.set()
+                await self.release_downscale.wait()
+
+    cm = BlockingDownscaleSettlementCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    transfer = asyncio.create_task(
+        orch.submit(
+            "default/b",
+            _targets(decode=3),
+            blocking=True,
+            deployment_name="default/b",
+            caller_name="default/b",
+        )
+    )
+    await cm.downscale_wait_started.wait()
+    assert cm.pools["default/a"]["decode"][0] == 1
+    assert cm.pools["default/b"]["decode"][0] == 2
+
+    cm.release_downscale.set()
+    result = await transfer
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
+async def test_blocking_transfer_stops_when_downscale_does_not_settle():
+    class FailingDownscaleSettlementCapacityManager(FakeCapacityManager):
+        async def wait_for_ready(self, participant_id):
+            if participant_id == "default/a":
+                raise RuntimeError("downscale did not settle")
+
+    cm = FailingDownscaleSettlementCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    with pytest.raises(RuntimeError, match="downscale did not settle"):
+        await orch.submit(
+            "default/b",
+            _targets(decode=3),
+            blocking=True,
+            deployment_name="default/b",
+            caller_name="default/b",
+        )
+
+    assert cm.pools["default/a"]["decode"][0] == 1
+    assert cm.pools["default/b"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
+async def test_skipped_scale_is_not_reported_or_waited_as_applied():
+    class SkippingCapacityManager(FakeCapacityManager):
+        async def scale(self, participant_id, targets, blocking):
+            return False
+
+        async def wait_for_ready(self, participant_id):
+            raise AssertionError("skipped scale must not wait for readiness")
+
+    cm = SkippingCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm)
+
+    result = await orch.submit(
+        "default/a",
+        _targets(prefill=2),
+        blocking=True,
+        deployment_name="default/a",
+        caller_name="default/a",
+    )
+
+    assert result.status == ScaleStatus.REJECTED
+    assert result.current_replicas == {}
+
+
+@pytest.mark.asyncio
+async def test_skipped_downscale_stops_dependent_upscale():
+    class SkippingDownscaleCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.scale_attempts = []
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_attempts.append(participant_id)
+            if participant_id == "default/a":
+                return False
+            return await super().scale(participant_id, targets, blocking)
+
+    cm = SkippingDownscaleCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    result = await orch.submit(
+        "default/b",
+        _targets(decode=3),
+        blocking=True,
+        deployment_name="default/b",
+        caller_name="default/b",
+    )
+
+    assert result.status == ScaleStatus.REJECTED
+    assert cm.scale_attempts == ["default/a"]
+    assert cm.pools["default/a"]["decode"][0] == 2
+    assert cm.pools["default/b"]["decode"][0] == 2
 
 
 @pytest.mark.asyncio

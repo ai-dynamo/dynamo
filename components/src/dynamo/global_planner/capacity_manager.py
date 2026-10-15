@@ -98,8 +98,8 @@ class CapacityManager:
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
-    ) -> None:
-        """Apply desired replica targets to one participant."""
+    ) -> bool:
+        """Apply desired targets; return whether the participant accepted them."""
         raise NotImplementedError
 
     async def wait_for_ready(self, participant_id: str) -> None:

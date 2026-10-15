@@ -44,7 +44,7 @@ RUN pip install --no-cache-dir \
       --extra-index-url https://pypi.nvidia.com \
       ai-dynamo-runtime==${DYNAMO_VERSION} \
       "kubernetes[google-auth]>=37.0.1,<38.0.0" \
-      "pydantic<2.13" "pydantic-settings<2.13.0" \
+      "pydantic==2.13.5" "pydantic-settings<2.13.0" \
       msgpack msgspec prometheus-client pyzmq transformers
 
 # ai-dynamo[vllm] extras minus nixl + ray (handled above), plus the

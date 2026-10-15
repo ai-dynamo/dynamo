@@ -116,7 +116,7 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
-    ) -> None:
+    ) -> bool | None:
         pass
 
 

@@ -62,14 +62,23 @@ def test_write_retry_does_not_multiply_transient_request_retries() -> None:
     assert attempts == 1
 
 
-def test_conflict_after_ambiguous_request_retry_is_distinguished() -> None:
+def test_write_retry_does_not_restart_conflict_after_ambiguous_request() -> None:
     errors = iter([client.ApiException(status=500), client.ApiException(status=409)])
+    attempts = 0
 
     def request() -> None:
+        nonlocal attempts
+        attempts += 1
         raise next(errors)
 
-    with pytest.raises(kubernetes.AmbiguousKubernetesWriteError):
-        kubernetes.retry_kubernetes_request(request)
+    with pytest.raises(kubernetes.AmbiguousKubernetesWriteError) as raised:
+        kubernetes.retry_kubernetes_write(
+            lambda: kubernetes.retry_kubernetes_request(request)
+        )
+
+    assert attempts == 2
+    assert raised.value.status == 409
+    assert raised.value.original_error.status == 409
 
 
 def test_exhausted_server_errors_are_ambiguous() -> None:
@@ -84,7 +93,7 @@ def test_exhausted_server_errors_are_ambiguous() -> None:
         kubernetes.retry_kubernetes_request(request)
 
     assert attempts == kubernetes.DEFAULT_BACKOFF.steps
-    assert raised.value.status == 409
+    assert raised.value.status == 500
     assert raised.value.original_error.status == 500
 
 
@@ -97,8 +106,24 @@ def test_non_retryable_error_after_server_error_is_ambiguous() -> None:
     with pytest.raises(kubernetes.AmbiguousKubernetesWriteError) as raised:
         kubernetes.retry_kubernetes_request(request)
 
-    assert raised.value.status == 409
+    assert raised.value.status == 404
     assert raised.value.original_error.status == 404
+
+
+def test_write_retry_does_not_restart_exhausted_request_retry() -> None:
+    attempts = 0
+
+    def request() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise client.ApiException(status=500)
+
+    with pytest.raises(kubernetes.AmbiguousKubernetesWriteError):
+        kubernetes.retry_kubernetes_write(
+            lambda: kubernetes.retry_kubernetes_request(request)
+        )
+
+    assert attempts == kubernetes.DEFAULT_BACKOFF.steps
 
 
 def test_conflict_after_throttling_remains_an_ordinary_conflict() -> None:

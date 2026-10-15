@@ -254,44 +254,18 @@ class Orchestrator:
     ) -> ScaleOutcome:
         """Arbitrate and execute one scale request.
 
-        The observe -> decide -> scale -> readback span is serialized under the scale lock
-        (when enabled) so concurrent requests can't both pass against the same
-        pre-scale state or report a later request's result. Patch failures
-        propagate to the caller (the API layer maps them to REJECTED / ERROR).
+        The observe -> decide -> scale span is serialized under the scale lock
+        (when enabled) so concurrent requests cannot both pass against the same
+        pre-scale state. Patch failures propagate to the caller (the API layer
+        maps them to REJECTED / ERROR).
         """
         if self._scale_lock is not None:
             async with self._scale_lock:
-                return await self._submit_and_readback(
+                return await self._observe_decide_apply(
                     participant_id, targets, blocking, deployment_name, caller_name
                 )
-        return await self._submit_and_readback(
+        return await self._observe_decide_apply(
             participant_id, targets, blocking, deployment_name, caller_name
-        )
-
-    async def _submit_and_readback(
-        self,
-        participant_id: str,
-        targets: list[TargetReplica],
-        blocking: bool,
-        deployment_name: str,
-        caller_name: str,
-    ) -> ScaleOutcome:
-        """Apply one serialized request and capture its resulting state."""
-        terminal = await self._observe_decide_apply(
-            participant_id, targets, blocking, deployment_name, caller_name
-        )
-
-        if terminal is not None:
-            return terminal
-
-        current_replicas = await asyncio.to_thread(
-            self.capacity_manager.current_replicas, participant_id
-        )
-        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
-        return ScaleOutcome(
-            status=ScaleStatus.SUCCESS,
-            message=f"Scaled {deployment_name} successfully",
-            current_replicas=current_replicas,
         )
 
     async def _observe_decide_apply(
@@ -301,13 +275,12 @@ class Orchestrator:
         blocking: bool,
         deployment_name: str,
         caller_name: str,
-    ) -> Optional[ScaleOutcome]:
+    ) -> ScaleOutcome:
         """Observe all pools, decide the budget outcome, and apply it.
 
-        Returns a terminal ``ScaleOutcome`` for a rejection or an unrecoverable
-        first-patch error; returns ``None`` when the request was applied and the
-        caller should read back current replicas. May raise a patch error from
-        the first applied participant (propagated to the API layer).
+        Returns the result from the serialized observation and accepted absolute
+        targets. May raise a patch error from the first applied participant
+        (propagated to the API layer).
         """
         # Let the backend record any request context it needs to read pool state
         # correctly (e.g. component-name role hints for generic workers).
@@ -379,22 +352,40 @@ class Orchestrator:
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
 
-        terminal, applied = await run_async_to_completion(
-            self._apply_approved_targets(grouped_targets, ordered_participants)
+        apply = self._apply_approved_targets(
+            grouped_targets, ordered_participants, blocking=blocking
         )
-        if terminal is not None or not blocking:
+        if blocking:
+            terminal, applied = await apply
+        else:
+            terminal, applied = await run_async_to_completion(apply)
+        if terminal is not None:
             return terminal
 
-        for pid in applied:
-            await self.capacity_manager.wait_for_ready(pid)
-        return None
+        current_replicas = {
+            sub_type: spec.current_replicas
+            for sub_type, spec in all_pools.get(participant_id, {}).items()
+        }
+        if participant_id in applied:
+            for target in grouped_targets[participant_id]:
+                current_replicas[
+                    target.sub_component_type.value
+                ] = target.desired_replicas
+        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
+        return ScaleOutcome(
+            status=ScaleStatus.SUCCESS,
+            message=f"Scaled {deployment_name} successfully",
+            current_replicas=current_replicas,
+        )
 
     async def _apply_approved_targets(
         self,
         grouped_targets: dict[str, list[TargetReplica]],
         ordered_participants: list[str],
+        *,
+        blocking: bool,
     ) -> tuple[Optional[ScaleOutcome], list[str]]:
-        """Apply an admitted plan completely before honoring cancellation."""
+        """Apply an admitted plan, settling each blocking step before the next."""
 
         # TODO(global-planner): Persist enough state to repair or roll back a
         # plan that still becomes partial because a later participant fails.
@@ -419,23 +410,23 @@ class Orchestrator:
                     )
                 logger.error(
                     f"Multi-partner transfer: unknown participant {pid} "
-                    f"after applying {applied}; will self-correct on next tick"
+                    f"after applying {applied}; stopping plan until the next tick"
                 )
-                continue
+                break
             try:
-                await self.capacity_manager.scale(pid, tgts, blocking=False)
-                applied.append(pid)
+                accepted = await self.capacity_manager.scale(pid, tgts, blocking=False)
             except DynamoGraphDeploymentNotReadyError as patch_err:
                 if i == 0:
                     raise
                 logger.warning(
                     "Multi-partner transfer: patch on %s was skipped "
                     "after applying %s because the participant is not ready: %s; "
-                    "will self-correct on next tick",
+                    "stopping plan until the next tick",
                     pid,
                     applied,
                     patch_err,
                 )
+                break
             except Exception as patch_err:
                 if i == 0:
                     # First patch failure: nothing applied, propagate to the
@@ -444,8 +435,27 @@ class Orchestrator:
                 logger.error(
                     f"Multi-partner transfer: patch on {pid} "
                     f"failed after applying {applied}: "
-                    f"{patch_err}; will self-correct on next tick"
+                    f"{patch_err}; stopping plan until the next tick"
                 )
+                break
+            if not accepted:
+                logger.warning(
+                    "Multi-partner transfer: participant %s did not accept its "
+                    "target after applying %s; stopping plan until the next tick",
+                    pid,
+                    applied,
+                )
+                return (
+                    ScaleOutcome(
+                        status=ScaleStatus.REJECTED,
+                        message=f"Participant {pid} did not accept its scale target",
+                        current_replicas={},
+                    ),
+                    applied,
+                )
+            applied.append(pid)
+            if blocking:
+                await self.capacity_manager.wait_for_ready(pid)
 
         return None, applied
 

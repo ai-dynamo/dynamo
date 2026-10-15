@@ -22,13 +22,21 @@ class AmbiguousKubernetesWriteError(rest.ApiException):
 
     def __init__(self, error: Exception):
         super().__init__(
-            status=409,
+            status=getattr(error, "status", None),
             reason=f"write completion is ambiguous after {type(error).__name__}: {error}",
             body=getattr(error, "body", None),
             data=getattr(error, "data", None),
         )
         self.headers = getattr(error, "headers", None)
         self.original_error = error
+
+
+class _TerminalKubernetesWriteError(Exception):
+    """Keep an ambiguous write outside the HTTP conflict retry predicate."""
+
+    def __init__(self, error: AmbiguousKubernetesWriteError):
+        super().__init__(str(error))
+        self.error = error
 
 
 def client_go_api_client() -> client.ApiClient:
@@ -50,8 +58,8 @@ def retry_kubernetes_request(fn: Callable[[], T]) -> T:
     """Retry one API operation on throttling and transient server errors.
 
     If a transport or server failure is followed by any terminal error,
-    preserve that ambiguity for callers that cannot safely repeat a relative
-    mutation. Absolute writes see it as a conflict and can re-read state.
+    preserve that ambiguity as a terminal result so an outer conflict retry
+    cannot repeat a write whose completion is unknown.
     """
 
     ambiguous_completion = False
@@ -88,4 +96,13 @@ def retry_kubernetes_write(fn: Callable[[], T]) -> T:
     multiplied by retries of the complete closure.
     """
 
-    return retry_on_conflict(fn)
+    def write() -> T:
+        try:
+            return fn()
+        except AmbiguousKubernetesWriteError as error:
+            raise _TerminalKubernetesWriteError(error) from error
+
+    try:
+        return retry_on_conflict(write)
+    except _TerminalKubernetesWriteError as error:
+        raise error.error

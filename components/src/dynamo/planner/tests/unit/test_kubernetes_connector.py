@@ -717,6 +717,90 @@ async def test_add_component_recomputes_delta_when_conflicting_writer_reaches_ta
 
 
 @pytest.mark.asyncio
+async def test_add_component_stops_conflict_retry_across_authority_change(
+    kubernetes_connector, mock_kube_api
+):
+    initial = _deployment(_adapter_component("worker", "decode", replicas=1))
+    transitioned = _deployment(_component("worker", "decode", replicas=1))
+    transitioned["metadata"]["resourceVersion"] = "2"
+    mock_kube_api.get_graph_deployment.side_effect = [initial, transitioned]
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=1
+    )
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
+        status=409
+    )
+
+    with pytest.raises(
+        RuntimeError, match="replica authority identity changed during retry"
+    ):
+        await kubernetes_connector.add_component(
+            SubComponentType.DECODE, blocking=False
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 2, resource_version="101"
+    )
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_component_stops_when_adapter_disappears_with_authority_change(
+    kubernetes_connector, mock_kube_api
+):
+    initial = _deployment(_adapter_component("worker", "decode", replicas=1))
+    transitioned = _deployment(_component("worker", "decode", replicas=1))
+    transitioned["metadata"]["resourceVersion"] = "2"
+    mock_kube_api.get_graph_deployment.side_effect = [initial, transitioned]
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=1
+    )
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
+        status=404
+    )
+
+    with pytest.raises(RuntimeError, match="authority changed during update"):
+        await kubernetes_connector.add_component(
+            SubComponentType.DECODE, blocking=False
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 2, resource_version="101"
+    )
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_component_stops_conflict_retry_on_recreated_adapter(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=1))
+    initial_adapter = _scaling_adapter("worker", replicas=1)
+    replacement_adapter = _scaling_adapter("worker", replicas=1)
+    replacement_adapter["metadata"]["uid"] = "replacement-adapter-uid"
+    replacement_adapter["metadata"]["resourceVersion"] = "102"
+    mock_kube_api.get_graph_deployment.side_effect = [deployment, deployment]
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        replacement_adapter,
+    ]
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
+        status=409
+    )
+
+    with pytest.raises(
+        RuntimeError, match="replica authority identity changed during retry"
+    ):
+        await kubernetes_connector.add_component(
+            SubComponentType.DECODE, blocking=False
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 2, resource_version="101"
+    )
+
+
+@pytest.mark.asyncio
 async def test_add_component_does_not_repeat_ambiguous_committed_dgd_write(
     kubernetes_connector, mock_kube_api
 ):
@@ -1152,14 +1236,13 @@ async def test_set_component_replicas_undeclared_adapter_ignores_stray_dgdsa(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_retries_dgd_conflict_through_new_adapter(
+async def test_set_component_replicas_stops_dgd_conflict_after_new_adapter(
     kubernetes_connector, mock_kube_api
 ):
     initial = _deployment(_component("worker", "decode", replicas=0))
     transitioned = _deployment(_adapter_component("worker", "decode", replicas=0))
     mock_kube_api.get_graph_deployment.side_effect = [
         initial,
-        transitioned,
         transitioned,
     ]
     mock_kube_api.is_deployment_ready.return_value = True
@@ -1170,23 +1253,22 @@ async def test_set_component_replicas_retries_dgd_conflict_through_new_adapter(
         "worker", replicas=0
     )
 
-    await kubernetes_connector.set_component_replicas(
-        [
-            TargetReplica(
-                sub_component_type=SubComponentType.DECODE,
-                component_name="worker",
-                desired_replicas=1,
-            )
-        ],
-        blocking=False,
-    )
+    with pytest.raises(RuntimeError, match="replica authority changed during retry"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
 
     mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "test-graph", "worker", 1, deployment=initial
     )
-    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
-        "test-graph", "worker", 1, resource_version="101"
-    )
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1321,9 +1403,10 @@ async def test_set_component_replicas_component_already_at_desired_replicas(
     mock_kube_api.wait_for_graph_deployment_ready.return_value = None
 
     # Act
-    await kubernetes_connector.set_component_replicas(target_replicas)
+    accepted = await kubernetes_connector.set_component_replicas(target_replicas)
 
     # Assert
+    assert accepted
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
 
@@ -1381,9 +1464,10 @@ async def test_set_component_replicas_deployment_not_ready_skips_by_default(
     mock_kube_api.is_deployment_ready.return_value = False
 
     # Act
-    await kubernetes_connector.set_component_replicas(target_replicas)
+    accepted = await kubernetes_connector.set_component_replicas(target_replicas)
 
     # Assert
+    assert not accepted
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
     mock_kube_api.update_graph_replicas.assert_not_called()
@@ -2016,7 +2100,7 @@ async def test_set_component_replicas_ready_retries_adapter_conflict(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_retries_adapter_to_dgd_transition(
+async def test_set_component_replicas_stops_committed_adapter_to_dgd_transition(
     kubernetes_connector, mock_kube_api
 ):
     initial = _deployment(_adapter_component("worker", "decode", replicas=0))
@@ -2025,30 +2109,28 @@ async def test_set_component_replicas_retries_adapter_to_dgd_transition(
     mock_kube_api.get_graph_deployment.side_effect = [
         initial,
         transitioned,
-        transitioned,
     ]
     mock_kube_api.is_deployment_ready.return_value = True
     mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
         "worker", replicas=0
     )
 
-    await kubernetes_connector.set_component_replicas(
-        [
-            TargetReplica(
-                sub_component_type=SubComponentType.DECODE,
-                component_name="worker",
-                desired_replicas=1,
-            )
-        ],
-        blocking=False,
-    )
+    with pytest.raises(RuntimeError, match="partial application"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
 
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
         "test-graph", "worker", 1, resource_version="101"
     )
-    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
-        "test-graph", "worker", 1, deployment=transitioned
-    )
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2100,7 +2182,7 @@ async def test_set_component_replicas_stops_authority_retry_after_prior_batch_wr
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_retries_deleted_adapter_after_authority_change(
+async def test_set_component_replicas_stops_deleted_adapter_after_authority_change(
     kubernetes_connector, mock_kube_api
 ):
     initial = _deployment(_adapter_component("worker", "decode", replicas=0))
@@ -2108,7 +2190,6 @@ async def test_set_component_replicas_retries_deleted_adapter_after_authority_ch
     transitioned["metadata"]["resourceVersion"] = "2"
     mock_kube_api.get_graph_deployment.side_effect = [
         initial,
-        transitioned,
         transitioned,
     ]
     mock_kube_api.is_deployment_ready.return_value = True
@@ -2119,22 +2200,91 @@ async def test_set_component_replicas_retries_deleted_adapter_after_authority_ch
         status=404
     )
 
-    await kubernetes_connector.set_component_replicas(
-        [
-            TargetReplica(
-                sub_component_type=SubComponentType.DECODE,
-                component_name="worker",
-                desired_replicas=1,
-            )
-        ],
-        blocking=False,
-    )
+    with pytest.raises(RuntimeError, match="authority changed during update"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
 
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
         "test-graph", "worker", 1, resource_version="101"
     )
-    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
-        "test-graph", "worker", 1, deployment=transitioned
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_stops_conflict_retry_across_authority_change(
+    kubernetes_connector, mock_kube_api
+):
+    initial = _deployment(_adapter_component("worker", "decode", replicas=0))
+    transitioned = _deployment(_component("worker", "decode", replicas=0))
+    transitioned["metadata"]["resourceVersion"] = "2"
+    mock_kube_api.get_graph_deployment.side_effect = [initial, transitioned]
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
+        status=409
+    )
+
+    with pytest.raises(RuntimeError, match="replica authority changed during retry"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_stops_conflict_retry_on_recreated_adapter(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    initial_adapter = _scaling_adapter("worker", replicas=0)
+    replacement_adapter = _scaling_adapter("worker", replicas=0)
+    replacement_adapter["metadata"]["uid"] = "replacement-adapter-uid"
+    replacement_adapter["metadata"]["resourceVersion"] = "102"
+    mock_kube_api.get_graph_deployment.side_effect = [deployment, deployment]
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        replacement_adapter,
+    ]
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
+        status=409
+    )
+
+    with pytest.raises(RuntimeError, match="replica authority changed during retry"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
     )
 
 
