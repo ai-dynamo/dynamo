@@ -784,7 +784,10 @@ jobs:
   vllm-test-xpu:
     name: vllm-xpu
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    # XPU is not validated on release branches.
+    if: >-
+      !startsWith(github.ref_name, 'release/') &&
+      (github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true')
     uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
