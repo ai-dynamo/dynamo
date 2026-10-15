@@ -305,10 +305,10 @@ message KvPoolLoadUpdate
 // Coverage of an aggregate in a ServingLoadUpdate.
 enum DataStatus {
   DATA_STATUS_UNSPECIFIED = 0;
-  // Every expected source reported recently; all documented optional fields are set.
+  // Every expected source reported recently; every gauge for this view kind is set.
   DATA_STATUS_COMPLETE = 1;
-  // Some but not all expected sources reported; aggregate gauges are unset
-  // because a partial sum would read as lower load.
+  // Some expected sources did not report, or the set of expected sources is
+  // unknown; gauges are unset because a partial sum would read as lower load.
   DATA_STATUS_DEGRADED = 2;
   // No expected source reported.
   DATA_STATUS_UNAVAILABLE = 3;
@@ -328,13 +328,17 @@ message RequestLifecycleStats
   // within one incarnation. A new incarnation starts from each frontend's own
   // running totals when it is first heard, so values are neither zero nor
   // continuous across incarnations: compute rates only within one incarnation.
-  // Set even when the view is not COMPLETE.
+  // Set even when the view is not COMPLETE. Each started request ends exactly
+  // once: completed counts successes only and failed excludes cancellations,
+  // so started = completed + failed + cancelled + in flight.
   uint64 requests_started_total = 1;
   uint64 requests_completed_total = 2;
   uint64 requests_failed_total = 3;
   uint64 requests_cancelled_total = 4;
   // Admitted requests that have not produced their first output token yet:
-  // being tokenized, queued, routed, or prefilled. Set only when COMPLETE.
+  // being tokenized, queued, routed, or prefilled. Requests that never stream
+  // tokens (embeddings, images, videos, tensors) stay here until they finish.
+  // Set only when COMPLETE.
   optional uint64 requests_awaiting_first_token = 5;
   // Requests producing output tokens. Set only when COMPLETE.
   optional uint64 requests_generating = 6;
@@ -370,7 +374,8 @@ message LoadView
   uint64 source_observed_ms = 4;
 }
 
-// Derived from the pool's live worker membership.
+// Derived from the pool's live worker membership. Both fields are unset while
+// the pool's runtime configuration is invalid.
 message PoolDeploymentStatus
 {
   optional uint64 live_workers = 1;
@@ -382,9 +387,9 @@ message PoolDeploymentStatus
 // Scheduler load of one pool as seen by the routers that schedule onto it:
 // COMPLETE when every expected router reported every expected rank recently,
 // DEGRADED when coverage is partial, UNAVAILABLE when no router reported.
-// Expected routers are those registered for the pool's scheduler-load subject
-// plus any that reported recently; routers that predate this RPC are not
-// counted.
+// Expected routers are those that reported recently plus those that registered
+// for the pool's scheduler-load subject within the last three publish
+// intervals; routers that predate this RPC are not counted.
 message PoolServingLoad
 {
   ProducerIdentity producer = 1;
@@ -392,9 +397,11 @@ message PoolServingLoad
   PoolDeploymentStatus deployment = 3;
 }
 
-// Expected frontends are the frontends registered in discovery for the
-// namespace plus every frontend that published recently. A frontend that does
-// not list the model is not serving it and contributes zero.
+// Expected frontends are those that published recently plus those that
+// registered in discovery within the last three publish intervals, in the
+// model's namespace and, for frontends without an exact namespace, the
+// Relay's. A frontend that does not list the model is not serving it and
+// contributes zero.
 message ModelDeploymentStatus
 {
   uint64 expected_frontends = 1;

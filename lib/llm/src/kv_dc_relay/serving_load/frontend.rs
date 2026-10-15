@@ -23,7 +23,7 @@ use dynamo_runtime::transports::event_plane::{Codec, EventSubscriber};
 use futures::Stream;
 use tokio_stream::StreamMap;
 
-use super::super::identity::DcPoolCatalog;
+use super::super::identity::{CanonicalModelId, DcPoolCatalog};
 use super::super::load::Coverage;
 use super::super::topology::TopologySnapshot;
 use super::{ModelServingLoad, SOURCE_RETENTION, freshness};
@@ -34,7 +34,7 @@ use crate::frontend_load::{
 use crate::utils::retry::{Backoff, FailureStreak};
 
 /// How long a frontend's frame counts as observed.
-const FRONTEND_FRESHNESS: Duration = freshness(FRONTEND_LOAD_PUBLISH_INTERVAL);
+pub(super) const FRONTEND_FRESHNESS: Duration = freshness(FRONTEND_LOAD_PUBLISH_INTERVAL);
 const RESUBSCRIBE_INITIAL: Duration = Duration::from_millis(100);
 const RESUBSCRIBE_MAX: Duration = Duration::from_secs(5);
 
@@ -164,6 +164,7 @@ struct FrontendSource {
     /// its baseline while absent from frames because the frontend's totals for
     /// it survive model removal and re-registration.
     baselines: HashMap<String, RequestTotals>,
+    warned_invalid_model: bool,
 }
 
 impl FrontendSource {
@@ -176,15 +177,18 @@ impl FrontendSource {
 #[derive(Default)]
 pub(super) struct FrontendReports {
     frontends: HashMap<(String, u64), FrontendSource>,
-    /// Relay-lifetime totals per (namespace, model). Bounded by the models ever
-    /// served and never reset while the Relay runs.
-    totals: HashMap<(String, String), RequestTotals>,
+    /// Relay-lifetime totals per namespace and model. Bounded by the models
+    /// ever served and never reset while the Relay runs.
+    totals: HashMap<String, HashMap<String, RequestTotals>>,
 }
 
 impl FrontendReports {
     /// Records one frame. Duplicate, reordered, and replaced-incarnation frames
     /// are ignored; a new incarnation of a known frontend is a restart and
-    /// starts new baselines.
+    /// starts new baselines. A frontend first heard after its first frame only
+    /// contributes growth from then on, so totals count what this Relay saw.
+    /// Models whose names the wire would reject are dropped here, where they
+    /// enter, rather than invalidating every consumer's window.
     pub(super) fn record(&mut self, namespace: String, event: FrontendEvent) {
         let FrontendEvent {
             publisher_id,
@@ -193,6 +197,7 @@ impl FrontendReports {
             frame,
         } = event;
         let frontend_instance_id = frame.frontend_instance_id;
+        let mut counts_from_zero = true;
         let source = match self
             .frontends
             .entry((namespace.clone(), frontend_instance_id))
@@ -206,7 +211,7 @@ impl FrontendReports {
                 } else if source.replaced_incarnation == Some(frame.incarnation) {
                     return;
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         %namespace,
                         frontend_instance_id,
                         "Frontend restarted; resetting its load baselines"
@@ -217,28 +222,52 @@ impl FrontendReports {
                 }
                 source
             }
-            Entry::Vacant(entry) => entry.insert(FrontendSource {
-                incarnation: frame.incarnation,
-                replaced_incarnation: None,
-                sequence: 0,
-                publisher_id,
-                published_at_ms,
-                received_at,
-                serving_ready: false,
-                models: Vec::new(),
-                baselines: HashMap::new(),
-            }),
+            Entry::Vacant(entry) => {
+                counts_from_zero = frame.sequence == 1;
+                entry.insert(FrontendSource {
+                    incarnation: frame.incarnation,
+                    replaced_incarnation: None,
+                    sequence: 0,
+                    publisher_id,
+                    published_at_ms,
+                    received_at,
+                    serving_ready: false,
+                    models: Vec::new(),
+                    baselines: HashMap::new(),
+                    warned_invalid_model: false,
+                })
+            }
         };
 
-        for model in &frame.models {
-            let baseline = source
-                .baselines
-                .insert(model.model.clone(), model.totals)
-                .unwrap_or_default();
-            self.totals
-                .entry((namespace.clone(), model.model.clone()))
-                .or_default()
-                .add(&model.totals.growth_since(&baseline));
+        let mut models = frame.models;
+        models.retain(|model| {
+            let valid = CanonicalModelId::new(model.model.as_str()).is_ok();
+            if !valid && !std::mem::replace(&mut source.warned_invalid_model, true) {
+                tracing::warn!(%namespace, frontend_instance_id, model = ?model.model, "Dropping frontend load of a model with an invalid name");
+            }
+            valid
+        });
+
+        let totals = self.totals.entry(namespace).or_default();
+        for model in &models {
+            let baseline = match source.baselines.get_mut(&model.model) {
+                Some(baseline) => std::mem::replace(baseline, model.totals),
+                None => {
+                    source.baselines.insert(model.model.clone(), model.totals);
+                    if counts_from_zero {
+                        RequestTotals::default()
+                    } else {
+                        model.totals
+                    }
+                }
+            };
+            let growth = model.totals.growth_since(&baseline);
+            match totals.get_mut(&model.model) {
+                Some(total) => total.add(&growth),
+                None => {
+                    totals.insert(model.model.clone(), growth);
+                }
+            }
         }
 
         source.sequence = frame.sequence;
@@ -246,42 +275,49 @@ impl FrontendReports {
         source.published_at_ms = published_at_ms;
         source.received_at = received_at;
         source.serving_ready = frame.is_serving_ready;
-        source.models = frame.models;
+        source.models = models;
     }
 
-    /// Forgets frontends silent for [`SOURCE_RETENTION`] that are not
-    /// discovered, which bounds state under frontend churn.
+    /// Forgets frontends silent for [`SOURCE_RETENTION`] whose publisher is no
+    /// longer `registered`, which bounds state under frontend churn.
     ///
     /// Forgetting a frontend also forgets its baselines: if it later resumes
     /// the same incarnation, its cumulative counters are added in full again.
     /// That requires a long partition of a frontend that also left discovery.
-    pub(super) fn prune(&mut self, discovered: &HashMap<String, HashSet<u64>>, now: Instant) {
+    pub(super) fn prune(&mut self, registered: impl Fn(&String, u64) -> bool, now: Instant) {
         self.frontends.retain(|(namespace, _), source| {
             now.saturating_duration_since(source.received_at) <= SOURCE_RETENTION
-                || discovered
-                    .get(namespace)
-                    .is_some_and(|publishers| publishers.contains(&source.publisher_id))
+                || registered(namespace, source.publisher_id)
         });
     }
 
     /// One view per model a catalog pool registers or a fresh frontend serves.
-    /// `discovered` holds the frontend publishers registered per namespace; a
-    /// namespace whose listing failed is absent.
+    ///
+    /// Frontends without an exact namespace publish in `relay_namespace` but
+    /// serve every namespace's models, so their load of a model the catalog
+    /// registers in exactly one other namespace counts there.
+    ///
+    /// `registered` holds, per namespace with a known roster, the frontend
+    /// publishers expected besides those with a fresh frame.
     pub(super) fn model_loads(
         &self,
         catalog: &DcPoolCatalog,
-        discovered: &HashMap<String, HashSet<u64>>,
+        relay_namespace: &str,
+        registered: &HashMap<String, HashSet<u64>>,
         now: Instant,
     ) -> Vec<ModelServingLoad> {
         let mut models = BTreeMap::<(&str, &str), ModelAggregate>::new();
+        let mut homes = HashMap::<&str, BTreeSet<&str>>::new();
         for pool in catalog.pools() {
             let namespace = pool.serving_endpoint().namespace.as_str();
             for registration in pool.registrations() {
+                let model = registration.model().as_str();
                 models
-                    .entry((namespace, registration.model().as_str()))
+                    .entry((namespace, model))
                     .or_default()
                     .serving_pools
                     .insert(pool.pool_id());
+                homes.entry(model).or_default().insert(namespace);
             }
         }
         for ((namespace, _), source) in &self.frontends {
@@ -289,10 +325,12 @@ impl FrontendReports {
                 continue;
             }
             for model in &source.models {
-                let aggregate = models
-                    .entry((namespace.as_str(), model.model.as_str()))
-                    .or_default();
-                aggregate.ready_frontends += u64::from(source.serving_ready);
+                let namespace = Some(namespace.as_str())
+                    .filter(|&namespace| namespace != relay_namespace)
+                    .or_else(|| relay_home(&homes, &model.model, relay_namespace))
+                    .unwrap_or(namespace);
+                let aggregate = models.entry((namespace, model.model.as_str())).or_default();
+                aggregate.ready_frontends += u64::from(source.serving_ready && model.is_ready);
                 aggregate.gauges.add(&model.gauges);
             }
         }
@@ -300,25 +338,31 @@ impl FrontendReports {
         models
             .into_iter()
             .map(|((namespace, model), aggregate)| {
-                let coverage = *coverage
-                    .entry(namespace)
-                    .or_insert_with(|| self.coverage(namespace, discovered.get(namespace), now));
+                let relay_load = relay_home(&homes, model, relay_namespace) == Some(namespace);
+                let mut model_coverage =
+                    self.cached_coverage(&mut coverage, namespace, registered, now);
+                let mut totals = self.totals(namespace, model);
+                if relay_load {
+                    model_coverage = model_coverage.and(self.cached_coverage(
+                        &mut coverage,
+                        relay_namespace,
+                        registered,
+                        now,
+                    ));
+                    totals.add(&self.totals(relay_namespace, model));
+                }
                 ModelServingLoad {
                     namespace: namespace.to_string(),
                     model: model.to_string(),
-                    gauges: match coverage.status {
+                    gauges: match model_coverage.status() {
                         Coverage::Complete(()) => Coverage::Complete(aggregate.gauges),
                         Coverage::Partial => Coverage::Partial,
                         Coverage::Missing => Coverage::Missing,
                     },
-                    totals: self
-                        .totals
-                        .get(&(namespace.to_string(), model.to_string()))
-                        .copied()
-                        .unwrap_or_default(),
-                    source_observed_ms: coverage.source_observed_ms,
-                    expected_frontends: coverage.expected,
-                    observed_frontends: coverage.observed,
+                    totals,
+                    source_observed_ms: model_coverage.source_observed_ms.unwrap_or_default(),
+                    expected_frontends: model_coverage.expected,
+                    observed_frontends: model_coverage.observed,
                     ready_frontends: aggregate.ready_frontends,
                     serving_pools: aggregate.serving_pools.into_iter().collect(),
                 }
@@ -326,61 +370,113 @@ impl FrontendReports {
             .collect()
     }
 
-    /// Expected frontends are the publishers discovered in the namespace plus
-    /// every frontend there with a fresh frame, so broker-mode frontends (never
-    /// discovered) and frontends discovery has not caught up with still count.
+    fn cached_coverage<'a>(
+        &self,
+        cache: &mut HashMap<&'a str, NamespaceCoverage>,
+        namespace: &'a str,
+        registered: &HashMap<String, HashSet<u64>>,
+        now: Instant,
+    ) -> NamespaceCoverage {
+        *cache
+            .entry(namespace)
+            .or_insert_with(|| self.coverage(namespace, registered.get(namespace), now))
+    }
+
+    fn totals(&self, namespace: &str, model: &str) -> RequestTotals {
+        self.totals
+            .get(namespace)
+            .and_then(|totals| totals.get(model))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Expected frontends are every frontend in the namespace with a fresh
+    /// frame plus the `registered` publishers not heard yet, so broker-mode
+    /// frontends (never registered) still count and a registered publisher
+    /// that went silent stops counting once its frame expires.
     fn coverage(
         &self,
         namespace: &str,
-        discovered: Option<&HashSet<u64>>,
+        registered: Option<&HashSet<u64>>,
         now: Instant,
     ) -> NamespaceCoverage {
-        let mut observed = 0_u64;
-        let mut expected = 0_u64;
-        let mut oldest = None::<u64>;
+        let mut coverage = NamespaceCoverage {
+            roster_known: registered.is_some(),
+            ..NamespaceCoverage::default()
+        };
         let mut known = HashSet::new();
         for ((source_namespace, _), source) in &self.frontends {
             if source_namespace != namespace {
                 continue;
             }
             known.insert(source.publisher_id);
-            let discovered = discovered.is_some_and(|ids| ids.contains(&source.publisher_id));
             if source.is_fresh(now) {
-                observed += 1;
-                expected += 1;
-                oldest = Some(
-                    oldest.map_or(source.published_at_ms, |at| at.min(source.published_at_ms)),
+                coverage.observed += 1;
+                coverage.expected += 1;
+                coverage.source_observed_ms = Some(
+                    coverage
+                        .source_observed_ms
+                        .map_or(source.published_at_ms, |at| at.min(source.published_at_ms)),
                 );
-            } else if discovered {
-                expected += 1;
+            } else if registered.is_some_and(|ids| ids.contains(&source.publisher_id)) {
+                coverage.expected += 1;
             }
         }
-        if let Some(discovered) = discovered {
-            expected += discovered.difference(&known).count() as u64;
+        if let Some(registered) = registered {
+            coverage.expected += registered.difference(&known).count() as u64;
         }
-        let status = if discovered.is_some() && expected > 0 && observed == expected {
-            Coverage::Complete(())
-        } else if observed > 0 {
-            Coverage::Partial
-        } else {
-            Coverage::Missing
-        };
-        NamespaceCoverage {
-            status,
-            expected,
-            observed,
-            source_observed_ms: oldest.unwrap_or_default(),
-        }
+        coverage
     }
 }
 
-/// Frontend coverage shared by every model in one namespace.
-#[derive(Clone, Copy)]
+/// The one other namespace whose catalog pools register `model`, where load
+/// heard in `relay_namespace` counts.
+fn relay_home<'a>(
+    homes: &HashMap<&str, BTreeSet<&'a str>>,
+    model: &str,
+    relay_namespace: &str,
+) -> Option<&'a str> {
+    let homes = homes.get(model)?;
+    match homes.first() {
+        Some(&home) if homes.len() == 1 && home != relay_namespace => Some(home),
+        _ => None,
+    }
+}
+
+/// Frontend coverage of one namespace, or of several combined.
+#[derive(Clone, Copy, Default)]
 struct NamespaceCoverage {
-    status: Coverage<()>,
+    /// Whether every namespace's roster is known; without it a silent
+    /// registered frontend cannot be ruled out.
+    roster_known: bool,
     expected: u64,
     observed: u64,
-    source_observed_ms: u64,
+    /// Oldest publish time among the fresh frontends.
+    source_observed_ms: Option<u64>,
+}
+
+impl NamespaceCoverage {
+    fn and(self, other: Self) -> Self {
+        Self {
+            roster_known: self.roster_known && other.roster_known,
+            expected: self.expected + other.expected,
+            observed: self.observed + other.observed,
+            source_observed_ms: match (self.source_observed_ms, other.source_observed_ms) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            },
+        }
+    }
+
+    fn status(&self) -> Coverage<()> {
+        if self.roster_known && self.expected > 0 && self.observed == self.expected {
+            Coverage::Complete(())
+        } else if self.observed > 0 {
+            Coverage::Partial
+        } else {
+            Coverage::Missing
+        }
+    }
 }
 
 /// One model's sum over its namespace's fresh frontends.
@@ -410,6 +506,7 @@ mod tests {
     use crate::kv_dc_relay::topology::{TopologyEntry, TopologyReadinessState};
 
     const NS: &str = "ns";
+    const RELAY_NS: &str = "relay";
     const FRONTEND: u64 = 10;
     const PUBLISHER: u64 = 1;
 
@@ -491,7 +588,7 @@ mod tests {
         reports: &FrontendReports,
         discovered: &HashMap<String, HashSet<u64>>,
     ) -> ModelServingLoad {
-        let mut models = reports.model_loads(&catalog(Vec::new()), discovered, Instant::now());
+        let mut models = reports.model_loads(&catalog(Vec::new()), RELAY_NS, discovered, Instant::now());
         assert_eq!(models.len(), 1);
         models.pop().unwrap()
     }
@@ -580,14 +677,14 @@ mod tests {
         record(
             &mut reports,
             PUBLISHER,
-            frame(1, 7, vec![model_load("a", 1, 5)]),
+            frame(1, 1, vec![model_load("a", 1, 5)]),
         );
         record(&mut reports, 2, frame(2, 1, vec![model_load("a", 1, 3)]));
         // A late frame of the replaced process must not look like another restart.
         record(
             &mut reports,
             PUBLISHER,
-            frame(1, 8, vec![model_load("a", 1, 6)]),
+            frame(1, 2, vec![model_load("a", 1, 6)]),
         );
         record(&mut reports, 2, frame(2, 2, vec![model_load("a", 4, 4)]));
 
@@ -675,7 +772,7 @@ mod tests {
         // "other" has a discovered frontend that never published.
         let mut discovered = listed(&[PUBLISHER]);
         discovered.insert("other".to_string(), HashSet::from([2, 3]));
-        let models = reports.model_loads(&catalog(Vec::new()), &discovered, Instant::now());
+        let models = reports.model_loads(&catalog(Vec::new()), RELAY_NS, &discovered, Instant::now());
         let keys = models
             .iter()
             .map(|model| (model.namespace.as_str(), model.model.as_str()))
@@ -701,7 +798,7 @@ mod tests {
         other.is_serving_ready = false;
         record(&mut reports, 2, other);
 
-        let models = reports.model_loads(&catalog(Vec::new()), &listed(&[]), Instant::now());
+        let models = reports.model_loads(&catalog(Vec::new()), RELAY_NS, &listed(&[]), Instant::now());
         let (a, b) = (&models[0], &models[1]);
         assert_eq!(a.observed_frontends, 2);
         assert_eq!(a.ready_frontends, 1);
@@ -710,11 +807,23 @@ mod tests {
         assert_eq!(awaiting(b), Some(4));
     }
 
+    /// A ready frontend is not ready for a model it cannot serve yet.
+    #[test]
+    fn ready_frontends_count_only_models_ready_to_serve() {
+        let mut reports = FrontendReports::default();
+        let mut not_ready = model_load("a", 0, 0);
+        not_ready.is_ready = false;
+        record(&mut reports, PUBLISHER, frame(1, 1, vec![not_ready]));
+
+        let model = only_model(&reports, &listed(&[PUBLISHER]));
+        assert_eq!((model.observed_frontends, model.ready_frontends), (1, 0));
+    }
+
     #[test]
     fn catalog_models_without_frontends_are_unavailable_with_zero_totals() {
         let reports = FrontendReports::default();
         let catalog = catalog(vec![pool(NS, "a")]);
-        let models = reports.model_loads(&catalog, &listed(&[]), Instant::now());
+        let models = reports.model_loads(&catalog, RELAY_NS, &listed(&[]), Instant::now());
         assert_eq!(models.len(), 1);
         assert_eq!(
             (models[0].namespace.as_str(), models[0].model.as_str()),
@@ -726,8 +835,76 @@ mod tests {
         assert_eq!(models[0].expected_frontends, 0);
     }
 
+    /// A frontend without an exact namespace publishes in the Relay's
+    /// namespace; its load counts under the namespace that serves the model.
     #[test]
-    fn prune_forgets_only_long_silent_undiscovered_frontends() {
+    fn relay_namespace_frontends_count_under_the_models_catalog_namespace() {
+        let mut reports = FrontendReports::default();
+        reports.record(
+            RELAY_NS.to_string(),
+            event(PUBLISHER, frame(1, 1, vec![model_load("a", 2, 5)])),
+        );
+        let catalog = catalog(vec![pool(NS, "a")]);
+        let registered = HashMap::from([
+            (NS.to_string(), HashSet::new()),
+            (RELAY_NS.to_string(), HashSet::from([PUBLISHER])),
+        ]);
+
+        let models = reports.model_loads(&catalog, RELAY_NS, &registered, Instant::now());
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!((model.namespace.as_str(), model.model.as_str()), (NS, "a"));
+        assert_eq!(awaiting(model), Some(2));
+        assert_eq!(model.totals.requests_started, 5);
+        assert_eq!((model.expected_frontends, model.observed_frontends), (1, 1));
+        assert_eq!(model.serving_pools, [catalog.pools()[0].pool_id()]);
+    }
+
+    /// One frontend serving a name the wire rejects must not poison the window:
+    /// the Relay drops that model and keeps the rest.
+    #[test]
+    fn invalid_model_names_are_dropped_at_the_trust_boundary() {
+        let mut reports = FrontendReports::default();
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 1, vec![model_load("llama ", 1, 1), model_load("a", 2, 5)]),
+        );
+
+        let model = only_model(&reports, &listed(&[PUBLISHER]));
+        assert_eq!(model.model, "a");
+        assert_eq!(awaiting(&model), Some(2));
+    }
+
+    /// A live frontend the Relay forgot, or first hears mid-stream, adds only
+    /// the growth it reports from then on.
+    #[test]
+    fn a_frontend_first_heard_mid_stream_counts_only_later_growth() {
+        let mut reports = FrontendReports::default();
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 1, vec![model_load("a", 1, 100)]),
+        );
+        let later = Instant::now() + SOURCE_RETENTION + Duration::from_secs(1);
+        reports.prune(|_, _| false, later);
+        assert!(reports.frontends.is_empty());
+
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 7, vec![model_load("a", 1, 101)]),
+        );
+        record(
+            &mut reports,
+            PUBLISHER,
+            frame(1, 8, vec![model_load("a", 1, 103)]),
+        );
+        assert_eq!(reports.totals(NS, "a").requests_started, 102);
+    }
+
+    #[test]
+    fn prune_forgets_only_long_silent_unregistered_frontends() {
         let mut reports = FrontendReports::default();
         record(
             &mut reports,
@@ -736,13 +913,13 @@ mod tests {
         );
         let later = Instant::now() + SOURCE_RETENTION + Duration::from_secs(1);
 
-        reports.prune(&listed(&[PUBLISHER]), later);
+        reports.prune(|_, publisher| publisher == PUBLISHER, later);
         assert_eq!(reports.frontends.len(), 1);
-        reports.prune(&HashMap::new(), later);
+        reports.prune(|_, _| false, later);
         assert!(reports.frontends.is_empty());
         // Totals outlive the frontend.
         assert_eq!(
-            reports.totals[&(NS.to_string(), "a".to_string())].requests_started,
+            reports.totals(NS, "a").requests_started,
             5
         );
     }

@@ -16,7 +16,7 @@ use crate::kv_router::sequence::SCHEDULER_LOAD_PUBLISH_INTERVAL;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// How long a router scheduler's view counts.
-const SCHEDULER_FRESHNESS: Duration = freshness(SCHEDULER_LOAD_PUBLISH_INTERVAL);
+pub(super) const SCHEDULER_FRESHNESS: Duration = freshness(SCHEDULER_LOAD_PUBLISH_INTERVAL);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct LoadCapacity {

@@ -98,7 +98,7 @@ impl SubscriberLimits {
                 StreamKind::Catalog => "catalog stream",
                 StreamKind::Pool => "total pool stream",
                 StreamKind::Readiness => "readiness stream",
-                StreamKind::Load => "load stream",
+                StreamKind::Load => "pool-load stream",
                 StreamKind::ServingLoad => "serving-load stream",
             };
             RelayErrorReason::ResourceLimit
@@ -319,21 +319,24 @@ impl proto::KvEventRelay for KvEventRelayService {
     }
 }
 
-/// Streams the current window, then every newer one. A subscriber that falls
-/// behind the bounded fanout must resubscribe from a complete window.
+/// Streams the current window, if there is one yet, then every newer one. A
+/// subscriber that falls behind the bounded fanout must resubscribe from a
+/// complete window.
 fn window_stream<T: LoadWindow>(
     hub: &LoadUpdateHub<T>,
     permit: OwnedSemaphorePermit,
     cancel: CancellationToken,
     subscriber_id: String,
-    plane: &'static str,
+    stream_name: &'static str,
 ) -> WindowStream<T> {
     let mut updates = hub.subscribe();
     let initial = hub.current();
     Box::pin(try_stream! {
         let _permit = permit;
-        let mut current_sequence = initial.window_sequence();
-        yield initial;
+        let mut current_sequence = initial.as_ref().map_or(0, LoadWindow::window_sequence);
+        if let Some(initial) = initial {
+            yield initial;
+        }
         loop {
             let update = tokio::select! {
                 biased;
@@ -347,13 +350,13 @@ fn window_stream<T: LoadWindow>(
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(%subscriber_id, plane, skipped, "KV Relay load subscriber lagged; forcing resubscribe");
+                    tracing::warn!(%subscriber_id, stream_name, skipped, "KV Relay load subscriber lagged; forcing resubscribe");
                     Err(RelayErrorReason::SubscriberLagged.status(format!(
-                        "{plane} subscriber lagged by {skipped} complete windows; resubscribe"
+                        "{stream_name} subscriber lagged by {skipped} complete windows; resubscribe"
                     )))?;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    Err(RelayErrorReason::PublicationUnavailable.status(format!("{plane} publication stopped")))?;
+                    Err(RelayErrorReason::PublicationUnavailable.status(format!("{stream_name} publication stopped")))?;
                 }
             }
         }

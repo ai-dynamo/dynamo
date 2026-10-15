@@ -4,9 +4,9 @@
 //! Validation of `ServingLoadUpdate` windows.
 //!
 //! [`validate_serving_load_update`] decides whether a window is usable at all;
-//! the per-entry validators decide whether one entry is. An entry error with
-//! `is_unsupported()` (an unknown `DataStatus` or pool identity) quarantines that
-//! entry only.
+//! the per-entry validators decide whether one entry is. Any entry error
+//! quarantines that entry only; `is_unsupported()` marks the ones a newer
+//! producer may legitimately send (an unknown `DataStatus` or pool identity).
 
 use std::collections::HashSet;
 
@@ -67,12 +67,12 @@ pub fn validate_pool_serving_load(pool: &PoolServingLoad) -> Result<(), WireIden
         .tokens
         .as_ref()
         .ok_or(WireIdentityError::MissingField("pool token load"))?;
-    require_presence(
+    require_set_exactly_when(
         "active_prefill_tokens",
         tokens.active_prefill_tokens,
         complete,
     )?;
-    require_presence(
+    require_set_exactly_when(
         "active_decode_blocks",
         tokens.active_decode_blocks,
         complete,
@@ -86,7 +86,7 @@ pub fn validate_pool_serving_load(pool: &PoolServingLoad) -> Result<(), WireIden
         ("pool input_tokens_total", tokens.input_tokens_total),
         ("pool output_tokens_total", tokens.output_tokens_total),
     ] {
-        require_presence(field, value, false)?;
+        require_set_exactly_when(field, value, false)?;
     }
     pool.deployment
         .as_ref()
@@ -106,12 +106,12 @@ pub fn validate_model_serving_load(model: &ModelServingLoad) -> Result<(), WireI
         .requests
         .as_ref()
         .ok_or(WireIdentityError::MissingField("model request counts"))?;
-    require_presence(
+    require_set_exactly_when(
         "requests_awaiting_first_token",
         requests.requests_awaiting_first_token,
         complete,
     )?;
-    require_presence(
+    require_set_exactly_when(
         "requests_generating",
         requests.requests_generating,
         complete,
@@ -120,24 +120,24 @@ pub fn validate_model_serving_load(model: &ModelServingLoad) -> Result<(), WireI
         .tokens
         .as_ref()
         .ok_or(WireIdentityError::MissingField("model token load"))?;
-    require_presence(
+    require_set_exactly_when(
         "awaiting_first_token_input_tokens",
         tokens.awaiting_first_token_input_tokens,
         complete,
     )?;
-    require_presence(
+    require_set_exactly_when(
         "inflight_input_tokens",
         tokens.inflight_input_tokens,
         complete,
     )?;
-    require_presence("input_tokens_total", tokens.input_tokens_total, true)?;
-    require_presence("output_tokens_total", tokens.output_tokens_total, true)?;
-    require_presence(
+    require_set_exactly_when("input_tokens_total", tokens.input_tokens_total, true)?;
+    require_set_exactly_when("output_tokens_total", tokens.output_tokens_total, true)?;
+    require_set_exactly_when(
         "model active_prefill_tokens",
         tokens.active_prefill_tokens,
         false,
     )?;
-    require_presence(
+    require_set_exactly_when(
         "model active_decode_blocks",
         tokens.active_decode_blocks,
         false,
@@ -170,12 +170,12 @@ fn validate_status(load: &LoadView) -> Result<bool, WireIdentityError> {
     }
 }
 
-fn require_presence(
+fn require_set_exactly_when(
     field: &'static str,
     value: Option<u64>,
-    required: bool,
+    condition: bool,
 ) -> Result<(), WireIdentityError> {
-    if value.is_some() != required {
+    if value.is_some() != condition {
         return Err(WireIdentityError::LoadViewField(field));
     }
     Ok(())

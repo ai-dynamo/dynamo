@@ -56,7 +56,7 @@ struct RelayFixture {
     topology: Arc<TopologyPublisher>,
     attachment: Option<PoolAttachment>,
     pool_id: PoolId,
-    serving_load: watch::Sender<Arc<ServingLoadSnapshot>>,
+    serving_load: watch::Sender<Option<Arc<ServingLoadSnapshot>>>,
 }
 
 impl RelayFixture {
@@ -121,7 +121,7 @@ impl RelayFixture {
             config.max_pool_streams_total,
             Duration::from_millis(config.snapshot_progress_timeout_ms),
         ));
-        let (serving_load, serving_load_rx) = watch::channel(Arc::default());
+        let (serving_load, serving_load_rx) = watch::channel(None);
         let transport = GrpcTransport::start(publication, serving_load_rx, lifecycle, config)
             .await
             .unwrap();
@@ -535,6 +535,8 @@ async fn actual_relay_transport_serves_all_rpc_surfaces_and_contiguous_cbi1() {
         .expect("load stream ended");
     proto::validate_protocol_envelope(load.protocol_version, load.contract_marker)
         .expect("valid load envelope");
+    // The hub has no seed window: the first one a subscriber sees is published.
+    assert!(load.window_sequence > 0);
     assert_eq!(load.pools.len(), 1);
     assert_eq!(load.pools[0].producer.as_ref(), Some(&producer));
     assert_eq!(load.pools[0].kv_used_blocks, 40);
@@ -755,25 +757,24 @@ async fn serving_load_streams_complete_windows_from_the_aggregate() {
         .await
         .unwrap()
         .into_inner();
-    // The aggregate starts empty, before it has seen the catalog.
-    let first = next_serving_load(&mut stream).await;
-    assert!(first.pools.is_empty() && first.models.is_empty());
+    // No window before the aggregate's first snapshot: an empty one would
+    // read as every pool gone.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.message())
+            .await
+            .is_err()
+    );
 
     fixture
         .serving_load
-        .send_replace(Arc::new(ServingLoadSnapshot {
+        .send_replace(Some(Arc::new(ServingLoadSnapshot {
             pools: fixture
                 .registry
                 .serving_pool_loads(&HashMap::new(), std::time::Instant::now()),
             models: Vec::new(),
-        }));
-    let window = loop {
-        let window = next_serving_load(&mut stream).await;
-        assert!(window.window_sequence > first.window_sequence);
-        if !window.pools.is_empty() {
-            break window;
-        }
-    };
+        })));
+    let window = next_serving_load(&mut stream).await;
+    assert_eq!(window.window_sequence, 1);
     assert_eq!(window.window_ms, 10);
     assert_eq!(window.pools.len(), 1);
     let pool = &window.pools[0];

@@ -53,6 +53,26 @@ Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a
   Requests in the HTTP processing queue. Kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages.
 </ParamField>
 
+<ParamField path="dynamo_frontend_requests_awaiting_first_token" type="gauge">
+  Admitted requests that have not produced an output token yet: being tokenized, queued, routed, or prefilled. Requests to endpoints that never stream tokens (embeddings, images, videos, tensors) stay here until they finish. Labeled by `model`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_requests_generating" type="gauge">
+  In-flight requests that have produced at least one output token. Labeled by `model`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_awaiting_first_token_input_tokens" type="gauge">
+  Known prompt tokens of the requests counted by `dynamo_frontend_requests_awaiting_first_token`. Labeled by `model`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_inflight_input_tokens" type="gauge">
+  Known prompt tokens of all in-flight requests. Labeled by `model`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_input_tokens_total" type="counter">
+  Cumulative known prompt tokens of admitted requests. Labeled by `model`.
+</ParamField>
+
 <ParamField path="dynamo_frontend_disconnected_clients" type="gauge">
   Number of disconnected clients.
 </ParamField>

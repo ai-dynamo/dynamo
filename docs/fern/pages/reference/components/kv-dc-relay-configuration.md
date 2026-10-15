@@ -72,6 +72,22 @@ For Kubernetes pod identity and RBAC, see [Deploy the DC KV Relay](../../kuberne
 Relay's CLI does not accept the Frontend's runtime CLI flags; configure the runtime through its
 environment variables.
 
+## Serving-Load Publishers
+
+`SubscribeServingLoad` aggregates load that frontends, routers, and workers publish only when
+`DYN_SERVING_LOAD_PUBLISH` is true. It is off by default, so deployments without a Relay pay
+nothing. Set it on the processes that feed the Relay, not on the Relay itself:
+
+| Process | Publishes |
+| --- | --- |
+| Frontend, including its embedded KV router | Per-model request and token load once per second, and the embedded router's scheduler load |
+| Standalone KV router | Scheduler load of every worker rank once per second |
+| Worker | Its last KV metrics every 10 seconds, for subscribers that joined late |
+
+Set it on all of them. The Relay cannot see a frontend or router that does not publish, so when
+only some do, their load reads as the complete load. Without it anywhere, every serving-load view
+is `UNAVAILABLE`, and after 30 seconds the Relay logs a warning naming the variable.
+
 ## Producer Tuning
 
 These environment-only overrides also work without a WAN listener. All values must be positive
@@ -124,7 +140,7 @@ These limits belong to the publisher; the Python launcher exposes their override
 | `DYN_RELAY_MAX_POOL_STREAMS_TOTAL` | `64` | Total active pool streams. |
 | `DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL` | `64` | Subscribers attached to one pool. |
 | `DYN_RELAY_MAX_READINESS_SUBSCRIBERS` | `64` | Concurrent readiness streams. |
-| `DYN_RELAY_MAX_LOAD_SUBSCRIBERS` | `64` | Concurrent load streams. |
+| `DYN_RELAY_MAX_LOAD_SUBSCRIBERS` | `64` | Concurrent pool-load streams. |
 | `DYN_RELAY_MAX_SERVING_LOAD_SUBSCRIBERS` | `64` | Concurrent serving-load streams. |
 
 ### Validation Limits

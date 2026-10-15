@@ -80,21 +80,24 @@ The Relay consumes only DC-local, positively advertised facts:
 | Instance availability | per-endpoint instance watches | live worker sets; authoritative once the watch delivers its initial snapshot |
 | KV event source advertisements | typed `KvEventSource` discovery entries | pool materialization gate, per-`(worker_id, dp_rank)` ingest and recovery |
 | Worker KV-occupancy events | DC event plane (`kv_metrics` subject) | authoritative pool KV-load windows |
-| Router scheduler views | DC event plane (`scheduler_load` subject, per serving endpoint) | pool scheduler load in serving-load windows |
-| Frontend load frames | DC event plane (`frontend-load` topic, per namespace) | model request and token load in serving-load windows |
-| Event-channel registrations | discovery plane, listed once per second | expected routers and frontends for serving-load coverage |
+| Router scheduler reports | DC event plane (`scheduler_load` subject, per serving endpoint) | pool scheduler load in serving-load windows |
+| Frontend load frames | DC event plane (`frontend_load` topic, per namespace) | model request and token load in serving-load windows |
+| Event-channel registrations | discovery plane, watched per namespace and serving endpoint | expected routers and frontends for serving-load coverage |
 
 The Relay never probes workers, never synthesizes facts it cannot observe, and
 never assumes another component's internal state.
 
-Each pool's load collector subscribes to both worker subjects for its serving endpoint;
-scheduler views are kept per `(rank, router)` and are never mixed into KV usage. Routers tag
-each view with its scheduler group: views within a group overlap and take the per-rank maximum,
-while views from distinct groups are summed. With the WAN transport enabled, a serving-load
+Each pool's load collectors subscribe to the workers' `kv_metrics` subject and the routers'
+`scheduler_load` subject on its serving endpoint. Each router report is one batch covering
+every rank it schedules, kept per router and never mixed into KV usage. Routers tag each report
+with its scheduler group: reports within a group overlap and take the per-rank maximum, while
+reports from distinct groups are summed. With the WAN transport enabled, a serving-load
 aggregator subscribes to frontend load in every namespace that holds a catalog pool or a served
-model, plus the Relay's own namespace, reconciling those subscriptions as the catalog and
-namespace sources change. Once per second it lists the registered publishers and publishes one
-complete serving-load snapshot; its stopping fails the transport.
+model, plus the Relay's own namespace, and watches the publishers registered for both streams,
+reconciling as the catalog and namespace sources change. Once per load window it publishes one
+complete serving-load snapshot, which becomes the next `SubscribeServingLoad` window; its
+stopping fails the transport. [The gRPC contract](grpc-contract.md#subscribeservingload) defines
+coverage.
 
 ## The two projections
 

@@ -25,7 +25,7 @@ use tonic::transport::Server;
 use tonic::transport::server::Connected;
 
 use super::config::KvDcRelayGrpcConfig;
-use super::load::{LoadUpdateHub, load_update, run_load_publisher};
+use super::load::{LoadUpdateHub, load_update, run_load_publisher, run_snapshot_publisher};
 use super::protocol::{FILE_DESCRIPTOR_SET, KvEventRelayServer};
 use super::service::{KvEventRelayService, KvEventRelayServiceConfig, SubscriberLimits};
 use super::serving_load::serving_load_update;
@@ -140,11 +140,12 @@ impl Connected for CancellableIo {
 }
 
 impl GrpcTransport {
-    /// `serving_load` is the host's serving-load aggregate; its sender closing
-    /// before shutdown fails the transport.
+    /// `serving_load` is the host's serving-load aggregate, which snapshots once
+    /// per `config.load_window_ms` and holds `None` until its first snapshot;
+    /// its sender closing before shutdown fails the transport.
     pub(crate) async fn start(
         publication: Arc<dyn RelayPublicationSource>,
-        serving_load: watch::Receiver<Arc<ServingLoadSnapshot>>,
+        serving_load: watch::Receiver<Option<Arc<ServingLoadSnapshot>>>,
         lifecycle: CancellationToken,
         config: KvDcRelayGrpcConfig,
     ) -> anyhow::Result<Self> {
@@ -170,14 +171,8 @@ impl GrpcTransport {
         }));
         let load_window = Duration::from_millis(config.load_window_ms);
         let relay = source.relay_identity();
-        let load_updates = LoadUpdateHub::new(
-            load_update(relay, source.load_snapshots(), load_window, 0),
-            config.load_fanout_capacity,
-        );
-        let serving_load_updates = LoadUpdateHub::new(
-            serving_load_update(relay, &serving_load.borrow(), load_window, 0),
-            config.load_fanout_capacity,
-        );
+        let load_updates = LoadUpdateHub::new(config.load_fanout_capacity);
+        let serving_load_updates = LoadUpdateHub::new(config.load_fanout_capacity);
         let limits = SubscriberLimits::new(
             config.max_catalog_subscribers,
             config.max_pool_streams_total,
@@ -247,34 +242,20 @@ impl GrpcTransport {
                 .await
                 .context("KV Relay gRPC server failed")
         });
-        let kv_load =
+        let kv_load_publisher =
             run_load_publisher(load_window, load_updates, cancel.clone(), move |sequence| {
-                Ok(load_update(
-                    relay,
-                    source.load_snapshots(),
-                    load_window,
-                    sequence,
-                ))
+                load_update(relay, source.load_snapshots(), load_window, sequence)
             });
-        let serving_load = run_load_publisher(
-            load_window,
+        // The aggregator snapshots once per `load_window`; each snapshot is one window.
+        let serving_load_publisher = run_snapshot_publisher(
+            serving_load,
             serving_load_updates,
             cancel.clone(),
-            move |sequence| {
-                // Errors only once the aggregator dropped its sender.
-                serving_load
-                    .has_changed()
-                    .map_err(|_| anyhow::anyhow!("KV Relay serving-load aggregator stopped"))?;
-                Ok(serving_load_update(
-                    relay,
-                    &serving_load.borrow(),
-                    load_window,
-                    sequence,
-                ))
-            },
+            move |snapshot, sequence| serving_load_update(relay, snapshot, load_window, sequence),
         );
-        let load_task =
-            tokio::spawn(async move { tokio::try_join!(kv_load, serving_load).map(drop) });
+        let load_task = tokio::spawn(async move {
+            tokio::try_join!(kv_load_publisher, serving_load_publisher).map(drop)
+        });
         let supervisor_cancel = cancel.clone();
         let supervisor_health = health.clone();
         let task = tokio::spawn(supervise_transport(

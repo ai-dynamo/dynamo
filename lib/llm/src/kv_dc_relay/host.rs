@@ -632,7 +632,7 @@ pub struct KvDcRelay {
     publication_source: Arc<RegistryPublicationSource>,
     transport: Option<GrpcTransport>,
     /// Serving-load aggregator feeding the transport; runs only with it.
-    serving_load: Mutex<Option<JoinHandle<()>>>,
+    serving_load_aggregator: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl KvDcRelay {
@@ -740,11 +740,12 @@ impl KvDcRelay {
             max_active_streams,
             snapshot_progress_timeout,
         ));
-        let (transport, serving_load) = if let Some(transport_config) = transport_config {
+        let (transport, serving_load_aggregator) = if let Some(transport_config) = transport_config {
             let (serving_load, aggregator) = ServingLoadAggregator::spawn(
                 &component,
                 pools.clone(),
                 topology.clone(),
+                Duration::from_millis(transport_config.load_window_ms),
                 cancel.child_token(),
             );
             match GrpcTransport::start(
@@ -758,7 +759,11 @@ impl KvDcRelay {
                 Ok(transport) => (Some(transport), Some(aggregator)),
                 Err(error) => {
                     cancel.cancel();
-                    let _ = aggregator.await;
+                    if let Err(error) = aggregator.await
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(%error, "KV DC Relay serving-load aggregator failed while its transport failed to start");
+                    }
                     topology.clear();
                     membership.shutdown().await;
                     pools.shutdown().await;
@@ -804,7 +809,7 @@ impl KvDcRelay {
             topology,
             publication_source,
             transport,
-            serving_load: Mutex::new(serving_load),
+            serving_load_aggregator: Mutex::new(serving_load_aggregator),
         })
     }
 
@@ -976,9 +981,9 @@ impl KvDcRelay {
         if let Some(transport) = &self.transport {
             transport.shutdown().await;
         }
-        let serving_load = self.serving_load.lock().take();
-        if let Some(serving_load) = serving_load
-            && let Err(error) = serving_load.await
+        let aggregator = self.serving_load_aggregator.lock().take();
+        if let Some(aggregator) = aggregator
+            && let Err(error) = aggregator.await
             && !error.is_cancelled()
         {
             tracing::warn!(%error, "KV DC Relay serving-load aggregator failed during shutdown");
@@ -2202,6 +2207,9 @@ async fn collect_pending_while<T>(
     }
 }
 
+/// Feeds worker KV occupancy of the endpoint's ranks into the pool registry. The
+/// generation's observations are cleared whenever the subscription fails, since
+/// updates may have been lost.
 async fn run_load_collector(
     component: Component,
     endpoint: EndpointId,
@@ -2210,66 +2218,44 @@ async fn run_load_collector(
     pools: Arc<PoolRegistry>,
     cancel: CancellationToken,
 ) {
-    let mut retry = LoadRetryBackoff::default();
+    let mut retry = Backoff::new(LOAD_RETRY_INITIAL, LOAD_RETRY_MAX);
+    let mut failures = FailureStreak::default();
     loop {
-        let subscriber = KvMetricsSubscriber::for_endpoint_id(&component, &endpoint).await;
-        let mut subscriber = match subscriber {
-            Ok(subscriber) => subscriber,
-            Err(error) => {
-                let failure = retry.failed();
-                if failure.first {
-                    tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = failure.delay.as_millis(), "Failed to subscribe to KV DC Relay ActiveLoad stream");
-                } else {
-                    tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad subscription retry failed");
-                }
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(failure.delay) => {}
-                }
-                continue;
-            }
+        let subscriber = tokio::select! {
+            _ = cancel.cancelled() => return,
+            subscriber = KvMetricsSubscriber::for_endpoint_id(&component, &endpoint) => subscriber,
         };
-        loop {
-            let event = tokio::select! {
-                _ = cancel.cancelled() => return,
-                event = subscriber.next() => event,
-            };
-            match event {
-                Some(Ok(load)) => {
-                    retry.succeeded();
-                    if !pools.observe_load(pool_id, layout_generation, load) {
-                        tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
-                    }
+        let error = match subscriber {
+            Ok(mut subscriber) => loop {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    event = subscriber.next() => event,
+                };
+                let load = match event {
+                    Some(Ok(load)) => load,
+                    Some(Err(error)) => break error,
+                    None => break anyhow::anyhow!("stream closed"),
+                };
+                retry.reset();
+                if let Some(failures) = failures.recover() {
+                    tracing::info!(%endpoint, %pool_id, layout_generation, failures, "KV DC Relay ActiveLoad stream recovered");
                 }
-                Some(Err(error)) => {
-                    pools.clear_load_observations(pool_id, layout_generation);
-                    let failure = retry.failed();
-                    if failure.first {
-                        tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream failed; resubscribing");
-                    } else {
-                        tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream failed again; resubscribing");
-                    }
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(failure.delay) => {}
-                    }
-                    break;
+                if !pools.observe_load(pool_id, layout_generation, load) {
+                    tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
                 }
-                None => {
-                    pools.clear_load_observations(pool_id, layout_generation);
-                    let failure = retry.failed();
-                    if failure.first {
-                        tracing::warn!(%endpoint, %pool_id, layout_generation, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream closed; resubscribing");
-                    } else {
-                        tracing::debug!(%endpoint, %pool_id, layout_generation, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream closed again; resubscribing");
-                    }
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(failure.delay) => {}
-                    }
-                    break;
-                }
-            }
+            },
+            Err(error) => error,
+        };
+        pools.clear_load_observations(pool_id, layout_generation);
+        let delay = retry.next_delay();
+        if failures.fail() {
+            tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = delay.as_millis(), "KV DC Relay ActiveLoad stream failed; resubscribing");
+        } else {
+            tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failures.failures(), retry_ms = delay.as_millis(), "KV DC Relay ActiveLoad stream failed again; resubscribing");
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
@@ -2346,44 +2332,6 @@ async fn run_scheduler_load_collector(
 
 const LOAD_RETRY_INITIAL: Duration = Duration::from_millis(100);
 const LOAD_RETRY_MAX: Duration = Duration::from_secs(5);
-
-struct LoadRetryBackoff {
-    failures: u64,
-    next_delay: Duration,
-}
-
-impl Default for LoadRetryBackoff {
-    fn default() -> Self {
-        Self {
-            failures: 0,
-            next_delay: LOAD_RETRY_INITIAL,
-        }
-    }
-}
-
-impl LoadRetryBackoff {
-    fn failed(&mut self) -> LoadRetryFailure {
-        self.failures = self.failures.saturating_add(1);
-        let failure = LoadRetryFailure {
-            count: self.failures,
-            delay: self.next_delay,
-            first: self.failures == 1,
-        };
-        self.next_delay = self.next_delay.saturating_mul(2).min(LOAD_RETRY_MAX);
-        failure
-    }
-
-    fn succeeded(&mut self) {
-        self.failures = 0;
-        self.next_delay = LOAD_RETRY_INITIAL;
-    }
-}
-
-struct LoadRetryFailure {
-    count: u64,
-    delay: Duration,
-    first: bool,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegistrationRefresh {
@@ -3189,7 +3137,7 @@ mod tests {
             topology,
             publication_source,
             transport: None,
-            serving_load: Mutex::new(None),
+            serving_load_aggregator: Mutex::new(None),
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -3283,7 +3231,7 @@ mod tests {
             topology: topology.clone(),
             publication_source,
             transport: None,
-            serving_load: Mutex::new(None),
+            serving_load_aggregator: Mutex::new(None),
         };
 
         cancel.cancel();
@@ -3401,7 +3349,7 @@ mod tests {
             topology,
             publication_source,
             transport: None,
-            serving_load: Mutex::new(None),
+            serving_load_aggregator: Mutex::new(None),
         };
 
         let health = relay.health().await;

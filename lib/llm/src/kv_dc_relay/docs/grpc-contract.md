@@ -229,7 +229,8 @@ namespace consistency; duplicate members, adapters, and roles rejected;
 ### SubscribeKvPoolLoad
 
 Emits complete `KvPoolLoadUpdate` windows (`window_sequence`, `observed_ms`,
-`window_ms`); a pool absent from the next window is gone. Per-pool
+`window_ms`); a pool absent from the next window is gone. Nothing is sent before
+the first window, one `window_ms` after the Relay starts serving. Per-pool
 `KvPoolLoadEntry` carries worker-authoritative KV occupancy
 (`kv_used_blocks` / `total_kv_blocks`) and observed/expected rank coverage.
 An aggregate is authoritative only when every declared rank has reported and
@@ -253,7 +254,19 @@ Router scheduler load is published separately by `SubscribeServingLoad`.
 Emits complete `ServingLoadUpdate` windows (`window_sequence`, `observed_ms`, `window_ms`) at
 the same cadence and with the same fanout bound as `SubscribeKvPoolLoad`; a lagging subscriber
 is terminated with `SUBSCRIBER_LAGGED`. Its subscriber limit is independent. A pool or model
-absent from the next window is gone.
+absent from the next window is gone. Like `SubscribeKvPoolLoad`, the stream sends nothing until
+the Relay has built its first window, so a subscriber never sees a placeholder empty window.
+
+A Relay that predates this RPC answers `UNIMPLEMENTED`: serving load is unavailable from it, which
+is not an outage.
+
+Producers publish at least once per second, and the Relay treats a report as fresh for three
+of those intervals; a producer must not publish less often. Producers publish only with
+`DYN_SERVING_LOAD_PUBLISH` set to a truthy value. Set it on every
+frontend (including the routers embedded in frontends), on standalone routers, and on workers,
+which then re-send their KV metrics every 10 s for subscribers that joined late. Without it the
+Relay still serves the stream, but every view is `UNAVAILABLE`, and it logs a warning after
+30 s without any publisher.
 
 | Entry | Key | Contents |
 | --- | --- | --- |
@@ -264,26 +277,68 @@ Each `LoadView.status` states coverage of its expected sources:
 
 | Status | Pools (router schedulers) | Models (frontends in the namespace) |
 | --- | --- | --- |
-| `COMPLETE` | Every expected router has a recent view of every declared rank. | Discovery succeeded and every expected frontend published recently. |
-| `DEGRADED` | Some views are missing, or scheduler discovery failed. | Some expected frontends are silent, or frontend discovery failed. |
+| `COMPLETE` | Every expected router has a recent report of every declared rank. | The roster is known and every expected frontend published recently. |
+| `DEGRADED` | Some reports are missing, or the router roster is unknown. | Some expected frontends are silent, or the frontend roster is unknown. |
 | `UNAVAILABLE` | No router reported recently. | No frontend published recently. |
 
-Expected sources are the publishers registered in discovery plus every source that reported
-within three publish intervals, so broker-mode publishers, which skip registration, still count.
+These states describe report coverage only. `UNAVAILABLE` here means no report was heard; it
+says nothing about whether the pool or model can serve, which is what
+`SubscribeServingReadiness` reports.
+
+`COMPLETE` means every source publishing this stream has reported; it does not mean every
+process that should publish is alive, or publishes at all. A frontend or router that does not
+publish (the gate is off, or it predates this RPC) is invisible to the Relay, so a fleet where only
+some of them publish reads `COMPLETE` with a partial sum. Enable the gate on every frontend and
+router serving the namespace. A source is expected from when the Relay first sees its
+discovery record until one freshness window (three publish intervals) later, and after that
+only while it keeps reporting. So a source that is starting holds its views `DEGRADED` until it
+reports, and a source that stops reporting, whether it exited or was partitioned, drops out of
+the expected set when its last report expires; `expected_frontends` and `observed_frontends`
+fall with it. The roster is unknown until the Relay's discovery watch delivers a complete set,
+and again while that watch is re-established. ZMQ-broker publishers do not register, so in
+broker mode the expected sources are exactly the ones heard recently.
+
 Gauges (`active_*`, `requests_awaiting_first_token`, `requests_generating`, and the in-flight
 token counts) are set exactly when the view is `COMPLETE`: a partial sum would read as lower load.
-Model `*_total` counters are always set. They accumulate over every frontend heard during one
-`relay_incarnation` and absorb frontend restarts. A new `relay_incarnation` starts from each
-frontend's own running totals when it is first heard, so the values are neither zero nor
-continuous across incarnations; compute rates only within one incarnation.
+Model `*_total` counters are always set. They count what one `relay_incarnation` observed: a
+frontend first heard from its first frame, or after it restarts, contributes everything it
+reports, and one first heard later contributes only its growth from then on. They absorb frontend
+restarts and restart from zero with each `relay_incarnation`; compute rates only within one
+incarnation.
 Fields that belong to the other view kind are never set. `PoolDeploymentStatus` fields are unset
 while the pool's runtime configuration is invalid or, for `max_concurrency`, while a worker
 does not declare its limit.
 
-Within one scheduler group, views overlap, so the Relay takes each rank's maximum. Distinct
-groups are disjoint, so it sums them. A standalone router that reconnects counts only its latest
-view. Frontends are heard in every namespace that holds a catalog pool or a served model, and in
-the Relay's own namespace, where frontends without an exact namespace publish.
+Within one scheduler group, router reports overlap, so the Relay takes each rank's maximum.
+Distinct groups are disjoint, so it sums them. A standalone router that reconnects counts only
+its latest report. Frontends are heard in every namespace that holds a catalog pool or a served model, and in
+the Relay's own namespace, where frontends without an exact namespace publish. Those frontends
+serve every namespace's models, so their load of a model that catalog pools register in exactly
+one other namespace counts under that namespace, and their coverage counts toward it. A model
+registered in several namespaces stays under the Relay's namespace.
+
+Totals stay monotonic within a frontend incarnation. Three cases still miscount; they are bounded
+and never make a counter go backwards:
+
+- A frame in which a frontend's total for a model falls (an alias was unregistered) counts no
+  growth, including any real growth in that frame.
+- An alias moved to another model carries its history into the new model's totals.
+- An alias removed and then registered again counts its history twice.
+
+Other known limits:
+
+- A restarted standalone router reports under a new group, so for up to three publish intervals
+  its previous process's reports are still fresh and both are summed.
+- A router reports a dimension it does not track as 0: prefill pools always report
+  `active_decode_blocks = 0`, as does any router with that tracking disabled.
+- Within a replica group the maximum undercounts what replicas do not share: output blocks, which
+  each replica tracks locally, and two routers for one endpoint in the same process, which ignore
+  each other's events.
+- A KServe gRPC frontend stops publishing when it starts draining, so it drops out of the expected
+  set while its last requests finish.
+- With a Python chat processor (`--dyn-chat-processor vllm` or `sglang`), prompt tokens reach the
+  frontend with the first output chunk, so `awaiting_first_token_input_tokens` stays near zero
+  through queueing and prefill.
 
 Validate with `validate_serving_load_update` before applying a window: an invalid envelope,
 a missing relay identity, a pool without an identifiable producer, or a duplicate pool or model

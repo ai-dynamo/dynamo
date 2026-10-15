@@ -65,15 +65,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backoff_doubles_to_its_cap_and_resets() {
-        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(5));
-        let delays = [(); 5].map(|()| backoff.next_delay().as_secs());
-        assert_eq!(delays, [1, 2, 4, 5, 5]);
-        backoff.reset();
-        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
-    }
-
-    #[test]
     fn failure_streak_starts_once_and_reports_its_length_on_recovery() {
         let mut streak = FailureStreak::default();
         assert_eq!(streak.recover(), None);

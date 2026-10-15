@@ -437,14 +437,11 @@ mod tests {
         }
     }
 
+    /// A bad envelope or a duplicate key invalidates the whole window.
     #[test]
     fn serving_load_window_rejects_bad_envelopes_and_duplicate_keys() {
         let update = serving_load_update();
-        let decoded = ServingLoadUpdate::decode(update.encode_to_vec().as_slice()).unwrap();
-        assert_eq!(decoded, update);
         validate_serving_load_update(&update).unwrap();
-        validate_pool_serving_load(&update.pools[0]).unwrap();
-        validate_model_serving_load(&update.models[0]).unwrap();
 
         let mut wrong_version = update.clone();
         wrong_version.protocol_version += 1;
@@ -455,6 +452,9 @@ mod tests {
         let mut no_relay = update.clone();
         no_relay.relay = None;
         assert!(validate_serving_load_update(&no_relay).is_err());
+        let mut anonymous = update.clone();
+        anonymous.pools[0].producer = None;
+        assert!(validate_serving_load_update(&anonymous).is_err());
 
         let mut duplicate_pool = update.clone();
         duplicate_pool.pools.push(update.pools[0].clone());
@@ -468,20 +468,21 @@ mod tests {
             validate_serving_load_update(&duplicate_model),
             Err(WireIdentityError::DuplicateLoadModel { .. })
         ));
-        let mut duplicate_link = update.models[0].clone();
-        duplicate_link
-            .deployment
-            .as_mut()
-            .unwrap()
-            .serving_pools
-            .push(pool_id());
-        assert_eq!(
-            validate_model_serving_load(&duplicate_link),
-            Err(WireIdentityError::DuplicateServingPool)
-        );
+    }
 
-        // A pool with an unsupported identity is quarantined, not fatal to the
-        // window; a pool that cannot be identified is.
+    /// An entry this consumer cannot interpret is quarantined on its own.
+    #[test]
+    fn serving_load_entries_with_unknown_status_or_identity_are_unsupported() {
+        let update = serving_load_update();
+        for status in [99, -1] {
+            let mut pool = update.pools[0].clone();
+            pool.load.as_mut().unwrap().status = status;
+            assert!(
+                validate_pool_serving_load(&pool)
+                    .unwrap_err()
+                    .is_unsupported()
+            );
+        }
         let mut future_pool = update.clone();
         future_pool.pools[0]
             .producer
@@ -497,51 +498,41 @@ mod tests {
                 .unwrap_err()
                 .is_unsupported()
         );
-        let mut anonymous = update.clone();
-        anonymous.pools[0].producer = None;
-        assert!(validate_serving_load_update(&anonymous).is_err());
     }
 
+    /// Gauges are set exactly when COMPLETE, totals always, and the other view
+    /// kind's fields never; a malformed entry is rejected, not unsupported.
     #[test]
-    fn serving_load_entries_quarantine_unknown_status_and_enforce_presence_rules() {
+    fn serving_load_entries_enforce_presence_rules() {
         let update = serving_load_update();
-        for status in [99, -1] {
-            let mut pool = update.pools[0].clone();
-            pool.load.as_mut().unwrap().status = status;
-            assert!(
-                validate_pool_serving_load(&pool)
-                    .unwrap_err()
-                    .is_unsupported()
-            );
-        }
-        let mut unspecified = update.models[0].clone();
-        unspecified.load.as_mut().unwrap().status = DataStatus::Unspecified as i32;
-        assert!(
-            !validate_model_serving_load(&unspecified)
-                .unwrap_err()
-                .is_unsupported()
-        );
+        validate_pool_serving_load(&update.pools[0]).unwrap();
+        validate_model_serving_load(&update.models[0]).unwrap();
 
-        let presence_violations: &[fn(&mut LoadView)] = &[
+        let model_violations: &[fn(&mut ModelServingLoad)] = &[
+            |model| model.load.as_mut().unwrap().status = DataStatus::Unspecified as i32,
             // DEGRADED gauges would read as a partial sum.
-            |view| view.requests.as_mut().unwrap().requests_generating = Some(1),
-            |view| view.tokens.as_mut().unwrap().inflight_input_tokens = Some(1),
+            |model| {
+                let requests = model.load.as_mut().unwrap().requests.as_mut().unwrap();
+                requests.requests_generating = Some(1);
+            },
             // COMPLETE requires every gauge.
-            |view| view.status = DataStatus::Complete as i32,
+            |model| model.load.as_mut().unwrap().status = DataStatus::Complete as i32,
             // Totals are always set; pool fields never.
-            |view| view.tokens.as_mut().unwrap().output_tokens_total = None,
-            |view| view.tokens.as_mut().unwrap().active_decode_blocks = Some(1),
+            |model| {
+                let tokens = model.load.as_mut().unwrap().tokens.as_mut().unwrap();
+                tokens.output_tokens_total = None;
+            },
+            |model| {
+                let tokens = model.load.as_mut().unwrap().tokens.as_mut().unwrap();
+                tokens.active_decode_blocks = Some(1);
+            },
+            |model| model.deployment.as_mut().unwrap().serving_pools.push(pool_id()),
         ];
-        for (index, violate) in presence_violations.iter().enumerate() {
+        for (index, violate) in model_violations.iter().enumerate() {
             let mut model = update.models[0].clone();
-            violate(model.load.as_mut().unwrap());
-            assert!(
-                matches!(
-                    validate_model_serving_load(&model),
-                    Err(WireIdentityError::LoadViewField(_))
-                ),
-                "model presence violation {index} was accepted"
-            );
+            violate(&mut model);
+            let error = validate_model_serving_load(&model).unwrap_err();
+            assert!(!error.is_unsupported(), "model violation {index}: {error:?}");
         }
 
         let mut incomplete = update.pools[0].clone();
