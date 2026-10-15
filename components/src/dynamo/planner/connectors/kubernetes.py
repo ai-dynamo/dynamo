@@ -1374,17 +1374,30 @@ class KubernetesConnector(PlannerConnector):
             for plan in adapter_mutations
             if plan.target.desired_replicas > plan.current_replicas
         ]
+        committed_adapter_plans: list[_ReplicaUpdatePlan] = []
         for plan in adapter_reductions:
             if startup_reduction:
                 startup_reductions.record_attempts([plan])
-            transaction.run(
-                lambda plan=plan: self._write_preflighted_replica_target(
-                    plan.deployment,
-                    plan.service,
-                    plan.target.desired_replicas,
-                    plan.scaling_adapter,
+            if transaction.possibly_applied:
+                transaction.run(
+                    lambda plan=plan: self._write_adapter_stage_after_prior_updates(
+                        deployment,
+                        plans,
+                        committed_adapter_plans,
+                        [],
+                        plan,
+                    )
                 )
-            )
+            else:
+                transaction.run(
+                    lambda plan=plan: self._write_preflighted_replica_target(
+                        plan.deployment,
+                        plan.service,
+                        plan.target.desired_replicas,
+                        plan.scaling_adapter,
+                    )
+                )
+            committed_adapter_plans.append(plan)
 
         dgd_mutations = [plan for plan in mutations if plan.scaling_adapter is None]
         if adapter_reductions and dgd_mutations:
@@ -1424,7 +1437,6 @@ class KubernetesConnector(PlannerConnector):
                 )
             )
 
-        committed_adapter_plans = list(adapter_reductions)
         for plan in adapter_increases:
             if transaction.possibly_applied:
                 transaction.run(

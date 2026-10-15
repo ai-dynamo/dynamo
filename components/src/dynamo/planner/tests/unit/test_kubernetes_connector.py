@@ -1198,6 +1198,62 @@ async def test_set_component_replicas_retries_adapter_stage_after_direct_write(
 
 
 @pytest.mark.asyncio
+async def test_set_component_replicas_retries_second_adapter_reduction(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _adapter_component("first-down", "worker", replicas=2),
+        _adapter_component("second-down", "worker", replicas=2),
+    )
+    mock_kube_api.get_graph_deployment.side_effect = [deployment] * 5
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.is_spec_generation_observed.return_value = True
+
+    first_initial = _scaling_adapter("first-down", replicas=2)
+    first_applied = _scaling_adapter("first-down", replicas=1)
+    first_applied["metadata"]["resourceVersion"] = "102"
+    second_initial = _scaling_adapter("second-down", replicas=2)
+    second_initial["metadata"]["resourceVersion"] = "201"
+    second_refreshed = deepcopy(second_initial)
+    second_refreshed["metadata"]["resourceVersion"] = "202"
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        first_initial,
+        second_initial,
+        first_applied,
+        second_initial,
+        first_applied,
+        second_refreshed,
+    ]
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = [
+        None,
+        client.ApiException(status=409),
+        None,
+    ]
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="first-down",
+                desired_replicas=1,
+            ),
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="second-down",
+                desired_replicas=1,
+            ),
+        ],
+        blocking=False,
+    )
+
+    assert mock_kube_api.update_scaling_adapter_replicas.call_args_list == [
+        call("test-graph", "first-down", 1, resource_version="101"),
+        call("test-graph", "second-down", 1, resource_version="201"),
+        call("test-graph", "second-down", 1, resource_version="202"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_set_component_replicas_retries_direct_stage_after_adapter_reduction(
     kubernetes_connector, mock_kube_api
 ):
@@ -1209,6 +1265,7 @@ async def test_set_component_replicas_retries_direct_stage_after_adapter_reducti
     propagated["metadata"]["resourceVersion"] = "2"
     get_components_by_name(propagated)["adapter-down"]["replicas"] = 1
     mock_kube_api.get_graph_deployment.side_effect = [
+        initial,
         initial,
         initial,
         propagated,

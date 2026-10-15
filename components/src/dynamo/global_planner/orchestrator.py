@@ -263,6 +263,11 @@ class Orchestrator:
         """
 
         admitted = asyncio.Event()
+        cancel_requested = asyncio.Event()
+
+        def complete_after_cancel() -> bool:
+            cancel_requested.set()
+            return admitted.is_set()
 
         async def operation() -> Optional[ScaleOutcome]:
             return await self._observe_decide_apply(
@@ -272,6 +277,7 @@ class Orchestrator:
                 deployment_name,
                 caller_name,
                 admitted,
+                cancel_requested,
             )
 
         async def transaction() -> Optional[ScaleOutcome]:
@@ -280,11 +286,11 @@ class Orchestrator:
         if self._scale_lock is not None:
             async with self._scale_lock:
                 terminal = await run_async_to_completion(
-                    transaction(), complete_on_cancel=admitted.is_set
+                    transaction(), complete_on_cancel=complete_after_cancel
                 )
         else:
             terminal = await run_async_to_completion(
-                transaction(), complete_on_cancel=admitted.is_set
+                transaction(), complete_on_cancel=complete_after_cancel
             )
         if terminal is not None:
             return terminal
@@ -309,6 +315,7 @@ class Orchestrator:
         deployment_name: str,
         caller_name: str,
         admitted: asyncio.Event,
+        cancel_requested: asyncio.Event,
     ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
 
@@ -388,7 +395,10 @@ class Orchestrator:
         )
 
         terminal, _ = await self._apply_approved_targets(
-            grouped_targets, ordered_participants, blocking=blocking
+            grouped_targets,
+            ordered_participants,
+            blocking=blocking,
+            cancel_requested=cancel_requested,
         )
         if terminal is not None:
             return terminal
@@ -400,6 +410,7 @@ class Orchestrator:
         ordered_participants: list[str],
         *,
         blocking: bool,
+        cancel_requested: asyncio.Event,
     ) -> tuple[Optional[ScaleOutcome], list[str]]:
         """Apply an admitted plan, settling each blocking step before the next."""
 
@@ -476,10 +487,39 @@ class Orchestrator:
             completed.append(pid)
             if result.applied:
                 applied.append(pid)
+            if (
+                blocking
+                and cancel_requested.is_set()
+                and (result.applied or pid == ordered_participants[-1])
+            ):
+                raise asyncio.CancelledError
             if blocking:
-                await self.capacity_manager.wait_for_ready(pid)
+                await self._wait_for_ready_or_cancel(pid, cancel_requested)
 
         return None, completed
+
+    async def _wait_for_ready_or_cancel(
+        self,
+        participant_id: str,
+        cancel_requested: asyncio.Event,
+    ) -> None:
+        """Keep readiness polling cancellable after a write has completed."""
+        readiness = asyncio.create_task(
+            self.capacity_manager.wait_for_ready(participant_id)
+        )
+        cancellation = asyncio.create_task(cancel_requested.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {readiness, cancellation}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if cancellation in done:
+                raise asyncio.CancelledError
+            await readiness
+        finally:
+            for task in (readiness, cancellation):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(readiness, cancellation, return_exceptions=True)
 
     @staticmethod
     def _partial_plan_error(

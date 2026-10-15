@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch, sentinel
 import pytest
 from kubernetes import client
 
+from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
@@ -295,6 +296,22 @@ def test_update_service_replicas_retries_429_without_rereading_scale(
 
     mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
     assert mock_custom_api.patch_namespaced_custom_object_scale.call_count == 2
+
+
+def test_update_service_replicas_does_not_fallback_after_ambiguous_404(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = [
+        client.ApiException(status=500),
+        client.ApiException(status=404),
+    ]
+
+    with pytest.raises(AmbiguousKubernetesWriteError):
+        k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    assert mock_custom_api.patch_namespaced_custom_object_scale.call_count == 2
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
 
 
 def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):

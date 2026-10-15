@@ -23,6 +23,7 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 from dynamo.common.kubernetes import (
+    AmbiguousKubernetesWriteError,
     client_go_api_client,
     retry_kubernetes_request,
     retry_kubernetes_write,
@@ -174,6 +175,8 @@ class KubernetesAPI:
                 graph_deployment_name, service_name, replicas
             )
 
+        except AmbiguousKubernetesWriteError:
+            raise
         except client.ApiException as e:
             if e.status == 404:
                 # DGDSA doesn't exist - fall back to a direct DGD patch.
