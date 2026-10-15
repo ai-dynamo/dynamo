@@ -816,7 +816,7 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_native_generate_stream_forwards_only_opaque_response():
+async def test_native_generate_stream_forwards_opaque_response_and_token_ids():
     native_response = {
         "output_ids": [101],
         "meta_info": {
@@ -841,7 +841,7 @@ async def test_native_generate_stream_forwards_only_opaque_response():
     )
 
     assert chunks == [
-        {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+        {"token_ids": [101], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
 

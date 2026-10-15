@@ -11,6 +11,7 @@ use dynamo_backend_common::{
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 use tokio_util::{
@@ -366,7 +367,21 @@ impl NativeHttp {
                     return;
                 }
                 let has_output = response_has_output(&response);
+                // The router counts decode output from token_ids; clients get the
+                // opaque response. Prefill reports none, as on the gRPC path.
+                let token_ids = if is_prefill {
+                    Vec::new()
+                } else {
+                    match output_ids(&response) {
+                        Ok(token_ids) => token_ids,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                };
                 let (mut output, terminal) = output(response, &mut prefill_handoff);
+                output.token_ids = token_ids;
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
                     ctx.notify_first_token();
                     first_output_seen = true;
@@ -386,6 +401,13 @@ impl NativeHttp {
             }
         })
     }
+}
+
+fn output_ids(response: &Value) -> Result<Vec<u32>, DynamoError> {
+    response.get("output_ids").map_or(Ok(Vec::new()), |ids| {
+        Vec::<u32>::deserialize(ids)
+            .map_err(|error| client::protocol_error(format!("invalid SGLang output_ids: {error}")))
+    })
 }
 
 fn response_has_output(response: &Value) -> bool {
@@ -911,9 +933,34 @@ mod tests {
             CancellationToken::new(),
         );
 
-        assert!(stream.next().await.unwrap().is_ok());
+        assert_eq!(stream.next().await.unwrap().unwrap().token_ids, [101]);
         assert!(*first_token_seen.borrow());
-        assert!(stream.next().await.unwrap().is_ok());
+        assert_eq!(stream.next().await.unwrap().unwrap().token_ids, [102]);
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_rejects_invalid_output_ids() {
+        let body = "data: {\"output_ids\":[-1],\"meta_info\":{\"finish_reason\":null}}\n\n";
+        let (port, server) = serve_once(body.to_string(), "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("invalid SGLang output_ids"),
+            "{error}"
+        );
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
@@ -1004,6 +1051,7 @@ mod tests {
             terminal.engine_data,
             Some(json!({"sglang_response": response}))
         );
+        assert!(terminal.token_ids.is_empty());
         server.await.unwrap();
     }
 
@@ -1075,6 +1123,7 @@ mod tests {
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         assert!(terminal.disaggregated_params.is_none());
         assert!(terminal.engine_data.is_none());
+        assert!(terminal.token_ids.is_empty());
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
