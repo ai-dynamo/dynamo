@@ -38,6 +38,10 @@ the child's own conversation ID and a signed parent hint for context requests;
 decode requests retain the child's identity. The gateway must authorize client
 parent-session headers before they reach the router.
 
+KV routing examples require a TensorRT-LLM build with native KVCM2 event
+streaming and a Dynamo frontend and sidecar built from this PR. The pinned
+private engine image in the Kubernetes examples requires `ghcr-pull-secret`.
+
 ## Run locally
 
 See [`launch/`](launch/) for all topologies. For example, aggregated serving on
@@ -47,6 +51,10 @@ one GPU:
 export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 lib/sidecar/trtllm/launch/agg.sh
 ```
+
+For KV-aware routing, use `launch/agg_kv_router.sh` (two GPUs) or
+`launch/disagg_kv_router.sh` (four GPUs). Both enable OpenEngine load metrics
+and publish one ZMQ event source per worker.
 
 In a second terminal:
 
@@ -70,6 +78,10 @@ kubectl create secret generic hf-token-secret -n <namespace> \
 kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
+
+Use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml` for KV
+routing. Build the Dynamo images from this PR and replace their image references
+in the manifests before applying.
 
 ## Topologies
 
