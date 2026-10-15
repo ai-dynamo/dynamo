@@ -427,6 +427,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && super::image_edits::advertised_limit(&existing.card)
+                    == super::image_edits::advertised_limit(&instance.card)
             {
                 // A repeated registration still confirms liveness after an older snapshot.
                 self.record_mutation(instance.key.clone());
@@ -1983,6 +1985,43 @@ mod tests {
 
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
         assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn image_edits_capability_update_reconciles_without_changing_identity() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let legacy = instance(1, "same");
+        controller.apply_added(legacy.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let admitted = host.admissions.lock().unwrap()[0].clone();
+
+        let mut upgraded = legacy.clone();
+        upgraded.card.user_data = Some(serde_json::json!({"image_edits": {
+            "schema_version": 1, "max_input_images": 4
+        }}));
+        assert_eq!(legacy.mdc_checksum, upgraded.mdc_checksum);
+        assert!(
+            controller.apply_added(upgraded.clone()),
+            "capability changes must not be suppressed as duplicate Added events"
+        );
+        assert!(!controller.apply_added(upgraded));
+        assert_eq!(*admitted.borrow(), vec![1]);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+
+        // A legacy join stays admitted under the existing cohort rules. A
+        // competing model identity remains outside this capability population.
+        let peer = instance(2, "same");
+        controller.apply_added(peer.clone());
+        controller.apply_added(instance(99, "different"));
+        assert_eq!(*admitted.borrow(), vec![1, 2]);
+        controller.apply_removed(&peer.key);
+        assert_eq!(*admitted.borrow(), vec![1]);
+        assert!(controller.apply_added(legacy));
     }
 
     #[tokio::test]

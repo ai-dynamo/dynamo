@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.common.lora.manager import LoRAInfo
+from dynamo.vllm.omni.image_edit import ImageEditLimits
 
 try:
     from PIL import Image
@@ -1346,8 +1347,11 @@ class TestImageGenerationSizeValidation:
 def image_request_handler():
     handler = _make_handler()
     handler.config.output_modalities = ["image"]
-    handler._image_loader = ImageLoader()
-    handler._image_loader.load_image = AsyncMock(wraps=handler._image_loader.load_image)
+    handler._image_edit_limits = ImageEditLimits()
+    handler._image_edit_loader = ImageLoader()
+    handler._image_edit_loader.load_image = AsyncMock(
+        wraps=handler._image_edit_loader.load_image
+    )
     handler._abort_monitor = MagicMock(return_value=nullcontext())
     handler.engine_client.generate.return_value.__aiter__.return_value = []
     return handler
@@ -1361,7 +1365,7 @@ class TestImageReferenceInputs:
         handler = image_request_handler
         handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
         image = Image.new("RGB", (2, 2), "red")
-        handler._image_loader.load_image = AsyncMock(return_value=image)
+        handler._image_edit_loader.load_image = AsyncMock(return_value=image)
         metadata = SimpleNamespace(
             supports_multimodal_inputs=True, max_multimodal_image_inputs=4
         )
@@ -1380,8 +1384,8 @@ class TestImageReferenceInputs:
             ):
                 pass
         lookup.assert_called_once_with("Flux2KleinPipeline")
-        handler._image_loader.load_image.assert_awaited_once_with(
-            "https://example.com/reference.png"
+        handler._image_edit_loader.load_image.assert_awaited_once_with(
+            "https://example.com/reference.png", max_pixels=32_000_000
         )
         prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
         assert prompt["multi_modal_data"]["image"] == [image]
@@ -1389,7 +1393,7 @@ class TestImageReferenceInputs:
     @pytest.mark.asyncio
     async def test_rejected_controls_do_not_load_reference(self, image_request_handler):
         handler = image_request_handler
-        handler._image_loader.load_image.side_effect = AssertionError(
+        handler._image_edit_loader.load_image.side_effect = AssertionError(
             "Invalid controls must be rejected before image loading"
         )
         request = {
@@ -1402,7 +1406,7 @@ class TestImageReferenceInputs:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
 
-        handler._image_loader.load_image.assert_not_awaited()
+        handler._image_edit_loader.load_image.assert_not_awaited()
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1468,7 +1472,7 @@ class TestImageReferenceInputs:
             assert prompt["mm_processor_kwargs"] == processor_kwargs
 
         assert handler.engine_client.generate.call_count == len(colors)
-        assert handler._image_loader.load_image.await_count == 2
+        assert handler._image_edit_loader.load_image.await_count == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1496,7 +1500,7 @@ class TestImageReferenceInputs:
         self, image_request_handler
     ):
         handler = image_request_handler
-        handler._image_loader = ImageLoader(max_bytes=1)
+        handler._image_edit_loader = ImageLoader(max_bytes=1)
         with io.BytesIO() as buffer:
             Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
             encoded = base64.b64encode(buffer.getvalue()).decode()
@@ -1505,11 +1509,12 @@ class TestImageReferenceInputs:
             "input_reference": f"data:image/png;base64,{encoded}",
         }
 
-        with pytest.raises(InvalidArgument) as exc_info:
+        with pytest.raises(HttpStatusError) as exc_info:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
 
-        assert str(exc_info.value) == "Failed to load input_reference"
+        assert exc_info.value.status == 413
+        assert "byte limit" in exc_info.value.message
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1541,7 +1546,7 @@ class TestImageReferenceInputs:
         self, image_request_handler, error
     ):
         handler = image_request_handler
-        handler._image_loader.load_image.side_effect = error
+        handler._image_edit_loader.load_image.side_effect = error
         request = {
             "prompt": "a teapot",
             "input_reference": "https://example.com/reference.png",
@@ -1551,7 +1556,11 @@ class TestImageReferenceInputs:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
 
-        assert exc_info.value is error
+        if isinstance(error, HttpStatusError):
+            assert exc_info.value.status == error.status
+            assert exc_info.value.message == "input_reference could not be loaded"
+        else:
+            assert exc_info.value is error
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1600,10 +1609,11 @@ class TestImageReferenceInputs:
             "input_reference": f"data:image/png;base64,{encoded}",
         }
 
-        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+        with pytest.raises(HttpStatusError) as caught:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
 
+        assert caught.value.status == 413
         handler.engine_client.generate.assert_not_called()
 
 
@@ -1633,7 +1643,7 @@ class TestImageEndpointSizeValidation:
         self, image_request_handler, reference
     ):
         handler = image_request_handler
-        handler._image_loader.load_image.side_effect = AssertionError(
+        handler._image_edit_loader.load_image.side_effect = AssertionError(
             "Invalid dimensions must be rejected before image loading"
         )
         request = {"prompt": "x", "size": "99999x99999"}
@@ -1649,7 +1659,7 @@ class TestImageEndpointSizeValidation:
         assert str(excinfo.value) == (
             "width in size='99999x99999' must be between 1 and 4096"
         )
-        handler._image_loader.load_image.assert_not_awaited()
+        handler._image_edit_loader.load_image.assert_not_awaited()
         handler.engine_client.generate.assert_not_called()
 
 
@@ -1785,3 +1795,59 @@ class TestRefAudioRejection:
 
         assert [chunk["status"] for chunk in chunks] == ["failed"]
         assert "blocked range" in chunks[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_multi_image_references_reach_omni_in_order(image_request_handler):
+    handler = image_request_handler
+    handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
+    images = [Image.new("RGB", (2, 2), color) for color in ["red", "blue"]]
+    handler._image_edit_loader.load_image = AsyncMock(side_effect=images)
+    metadata = SimpleNamespace(
+        supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+    )
+    with patch(
+        "dynamo.vllm.omni.image_edit.get_diffusion_model_metadata",
+        return_value=metadata,
+    ):
+        async for _ in handler._generate_openai_mode(
+            {
+                "prompt": "edit",
+                "input_reference": ["https://example.com/a", "https://example.com/b"],
+            },
+            None,
+            "multi-ref",
+        ):
+            pass
+    prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
+    assert prompt["multi_modal_data"]["image"] == images
+
+
+@pytest.mark.asyncio
+async def test_failed_second_image_never_generates_from_first(image_request_handler):
+    handler = image_request_handler
+    handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
+    handler._image_edit_loader.load_image = AsyncMock(
+        side_effect=[Image.new("RGB", (2, 2)), ValueError("secret")]
+    )
+    metadata = SimpleNamespace(
+        supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+    )
+    with patch(
+        "dynamo.vllm.omni.image_edit.get_diffusion_model_metadata",
+        return_value=metadata,
+    ):
+        with pytest.raises(InvalidArgument, match=r"input_reference\[1\]"):
+            async for _ in handler._generate_openai_mode(
+                {
+                    "prompt": "edit",
+                    "input_reference": [
+                        "https://example.com/a",
+                        "https://example.com/b",
+                    ],
+                },
+                None,
+                "multi-ref",
+            ):
+                pass
+    handler.engine_client.generate.assert_not_called()

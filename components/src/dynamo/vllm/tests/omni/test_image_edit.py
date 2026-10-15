@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from PIL import Image
 
+from dynamo.common.http import HttpStatusError
 from dynamo.common.multimodal import ImageLoader
 from dynamo.vllm.omni import image_edit
 
@@ -155,20 +156,28 @@ async def test_every_reference_loaded_in_order(metadata_lookup, count):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [ValueError, Image.DecompressionBombError])
+@pytest.mark.parametrize(
+    "failure, expected",
+    [(ValueError, ValueError), (Image.DecompressionBombError, HttpStatusError)],
+)
 async def test_bad_second_reference_preserves_shared_images_and_redacts_error(
-    metadata_lookup, failure
+    metadata_lookup, failure, expected
 ):
     first = Image.new("RGB", (2, 2), "red")
     loader = SimpleNamespace(
         load_image=AsyncMock(side_effect=[first, failure("private signed URL")])
     )
-    with pytest.raises(ValueError, match=r"^Failed to load input_reference\[1\]$"):
+    with pytest.raises(expected) as caught:
         await image_edit.load_image_edit_references(
             ["first", "second", "third"],
             image_loader=loader,
             model_class_name="Flux2KleinPipeline",
         )
+    if expected is HttpStatusError:
+        assert caught.value.status == 413
+    else:
+        assert str(caught.value) == "Failed to load input_reference[1]"
+    assert "private signed URL" not in str(caught.value)
     assert loader.load_image.await_count == 2
     assert first.getpixel((0, 0)) == (255, 0, 0)
     first.close()
@@ -224,3 +233,47 @@ async def test_cancellation_and_internal_errors_preserve_shared_images(
     assert caught.value is error
     assert first.getpixel((0, 0)) == (255, 0, 0)
     first.close()
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "true", "1.5", ""])
+def test_image_edit_environment_rejects_invalid_limits(monkeypatch, raw):
+    monkeypatch.setenv("DYN_IMAGE_EDIT_MAX_IMAGES", raw)
+    with pytest.raises(ValueError, match="DYN_IMAGE_EDIT_MAX_IMAGES"):
+        image_edit.ImageEditLimits.from_env()
+
+
+def test_advertised_capability_respects_operator_limit(metadata_lookup, monkeypatch):
+    monkeypatch.setenv("DYN_IMAGE_EDIT_MAX_IMAGES", "2")
+    assert image_edit.image_edit_capability(
+        "Flux2KleinPipeline", image_edit.ImageEditLimits.from_env()
+    ) == {"schema_version": 1, "max_input_images": 2}
+
+
+@pytest.mark.asyncio
+async def test_aggregate_pixels_stop_loading_later_images(metadata_lookup):
+    first = Image.new("RGB", (2, 2), "red")
+    loader = SimpleNamespace(load_image=AsyncMock(return_value=first))
+    with pytest.raises(HttpStatusError) as caught:
+        await image_edit.load_image_edit_references(
+            ["first", "second", "third"],
+            image_loader=loader,
+            model_class_name="Flux2KleinPipeline",
+            max_total_pixels=7,
+        )
+    assert caught.value.status == 413
+    assert loader.load_image.await_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    first.close()
+
+
+@pytest.mark.asyncio
+async def test_pixel_budget_rejects_before_rgb_decode(monkeypatch):
+    with io.BytesIO() as buffer:
+        Image.new("RGB", (3, 3), "red").save(buffer, format="PNG")
+        encoded = buffer.getvalue()
+    convert = Mock(side_effect=AssertionError("must not expand oversized pixels"))
+    monkeypatch.setattr(Image.Image, "convert", convert)
+    with pytest.raises(HttpStatusError) as caught:
+        await ImageLoader._open_image(io.BytesIO(encoded), max_pixels=8)
+    assert caught.value.status == 413
+    convert.assert_not_called()
