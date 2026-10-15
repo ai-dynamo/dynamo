@@ -146,6 +146,7 @@ def test_go_prefers_harvested_via_escaped_path(tmp_path):
 
 
 def test_normalize_cyclonedx_licenses():
+    """Preserve license values, entry order, grouping, and UNKNOWN fallbacks."""
     # Table-driven rather than pytest.mark.parametrize so _run_manual.py,
     # which calls each test with no arguments, can still run it.
     cases = [
@@ -173,6 +174,7 @@ def test_normalize_cyclonedx_licenses():
 
 
 def test_go_falls_back_to_evidence_licenses():
+    """Use Go license evidence when the component has no top-level licenses."""
     comp = go_gen._component_from_sbom_entry(
         {
             "name": "github.com/example/mod",
@@ -185,6 +187,7 @@ def test_go_falls_back_to_evidence_licenses():
 
 
 def test_rust_falls_back_to_license_overrides():
+    """Use a Rust override when available and keep unknown crates as UNKNOWN."""
     comp = rust_gen._component_from_sbom_entry(
         {"name": "sgl-model-gateway", "version": "0.1.0"}
     )

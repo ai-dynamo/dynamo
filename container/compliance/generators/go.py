@@ -51,6 +51,7 @@ def _escape_go_module_path(path: str) -> str:
 def _component_from_sbom_entry(
     entry: dict, licenses_dir: Path | None = None
 ) -> Component | None:
+    """Convert a Go SBOM entry, using evidence when top-level licenses are absent."""
     name = entry.get("name")
     version = entry.get("version")
     if not name or not version:
