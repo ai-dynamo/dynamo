@@ -17,6 +17,7 @@ from gpu_memory_service.integrations.vllm import worker as gms_worker  # noqa: E
 from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
     worker as gms_v1_worker,
 )
+from vllm.config import CUDAGraphMode  # noqa: E402
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -88,7 +89,7 @@ class _FakeDevice:
 
 
 _GIB = 1 << 30
-# A100 80 GB at vLLM's default gpu_memory_utilization (DYN-4950).
+# A100 80 GB at vLLM's default gpu_memory_utilization.
 _TOTAL = 85_093_777_408
 _REQUESTED = int(_TOTAL * 0.92)
 _WEIGHTS = int(1.18 * _GIB)  # imported read-only from GMS, shared by both
@@ -129,8 +130,6 @@ def _shadow_kv_budget(monkeypatch, tmp_path, peer_alloc_during_init=0):
     )
     monkeypatch.setattr(gms_worker._BaseWorker, "init_device", base_init_device)
     monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1")
-
-    from vllm.config import CUDAGraphMode
 
     worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
     worker.local_rank = 0

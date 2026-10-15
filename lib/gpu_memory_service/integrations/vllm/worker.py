@@ -283,7 +283,7 @@ class GMSWorker(_BaseWorker):
 
         weights_memory = get_imported_weights_bytes()
         invisible_weights_memory = 0 if has_pending_write else weights_memory
-        non_torch_memory = getattr(self, "_gms_non_torch_init_bytes", 0)
+        non_torch_memory = self._gms_non_torch_init_bytes
         non_kv_cache_memory = (
             torch_peak
             + invisible_weights_memory
