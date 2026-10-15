@@ -52,6 +52,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	ptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -4956,49 +4957,94 @@ func TestGenerateGrovePodCliqueSet_TRTLLMMultinodeDRA(t *testing.T) {
 	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, worker.Resources.Claims)
 }
 
-func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
-	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dynamo-graph",
-			Namespace: "k8s-namespace",
-		},
-		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Frontend": {
-					ComponentType:         commonconsts.ComponentTypeFrontend,
-					GlobalDynamoNamespace: true,
-					Replicas:              ptr.To(int32(1)),
+func TestGeneratePodCliqueSet_DynamoNamespace(t *testing.T) {
+	tests := []struct{ name, namespace, dgdName string }{
+		{name: "short", namespace: "k8s-namespace", dgdName: "test-dynamo-graph"},
+		{name: "63 byte boundary", namespace: strings.Repeat("n", 36), dgdName: "g" + strings.Repeat("a", 25)},
+		{name: "64 byte regression", namespace: strings.Repeat("n", 36), dgdName: "g" + strings.Repeat("a", 26)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render Grove cliques with both global and per-deployment runtime identities")
+			dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.dgdName,
+					Namespace: tt.namespace,
 				},
-				"Planner": {
-					ComponentType: commonconsts.ComponentTypePlanner,
-					Replicas:      ptr.To(int32(1)),
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: string(BackendFrameworkVLLM),
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							ComponentType:         commonconsts.ComponentTypeFrontend,
+							GlobalDynamoNamespace: true,
+							Replicas:              ptr.To(int32(1)),
+						},
+						"Planner": {
+							ComponentType: commonconsts.ComponentTypePlanner,
+							Replicas:      ptr.To(int32(1)),
+						},
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+							ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+								MainContainer: &corev1.Container{
+									Image:   "vllm:1.6.0",
+									Command: []string{"python3"},
+									Args:    []string{"-m", "dynamo.vllm"},
+									Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+										corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+									}},
+								},
+							},
+						},
+					},
 				},
-			},
-		},
-	}
+			}
 
-	converted := betaDGD(t, dynamoDeployment)
-	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
-	if !assert.NoError(t, err) {
-		return
-	}
+			converted := betaDGD(t, dynamoDeployment)
+			workerHash, err := ComputeDGDWorkersSpecHash(converted)
+			require.NoError(t, err)
+			require.NotEmpty(t, workerHash)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, true, nil)
+			if !assert.NoError(t, err) {
+				return
+			}
 
-	if !assert.Len(t, got.Spec.Template.Cliques, 2) {
-		return
-	}
+			if !assert.Len(t, got.Spec.Template.Cliques, 3) {
+				return
+			}
 
-	for _, clique := range got.Spec.Template.Cliques {
-		switch clique.Name {
-		case "frontend":
-			assert.Equal(t, commonconsts.GlobalDynamoNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
-			assertDYNNamespace(t, clique.Spec.PodSpec, commonconsts.GlobalDynamoNamespace)
-		case "planner":
-			expectedNamespace := fmt.Sprintf("%s-%s", dynamoDeployment.Namespace, dynamoDeployment.Name)
-			assert.Equal(t, expectedNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
-			assertDYNNamespace(t, clique.Spec.PodSpec, expectedNamespace)
-		default:
-			t.Errorf("GenerateGrovePodCliqueSet() clique = %v, want %v", clique.Name, "frontend or planner")
-		}
+			t.Log("Verify clique labels and runtime environment variables use the same valid identity")
+			for _, clique := range got.Spec.Template.Cliques {
+				assert.Empty(t, validation.IsValidLabelValue(clique.Labels[commonconsts.KubeLabelDynamoNamespace]))
+				switch clique.Name {
+				case "frontend":
+					assert.Equal(t, commonconsts.GlobalDynamoNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
+					assertDYNNamespace(t, clique.Spec.PodSpec, commonconsts.GlobalDynamoNamespace)
+				case "planner":
+					expectedNamespace := v1beta1.ComputeDynamoNamespace(false, tt.namespace, tt.dgdName)
+					assert.Equal(t, expectedNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
+					assertDYNNamespace(t, clique.Spec.PodSpec, expectedNamespace)
+				case "worker":
+					expectedNamespace := v1beta1.ComputeDynamoNamespace(false, tt.namespace, tt.dgdName)
+					assert.Equal(t, expectedNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
+					assertDYNNamespace(t, clique.Spec.PodSpec, expectedNamespace)
+					assert.Equal(t, workerHash, clique.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+
+					t.Log("Verify the worker suffix remains separate from the bounded base identity")
+					require.Len(t, clique.Spec.PodSpec.Containers, 1)
+					env := make(map[string]string)
+					for _, variable := range clique.Spec.PodSpec.Containers[0].Env {
+						env[variable.Name] = variable.Value
+					}
+					assert.Equal(t, workerHash, env[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
+					assert.NotEqual(t, expectedNamespace+"-"+workerHash, clique.Labels[commonconsts.KubeLabelDynamoNamespace])
+				default:
+					t.Errorf("GenerateGrovePodCliqueSet() clique = %v, want %v", clique.Name, "frontend, planner or worker")
+				}
+			}
+
+		})
 	}
 }
 

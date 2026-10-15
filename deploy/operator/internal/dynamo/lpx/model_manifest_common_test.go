@@ -21,7 +21,6 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 		name, topology, family   string
 		numChips, devicesPerNode uint32
 		extent, wantExtent       []uint32
-		wantCompatible           bool
 		architectures            [][]string
 		wantErr                  string
 	}{
@@ -34,14 +33,14 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 		{name: "missing programs", topology: registryTestTopology, architectures: [][]string{}, wantErr: "programs are missing or invalid"},
 		{name: "empty program", topology: registryTestTopology, architectures: [][]string{{}}, wantErr: "program chips are missing or invalid"},
 		{name: "unknown architecture", topology: registryTestTopology, architectures: [][]string{{"v3u"}}, wantErr: "unsupported chip architecture"},
-		{name: "metadata-less HX opaque topology", topology: " opaque__hx ", numChips: 16, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}, wantCompatible: true},
+		{name: "metadata-less HX opaque topology", topology: " opaque__hx ", numChips: 16, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}},
 		{name: "metadata HX opaque topology", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: " " + hxTopologyFamily + " ", extent: []uint32{16, 1, 1, 1}, wantExtent: []uint32{16, 1, 1, 1}},
 		{name: "metadata HX with XT fixture name", topology: registryTestTopology, numChips: 8, devicesPerNode: 8, family: hxTopologyFamily, extent: []uint32{8, 1, 1, 1}, wantExtent: []uint32{8, 1, 1, 1}},
 		{name: "full HX geometry", topology: v3OpaqueTopology, numChips: 512, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 8, 2, 2}, wantExtent: []uint32{16, 8, 2, 2}},
 		{name: "unknown HX family", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: "unknown", extent: []uint32{16, 1, 1, 1}, wantErr: "topologyMetadata.topologyFamily"},
 		{name: "missing HX extent", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: hxTopologyFamily, wantErr: "unsupported HX extent"},
 		{name: "unsupported HX extent", topology: v3OpaqueTopology, numChips: 64, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 1, 2, 2}, wantErr: "unsupported HX extent"},
-		{name: "metadata-less HX four-chip node", topology: v3OpaqueTopology, numChips: 4, devicesPerNode: 4, wantExtent: []uint32{4, 1, 1, 1}, wantCompatible: true},
+		{name: "metadata-less HX four-chip node", topology: v3OpaqueTopology, numChips: 4, devicesPerNode: 4, wantExtent: []uint32{4, 1, 1, 1}},
 		{name: "metadata-less HX subnode", topology: v3OpaqueTopology, numChips: 8, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}},
 		{name: "metadata-less HX needs geometry for multiple nodes", topology: v3OpaqueTopology, numChips: 32, devicesPerNode: 16, wantErr: "without topologyMetadata requires a one-node stage"},
 		{name: "metadata-less HX zero chips", topology: v3OpaqueTopology, devicesPerNode: 16, wantErr: "chip count divides 16"},
@@ -82,16 +81,14 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 				}
 			}
 
-			t.Log("Decode exactly the supported geometry and preserve the compatibility flag")
-			partition, compatible, err := buildPartitionFromManifestV2(raw)
+			t.Log("Decode exactly the supported geometry")
+			partition, err := buildPartitionFromManifestV2(raw)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
 				require.Equal(t, BuildPartition{}, partition)
-				require.False(t, compatible)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, test.wantCompatible, compatible)
 			require.Equal(t, 7, partition.SourcePartitionID)
 			require.Equal(t, "part-0", partition.PartPath)
 			require.Equal(t, test.topology, partition.Topology.Raw)
@@ -111,7 +108,7 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 		{SourcePartitionID: 7, Topology: Topology{ChipCount: 16}, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
 		{SourcePartitionID: 3, Topology: Topology{ChipCount: 16}, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
 	}
-	family, _, _, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, hx, false)
+	family, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, hx, false)
 	require.NoError(t, err)
 	require.Equal(t, BuildFamilyHX, family)
 	require.Equal(t, []int{7, 3}, []int{hx[0].SourcePartitionID, hx[1].SourcePartitionID})
@@ -121,7 +118,7 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 		{SourcePartitionID: 7, Topology: Topology{ChipCount: 8}, DevicesPerNode: 8},
 		{SourcePartitionID: 3, Topology: Topology{ChipCount: 8}, DevicesPerNode: 8},
 	}
-	family, _, _, err = classifyManifestPartitions(gbuildManifestV2CapnpFile, xt, false)
+	family, err = classifyManifestPartitions(gbuildManifestV2CapnpFile, xt, false)
 	require.NoError(t, err)
 	require.Equal(t, BuildFamilyXT, family)
 	require.Equal(t, []int{3, 7}, []int{xt[0].SourcePartitionID, xt[1].SourcePartitionID})

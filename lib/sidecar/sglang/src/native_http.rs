@@ -23,11 +23,15 @@ use crate::{client, client::Discovery, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
+/// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
+const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 
 pub(crate) struct NativeRequest {
     body: Value,
     is_prefill: bool,
     prefill_handoff: Option<Value>,
+    /// Return prefill's final native response for the frontend to join.
+    keep_prefill_output: bool,
 }
 
 /// Rebuild the installed SGLang version's request from the opaque frontend
@@ -126,6 +130,10 @@ pub(crate) fn request(
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
         prefill_handoff,
+        keep_prefill_output: request
+            .annotations
+            .iter()
+            .any(|a| a == PREFILL_OUTPUT_ANNOTATION),
     }))
 }
 
@@ -245,6 +253,7 @@ impl NativeHttp {
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
+            let keep_prefill_output = request.keep_prefill_output;
             let mut prefill_handoff = request.prefill_handoff;
             let stopped_ctx = ctx.inner_arc();
             let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
@@ -346,7 +355,7 @@ impl NativeHttp {
                         return;
                     }
                 };
-                // Prefill's raw HTTP payload is not forwarded to the caller.
+                // Prefill's raw HTTP payload is forwarded only on request.
                 // Surface backend failures before that payload is discarded.
                 if is_prefill
                     && let Some(finish) = response.pointer("/meta_info/finish_reason")
@@ -366,7 +375,9 @@ impl NativeHttp {
                     if !terminal {
                         continue;
                     }
-                    output.engine_data = None;
+                    if !keep_prefill_output {
+                        output.engine_data = None;
+                    }
                 }
                 yield Ok(output);
                 if terminal {
@@ -894,6 +905,7 @@ mod tests {
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
                 prefill_handoff: None,
+                keep_prefill_output: false,
             },
             ctx,
             CancellationToken::new(),
@@ -919,6 +931,7 @@ mod tests {
                     "bootstrap_port": 5000,
                     "bootstrap_room": 7
                 })),
+                keep_prefill_output: false,
             },
             ctx,
             CancellationToken::new(),
@@ -949,6 +962,7 @@ mod tests {
                     prefill_handoff: Some(json!({
                         "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
                     })),
+                    keep_prefill_output: false,
                 },
                 ctx,
                 CancellationToken::new(),
@@ -961,6 +975,36 @@ mod tests {
             assert!(stream.next().await.is_none());
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn annotated_prefill_keeps_its_final_native_response() {
+        let mut canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": {}}));
+        canonical.annotations = vec![super::PREFILL_OUTPUT_ANNOTATION.to_string()];
+        let mode = DisaggregationMode::Prefill;
+        let native = request(&canonical, "rid", mode, Some("prefill"), Some(5000));
+        let native = native.unwrap().unwrap();
+        let response =
+            json!({"output_ids": [101], "meta_info": {"finish_reason": {"type": "length"}}});
+        let (port, server) = serve_once(format!("data: {response}\n\n"), "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(native, ctx, CancellationToken::new());
+        assert!(
+            stream
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .disaggregated_params
+                .is_some()
+        );
+        let terminal = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            terminal.engine_data,
+            Some(json!({"sglang_response": response}))
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -998,6 +1042,7 @@ mod tests {
                     "bootstrap_port": 5000,
                     "bootstrap_room": 7
                 })),
+                keep_prefill_output: false,
             },
             ctx,
             CancellationToken::new(),
@@ -1029,6 +1074,7 @@ mod tests {
         let terminal = stream.next().await.unwrap().unwrap();
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         assert!(terminal.disaggregated_params.is_none());
+        assert!(terminal.engine_data.is_none());
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
@@ -1043,6 +1089,7 @@ mod tests {
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
                 prefill_handoff: None,
+                keep_prefill_output: false,
             },
             ctx,
             CancellationToken::new(),

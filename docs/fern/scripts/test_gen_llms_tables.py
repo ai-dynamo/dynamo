@@ -9,6 +9,7 @@ pytest config ignores docs/, so the standalone pytest.ini beside this file
 supplies the marker registrations.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -187,6 +188,42 @@ class TestAgainstRealData:
         table = gen.driver_floor_table(real)
         assert table.startswith("| Driver |")
         assert "TensorRT-LLM" in table
+
+
+class TestEnterpriseArtifacts:
+    ARTIFACTS = [
+        {"component": "vLLM runtime", "ref": "nvcr.io/x/vllm-runtime-enterprise:{tag}"},
+        {"component": "Chart", "ref": "https://h/charts/platform-enterprise-{tag}.tgz"},
+    ]
+
+    def test_newest_enterprise_release_sets_line_and_tag(self):
+        body = gen.render_enterprise_artifacts(
+            {
+                "RELEASES": [
+                    {"version": "v1.6.0"},
+                    {"version": "v1.5.1", "enterprise": "Oct 6, 2026"},
+                    {"version": "v1.5.0", "enterprise": "Sep 28, 2026"},
+                ],
+                "ENTERPRISE_ARTIFACTS": self.ARTIFACTS,
+            }
+        )
+        assert "The Dynamo 1.5 release line" in body
+        assert "| vLLM runtime | `nvcr.io/x/vllm-runtime-enterprise:1.5.1` |" in body
+        assert "platform-enterprise-1.5.1.tgz" in body
+
+    def test_renders_from_the_checked_in_module(self):
+        real = gen.parse_data_module(gen.DATA_TS)
+        body = gen.render_enterprise_artifacts(real)
+        assert body.count("-enterprise") == len(real["ENTERPRISE_ARTIFACTS"])
+        assert "{tag}" not in body
+
+    def test_json_gives_enterprise_dates_an_iso_twin(self):
+        real = gen.parse_data_module(gen.DATA_TS)
+        releases = json.loads(gen.build_json(real))["releases"]
+        dated = [r for r in releases if "enterprise" in r]
+        assert dated
+        for rel in dated:
+            assert rel["enterpriseIso"] == gen.iso_date(rel["enterprise"])
 
 
 class TestGeneratedNightlyLedger:
