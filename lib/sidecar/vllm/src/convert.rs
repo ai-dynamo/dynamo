@@ -85,7 +85,7 @@ pub(crate) fn build_generate_request(
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let request = normalize_response_options(request)?;
+    let mut request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     let output_text = !requires_frontend_decode(&request);
     validate_multimodal_cache_uuids(&request)?;
@@ -151,7 +151,7 @@ pub(crate) fn build_generate_request(
         None
     };
     let raw_media = if has_raw_media_metadata {
-        build_media(&request, forwarded_image_uuids.as_deref())?
+        build_media(&mut request, forwarded_image_uuids.as_deref())?
     } else {
         Vec::new()
     };
@@ -661,12 +661,25 @@ fn consume_redundant_nvext(
                 "extra_args.nvext.token_in must be true when present",
             ));
         }
-        // Worker attribution and timing are produced by the frontend.
+        // These response fields are assembled by the frontend.
         if let Some(fields) = nvext.get_mut("extra_fields") {
             let fields = fields.as_array_mut().ok_or_else(|| {
                 client::invalid_argument("extra_args.nvext.extra_fields must be an array")
             })?;
-            fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
+            fields.retain(|field| {
+                !matches!(
+                    field.as_str(),
+                    Some(
+                        "worker_id"
+                            | "timing"
+                            | "completion_token_ids"
+                            | "prompt_token_ids"
+                            | "prompt_logprobs"
+                            | "detailed_finish_reason"
+                            | "stop_reason"
+                    )
+                )
+            });
             if fields.is_empty() {
                 nvext.remove("extra_fields");
             }
@@ -688,11 +701,11 @@ fn strip_multimodal_prompt_token_ids(prefill_result: &mut Option<PrefillResult>)
     }
 }
 
-fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, DynamoError> {
+fn media_source(modality: &str, source: String) -> Result<pb::media_item::Source, DynamoError> {
     if source.starts_with("data:") {
-        Ok(pb::media_item::Source::DataUri(source.to_string()))
+        Ok(pb::media_item::Source::DataUri(source))
     } else if source.starts_with("http://") || source.starts_with("https://") {
-        Ok(pb::media_item::Source::Url(source.to_string()))
+        Ok(pb::media_item::Source::Url(source))
     } else {
         Err(client::invalid_argument(format!(
             "vLLM gRPC {modality} input must use an http://, https://, or data: URI"
@@ -784,10 +797,10 @@ fn validate_media_uuid(uuid: &str) -> Result<(), DynamoError> {
 }
 
 fn build_media(
-    request: &PreprocessedRequest,
+    request: &mut PreprocessedRequest,
     forwarded_uuids: Option<&[String]>,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
-    let Some(media_by_modality) = request.multi_modal_data.as_ref() else {
+    let Some(media_by_modality) = request.multi_modal_data.take() else {
         if request
             .multi_modal_uuids
             .as_ref()
@@ -818,7 +831,7 @@ fn build_media(
         let uuids = request
             .multi_modal_uuids
             .as_ref()
-            .and_then(|by_modality| by_modality.get(key));
+            .and_then(|by_modality| by_modality.get(&key));
         if let Some(uuids) = uuids
             && uuids.len() != items.len()
         {
@@ -839,10 +852,10 @@ fn build_media(
             )));
         }
 
-        for (index, item) in items.iter().enumerate() {
+        for (index, item) in items.into_iter().enumerate() {
             let source = match item {
-                MultimodalData::Url(url) => media_source(key, url.as_str())?,
-                MultimodalData::RawUrl(source) => media_source(key, source)?,
+                MultimodalData::Url(url) => media_source(&key, url.into())?,
+                MultimodalData::RawUrl(source) => media_source(&key, source)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(
                         "vLLM sidecar cannot dereference pre-decoded RDMA media; configure URL passthrough",

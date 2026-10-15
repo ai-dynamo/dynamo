@@ -61,6 +61,7 @@ from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
     OutputFormatter,
+    _normalize_image_output_options,
 )
 from dynamo.vllm.omni.utils import (
     audio_output_is_cumulative,
@@ -810,6 +811,12 @@ class OmniHandler(BaseOmniHandler):
         dimensions: tuple[int, int],
     ) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
+        output_format = _normalize_image_output_options(
+            req.output_format,
+            req.response_format,
+            quality=req.quality,
+            background=req.background,
+        )
         width, height = dimensions
         nvext = req.nvext or ImageNvExt()
 
@@ -844,6 +851,7 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=sampling_params_list,
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
+            output_format=output_format,
             lora_request=lora_request,
         )
 

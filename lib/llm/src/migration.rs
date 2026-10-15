@@ -16,7 +16,7 @@ use crate::{
         TokenIdType,
         common::{
             extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-            llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+            llm_backend::{BackendOutput, DecoderCheckpoint, LLMEngineOutput, PreprocessedRequest},
             preprocessor::MultimodalData,
             timing::RequestPhase,
         },
@@ -38,13 +38,12 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
-/// `migration_link`; `jailed_text` lets it carry forward whatever the Backend's
-/// decoder is still withholding as a possible hidden-stop-sequence prefix, so a
-/// retried attempt's fresh decoder can be reseeded instead of silently losing it.
+/// `migration_link`; `decoder_checkpoint` carries the Backend's in-process incremental
+/// decoder state so a retry can restore withheld text and buffered token IDs.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
-    fn jailed_text(&self) -> Option<&str>;
+    fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint>;
 }
 
 impl HasTokenIds for BackendOutput {
@@ -54,8 +53,8 @@ impl HasTokenIds for BackendOutput {
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
-    fn jailed_text(&self) -> Option<&str> {
-        self.jailed_text.as_deref()
+    fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
+        self.jailed_text.as_ref()
     }
 }
 
@@ -66,8 +65,8 @@ impl HasTokenIds for LLMEngineOutput {
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
-    fn jailed_text(&self) -> Option<&str> {
-        self.jailed_text.as_deref()
+    fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
+        self.jailed_text.as_ref()
     }
 }
 
@@ -415,6 +414,7 @@ where
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
+        slf.release_replay_prompt_if_final();
         Ok(slf)
     }
 
@@ -465,6 +465,7 @@ where
                         if let Err(err) = self.new_stream(Some(migration_event)).await {
                             tracing::warn!(error = ?err, "Cannot recreate stream");
                         } else {
+                            self.release_replay_prompt_if_final();
                             continue;
                         }
                     } else {
@@ -533,7 +534,8 @@ where
             if let Some(session_affinity) = self.session_affinity.as_ref() {
                 request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
             }
-            self.context.link_child(request.context());
+            let attempt_context = request.context();
+            self.context.link_child(attempt_context.clone());
             if self.context.is_stopped() || self.context.is_killed() {
                 if let Some(cause) = migration {
                     tracing::info!(
@@ -589,10 +591,19 @@ where
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
-                    self.record_migration_outcome(
-                        migration_event.as_ref(),
-                        frontend_service::migration_outcome::SUCCESS,
-                    );
+                    // A dispatch cancelled before its response prologue returns `Ok` empty,
+                    // so a stopped context here means the client left during the handshake.
+                    // The parent stops its children before itself, so check the attempt too.
+                    let outcome = if self.context.is_stopped()
+                        || self.context.is_killed()
+                        || attempt_context.is_stopped()
+                        || attempt_context.is_killed()
+                    {
+                        frontend_service::migration_outcome::CANCELLED
+                    } else {
+                        frontend_service::migration_outcome::SUCCESS
+                    };
+                    self.record_migration_outcome(migration_event.as_ref(), outcome);
                     self.active_route_trace = Some(route_trace);
                     self.next_stream = Some(next_stream);
                     return Ok(());
@@ -731,12 +742,10 @@ where
         if let Some(link) = llm_engine_output.worker_trace_link() {
             self.last_worker_link = Some(link.clone());
         }
-        // Snapshot whatever the Backend's decoder is currently withholding as a possible
-        // hidden-stop-sequence prefix, so a future retry's fresh decoder can be reseeded
-        // from it (`jail_seed`) instead of the withheld text simply vanishing. Overwritten
-        // on every chunk -- `None` once the decoder resolves it one way or the other -- so
-        // this always reflects the last known-good chunk's state, never a stale one.
-        self.request.jail_seed = llm_engine_output.jailed_text().map(str::to_string);
+        // Snapshot the Backend's complete in-process decoder checkpoint. Overwrite it on
+        // every chunk (`None` once fully resolved) so a future retry replays exactly the
+        // last known-good buffered IDs and stop-filter text, never stale state.
+        self.request.jail_seed = llm_engine_output.decoder_checkpoint().cloned();
         let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
         if self.exceed_max_seq_len(output_len) {
             return;
@@ -751,6 +760,15 @@ where
         }
         if !token_ids.is_empty() {
             Arc::make_mut(&mut self.request.token_ids).extend(token_ids.iter().copied());
+        }
+    }
+
+    /// Once no further attempt can be dispatched, the prompt is only replay state: the
+    /// dispatched attempt holds its own reference for as long as it needs one. Release it so a
+    /// long prompt is not pinned for the rest of the response stream.
+    fn release_replay_prompt_if_final(&mut self) {
+        if self.retries_left == 0 && !self.request.token_ids.is_empty() {
+            self.request.token_ids = Arc::default();
         }
     }
 
@@ -769,6 +787,7 @@ where
                 self.metrics
                     .inc_migration_max_seq_len_exceeded(&self.model_name);
                 self.retries_left = 0; // disable migration
+                self.release_replay_prompt_if_final();
                 return true;
             }
         }
@@ -1094,6 +1113,15 @@ mod tests {
         },
         /// Fails on the first call, then generate returns a cancellation error
         FailThenGenerateCancelled,
+        /// Models the addressed router returning an `Ok` empty stream when the
+        /// client cancels before the replacement's response prologue
+        FailThenCancelDuringHandshake {
+            mid_stream: bool,
+            fail_after: usize,
+            dispatched: Arc<tokio::sync::Notify>,
+            /// Stop only the attempt context, as a parent does before stopping itself
+            stop_attempt_only: bool,
+        },
         /// One addressed worker rejects admission, then a replacement succeeds.
         WorkerOverloadSequence {
             worker_ids: Vec<u64>,
@@ -1243,6 +1271,55 @@ mod tests {
                             .error_type(error_type)
                             .message("request cancelled")
                             .build()
+                    ))
+                }
+                MockBehavior::FailThenCancelDuringHandshake {
+                    mid_stream,
+                    fail_after,
+                    dispatched,
+                    stop_attempt_only,
+                } => {
+                    if call_num > 0 {
+                        dispatched.notify_one();
+                        let request_context = context.context();
+                        if *stop_attempt_only {
+                            request_context.stop_generating();
+                        }
+                        request_context.stopped().await;
+                        return Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                            Box::pin(stream::empty()),
+                            request_context,
+                        ));
+                    }
+                    let error = DynamoError::builder()
+                        .error_type(if *mid_stream {
+                            ErrorType::Disconnected
+                        } else {
+                            ErrorType::CannotConnect
+                        })
+                        .message("worker failed")
+                        .build();
+                    if !*mid_stream {
+                        return Err(anyhow::anyhow!(error));
+                    }
+                    let (tx, rx) = mpsc::channel(1);
+                    let token_offset = self.token_offset;
+                    let fail_after = *fail_after;
+                    tokio::spawn(async move {
+                        for i in 0..fail_after {
+                            if tx
+                                .send(create_mock_output(token_offset + 1 + i as u32))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        let _ = tx.send(Annotated::from_err(error)).await;
+                    });
+                    Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                        Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+                        Arc::new(Controller::new(self.context_id.clone())),
                     ))
                 }
                 MockBehavior::WorkerOverloadSequence { worker_ids } => {
@@ -1575,6 +1652,76 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    async fn build_and_observe_prompt(
+        behavior: MockBehavior,
+        migration_limit: u32,
+    ) -> (
+        RetryManager<BackendOutput>,
+        std::sync::Weak<Vec<TokenIdType>>,
+    ) {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let prompt = Arc::downgrade(&request.token_ids);
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(MockEngine::new(behavior, 10, 100, context_id.clone()));
+        let retry_manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            next_generate,
+            migration_limit,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+        (retry_manager, prompt)
+    }
+
+    /// Without retries left, the RetryManager must not pin the prompt for the whole stream:
+    /// once the final attempt is dispatched, only the downstream attempt may hold it.
+    #[tokio::test]
+    async fn test_retry_manager_releases_prompt_after_final_dispatch() {
+        let (mut retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 0).await;
+        assert!(
+            prompt.upgrade().is_none(),
+            "prompt pinned with no retries left"
+        );
+        let mut responses = 0;
+        while let Some(response) = retry_manager.next().await {
+            assert!(response.err().is_none());
+            responses += 1;
+        }
+        assert_eq!(responses, 10);
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_keeps_prompt_while_retries_remain() {
+        let (_retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 1).await;
+        let prompt = prompt
+            .upgrade()
+            .expect("prompt released while a retry is possible");
+        assert_eq!(*prompt, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_releases_prompt_after_last_retry() {
+        let (mut retry_manager, prompt) =
+            build_and_observe_prompt(MockBehavior::FailThenSuccess, 1).await;
+        assert!(
+            prompt.upgrade().is_none(),
+            "prompt pinned after the last retry"
+        );
+        let mut responses = 0;
+        while let Some(response) = retry_manager.next().await {
+            assert!(response.err().is_none());
+            responses += 1;
+        }
+        assert_eq!(responses, 10);
     }
 
     #[tokio::test]
@@ -2206,6 +2353,128 @@ mod tests {
         );
     }
 
+    /// The client disconnects while the replacement worker is still in its
+    /// response handshake. The addressed router turns that into an `Ok` empty
+    /// stream, which must be recorded as `cancelled`, not `success`.
+    /// With `stop_attempt_only`, the router returns while only the attempt
+    /// context is stopped and the parent is stopped afterwards.
+    async fn run_cancel_during_handshake(mid_stream: bool, stop_attempt_only: bool) {
+        dynamo_runtime::logging::init();
+        let fail_after = 3;
+        let migration_type = if mid_stream {
+            frontend_service::migration_type::ONGOING_REQUEST
+        } else {
+            frontend_service::migration_type::NEW_REQUEST
+        };
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenCancelDuringHandshake {
+                mid_stream,
+                fail_after,
+                dispatched: dispatched.clone(),
+                stop_attempt_only,
+            },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+        let ctx = Arc::new(Controller::new(context_id));
+        let metrics = Arc::new(Metrics::new());
+        let duration_counts = |metrics: &Metrics| {
+            [
+                frontend_service::migration_outcome::SUCCESS,
+                frontend_service::migration_outcome::FAILURE,
+                frontend_service::migration_outcome::CANCELLED,
+            ]
+            .map(|outcome| migration_duration_count(metrics, migration_type, outcome))
+        };
+
+        let consume = async {
+            let mut retry_manager = RetryManager::build(
+                ctx.clone(),
+                BTreeMap::new(),
+                create_mock_request(10),
+                next_generate,
+                3,
+                None,
+                Arc::new(TEST_MODEL.to_string()),
+                metrics.clone(),
+                None,
+            )
+            .await
+            .expect("a handshake cancelled by the client closes cleanly");
+            let mut responses = Vec::new();
+            while let Some(response) = retry_manager.next().await {
+                responses.push(response);
+            }
+            if stop_attempt_only {
+                assert!(!ctx.is_stopped());
+                ctx.stop_generating();
+            }
+            responses
+        };
+        let disconnect = async {
+            if stop_attempt_only {
+                return;
+            }
+            dispatched.notified().await;
+            assert_eq!(
+                duration_counts(&metrics),
+                [0, 0, 0],
+                "no outcome may be recorded while the handshake is pending"
+            );
+            ctx.stop_generating();
+        };
+        let (responses, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(consume, disconnect)
+        })
+        .await
+        .expect("handshake cancellation must not hang");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let expected_tokens = if mid_stream { fail_after } else { 0 };
+        assert_eq!(responses.len(), expected_tokens);
+        for (i, response) in responses.iter().enumerate() {
+            assert!(
+                response.err().is_none(),
+                "the stream must end without an error item"
+            );
+            assert_eq!(
+                response.data.as_ref().unwrap().token_ids,
+                vec![101 + i as u32]
+            );
+        }
+        // [success, failure, cancelled]: exactly one terminal outcome.
+        assert_eq!(duration_counts(&metrics), [0, 0, 1]);
+        assert_eq!(
+            metrics.get_migration_new_request_count(TEST_MODEL),
+            u64::from(!mid_stream)
+        );
+        assert_eq!(
+            metrics.get_migration_ongoing_request_count(TEST_MODEL),
+            u64::from(mid_stream)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_new_request_cancelled_during_handshake() {
+        run_cancel_during_handshake(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_ongoing_request_cancelled_during_handshake() {
+        run_cancel_during_handshake(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_new_request_attempt_cancelled_before_parent() {
+        run_cancel_during_handshake(false, true).await;
+    }
+
     /// Test case 8: No migration for guided-decoding (structured-output) requests
     ///
     /// Bug (#7634): When a worker crashes mid-stream during a structured-output
@@ -2431,14 +2700,12 @@ mod tests {
 
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
 
-        // Tracked token_ids must equal exactly max_seq_len (5).
-        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5).
-        // After migration the retry stream delivers remaining tokens, but the first
-        // new token would push to 6 > 5, so tracking stops and no more are appended.
-        assert_eq!(
-            retry_manager.request.token_ids.len(),
-            5,
-            "tracked token_ids should be exactly max_seq_len"
+        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5). The first
+        // token of the retry stream pushes the sequence to 6 > 5, which disables migration,
+        // so no retry remains and the replay prompt is released.
+        assert!(
+            retry_manager.request.token_ids.is_empty(),
+            "replay prompt pinned after max_seq_len disabled migration"
         );
 
         // The limit was triggered once (first token of the retry stream exceeded 5).
@@ -2629,7 +2896,7 @@ mod tests {
                     );
                     let responses = stream::iter(vec![
                         Annotated::from_data(BackendOutput {
-                            jailed_text: Some("STOP".to_string()),
+                            jailed_text: Some("STOP".to_string().into()),
                             ..create_mock_output(10).data.unwrap()
                         }),
                         Annotated::from_err(
@@ -3224,6 +3491,7 @@ mod tests {
                 .map(|&id| {
                     Annotated::from_data(LLMEngineOutput {
                         token_ids: vec![id],
+                        log_probs: Some(vec![f64::from(id)]),
                         index: Some(0),
                         ..Default::default()
                     })
@@ -3263,12 +3531,13 @@ mod tests {
     }
 
     /// Drives a `RetryManager` wrapping a real `Backend` over a scripted raw-token engine
-    /// and returns the concatenation of every response's visible text.
-    async fn run_raw_token_migration(
+    /// and returns every data-bearing response for content and accounting assertions.
+    async fn run_raw_token_migration_outputs(
+        backend: Arc<crate::backend::Backend>,
         stop: Option<Vec<String>>,
         first_attempt_tokens: Vec<u32>,
         retry_tokens: Vec<u32>,
-    ) -> String {
+    ) -> Vec<BackendOutput> {
         let context_id = uuid::Uuid::new_v4().to_string();
         let raw_engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(RawTokenMigrationEngine {
@@ -3279,7 +3548,7 @@ mod tests {
             });
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
             Arc::new(BackendWrappedEngine {
-                backend: letter_backend(),
+                backend,
                 raw_engine,
             });
 
@@ -3299,13 +3568,26 @@ mod tests {
         .await
         .expect("Failed to build RetryManager");
 
-        let mut text = String::new();
+        let mut outputs = Vec::new();
         while let Some(response) = retry_manager.next().await {
-            if let Some(t) = response.data.and_then(|data| data.text) {
-                text.push_str(&t);
+            if let Some(data) = response.data {
+                outputs.push(data);
             }
         }
-        text
+        outputs
+    }
+
+    /// Runs the letter-tokenizer fixture and concatenates its caller-visible text.
+    async fn run_raw_token_migration(
+        stop: Option<Vec<String>>,
+        first_attempt_tokens: Vec<u32>,
+        retry_tokens: Vec<u32>,
+    ) -> String {
+        run_raw_token_migration_outputs(letter_backend(), stop, first_attempt_tokens, retry_tokens)
+            .await
+            .into_iter()
+            .filter_map(|data| data.text)
+            .collect()
     }
 
     /// End-to-end regression for the migration-discards-withheld-text bug, through a real
@@ -3327,5 +3609,84 @@ mod tests {
     async fn migration_hides_stop_sequence_completed_across_real_backend_retry() {
         let text = run_raw_token_migration(Some(vec!["ozzy".to_string()]), vec![1], vec![3]).await;
         assert_eq!(text, "", "the completed hidden stop must not leak any text");
+    }
+
+    /// Real byte-fallback tokenizer used to prove migration replays incremental decoder
+    /// state rather than treating buffered generated IDs as already-consumed prompt.
+    fn byte_fallback_backend() -> Arc<crate::backend::Backend> {
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null, "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [
+                {"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {"type": "BPE", "vocab": {
+                "<0x61>": 0, "<0xC3>": 1, "<0xA9>": 2, "!": 3
+            }, "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+        crate::backend::Backend::from_tokenizer(crate::tokenizers::Tokenizer::from(tokenizer))
+    }
+
+    /// A buffered ASCII byte from the failed attempt must be released with the retry's
+    /// boundary token, while token IDs, per-token strings, and logprobs remain aligned.
+    #[tokio::test]
+    async fn migration_replays_ascii_byte_fallback_decoder_state() {
+        let outputs =
+            run_raw_token_migration_outputs(byte_fallback_backend(), None, vec![0], vec![3]).await;
+        let text: String = outputs
+            .iter()
+            .filter_map(|data| data.text.as_deref())
+            .collect();
+        assert_eq!(text, "a!");
+
+        let accounting: Vec<_> = outputs
+            .iter()
+            .flat_map(|data| {
+                data.token_ids
+                    .iter()
+                    .copied()
+                    .zip(data.tokens.iter().map(|token| token.as_deref()))
+                    .zip(data.log_probs.iter().flatten().copied())
+                    .map(|((id, token), logprob)| (id, token, logprob))
+            })
+            .collect();
+        assert_eq!(accounting, vec![(0, Some("a"), 0.0), (3, Some("!"), 3.0)]);
+    }
+
+    /// Split UTF-8 bytes must combine across attempts; neither byte may be dropped or
+    /// double-counted when the retry reconstructs the incremental decoder.
+    #[tokio::test]
+    async fn migration_replays_multibyte_fallback_decoder_state() {
+        let outputs =
+            run_raw_token_migration_outputs(byte_fallback_backend(), None, vec![1], vec![2, 3])
+                .await;
+        let text: String = outputs
+            .iter()
+            .filter_map(|data| data.text.as_deref())
+            .collect();
+        assert_eq!(text, "é!");
+
+        let accounted: Vec<_> = outputs
+            .iter()
+            .flat_map(|data| {
+                data.token_ids
+                    .iter()
+                    .copied()
+                    .zip(data.tokens.iter().map(|token| token.as_deref()))
+                    .zip(data.log_probs.iter().flatten().copied())
+                    .map(|((id, token), logprob)| (id, token, logprob))
+            })
+            .collect();
+        assert_eq!(
+            accounted,
+            vec![
+                (1, Some("�"), 1.0),
+                (2, Some("�"), 2.0),
+                (3, Some("!"), 3.0)
+            ]
+        );
     }
 }
