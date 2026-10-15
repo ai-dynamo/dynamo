@@ -6560,6 +6560,70 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
 		},
+		{
+			// An authored command owns the argv, so the default args must not be appended.
+			name: "frontend with authored command and nil args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"python3", "-m", "dynamo.frontend"},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
+			wantArgs:         nil,
+		},
+		{
+			name: "frontend with authored command and empty args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"python3", "-m", "dynamo.frontend"},
+						Args:    []string{},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
+			wantArgs:         nil,
+		},
+		{
+			name: "frontend with authored command and args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"python3", "-m", "dynamo.frontend"},
+						Args:    []string{"--http-port", "8000"},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
+			wantArgs:         []string{"--http-port", "8000"},
+		},
+		{
+			name: "frontend with authored shell command and args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"/bin/sh", "-c"},
+						Args:    []string{"python3 -m dynamo.frontend --http-port 8000"},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"/bin/sh", "-c"},
+			wantArgs:         []string{"python3 -m dynamo.frontend --http-port 8000"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -10453,6 +10517,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 		wantSidecarName         string
 		wantSidecarImage        string
 		wantSidecarArgs         []string
+		wantSidecarCommand      []string
 		wantSidecarEnvVars      map[string]string
 		wantSidecarEnvFrom      int
 		wantSidecarProbes       bool
@@ -10535,6 +10600,28 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarImage:   "my-frontend:latest",
 			wantSidecarArgs:    []string{"-m", "dynamo.frontend"},
 			wantSidecarEnvFrom: 1,
+			wantSidecarProbes:  true,
+			wantSidecarPorts:   true,
+		},
+		{
+			// An authored sidecar command owns the argv, so the default args must not be appended.
+			name: "frontendSidecar with authored command and no args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:latest"},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{Containers: []corev1.Container{{
+					Name:    commonconsts.FrontendSidecarContainerName,
+					Image:   "my-frontend:latest",
+					Command: []string{"python3", "-m", "dynamo.frontend"},
+				}}}},
+			},
+			parentDGDName:      "test-dgd",
+			namespace:          "test-ns",
+			wantSidecarCount:   2,
+			wantSidecarName:    commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage:   "my-frontend:latest",
+			wantSidecarCommand: []string{"python3", "-m", "dynamo.frontend"},
+			wantSidecarArgs:    nil,
 			wantSidecarProbes:  true,
 			wantSidecarPorts:   true,
 		},
@@ -10700,11 +10787,16 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
 			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
 
-			if tt.wantSidecarArgs != nil {
+			if tt.wantSidecarCommand != nil {
+				t.Log("Check that an authored sidecar command keeps exactly its authored args")
+				assert.Equal(t, tt.wantSidecarCommand, sidecar.Command, "sidecar command")
 				assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
+			} else {
+				if tt.wantSidecarArgs != nil {
+					assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
+				}
+				assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
 			}
-
-			assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
 
 			if tt.wantSidecarEnvVars != nil {
 				envVars := make(map[string]string)

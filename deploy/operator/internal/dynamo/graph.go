@@ -1807,6 +1807,10 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if main := GetMainContainer(component); main != nil {
 		// Copy the authored container before merging fields and environment variables.
 		main = main.DeepCopy()
+		// An authored command owns the argv; mergo would keep default args under it.
+		if len(main.Command) > 0 {
+			container.Args = nil
+		}
 		baseEnv := container.Env
 		if err := mergo.Merge(&container, *main, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
@@ -2194,6 +2198,10 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Name = sidecarName
 		baseEnv := base.Env
 		user := podSpec.Containers[i].DeepCopy()
+		// An authored command owns the argv; mergo would keep default args under it.
+		if len(user.Command) > 0 {
+			base.Args = nil
+		}
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
