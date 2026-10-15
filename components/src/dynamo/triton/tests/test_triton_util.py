@@ -148,8 +148,7 @@ _HALF_DECODED = (1.5, -2.25, 3.125, -4.0)
 
 
 def test_dynamo_tensor_to_numpy_float16_reinterprets_bit_patterns():
-    """Float16 values are u16 bit patterns and become a native NumPy float16
-    array (DLPack-compatible on the response side)."""
+    """NumPy float16 supports DLPack on the response side."""
     bits = [0x3E00, 0xC080, 0x4240, 0xC400]
     arr = dynamo_tensor_to_numpy(_tensor("IN", "Float16", [2, 2], bits))
     assert arr.dtype == np.float16
@@ -160,10 +159,9 @@ def test_dynamo_tensor_to_numpy_float16_reinterprets_bit_patterns():
 
 
 def test_dynamo_tensor_to_numpy_bfloat16_reinterprets_bit_patterns():
-    """BFloat16 values are u16 bit patterns and become an ml_dtypes.bfloat16
-    array, the dtype tritonclient.utils.triton_to_np_dtype('BF16') returns.
-    tritonserver cannot take this array as an input directly; the handler wraps
-    its bytes in a tritonserver.Tensor(DataType.BF16, ...)."""
+    """tritonclient maps BF16 to ml_dtypes.bfloat16, which tritonserver cannot
+    take directly. The handler wraps the array's bytes in a
+    tritonserver.Tensor(DataType.BF16, ...)."""
     bits = [0x3FC0, 0xC010, 0x4048, 0xC080]
     arr = dynamo_tensor_to_numpy(_tensor("IN", "BFloat16", [2, 2], bits))
     assert arr.dtype == ml_dtypes.bfloat16
