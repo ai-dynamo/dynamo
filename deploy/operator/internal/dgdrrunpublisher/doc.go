@@ -30,8 +30,8 @@
 //  2. The Reconciler consumes the key. Informer events for the Run, its candidates and
 //     this Pod enqueue the same key. It reads the latest stored input and the cached
 //     cluster state, then creates missing candidates with server-side apply, completes
-//     candidate status, updates the Run's progress, message and ordered references only
-//     where they differ, and finally deletes obsolete candidates. Failed writes are
+//     candidate status (its metrics), updates the Run's published-candidate count, progress
+//     time and ordered references only where they differ, and finally deletes obsolete candidates. Failed writes are
 //     retried by the workqueue with backoff.
 //
 // The publisher's own writes come back as watch events and the cache can trail them. The

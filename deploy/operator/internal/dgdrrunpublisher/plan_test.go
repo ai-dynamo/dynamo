@@ -64,16 +64,18 @@ func TestFailedMaterializationIsNotDesiredButCounted(t *testing.T) {
 	if !reflect.DeepEqual(state.Status.CandidateNames, []string{cn("a")}) {
 		t.Fatalf("refs must not include the failed candidate: %v", state.Status.CandidateNames)
 	}
-	if !strings.Contains(state.Status.Message, "1 candidate(s) failed materialization") {
-		t.Fatalf("message = %q", state.Status.Message)
+	if state.Failed != 1 {
+		t.Fatalf("failed = %d, want 1", state.Failed)
+	}
+	if state.Status.Published != 1 {
+		t.Fatalf("published = %d, want 1: failed candidates are not published", state.Status.Published)
 	}
 }
 
-func TestRunErrorReplacesTheMessage(t *testing.T) {
-	snap := mustParse(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}))
-	snap.Run.Message, snap.Run.Error = "searching", "out of memory"
-	if got := Desire("run", testRunUID, snap).Status.Message; got != "out of memory" {
-		t.Fatalf("message = %q", got)
+func TestPublishedCountsTheReferencedCandidates(t *testing.T) {
+	state := desire(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"}))
+	if got, want := state.Status.Published, int32(len(state.Status.CandidateNames)); got != want || got != 2 {
+		t.Fatalf("published = %d, refs = %d, want 2", got, want)
 	}
 }
 
@@ -105,10 +107,7 @@ func TestNeedsUpdateOnlyWhenSomethingDiffers(t *testing.T) {
 		t.Fatal("identical status needs no write")
 	}
 	changes := map[string]func(*RunStatus){
-		"message":       func(s *RunStatus) { s.Message = "other" },
-		"round":         func(s *RunStatus) { s.Round++ },
-		"evaluated":     func(s *RunStatus) { s.Evaluated++ },
-		"no progress":   func(s *RunStatus) { s.HasProgress = false },
+		"published":     func(s *RunStatus) { s.Published++ },
 		"progress time": func(s *RunStatus) { s.LastProgress = s.LastProgress.Add(time.Second) },
 		"references":    func(s *RunStatus) { s.CandidateNames = nil },
 	}

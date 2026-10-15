@@ -27,13 +27,13 @@ import (
 	"testing"
 	"time"
 
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
-	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher/placeholderapi"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -126,7 +126,7 @@ func (w *memWriter) PopulateStatus(ctx context.Context, name, resourceVersion st
 	if err := w.c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name}, &object); err != nil {
 		return err
 	}
-	meta.SetStatusCondition(&object.Status.Conditions, metav1.Condition{Type: evaluatedCondition, Status: metav1.ConditionTrue, Reason: evaluatedCondition})
+	object.Status.Metrics = &runtime.RawExtension{Raw: []byte("{}")}
 	return w.c.Update(ctx, &object)
 }
 
@@ -143,15 +143,14 @@ func (w *memWriter) UpdateRunStatus(ctx context.Context, resourceVersion string,
 	if err := w.c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testRunName}, &run); err != nil {
 		return err
 	}
-	run.Status.Message = status.Message
-	run.Status.Progress = &v1beta2.RunProgress{Round: status.Round, Evaluated: status.Evaluated}
+	run.Status.Progress = &v1beta2.DGDRRunProgress{Candidates: &v1beta2.CandidateProgress{Published: status.Published}}
 	if !status.LastProgress.IsZero() {
 		progressed := metav1.NewTime(status.LastProgress)
 		run.Status.LastProgressTime = &progressed
 	}
 	run.Status.CandidateRefs = nil
 	for _, name := range status.CandidateNames {
-		run.Status.CandidateRefs = append(run.Status.CandidateRefs, v1beta2.CandidateRef{Name: name})
+		run.Status.CandidateRefs = append(run.Status.CandidateRefs, corev1.LocalObjectReference{Name: name})
 	}
 	return w.c.Update(ctx, &run)
 }
@@ -359,7 +358,7 @@ func TestExternallyModifiedRunStatusIsRepaired(t *testing.T) {
 	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testRunName}, &run); err != nil {
 		t.Fatal(err)
 	}
-	run.Status.Message = "changed by someone else"
+	run.Status.CandidateRefs = []corev1.LocalObjectReference{{Name: "changed-by-someone-else"}}
 	if err := f.c.Update(context.Background(), &run); err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +422,7 @@ func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
 		}
 	}
 	status := f.lastStatus()
-	if !reflect.DeepEqual(status.CandidateNames, []string{cn("a")}) || !strings.Contains(status.Message, "1 candidate(s) failed materialization") {
+	if !reflect.DeepEqual(status.CandidateNames, []string{cn("a")}) || status.Published != 1 {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -679,16 +678,15 @@ func TestSweeperStateOfReadsOnlyTheSweeperContainer(t *testing.T) {
 func TestObservedStatusMirrorsTheRunStatus(t *testing.T) {
 	when := metav1.NewTime(time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC))
 	run := &v1beta2.DynamoGraphDeploymentRun{Status: v1beta2.DynamoGraphDeploymentRunStatus{
-		Message:          "m",
-		Progress:         &v1beta2.RunProgress{Round: 2, Evaluated: 5},
+		Progress:         &v1beta2.DGDRRunProgress{Candidates: &v1beta2.CandidateProgress{Published: 2}},
 		LastProgressTime: &when,
-		CandidateRefs:    []v1beta2.CandidateRef{{Name: "x"}, {Name: "y"}},
+		CandidateRefs:    []corev1.LocalObjectReference{{Name: "x"}, {Name: "y"}},
 	}}
-	want := RunStatus{Message: "m", HasProgress: true, Round: 2, Evaluated: 5, LastProgress: when.Time, CandidateNames: []string{"x", "y"}}
+	want := RunStatus{Published: 2, LastProgress: when.Time, CandidateNames: []string{"x", "y"}}
 	if got := observedStatus(run); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
-	if got := observedStatus(&v1beta2.DynamoGraphDeploymentRun{}); got.HasProgress || !got.LastProgress.IsZero() {
+	if got := observedStatus(&v1beta2.DynamoGraphDeploymentRun{}); got.Published != 0 || !got.LastProgress.IsZero() {
 		t.Fatalf("an empty status must not look like reported progress: %+v", got)
 	}
 }
@@ -765,12 +763,11 @@ func TestCandidateApplyPayload(t *testing.T) {
 
 func TestCandidateStatusApplyPayloadIsDeterministic(t *testing.T) {
 	candidate := dgdcreconcile.DesiredCandidate{ID: "a", Metrics: map[string]any{"score": 2}}
-	now := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
-	first, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate, now)
+	first, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate, now)
+	second, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -780,20 +777,31 @@ func TestCandidateStatusApplyPayloadIsDeterministic(t *testing.T) {
 	if got, _ := nested(t, first, "metadata", "resourceVersion"); got != "17" {
 		t.Fatalf("the status write must be constrained to the version it was decided on, got %v", got)
 	}
-	conditions, _ := nested(t, first, "status", "conditions")
-	list, ok := conditions.([]any)
-	if !ok || len(list) != 1 {
-		t.Fatalf("conditions = %v", conditions)
+	if _, found := nested(t, first, "status", "metrics"); !found {
+		t.Fatal("the metrics are the candidate's status")
 	}
-	condition := list[0].(map[string]any)
-	if condition["type"] != evaluatedCondition || condition["status"] != "True" || condition["lastTransitionTime"] != "2026-10-05T21:35:12Z" {
-		t.Fatalf("condition = %v", condition)
+	if _, found := nested(t, first, "status", "conditions"); found {
+		t.Fatal("candidate status is metrics only")
+	}
+}
+
+func TestCandidateStatusApplyAlwaysWritesMetricsEvenWhenEmpty(t *testing.T) {
+	apply, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", dgdcreconcile.DesiredCandidate{ID: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, found := nested(t, apply, "status", "metrics")
+	if !found {
+		t.Fatal("an evaluated candidate without metrics must still carry an empty metrics object: its presence marks it populated")
+	}
+	if object, ok := metrics.(map[string]any); !ok || len(object) != 0 {
+		t.Fatalf("metrics = %#v, want an empty object", metrics)
 	}
 }
 
 func TestRunStatusApplyPayload(t *testing.T) {
 	when := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
-	status := RunStatus{Message: "m", HasProgress: true, Round: 2, Evaluated: 5, LastProgress: when, CandidateNames: []string{"x", "y"}}
+	status := RunStatus{Published: 2, LastProgress: when, CandidateNames: []string{"x", "y"}}
 	apply := buildRunStatusApply(testNamespace, testRunName, "42", status)
 	if apply.GetKind() != "DynamoGraphDeploymentRun" || apply.GetName() != testRunName {
 		t.Fatalf("identity = %s %s", apply.GetKind(), apply.GetName())
@@ -807,8 +815,13 @@ func TestRunStatusApplyPayload(t *testing.T) {
 	if got, _ := nested(t, apply, "status", "lastProgressTime"); got != "2026-10-05T21:35:12Z" {
 		t.Fatalf("lastProgressTime = %v", got)
 	}
-	if got, _ := nested(t, apply, "status", "progress", "round"); got != int64(2) {
-		t.Fatalf("round = %#v", got)
+	if got, _ := nested(t, apply, "status", "progress", "candidates", "published"); got != int64(2) {
+		t.Fatalf("published = %#v", got)
+	}
+	for _, field := range []string{"message", "provenance"} {
+		if _, found := nested(t, apply, "status", field); found {
+			t.Fatalf("status.%s does not exist in the API and must not be written", field)
+		}
 	}
 	refs, _ := nested(t, apply, "status", "candidateRefs")
 	if list, ok := refs.([]any); !ok || len(list) != 2 {
