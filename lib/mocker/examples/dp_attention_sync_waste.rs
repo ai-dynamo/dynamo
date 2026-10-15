@@ -219,6 +219,9 @@ struct KvTransfer {
     first_turn_tokens: u64,
     stayed_turn_tokens: u64,
     moved_turn_tokens: u64,
+    /// Subset of `moved_turn_tokens` whose move stayed on the previous rank's host, reloadable
+    /// from a shared host (G2) tier instead of the network.
+    moved_same_host_tokens: u64,
     follow_up_turns: usize,
     moved_turns: usize,
 }
@@ -228,7 +231,10 @@ impl KvTransfer {
         self.first_turn_tokens + self.stayed_turn_tokens + self.moved_turn_tokens
     }
 
-    fn from_sessions(sessions: &BTreeMap<String, BTreeMap<usize, TurnPlacement>>) -> Self {
+    fn from_sessions(
+        sessions: &BTreeMap<String, BTreeMap<usize, TurnPlacement>>,
+        ranks_per_host: usize,
+    ) -> Self {
         let mut transfer = Self::default();
         for turns in sessions.values() {
             let mut previous: Option<TurnPlacement> = None;
@@ -242,10 +248,16 @@ impl KvTransfer {
                             .saturating_sub(prev.input_length + prev.output_length)
                             as u64;
                     }
-                    Some(_) => {
+                    Some(prev) => {
                         transfer.follow_up_turns += 1;
                         transfer.moved_turns += 1;
                         transfer.moved_turn_tokens += turn.input_length as u64;
+                        if ranks_per_host > 0
+                            && prev.rank.0 == turn.rank.0
+                            && prev.rank.1 / ranks_per_host == turn.rank.1 / ranks_per_host
+                        {
+                            transfer.moved_same_host_tokens += turn.input_length as u64;
+                        }
                     }
                 }
                 previous = Some(*turn);
@@ -638,6 +650,12 @@ struct Summary {
     decode_radix_cache: bool,
     kv_bytes_per_token: usize,
     kv_transfer_gbps: f64,
+    host_transfer_gbps: f64,
+    /// Serialized transfer seconds: network (prefill deltas, first turns, cross-host moves)
+    /// and host tier (same-host moves). The engine itself charges every transfer at
+    /// `kv_transfer_gbps`, so same-host moves are timed conservatively there.
+    network_transfer_s: f64,
+    host_transfer_s: f64,
     kv_transfer: KvTransfer,
     kv_transfer_gb_total: f64,
     kv_transfer_gb_per_follow_up_turn: f64,
@@ -685,6 +703,8 @@ struct Args {
     /// 0 bytes/token leaves the handoff untimed.
     kv_bytes_per_token: usize,
     kv_transfer_gbps: f64,
+    host_transfer_gbps: f64,
+    decode_dp_ranks_per_host: usize,
     /// `mooncake-delta` (default): each row after a session's first is that turn's new tokens,
     /// accumulated onto the session's context by replay (AIPerf multi-turn exports);
     /// `mooncake`: every row is a complete, independent prompt.
@@ -753,6 +773,8 @@ fn parse_args() -> Result<Args> {
         decode_radix_cache: true,
         kv_bytes_per_token: 0,
         kv_transfer_gbps: 50.0,
+        host_transfer_gbps: 225.0,
+        decode_dp_ranks_per_host: 0,
         trace_format: TraceFileFormat::MooncakeDelta,
         timing: Timing {
             attention_fixed_ms: 1.5,
@@ -809,6 +831,8 @@ fn parse_args() -> Result<Args> {
             "--decode-radix-cache" => args.decode_radix_cache = parse_on_off(&flag, &value()?)?,
             "--kv-bytes-per-token" => args.kv_bytes_per_token = value()?.parse()?,
             "--kv-transfer-gbps" => args.kv_transfer_gbps = value()?.parse()?,
+            "--host-transfer-gbps" => args.host_transfer_gbps = value()?.parse()?,
+            "--decode-dp-ranks-per-host" => args.decode_dp_ranks_per_host = value()?.parse()?,
             "--trace-format" => {
                 args.trace_format = match value()?.as_str() {
                     "mooncake" => TraceFileFormat::Mooncake,
@@ -836,7 +860,7 @@ fn parse_args() -> Result<Args> {
                      [--max-num-batched-tokens N] [--max-sim-time-ms MS] [--speedup X] \
                      [--sample-interval-ms MS] [--decode-active-request-weight W] \
                      [--session-affinity on|off] [--prefill-session-affinity on|off] [--decode-session-affinity on|off] \
-                     [--decode-radix-cache on|off] [--kv-bytes-per-token N] [--kv-transfer-gbps X] \
+                     [--decode-radix-cache on|off] [--kv-bytes-per-token N] [--kv-transfer-gbps X] [--host-transfer-gbps X] [--decode-dp-ranks-per-host N] \
                      [--trace-format mooncake|mooncake-delta] [timing flags]"
                 );
                 std::process::exit(0);
@@ -976,7 +1000,8 @@ fn main() -> Result<()> {
     let samples: u64 = groups.values().map(|g| g.samples).sum();
     let n = samples.max(1) as f64;
     let timeline = build_timeline(&report.per_request, &args);
-    let kv_transfer = KvTransfer::from_sessions(&timeline.session_turn_ranks);
+    let kv_transfer =
+        KvTransfer::from_sessions(&timeline.session_turn_ranks, args.decode_dp_ranks_per_host);
     let (follow_up_turns, moved) = (kv_transfer.follow_up_turns, kv_transfer.moved_turns);
     let kv_transfer_gb_total =
         kv_transfer.total_tokens() as f64 * args.kv_bytes_per_token as f64 / 1e9;
@@ -1053,6 +1078,13 @@ fn main() -> Result<()> {
         decode_radix_cache: args.decode_radix_cache,
         kv_bytes_per_token: args.kv_bytes_per_token,
         kv_transfer_gbps: args.kv_transfer_gbps,
+        host_transfer_gbps: args.host_transfer_gbps,
+        network_transfer_s: (kv_transfer.total_tokens() - kv_transfer.moved_same_host_tokens)
+            as f64
+            * args.kv_bytes_per_token as f64
+            / (args.kv_transfer_gbps * 1e9),
+        host_transfer_s: kv_transfer.moved_same_host_tokens as f64 * args.kv_bytes_per_token as f64
+            / (args.host_transfer_gbps * 1e9),
         kv_transfer,
         kv_transfer_gb_total,
         kv_transfer_gb_per_follow_up_turn,
@@ -1124,6 +1156,13 @@ fn main() -> Result<()> {
         summary.kv_transfer.moved_turn_tokens,
         summary.kv_transfer.stayed_turn_tokens,
         summary.kv_transfer.first_turn_tokens
+    );
+    println!(
+        "{} kv_transfer_time: network={:.0} s host_tier={:.0} s moved_same_host_tokens={}",
+        summary.label,
+        summary.network_transfer_s,
+        summary.host_transfer_s,
+        summary.kv_transfer.moved_same_host_tokens
     );
     if let Some(prefill) = &summary.prefill_pool {
         println!(

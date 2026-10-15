@@ -31,6 +31,7 @@ const DEFAULT_GROUP_LOAD_TOLERANCE: f64 = 0.1;
 const DEFAULT_INCOMPLETE_GROUP_WEIGHT: f64 = 1.0;
 const DEFAULT_CACHE_AFFINITY_MIN_FRACTION: f64 = 0.5;
 const DEFAULT_AFFINITY_MIN_IMBALANCE_REDUCTION: f64 = 0.5;
+const DEFAULT_SAME_HOST_MOVE_COST: f64 = 50.0 / 225.0;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -58,6 +59,13 @@ struct Parameters {
     /// moving evens the barrier. Use a large value (e.g. 1e9) for hard stickiness, 0 to move
     /// whenever any other rank gives a lower wait.
     affinity_min_imbalance_reduction: f64,
+    /// DP ranks per physical host, numbered contiguously within a worker (ranks
+    /// `[k * n, (k + 1) * n)` share host `k`). 0 means unknown: every move costs a full transfer.
+    dp_ranks_per_host: u32,
+    /// Cost of a move between ranks on the bound rank's host, relative to a cross-host move:
+    /// same-host ranks reload the session from the shared host (G2) tier, e.g. Mooncake, over
+    /// the chip-host link instead of the network (GB200: 50 / 225 GB/s).
+    same_host_move_cost: f64,
 }
 
 impl Default for Parameters {
@@ -71,6 +79,8 @@ impl Default for Parameters {
             incomplete_group_weight: DEFAULT_INCOMPLETE_GROUP_WEIGHT,
             cache_affinity_min_fraction: DEFAULT_CACHE_AFFINITY_MIN_FRACTION,
             affinity_min_imbalance_reduction: DEFAULT_AFFINITY_MIN_IMBALANCE_REDUCTION,
+            dp_ranks_per_host: 0,
+            same_host_move_cost: DEFAULT_SAME_HOST_MOVE_COST,
         }
     }
 }
@@ -92,6 +102,7 @@ impl Parameters {
                 "affinity_min_imbalance_reduction",
                 self.affinity_min_imbalance_reduction,
             ),
+            ("same_host_move_cost", self.same_host_move_cost),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(WorkerSelectionPolicyProviderError::new(format!(
@@ -208,24 +219,47 @@ fn affinity_row(
         }
     }
     let increase = |row| barrier_increase(candidates, &blocks, &groups, row, request_blocks);
-    let Some((best_row, best_increase)) = (0..candidates.len())
-        .filter(|row| *row != bound_row)
-        .map(|row| (row, increase(row)))
-        .min_by(|(lr, li), (rr, ri)| li.total_cmp(ri).then_with(|| blocks[*lr].cmp(&blocks[*rr])))
-    else {
-        return bound_row;
-    };
-    let bound_worker = candidates[bound_row].worker().worker_id;
+    let bound = candidates[bound_row].worker();
     let bound_size = groups
         .iter()
-        .find(|(id, _, _)| *id == bound_worker)
+        .find(|(id, _, _)| *id == bound.worker_id)
         .map_or(1, |(_, size, _)| *size);
-    let saved =
-        (increase(bound_row) - best_increase) / (bound_size as f64 * request_blocks.max(1) as f64);
-    if saved > parameters.affinity_min_imbalance_reduction {
-        best_row
-    } else {
-        bound_row
+    let ranks_per_host = parameters.dp_ranks_per_host;
+    let move_cost = |row: usize| {
+        let worker = candidates[row].worker();
+        let same_host = ranks_per_host > 0
+            && worker.worker_id == bound.worker_id
+            && worker.dp_rank / ranks_per_host == bound.dp_rank / ranks_per_host;
+        if same_host {
+            parameters.same_host_move_cost
+        } else {
+            1.0
+        }
+    };
+    let stay = increase(bound_row);
+    let scale = bound_size as f64 * request_blocks.max(1) as f64;
+    // Net benefit of moving: slowest-rank context saved (as a fraction of the request) minus
+    // the threshold times the move's transfer cost.
+    let best = (0..candidates.len())
+        .filter(|row| *row != bound_row)
+        .map(|row| {
+            let saved = (stay - increase(row)) / scale;
+            let cost = move_cost(row);
+            (
+                row,
+                saved,
+                saved - parameters.affinity_min_imbalance_reduction * cost,
+                cost,
+            )
+        })
+        .max_by(|(lr, _, ln, lc), (rr, _, rn, rc)| {
+            ln.total_cmp(rn)
+                .then_with(|| rc.total_cmp(lc))
+                .then_with(|| blocks[*rr].cmp(&blocks[*lr]))
+        });
+    match best {
+        Some((row, saved, net, _)) if saved > 0.0 && net > 0.0 => row,
+        _ => bound_row,
     }
 }
 
@@ -628,6 +662,35 @@ mod tests {
                 }
             ),
             WorkerWithDpRank::new(0, 1)
+        );
+    }
+
+    #[test]
+    fn same_host_moves_are_cheaper() {
+        // Bound rank 1 is the straggler.
+        let skewed = [[(4, 100, 1), (4, 140, 1)], [(4, 100, 1), (4, 100, 1)]];
+        let threshold = Parameters {
+            affinity_min_imbalance_reduction: 1.5,
+            ..Parameters::default()
+        };
+        // Saving 40 of a 40-block request (1.0) is below a full-cost threshold of 1.5.
+        assert_eq!(
+            select_with_affinity(&skewed, &[], Some((0, 1)), 40, threshold),
+            WorkerWithDpRank::new(0, 1)
+        );
+        // With both ranks of worker 0 on one host the move costs 0.22 and goes ahead.
+        assert_eq!(
+            select_with_affinity(
+                &skewed,
+                &[],
+                Some((0, 1)),
+                40,
+                Parameters {
+                    dp_ranks_per_host: 2,
+                    ..threshold
+                }
+            ),
+            WorkerWithDpRank::new(0, 0)
         );
     }
 
