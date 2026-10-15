@@ -10509,6 +10509,23 @@ func TestFrontendSidecarRuntimeDefaults(t *testing.T) {
 	}
 }
 
+// assertFrontendSidecarArgv checks the sidecar command and args. An authored
+// command must keep exactly its authored args; otherwise the default command is
+// python3 and args are checked only when the case sets them.
+func assertFrontendSidecarArgv(t *testing.T, sidecar corev1.Container, wantCommand, wantArgs []string) {
+	t.Helper()
+	if wantCommand != nil {
+		t.Log("Check that an authored sidecar command keeps exactly its authored args")
+		assert.Equal(t, wantCommand, sidecar.Command, "sidecar command")
+		assert.Equal(t, wantArgs, sidecar.Args, "sidecar args")
+		return
+	}
+	if wantArgs != nil {
+		assert.Equal(t, wantArgs, sidecar.Args, "sidecar args")
+	}
+	assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
+}
+
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
@@ -10798,16 +10815,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
 			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
 
-			if tt.wantSidecarCommand != nil {
-				t.Log("Check that an authored sidecar command keeps exactly its authored args")
-				assert.Equal(t, tt.wantSidecarCommand, sidecar.Command, "sidecar command")
-				assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
-			} else {
-				if tt.wantSidecarArgs != nil {
-					assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
-				}
-				assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
-			}
+			assertFrontendSidecarArgv(t, sidecar, tt.wantSidecarCommand, tt.wantSidecarArgs)
 
 			if tt.wantSidecarEnvVars != nil {
 				envVars := make(map[string]string)
