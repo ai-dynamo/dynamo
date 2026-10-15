@@ -23,6 +23,13 @@ data:
     # One gRPC chunk per N decode steps, not per token: N>1 cuts per-token gRPC
     # serialization for a throughput win, at the cost of bursty delivery.
     stream_interval: 5
+    kv_cache_config:
+      use_kv_cache_manager_v2: true
+      enable_block_reuse: true
+      kv_cache_event_hash_algo: v1_block_key
+      kv_events_config:
+        enable_kv_cache_events: true
+        endpoint: tcp://*:5557
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -44,6 +51,8 @@ spec:
           args:
           - -m
           - dynamo.frontend
+          - --router-mode
+          - kv
   - name: TRTLLMWorker
     type: worker
     replicas: 1
@@ -119,6 +128,7 @@ spec:
           - --grpc
           - --grpc-protocol
           - openengine
+          - --openengine-enable-load-metrics
           - --host
           - 127.0.0.1
           - --port
