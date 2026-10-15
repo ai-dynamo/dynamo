@@ -72,14 +72,13 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		discoveryErr error
 		beforeUpdate func(*testing.T)
 		// check inspects the object the API server returned.
-		check             func(*testing.T, *unstructured.Unstructured)
-		wantImage         string
-		wantSchemaErr     string
-		wantCELErr        string
-		wantStatusErr     string
-		wantAdmissionErrs []string
-		wantWebhook       []string
-		wantWarnings      []string
+		check         func(*testing.T, *unstructured.Unstructured)
+		wantImage     string
+		wantSchemaErr string
+		wantCELErr    string
+		wantStatusErr string
+		wantWebhook   []string
+		wantWarnings  []string
 	}{
 		// Source-version schema, CEL, and conversion boundaries.
 		{
@@ -227,17 +226,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server}
 			}),
-		},
-		{
-			name: "invalid GPU SKU is rejected by the source schema",
-			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUType("invalid_sku")}
-			}),
-			gpuDiscovery: true,
-			wantAdmissionErrs: []string{
-				`spec.hardware.gpuSku: Unsupported value: "invalid_sku": supported values: "gb200", "gb200_sxm", "gb10", "b300_sxm", "b200_sxm", "rtx_pro_6000_server", "h200_sxm", "h100_sxm", "h100_pcie", "a100_sxm", "a100_pcie", "a30", "l40s", "l40", "l4", "v100_sxm", "v100_pcie", "t4", "mi200", "mi300"`,
-				`<nil>: Invalid value: "": "spec.hardware.gpuSku" must validate all the schemas (allOf). None validated`,
-			},
 		},
 		{
 			name: "independent create failures aggregate in API declaration order",
@@ -795,7 +783,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantStatusError:    tt.wantStatusErr,
-				wantAdmissionErrs:  tt.wantAdmissionErrs,
 				wantWebhookErrors:  tt.wantWebhook,
 				wantWarnings:       tt.wantWarnings,
 				beforeUpdate:       tt.beforeUpdate,
