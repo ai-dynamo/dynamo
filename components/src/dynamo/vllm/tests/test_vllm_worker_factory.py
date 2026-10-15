@@ -3182,6 +3182,290 @@ def test_native_cuda_measurement_rejects_fabricated_or_partial_median(
         _validate_execution_measurement(retained, measurement, -1)
 
 
+@pytest.fixture
+def native_prefill_payloads():
+    payloads = _execution_rank_payloads()
+    for rank, payload in enumerate(payloads):
+        payload["schema_version"] = 3
+        protocol = payload["measurement_protocol"]
+        protocol["timing_metric"] = "model_step_cuda"
+        protocol["execution_evidence"]["timing_clock"] = "cuda_event_elapsed"
+        group = payload["iteration_groups"][0]
+        group["point"].update(
+            point_type="prefill", total_prefill_tokens=512, total_kv_read_tokens=1024
+        )
+        for result in group["rank_results"]:
+            original = result["fpms"][0]
+            measurement = original["benchmark_measurement"]
+            raw = copy.deepcopy(measurement["raw_fpms"][0])
+            raw.update(
+                wall_time=0.007 + result["dp_rank"] * 0.001,
+                timing_scope="model_step_cuda",
+                scheduled_requests={
+                    "num_prefill_requests": 2,
+                    "sum_prefill_tokens": 512,
+                    "sum_prefill_kv_tokens": 1024,
+                    "var_prefill_length": 0.125,
+                    "num_decode_requests": 0,
+                    "sum_decode_kv_tokens": 0,
+                    "var_decode_kv_tokens": 0.0,
+                },
+            )
+            raw["benchmark_sample"].update(
+                sample_index=0,
+                native_iteration_id=0,
+                timing={
+                    "basis": "model_step_cuda",
+                    "start_monotonic": None,
+                    "end_monotonic": None,
+                    "duration_seconds": raw["wall_time"],
+                },
+                cudagraph={
+                    "status": "observed",
+                    "runtime_mode": "CUDAGraphMode.PIECEWISE",
+                    "num_unpadded_tokens": 512,
+                    "num_padded_tokens": 512,
+                    "num_paddings": 0,
+                },
+            )
+            measurement.update(
+                point_key=benchmark_content_point_key(group["point"]),
+                expected_internal_samples=1,
+                raw_fpms=[raw],
+                estimate={"method": "single_step", "raw_sample_indices": [0]},
+            )
+            retained = copy.deepcopy(raw)
+            retained.pop("benchmark_sample")
+            retained["benchmark_measurement"] = measurement
+            result["fpms"] = [retained]
+        group["wall_time"] = max(
+            result["fpms"][0]["wall_time"] for result in group["rank_results"]
+        )
+        payload["timing"]["measured_iteration_seconds"] = group["wall_time"]
+        payload["results"][0]["point"] = copy.deepcopy(group["point"])
+        payload["results"][0]["fpms"] = copy.deepcopy(
+            group["rank_results"][rank]["fpms"]
+        )
+        payload["speculative_benchmark"] = {
+            "phase": "prefill",
+            "method": "eagle3",
+            "num_draft_tokens": 3,
+            "measurement": "native_model_step_prefill",
+            "timing_scope": "model_step_cuda",
+            "execution_identity": {
+                "status": "resolved",
+                "binding": {
+                    "model_revision": "1" * 40,
+                    "execution_profile": {
+                        "kind": "speculative_round",
+                        "method": "eagle3",
+                        "num_draft_tokens": 3,
+                        "draft_model": "test/synthetic-draft",
+                        "draft_revision": "2" * 40,
+                        "timing_scope": "model_step_cuda",
+                    },
+                },
+                "unresolved_fields": [],
+                "sources": {
+                    "model_revision": "loaded_hf_commit",
+                    "draft_revision": "explicit_revision",
+                    "draft_model": "speculative_config.model",
+                },
+            },
+            "kv_capacity": {
+                "num_gpu_blocks": 100,
+                "free_blocks_before_benchmark": 99,
+                "usable_blocks": 99,
+                "allocated_kv_tensor_bytes": 4096,
+            },
+            "free_blocks_after_benchmark": 99,
+        }
+    return payloads
+
+
+@pytest.mark.parametrize("identity_status", ["resolved", "unresolved", None])
+def test_merge_native_prefill_preserves_execution_identity_and_observed_capacity(
+    tmp_path, native_prefill_payloads, identity_status
+):
+    for payload in native_prefill_payloads:
+        speculative = payload["speculative_benchmark"]
+        if identity_status is None:
+            speculative.pop("execution_identity")
+        elif identity_status == "unresolved":
+            speculative["execution_identity"] = {
+                "status": "unresolved",
+                "binding": None,
+                "unresolved_fields": ["model_revision", "draft_revision"],
+            }
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", payload)
+            for rank, payload in enumerate(native_prefill_payloads)
+        ],
+        tmp_path / "merged.json",
+    )
+    assert (
+        merged["speculative_benchmark"]
+        == native_prefill_payloads[0]["speculative_benchmark"]
+    )
+    for result in merged["results"]:
+        retained = result["fpms"][0]
+        raw = retained["benchmark_measurement"]["raw_fpms"][0]
+        assert retained["scheduled_requests"] == raw["scheduled_requests"]
+        assert retained["scheduled_requests"]["var_prefill_length"] == 0.125
+        assert retained["timing_scope"] == "model_step_cuda"
+        assert raw["benchmark_sample"]["native_iteration_id"] == 0
+    merged["speculative_benchmark"]["kv_capacity"]["usable_blocks"] = 1
+    assert (
+        native_prefill_payloads[0]["speculative_benchmark"]["kv_capacity"][
+            "usable_blocks"
+        ]
+        == 99
+    )
+
+
+def test_merge_resolved_identity_does_not_impose_downstream_draft_depth_limit(
+    tmp_path, native_prefill_payloads
+):
+    for payload in native_prefill_payloads:
+        speculative = payload["speculative_benchmark"]
+        speculative["num_draft_tokens"] = 6
+        speculative["execution_identity"]["binding"]["execution_profile"][
+            "num_draft_tokens"
+        ] = 6
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", payload)
+            for rank, payload in enumerate(native_prefill_payloads)
+        ],
+        tmp_path / "merged.json",
+    )
+    assert merged["speculative_benchmark"]["execution_identity"]["status"] == "resolved"
+    assert merged["speculative_benchmark"]["num_draft_tokens"] == 6
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "shape",
+        "queued",
+        "retained_clock",
+        "raw_clock",
+        "expected",
+        "selected",
+        "negative_id",
+        "boolean_id",
+    ],
+)
+def test_native_prefill_rejects_fabricated_or_partial_observation(
+    native_prefill_payloads, corruption
+):
+    retained = native_prefill_payloads[0]["iteration_groups"][0]["rank_results"][0][
+        "fpms"
+    ][0]
+    measurement = retained["benchmark_measurement"]
+    raw = measurement["raw_fpms"][0]
+    if corruption == "shape":
+        retained["scheduled_requests"]["var_prefill_length"] = 0.5
+    elif corruption == "queued":
+        retained["queued_requests"] = {"num_prefill_requests": 9}
+    elif corruption == "retained_clock":
+        retained["timing_scope"] = "scheduler_wall_time"
+    elif corruption == "raw_clock":
+        raw["benchmark_sample"]["timing"].update(
+            basis="schedule_to_output",
+            start_monotonic=0.0,
+            end_monotonic=raw["wall_time"],
+        )
+    elif corruption == "expected":
+        measurement["expected_internal_samples"] = 2
+    elif corruption == "selected":
+        measurement["estimate"]["selected_raw_sample_index"] = 1
+    else:
+        raw["benchmark_sample"]["native_iteration_id"] = (
+            True if corruption == "boolean_id" else -1
+        )
+    with pytest.raises(RuntimeError, match="execution evidence is invalid"):
+        _validate_execution_measurement(retained, measurement, -1)
+
+
+def test_native_reduction_rejects_cpu_cuda_mix(native_cuda_measurement):
+    retained, measurement = native_cuda_measurement
+    raw = measurement["raw_fpms"][0]
+    raw["timing_scope"] = "scheduler_wall_time"
+    raw["benchmark_sample"]["timing"].update(
+        basis="schedule_to_output", start_monotonic=0.0, end_monotonic=raw["wall_time"]
+    )
+    with pytest.raises(RuntimeError, match="mixes CPU and native CUDA"):
+        _validate_execution_measurement(retained, measurement, -1)
+
+
+@pytest.mark.parametrize("legacy_phase_specific", [False, True])
+def test_merge_checks_declared_phase_clock_without_relabeling_legacy_prefill(
+    tmp_path, native_prefill_payloads, legacy_phase_specific
+):
+    for rank, payload in enumerate(native_prefill_payloads):
+        protocol = payload["measurement_protocol"]
+        if legacy_phase_specific:
+            protocol["timing_metric"] = "phase_specific"
+            protocol["timing_by_phase"] = {
+                "prefill": "scheduler_wall_time",
+                "decode": "model_step_cuda",
+            }
+            protocol["execution_evidence"]["timing_clock"] = "phase_specific"
+        group = payload["iteration_groups"][0]
+        for result in group["rank_results"]:
+            retained = result["fpms"][0]
+            raw = retained["benchmark_measurement"]["raw_fpms"][0]
+            retained["timing_scope"] = raw["timing_scope"] = "scheduler_wall_time"
+            raw["benchmark_sample"]["timing"] = {
+                "basis": "schedule_to_output",
+                "start_monotonic": 0.0,
+                "end_monotonic": raw["wall_time"],
+            }
+            raw["benchmark_sample"].pop("native_iteration_id")
+        payload["results"][0]["fpms"] = copy.deepcopy(
+            group["rank_results"][rank]["fpms"]
+        )
+    inputs = [
+        (rank, tmp_path / f"rank{rank}.json", payload)
+        for rank, payload in enumerate(native_prefill_payloads)
+    ]
+    if legacy_phase_specific:
+        merged = _merge_benchmark_rank_results(inputs, tmp_path / "merged.json")
+        assert merged["results"][0]["fpms"][0]["timing_scope"] == "scheduler_wall_time"
+    else:
+        with pytest.raises(RuntimeError, match="declared timing metric"):
+            _merge_benchmark_rank_results(inputs, tmp_path / "merged.json")
+
+
+@pytest.mark.parametrize(
+    "corruption", ["binding", "revision", "depth", "unresolved", "rank"]
+)
+def test_merge_rejects_invalid_speculative_execution_identity(
+    tmp_path, native_prefill_payloads, corruption
+):
+    identity = native_prefill_payloads[1]["speculative_benchmark"]["execution_identity"]
+    if corruption == "binding":
+        identity["binding"] = None
+    elif corruption == "revision":
+        identity["binding"]["model_revision"] = "main"
+    elif corruption == "depth":
+        identity["binding"]["execution_profile"]["num_draft_tokens"] = 2
+    elif corruption == "unresolved":
+        identity["unresolved_fields"] = ["draft_revision"]
+    else:
+        identity["binding"]["execution_profile"]["draft_revision"] = "3" * 40
+    with pytest.raises(RuntimeError, match="speculative execution identity"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", payload)
+                for rank, payload in enumerate(native_prefill_payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
 def test_merge_records_missing_remote_warmup_history_without_losing_raw_observations(
     tmp_path,
 ):

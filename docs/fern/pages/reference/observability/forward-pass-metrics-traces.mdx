@@ -167,8 +167,8 @@ The shared protocol contains:
 | `content_seed`, `synthetic_content`, `synthetic_pool_tag` | Frozen content seed; recorded content mode and pool tag |
 | `prompt_hash_encoding` | `"uint32_le"`; prompt token ids are encoded as unsigned 32-bit little-endian integers before SHA-256 hashing |
 | `independent_repetitions` | `1`; adjacent samples within one engine launch are not independent repetitions |
-| `timing_metric` | `"scheduler_wall_time"` for ordinary decoding; `"model_step_cuda"` for speculative decode-only collection; `"phase_specific"` when an aggregate speculative run also collects scheduler-timed prefill |
-| `timing_by_phase` | Present for phase-specific timing: prefill uses `"scheduler_wall_time"`, decode uses `"model_step_cuda"` |
+| `timing_metric` | `"scheduler_wall_time"` for ordinary decoding; `"model_step_cuda"` for speculative prefill, decode, and aggregate collection |
+| `timing_by_phase` | Older speculative aggregate artifacts can declare `"phase_specific"` with prefill `"scheduler_wall_time"` and decode `"model_step_cuda"`; these clocks are not interchangeable |
 | `execution_evidence` | Versioned contract for per-sample observations and warmup records; identifies their field names, process-local clock and forward indices, graph-statistics source, and validation scope |
 | `input_evidence_scope` | `"injected_prompt_token_ids"`; hashes cover the prompt ids available at request injection |
 | `unobserved` | Lists inputs or context not established by this evidence: sampled continuation tokens, KV-cache tensors, recurrent-state tensors, decode real-KV chain warmup history, equivalent execution history, and equivalent graph, kernel, or cache warming |
@@ -246,12 +246,30 @@ The record count grows with warmup attempts; each attempt retains at most two sc
 Matching prompt hashes establishes only the captured token content. It does not establish matching sampled continuation tokens, initialized cache tensors, memory allocation, graph preparation, or execution history. Full-grid and subset measurements still require a controlled comparison before they can be treated as equivalent repetitions. Adjacent decode steps share preparation and are not independent repetitions; use separate benchmark launches to measure run-to-run variability and retain all attempts.
 </Warning>
 
-## Speculative Decode Self-Benchmarking
+<a id="speculative-decode-self-benchmarking" />
+
+## Speculative Self-Benchmarking
 
 **Experimental.** The vLLM self-benchmark supports sequential EAGLE3 with tensor
 parallelism, DP1/PP1/CP1, and no expert parallelism, offload, or KV transfer. Pass
 the target and draft model settings through the ordinary vLLM speculative
-configuration. Other speculative methods remain rejected for decode collection.
+configuration. The same restrictions apply to `--benchmark-mode prefill`,
+`decode`, and `agg`. Other speculative methods remain rejected.
+
+Each prefill point retains one native CUDA observation, including sampling and
+draft work in that forward. A discarded replica warms each exact requested
+shape, including captured shapes. Cached-prefill preparation remains outside
+the retained sample. The collector joins the measured shape and timing by
+native iteration ID and waits for that observation before advancing to the next
+point; it does not substitute a scheduler duration when timing is missing.
+Prefill retains native variance semantics (`Var(K + P/2)`), which differ from
+the scheduler's historical prefill variance (`Var(K + P)`). Do not rewrite the
+native variance to make the two representations equal.
+
+For cached-prefill measurements intended for a real-KV performance model, set
+`DYN_BENCH_PREFILL_REAL_SEED=1`. This computes and validates the prefix before
+measurement. Without that setting, the existing synthetic-prefix path remains
+explicitly labelled and does not qualify as real-KV data for AISimulate import.
 
 Each decode point prepares target and draft state through real, untimed prefill,
 then runs a short native asynchronous decode window. Balanced preparation chunks
@@ -268,7 +286,8 @@ Use a vLLM runtime with native forward-pass metrics and enable
 `--forward-pass-metrics-port` on a port distinct from
 `DYN_FORWARDPASS_METRIC_PORT`. Unsupported runtimes fail instead of substituting
 scheduler wall time. Sampling parameters inherit the model's effective generation
-configuration, including explicit generation-config overrides.
+configuration, including explicit generation-config overrides, for both
+prefill and decode as well as their shape warmups.
 The bounded window sets its own output-token budget and ignores EOS. Nonzero
 `min_tokens` or explicit `stop` / `stop_token_ids` settings are rejected for this
 experimental path rather than silently changing their sampling behavior.
@@ -281,17 +300,21 @@ draft-token and output-token counts. Acceptance changes output progress, not the
 meaning of the measured iteration latency.
 
 SD artifacts use `schema_version: 3` so version-2-only consumers can reject the
-changed decode semantics. `measurement_policy.decode` is
+changed semantics. Prefill uses a `single_step` reduction that retains the real
+observation's shape and duration. `measurement_policy.decode` is
 `continuous_native_async_decode`, not the ordinary decode policy.
 The rank and merged artifacts also contain `speculative_benchmark`:
 
 | Field | Meaning |
 |---|---|
+| `phase` | The selected benchmark mode: `prefill`, `decode`, or `agg`. |
+| `measurement`, `measurement_by_phase` | Native prefill single-step collection or continuous native asynchronous decode. Aggregate runs record both methods; both use the same CUDA timing scope. |
 | `num_draft_tokens`, `verify_tokens_per_request` | Fixed speculative depth and target query width. |
 | `timing_scope` | `model_step_cuda`: native GPU event interval, not the sum of kernel execution times. |
-| `window_warmup_iterations`, `window_measured_iterations`, `window_tail_iterations` | Five discarded startup iterations, twenty retained measurements, and two trailing iterations. |
+| `window_warmup_iterations`, `window_measured_iterations`, `window_tail_iterations` | Decode-window sizes: five discarded startup iterations, twenty retained measurements, and two trailing iterations. These are not prefill sample counts. |
 | `max_observed_steps_in_flight` | Largest observed count of submitted steps whose model outputs have not returned. |
 | `sampling` | Effective temperature, top-p, top-k, min-p, and repetition, presence, and frequency penalties. |
+| `execution_identity` | Optional immutable target/draft identity, its field sources, and explicit unresolved fields; described below. |
 | `kv_capacity.usable_blocks` | Observed free KV blocks before warmup, minus the watermark; permanent reservations are already excluded. |
 | `kv_capacity.context_capacity_tokens` | vLLM's maximum-concurrency capacity calculation applied to that usable pool at `capacity_basis_max_model_len`. Includes target and draft cache groups. |
 | `kv_capacity.lookahead_tokens_per_request` | Speculative lookahead that consumes the same pool in addition to committed context. |
@@ -308,6 +331,39 @@ its own KV coordinate. `estimate.selected_raw_sample_index` identifies it.
 while `point` and `point_key` identify the retained sample's measured coordinate.
 All twenty measurements remain in `raw_fpms`; they share preparation and are
 correlated observations, not twenty independent runs.
+
+### Immutable Execution Identity
+
+`speculative_benchmark.execution_identity.status` is `resolved` only when the
+target revision, draft revision, and portable draft model identity are known.
+The `binding` then contains `model_revision` and this execution profile:
+
+```json
+{
+  "kind": "speculative_round",
+  "method": "eagle3",
+  "num_draft_tokens": 3,
+  "draft_model": "Nicolassuez/Qwen3-0.6B-eagle3",
+  "draft_revision": "00b7c41f32655e90ee65ac5b90bb381905ce1700",
+  "timing_scope": "model_step_cuda"
+}
+```
+
+Revisions come from already-loaded Hugging Face configuration commit hashes or
+explicit immutable 40-hex revisions. The `sources` map distinguishes these
+origins. Collection does not fetch revision metadata, infer commits from local
+directory names, or verify local weight-file contents. Conflicting revisions
+remain unresolved. A private local draft path is not a portable model identity.
+When identity is incomplete, `status` is `unresolved`, `binding` is `null`, and
+`unresolved_fields` names the missing facts. Measurements remain usable as raw
+evidence, but import must supply and verify those facts separately. Older
+schema-3 artifacts can omit this block.
+
+Resolved identity does not establish interpolation coverage, measurement
+quality, or simulator accuracy. The initial AISimulate SD-round consumer admits
+EAGLE3 depths 1–5; a collector artifact outside that range does not expand the
+consumer's support. Convert measurements with their native clock and exact
+identity rather than relabelling older scheduler-timed prefill rows.
 
 Use the capacity only with the recorded model, draft, topology, context limit,
 graph policy and memory budget. It is not a universal sum of committed tokens

@@ -87,6 +87,7 @@ import os
 import platform
 import queue
 import random
+import re
 import shutil
 import sys
 import threading
@@ -243,6 +244,87 @@ def _json_safe(value: Any) -> Any:
         except Exception:
             logger.debug("Could not convert value via .item()", exc_info=True)
     return str(value).removeprefix("torch.")
+
+
+def _bench_speculative_execution_identity(vllm_config: Any) -> dict[str, Any]:
+    """Resolve immutable identity from loaded configs without accessing the hub."""
+    spec = vllm_config.speculative_config
+
+    def revision(config: Any, requested: Any) -> tuple[str | None, str | None]:
+        resolved = getattr(getattr(config, "hf_config", None), "_commit_hash", None)
+        resolved = (
+            resolved
+            if isinstance(resolved, str) and re.fullmatch(r"[0-9a-f]{40}", resolved)
+            else None
+        )
+        explicit = (
+            requested
+            if isinstance(requested, str) and re.fullmatch(r"[0-9a-f]{40}", requested)
+            else None
+        )
+        if resolved and explicit and resolved != explicit:
+            return None, None
+        if resolved:
+            return resolved, "loaded_hf_commit"
+        return explicit, "explicit_revision" if explicit else None
+
+    model_revision, model_source = revision(
+        vllm_config.model_config, getattr(vllm_config.model_config, "revision", None)
+    )
+    draft_config = getattr(spec, "draft_model_config", None)
+    draft_revision, draft_source = revision(
+        draft_config, getattr(spec, "revision", None)
+    )
+    draft_model = None
+    draft_model_source = None
+    for source, candidate in (
+        ("speculative_config.model", getattr(spec, "model", None)),
+        (
+            "draft_hf_config._name_or_path",
+            getattr(getattr(draft_config, "hf_config", None), "_name_or_path", None),
+        ),
+    ):
+        if (
+            isinstance(candidate, str)
+            and re.fullmatch(
+                r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*",
+                candidate,
+            )
+            and not os.path.exists(candidate)
+        ):
+            draft_model, draft_model_source = candidate, source
+            break
+    unresolved = [
+        field_name
+        for field_name, value in (
+            ("model_revision", model_revision),
+            ("draft_model", draft_model),
+            ("draft_revision", draft_revision),
+        )
+        if value is None
+    ]
+    return {
+        "status": "unresolved" if unresolved else "resolved",
+        "unresolved_fields": unresolved,
+        "sources": {
+            "model_revision": model_source,
+            "draft_revision": draft_source,
+            "draft_model": draft_model_source,
+        },
+        "binding": None
+        if unresolved
+        else {
+            "model_revision": model_revision,
+            "execution_profile": {
+                "kind": "speculative_round",
+                "method": spec.method,
+                "num_draft_tokens": spec.num_speculative_tokens,
+                "draft_model": draft_model,
+                "draft_revision": draft_revision,
+                "timing_scope": "model_step_cuda",
+            },
+        },
+    }
 
 
 def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, Any]:
@@ -2337,6 +2419,16 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_active:
             if (
                 self._bench_speculative_tokens
+                and self._bench_phase == _BenchPhase.PREFILL_SWEEP
+                and self._bench_sd_steps
+            ):
+                if self._bench_point_result_timed_out():
+                    error = TimeoutError("SD prefill output/timing drain timed out")
+                    self._bench_abort(error)
+                    raise error
+                return False
+            if (
+                self._bench_speculative_tokens
                 and self._bench_phase == _BenchPhase.DECODE_SWEEP
             ):
                 # Only prefix preparation and the window tail drain. Interior
@@ -2505,7 +2597,8 @@ class InstrumentedScheduler(AsyncScheduler):
         if (
             self._bench_active
             and self._bench_speculative_tokens
-            and self._bench_phase == _BenchPhase.DECODE_SWEEP
+            and self._bench_phase
+            in {_BenchPhase.PREFILL_SWEEP, _BenchPhase.DECODE_SWEEP}
         ):
             if scheduler_output.total_num_scheduled_tokens > 0:
                 owned = id(scheduler_output) in self._bench_sd_live_outputs
@@ -2945,10 +3038,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
             self._bench_config.collect_imbalanced = flag in truthy
 
-        if (
-            self._bench_config.mode in {"decode", "agg"}
-            and getattr(vllm_config, "speculative_config", None) is not None
-        ):
+        if getattr(vllm_config, "speculative_config", None) is not None:
             spec = vllm_config.speculative_config
             parallel = vllm_config.parallel_config
             # Offload moved out of CacheConfig in newer vLLM runtimes.
@@ -2977,6 +3067,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
             self._bench_speculative_tokens = spec.num_speculative_tokens
             self._bench_capacity_config = vllm_config
+            self._bench_sd_execution_identity = _bench_speculative_execution_identity(
+                vllm_config
+            )
             if (
                 _NativeFPMEmitter is None
                 or "correct_async_spec_lengths"
@@ -3257,6 +3350,29 @@ class InstrumentedScheduler(AsyncScheduler):
         def begin(scheduler, output):
             original_begin(scheduler, output)
             step = self._bench_sd_outputs.pop(id(output), None)
+            point = self._bench_current_point
+            if (
+                step is None
+                and self._bench_active
+                and self._bench_phase == _BenchPhase.PREFILL_SWEEP
+                and point is not None
+                and output.total_num_scheduled_tokens > 0
+            ):
+                step = _SpeculativeBenchmarkStep(
+                    benchmark_id=point.benchmark_id,
+                    window_index=0,
+                    phase="measured",
+                    scheduled_tokens=dict(output.num_scheduled_tokens),
+                    scheduled_draft_tokens={
+                        rid: len(tokens)
+                        for rid, tokens in output.scheduled_spec_decode_tokens.items()
+                    },
+                )
+                self._bench_sd_live_outputs.add(id(output))
+                self._bench_sd_inflight += 1
+                self._bench_sd_max_inflight = max(
+                    self._bench_sd_max_inflight, self._bench_sd_inflight
+                )
             if step is not None:
                 iteration_id = output.forward_pass_metrics_iteration_id
                 if iteration_id is None or iteration_id in self._bench_sd_steps:
@@ -3302,14 +3418,27 @@ class InstrumentedScheduler(AsyncScheduler):
                 "native SD FPM arrived without a settled window identity"
             )
         scheduled = msgspec.to_builtins(pending.scheduled)
-        if (
-            scheduled["num_prefill_requests"] != 0
-            or scheduled["num_decode_requests"] != point.batch_size
-            or scheduled["sum_decode_kv_tokens"] < point.total_kv_read_tokens
-            or not math.isfinite(pending.duration_seconds)
-            or pending.duration_seconds <= 0
+        if point.point_type == "prefill":
+            complete_step = (
+                scheduled["num_prefill_requests"] == point.batch_size
+                and scheduled["sum_prefill_tokens"] == point.total_prefill_tokens
+                and scheduled["sum_prefill_kv_tokens"] == point.total_kv_read_tokens
+                and scheduled["num_decode_requests"] == 0
+            )
+        else:
+            complete_step = (
+                scheduled["num_prefill_requests"] == 0
+                and scheduled["num_decode_requests"] == point.batch_size
+                and scheduled["sum_decode_kv_tokens"] >= point.total_kv_read_tokens
+            )
+        if not (
+            complete_step
+            and math.isfinite(pending.duration_seconds)
+            and pending.duration_seconds > 0
         ):
-            raise RuntimeError("native SD FPM does not describe a complete verify step")
+            raise RuntimeError(
+                f"native SD FPM does not describe a complete {point.point_type} step"
+            )
         if step.phase != "measured":
             return
         sample = {
@@ -3518,7 +3647,7 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_eager_warmup_points(self) -> list[BenchmarkPoint]:
         """One discarded replica per eager shape, executed before the sweep.
 
-        SD additionally warms every real decode coordinate: graph capture alone
+        SD additionally warms every real coordinate: graph capture alone
         does not cover the drafter's lazy kernels at the real context length.
 
         Captured shapes are executed during cudagraph capture at startup, so
@@ -3536,7 +3665,7 @@ class InstrumentedScheduler(AsyncScheduler):
         seen: set[tuple[str, int]] = set()
         replicas: list[BenchmarkPoint] = []
         for point in self._bench_grid:
-            if self._bench_speculative_tokens and point.point_type == "decode":
+            if self._bench_speculative_tokens:
                 replicas.append(
                     replace(
                         point,
@@ -4626,9 +4755,6 @@ class InstrumentedScheduler(AsyncScheduler):
         content_mode = os.environ.get("DYN_BENCH_PREFILL_CONTENT", "")
         if content_mode not in ("sharegpt", "sharegpt_chain"):
             content_mode = "random"
-        mixed_timing = bool(
-            self._bench_speculative_tokens and self._bench_config.mode == "agg"
-        )
         return {
             "schema_version": 1,
             "content_identity": "coordinate_rank_slot_v1",
@@ -4639,29 +4765,15 @@ class InstrumentedScheduler(AsyncScheduler):
             "synthetic_pool_tag": os.environ.get("DYN_BENCH_POOL_TAG", ""),
             "prompt_hash_encoding": "uint32_le",
             "independent_repetitions": 1,
-            "timing_metric": "phase_specific"
-            if mixed_timing
-            else "model_step_cuda"
+            "timing_metric": "model_step_cuda"
             if self._bench_speculative_tokens
             else "scheduler_wall_time",
-            **(
-                {
-                    "timing_by_phase": {
-                        "prefill": "scheduler_wall_time",
-                        "decode": "model_step_cuda",
-                    }
-                }
-                if mixed_timing
-                else {}
-            ),
             "execution_evidence": {
                 "schema_version": 1,
                 "sample_field": "benchmark_sample",
                 "warmup_field": "warmup_evidence",
                 "forward_index_scope": "rank_process",
-                "timing_clock": "phase_specific"
-                if mixed_timing
-                else "cuda_event_elapsed"
+                "timing_clock": "cuda_event_elapsed"
                 if self._bench_speculative_tokens
                 else "process_local_monotonic",
                 "cudagraph_source": "ModelRunnerOutput.cudagraph_stats",
@@ -4959,10 +5071,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 if prompt_token_ids_list is not None
                 else self._bench_synthetic_token_ids(content_salt, prompt_len)
             )
-            if (
-                self._bench_speculative_tokens
-                and self._bench_phase == _BenchPhase.DECODE_SWEEP
-            ):
+            if self._bench_speculative_tokens:
                 sampling = self._bench_sd_sampling.clone()
                 sampling.max_tokens = max_tokens
                 sampling.ignore_eos = ignore_eos
@@ -5785,6 +5894,10 @@ class InstrumentedScheduler(AsyncScheduler):
         return True
 
     def _bench_step_prefill(self) -> SchedulerOutput | None:
+        if self._bench_speculative_tokens and self._bench_sd_steps:
+            if self._bench_point_result_timed_out():
+                raise TimeoutError("SD prefill output/timing drain timed out")
+            return None
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
 
@@ -8281,13 +8394,28 @@ class InstrumentedScheduler(AsyncScheduler):
         }
         if self._bench_speculative_tokens:
             output["speculative_benchmark"] = {
-                "phase": "decode",
+                "phase": self._bench_config.mode,
                 "method": "eagle3",
                 "num_draft_tokens": self._bench_speculative_tokens,
                 "verify_tokens_per_request": self._bench_speculative_tokens + 1,
                 "preparation": "native_target_and_draft_prefill",
-                "measurement": "continuous_native_async_decode",
+                "measurement": "native_model_step_prefill"
+                if self._bench_config.mode == "prefill"
+                else "continuous_native_async_decode"
+                if self._bench_config.mode == "decode"
+                else "phase_specific",
+                **(
+                    {
+                        "measurement_by_phase": {
+                            "prefill": "native_model_step_prefill",
+                            "decode": "continuous_native_async_decode",
+                        }
+                    }
+                    if self._bench_config.mode == "agg"
+                    else {}
+                ),
                 "timing_scope": "model_step_cuda",
+                "execution_identity": self._bench_sd_execution_identity,
                 "window_warmup_iterations": _SD_WINDOW_WARMUP,
                 "window_measured_iterations": _SD_WINDOW_SAMPLES,
                 "window_tail_iterations": _SD_WINDOW_TAIL,
