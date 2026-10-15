@@ -148,11 +148,15 @@ jobs:
             --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
             --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
             -o cyclonedx-json=/tmp/syft.cdx.json -o syft-json=/tmp/syft.json
-          OUR_CSV=$(find /tmp/compliance -path '*linux_${{ matrix.platform }}*' -name 'osrb-*.csv' | head -1)
-          if [ -z "${OUR_CSV}" ]; then
-            echo "::error::No OSRB CSV for ${{ matrix.platform }}"
+          # Require one full inventory for this build and architecture.
+          # Historical baseline and diff CSVs must never substitute for it.
+          shopt -s nullglob
+          csvs=(/tmp/compliance/linux_${{ matrix.platform }}/osrb-*-"${GITHUB_SHA:0:8}".csv)
+          if [ "${#csvs[@]}" -ne 1 ]; then
+            echo "::error::Expected one current ${{ matrix.platform }} OSRB inventory; found ${#csvs[@]}"
             exit 1
           fi
+          OUR_CSV="${csvs[0]}"
           echo "auditing against ${OUR_CSV}"
           BASE_ARG=""
           [ -n "${{ steps.resolve.outputs.baseline }}" ] && BASE_ARG="--base-sbom ${{ steps.resolve.outputs.baseline }}"

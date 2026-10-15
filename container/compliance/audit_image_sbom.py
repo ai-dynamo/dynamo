@@ -36,6 +36,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from posixpath import normpath
 
 logger = logging.getLogger("compliance.audit_image_sbom")
 
@@ -93,9 +94,14 @@ def _is_first_party(name: str) -> bool:
     return name.startswith(_FIRST_PARTY_GO_PREFIXES)
 
 
+def _rootfs_path(path: str) -> str:
+    """Use one root-relative representation for Syft and package-owned paths."""
+    return normpath("/" + path.lstrip("/"))
+
+
 def _locations(component: dict) -> set[str]:
     return {
-        p["value"]
+        _rootfs_path(p["value"])
         for p in component.get("properties", [])
         if p["name"].startswith("syft:location:") and p["name"].endswith(":path")
     }
@@ -103,8 +109,6 @@ def _locations(component: dict) -> set[str]:
 
 def _ownership_coverage(native: dict, our_names: set[str]) -> dict[str, set[str]]:
     """Known owning-package records; never infer coverage from directory alone."""
-    from posixpath import normpath
-
     owners: dict[str, set[str]] = {}
     for artifact in native.get("artifacts", []):
         name = _normalize(artifact["name"])
@@ -116,7 +120,7 @@ def _ownership_coverage(native: dict, our_names: set[str]) -> dict[str, set[str]
             path = item["path"]
             if not path.startswith("/"):
                 path = normpath(root + "/" + path)
-            owners.setdefault(path, set()).add(name)
+            owners.setdefault(_rootfs_path(path), set()).add(name)
     return owners
 
 
