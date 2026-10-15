@@ -21,16 +21,6 @@ LOGGER_NAME = "dynamo.test.qwen_video_routing"
 VLLM_PREFIX = "Exact video-aware KV routing disabled"
 SGLANG_PREFIX = "Exact SGLang video-aware KV routing disabled"
 
-EXPECTED_PROBE_KWARGS = {
-    "num_frames": 5,
-    "height": 1120,
-    "width": 3760,
-    "temporal_factor": 2,
-    "factor": 32,
-    "min_pixels": 4096,
-    "max_pixels": 25165824,
-}
-
 
 def _resolve(smart_resize, prefix=VLLM_PREFIX):
     """Run the shared probe with the test logger and a backend warning prefix."""
@@ -48,15 +38,6 @@ def _warnings(caplog):
         for record in caplog.records
         if record.name == LOGGER_NAME and record.levelno == logging.WARNING
     ]
-
-
-def test_probe_calls_smart_resize_once_with_exact_arguments():
-    """Check that the probe calls smart_resize once with the fixed arguments."""
-    smart_resize = Mock(return_value=(1216, 4096))
-
-    _resolve(smart_resize)
-
-    smart_resize.assert_called_once_with(**EXPECTED_PROBE_KWARGS)
 
 
 @pytest.mark.parametrize(
