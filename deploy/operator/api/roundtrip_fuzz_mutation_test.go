@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
+	"sigs.k8s.io/randfill"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -169,82 +170,137 @@ func fuzzMutatedHubCarrier[
 
 func fuzzMutatedV1Beta2SpokeEnvelope(t *testing.T) {
 	t.Helper()
-	t.Logf("hub->v1beta2-envelope-(mutation)->hub->v1beta2-envelope seed=%d iters=%d", *fuzzSeed, *fuzzIters)
-	f := newRoundTripFiller(*fuzzSeed)
-	for i := 0; i < *fuzzIters; i++ {
-		// Build a v1beta2 carrier containing complete v1beta1 envelopes.
-		in := &v1beta1.DynamoGraphDeploymentRequest{}
-		f.Fill(in)
-		carrier := &v1beta2.DynamoGraphDeploymentRequest{}
-		if err := carrier.ConvertFrom(in); err != nil {
-			t.Fatalf("iter %d ConvertFrom: %v\ninput=%s", i, err, mustJSON(in))
-		}
-
-		// Mutate metadata and typed values inside both envelopes without changing representation.
-		patch := &v1beta1.DynamoGraphDeploymentRequest{}
-		f.Fill(patch)
-		sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-		mutateJSONEnvelope(t, carrier.Spec.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
-		mutateJSONEnvelope(t, carrier.Status.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
-		carrierBeforeYAML := toYAML(t, carrier)
-
-		// Convert away from the carrier without mutating it.
-		hub := &v1beta1.DynamoGraphDeploymentRequest{}
-		if err := carrier.ConvertTo(hub); err != nil {
-			t.Fatalf("iter %d ConvertTo mutated v1beta2 envelope: %v\ninput=%s", i, err, mustJSON(carrier))
-		}
-		if diff := cmp.Diff(carrierBeforeYAML, toYAML(t, carrier)); diff != "" {
-			t.Fatalf("iter %d ConvertTo mutated input (-before +after):\n%s", i, diff)
-		}
-
-		// Convert back and compare the complete envelope carrier.
-		out := &v1beta2.DynamoGraphDeploymentRequest{}
-		if err := out.ConvertFrom(hub); err != nil {
-			t.Fatalf("iter %d ConvertFrom restored v1beta2 envelope: %v", i, err)
-		}
-		if diff := cmp.Diff(carrier, out, cmpopts.EquateEmpty()); diff != "" {
-			t.Fatalf("iter %d mutated v1beta2 envelope mismatch (-want +got):\n%s", i, diff)
-		}
+	ops := v1Beta2SpokeEnvelopeMutationOps{
+		t: t,
+		f: newRoundTripFiller(*fuzzSeed),
 	}
+	fuzzMutatedDGDRCarrier(
+		t,
+		"hub->v1beta2-envelope-(mutation)->hub->v1beta2-envelope",
+		ops.buildCarrier,
+		ops.mutateCarrier,
+		ops.convertAway,
+		ops.convertBack,
+	)
 }
 
 func fuzzMutatedV1Beta1HubEnvelope(t *testing.T) {
 	t.Helper()
-	t.Logf("v1beta2->hub-envelope-(mutation)->v1beta2->hub-envelope seed=%d iters=%d", *fuzzSeed, *fuzzIters)
-	f := newRoundTripFiller(*fuzzSeed)
+	ops := v1Beta1HubEnvelopeMutationOps{
+		t: t,
+		f: newRoundTripFiller(*fuzzSeed),
+	}
+	fuzzMutatedDGDRCarrier(
+		t,
+		"v1beta2->hub-envelope-(mutation)->v1beta2->hub-envelope",
+		ops.buildCarrier,
+		ops.mutateCarrier,
+		ops.convertAway,
+		ops.convertBack,
+	)
+}
+
+type v1Beta2SpokeEnvelopeMutationOps struct {
+	t *testing.T
+	f *randfill.Filler
+}
+
+func (ops v1Beta2SpokeEnvelopeMutationOps) buildCarrier() (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	in := &v1beta1.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(in)
+	carrier := &v1beta2.DynamoGraphDeploymentRequest{}
+	return carrier, carrier.ConvertFrom(in)
+}
+
+func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.DynamoGraphDeploymentRequest) {
+	patch := &v1beta1.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(patch)
+	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
+	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
+	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+}
+
+func (v1Beta2SpokeEnvelopeMutationOps) convertAway(
+	carrier *v1beta2.DynamoGraphDeploymentRequest,
+) (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	return hub, carrier.ConvertTo(hub)
+}
+
+func (v1Beta2SpokeEnvelopeMutationOps) convertBack(
+	hub *v1beta1.DynamoGraphDeploymentRequest,
+) (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	out := &v1beta2.DynamoGraphDeploymentRequest{}
+	return out, out.ConvertFrom(hub)
+}
+
+type v1Beta1HubEnvelopeMutationOps struct {
+	t *testing.T
+	f *randfill.Filler
+}
+
+func (ops v1Beta1HubEnvelopeMutationOps) buildCarrier() (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	in := &v1beta2.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(in)
+	carrier := &v1beta1.DynamoGraphDeploymentRequest{}
+	return carrier, in.ConvertTo(carrier)
+}
+
+func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGraphDeploymentRequest) {
+	patch := &v1beta2.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(patch)
+	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
+	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
+	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+}
+
+func (v1Beta1HubEnvelopeMutationOps) convertAway(
+	carrier *v1beta1.DynamoGraphDeploymentRequest,
+) (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	spoke := &v1beta2.DynamoGraphDeploymentRequest{}
+	return spoke, spoke.ConvertFrom(carrier)
+}
+
+func (v1Beta1HubEnvelopeMutationOps) convertBack(
+	spoke *v1beta2.DynamoGraphDeploymentRequest,
+) (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	out := &v1beta1.DynamoGraphDeploymentRequest{}
+	return out, spoke.ConvertTo(out)
+}
+
+func fuzzMutatedDGDRCarrier[C, A any](
+	t *testing.T,
+	flow string,
+	buildCarrier func() (C, error),
+	mutateCarrier func(C),
+	convertAway func(C) (A, error),
+	convertBack func(A) (C, error),
+) {
+	t.Helper()
+	t.Logf("%s seed=%d iters=%d", flow, *fuzzSeed, *fuzzIters)
 	for i := 0; i < *fuzzIters; i++ {
-		// Build a v1beta1 carrier containing complete v1beta2 envelopes.
-		in := &v1beta2.DynamoGraphDeploymentRequest{}
-		f.Fill(in)
-		carrier := &v1beta1.DynamoGraphDeploymentRequest{}
-		if err := in.ConvertTo(carrier); err != nil {
-			t.Fatalf("iter %d ConvertTo: %v\ninput=%s", i, err, mustJSON(in))
+		carrier, err := buildCarrier()
+		if err != nil {
+			t.Fatalf("iter %d build carrier: %v", i, err)
 		}
 
-		// Mutate metadata and typed values inside both envelopes without changing representation.
-		patch := &v1beta2.DynamoGraphDeploymentRequest{}
-		f.Fill(patch)
-		sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-		mutateJSONEnvelope(t, carrier.Spec.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
-		mutateJSONEnvelope(t, carrier.Status.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+		mutateCarrier(carrier)
 		carrierBeforeYAML := toYAML(t, carrier)
 
-		// Convert away from the carrier without mutating it.
-		spoke := &v1beta2.DynamoGraphDeploymentRequest{}
-		if err := spoke.ConvertFrom(carrier); err != nil {
-			t.Fatalf("iter %d ConvertFrom mutated v1beta1 envelope: %v\ninput=%s", i, err, mustJSON(carrier))
+		away, err := convertAway(carrier)
+		if err != nil {
+			t.Fatalf("iter %d convert away from carrier: %v\ninput=%s", i, err, mustJSON(carrier))
 		}
 		if diff := cmp.Diff(carrierBeforeYAML, toYAML(t, carrier)); diff != "" {
-			t.Fatalf("iter %d ConvertFrom mutated input (-before +after):\n%s", i, diff)
+			t.Fatalf("iter %d conversion mutated input (-before +after):\n%s", i, diff)
 		}
 
-		// Convert back and compare the complete envelope carrier.
-		out := &v1beta1.DynamoGraphDeploymentRequest{}
-		if err := spoke.ConvertTo(out); err != nil {
-			t.Fatalf("iter %d ConvertTo restored v1beta1 envelope: %v", i, err)
+		out, err := convertBack(away)
+		if err != nil {
+			t.Fatalf("iter %d convert back to carrier: %v", i, err)
 		}
 		if diff := cmp.Diff(carrier, out, cmpopts.EquateEmpty()); diff != "" {
-			t.Fatalf("iter %d mutated v1beta1 envelope mismatch (-want +got):\n%s", i, diff)
+			t.Fatalf("iter %d mutated envelope mismatch (-want +got):\n%s", i, diff)
 		}
 	}
 }

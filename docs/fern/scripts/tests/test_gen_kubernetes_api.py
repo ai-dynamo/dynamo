@@ -244,8 +244,7 @@ def test_v1beta2_shared_type_names_use_deduplicated_anchors(
     run = next(t for t in v1beta2_pkg.types if t.name == "DynamoGraphDeploymentRun")
     run_spec = next(field for field in run.fields if field.name == "spec")
     assert (
-        run_spec.type
-        == "[DynamoGraphDeploymentRequestSpec]"
+        run_spec.type == "[DynamoGraphDeploymentRequestSpec]"
         "(#v1beta2-dynamographdeploymentrequestspec)"
     )
 

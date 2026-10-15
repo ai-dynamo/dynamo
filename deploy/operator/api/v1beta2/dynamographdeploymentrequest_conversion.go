@@ -31,93 +31,77 @@ var _ conversion.Convertible = &DynamoGraphDeploymentRequest{}
 
 // ConvertTo converts this v1beta2 spoke to the v1beta1 hub.
 func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error {
-	// Require the registered v1beta1 conversion hub.
 	dst, ok := dstRaw.(*v1beta1.DynamoGraphDeploymentRequest)
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", dstRaw)
 	}
 
-	// Preserve metadata independently from the versioned payloads.
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-
-	// Unwrap a foreign v1beta1 spec or envelope the complete native v1beta2 spec.
-	if src.Spec.V1Beta1 != nil {
-		if hasNativeV1Beta2Spec(src.Spec) {
-			return fmt.Errorf("v1beta2 spec contains both native fields and v1beta1 envelope")
-		}
-		if err := unmarshalEnvelope(src.Spec.V1Beta1, &dst.Spec, "spec.v1beta1"); err != nil {
-			return err
-		}
-	} else {
-		envelope, err := marshalEnvelope(src.Spec)
-		if err != nil {
-			return fmt.Errorf("marshal native v1beta2 spec: %w", err)
-		}
-		dst.Spec.V1Beta2 = envelope
+	if err := convertPayload(
+		src.Spec, src.Spec.V1Beta1, hasNativeV1Beta2Spec, &dst.Spec,
+		func(envelope *apiextensionsv1.JSON) { dst.Spec.V1Beta2 = envelope },
+		"v1beta2", "v1beta1", "spec",
+	); err != nil {
+		return err
 	}
 
-	// Unwrap a foreign v1beta1 status or envelope the complete native v1beta2 status.
-	if src.Status.V1Beta1 != nil {
-		if hasNativeV1Beta2Status(src.Status) {
-			return fmt.Errorf("v1beta2 status contains both native fields and v1beta1 envelope")
-		}
-		if err := unmarshalEnvelope(src.Status.V1Beta1, &dst.Status, "status.v1beta1"); err != nil {
-			return err
-		}
-	} else {
-		envelope, err := marshalEnvelope(src.Status)
-		if err != nil {
-			return fmt.Errorf("marshal native v1beta2 status: %w", err)
-		}
-		dst.Status.V1Beta2 = envelope
-	}
-
-	return nil
+	return convertPayload(
+		src.Status, src.Status.V1Beta1, hasNativeV1Beta2Status, &dst.Status,
+		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta2 = envelope },
+		"v1beta2", "v1beta1", "status",
+	)
 }
 
 // ConvertFrom converts the v1beta1 hub to this v1beta2 spoke.
 func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) error {
-	// Require the registered v1beta1 conversion hub.
 	src, ok := srcRaw.(*v1beta1.DynamoGraphDeploymentRequest)
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", srcRaw)
 	}
 
-	// Preserve metadata independently from the versioned payloads.
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-
-	// Unwrap a foreign v1beta2 spec or envelope the complete native v1beta1 spec.
-	if src.Spec.V1Beta2 != nil {
-		if hasNativeV1Beta1Spec(src.Spec) {
-			return fmt.Errorf("v1beta1 spec contains both native fields and v1beta2 envelope")
-		}
-		if err := unmarshalEnvelope(src.Spec.V1Beta2, &dst.Spec, "spec.v1beta2"); err != nil {
-			return err
-		}
-	} else {
-		envelope, err := marshalEnvelope(src.Spec)
-		if err != nil {
-			return fmt.Errorf("marshal native v1beta1 spec: %w", err)
-		}
-		dst.Spec.V1Beta1 = envelope
+	if err := convertPayload(
+		src.Spec, src.Spec.V1Beta2, hasNativeV1Beta1Spec, &dst.Spec,
+		func(envelope *apiextensionsv1.JSON) { dst.Spec.V1Beta1 = envelope },
+		"v1beta1", "v1beta2", "spec",
+	); err != nil {
+		return err
 	}
 
-	// Unwrap a foreign v1beta2 status or envelope the complete native v1beta1 status.
-	if src.Status.V1Beta2 != nil {
-		if hasNativeV1Beta1Status(src.Status) {
-			return fmt.Errorf("v1beta1 status contains both native fields and v1beta2 envelope")
+	return convertPayload(
+		src.Status, src.Status.V1Beta2, hasNativeV1Beta1Status, &dst.Status,
+		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta1 = envelope },
+		"v1beta1", "v1beta2", "status",
+	)
+}
+
+func convertPayload[S, D any](
+	src S,
+	foreignEnvelope *apiextensionsv1.JSON,
+	hasNativeFields func(S) bool,
+	dst *D,
+	setNativeEnvelope func(*apiextensionsv1.JSON),
+	srcVersion, foreignVersion, field string,
+) error {
+	if foreignEnvelope != nil {
+		if hasNativeFields(src) {
+			return fmt.Errorf(
+				"%s %s contains both native fields and %s envelope",
+				srcVersion, field, foreignVersion,
+			)
 		}
-		if err := unmarshalEnvelope(src.Status.V1Beta2, &dst.Status, "status.v1beta2"); err != nil {
-			return err
-		}
-	} else {
-		envelope, err := marshalEnvelope(src.Status)
-		if err != nil {
-			return fmt.Errorf("marshal native v1beta1 status: %w", err)
-		}
-		dst.Status.V1Beta1 = envelope
+		return unmarshalEnvelope(
+			foreignEnvelope,
+			dst,
+			fmt.Sprintf("%s.%s", field, foreignVersion),
+		)
 	}
 
+	envelope, err := marshalEnvelope(src)
+	if err != nil {
+		return fmt.Errorf("marshal native %s %s: %w", srcVersion, field, err)
+	}
+	setNativeEnvelope(envelope)
 	return nil
 }
 
