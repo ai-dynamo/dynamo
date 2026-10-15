@@ -67,24 +67,30 @@ class _FakeDevice:
     """Device memory seen by one engine of a shadow-failover pair."""
 
     def __init__(self, total: int, peer_used: int):
+        """Start with peer memory resident and no local torch allocations."""
         self.total = total
         self.used = peer_used
         self.reserved = 0
         self.peak_allocated = 0
 
     def mem_get_info(self):
+        """Return device-wide free and total bytes."""
         return self.total - self.used, self.total
 
     def memory_reserved(self):
+        """Return this engine's torch reservation."""
         return self.reserved
 
     def max_memory_allocated(self):
+        """Return this engine's peak torch allocation."""
         return self.peak_allocated
 
     def reset_peak_memory_stats(self):
+        """Clear the torch peak before profiling."""
         self.peak_allocated = 0
 
     def synchronize(self):
+        """Model a device with no pending asynchronous work."""
         pass
 
 
@@ -94,12 +100,12 @@ _TOTAL = 85_093_777_408
 _REQUESTED = int(_TOTAL * 0.92)
 _WEIGHTS = int(1.18 * _GIB)  # imported read-only from GMS, shared by both
 _TORCH_PEAK = int(0.5 * _GIB)
-_CONTEXT = int(1.1 * _GIB)  # CUDA context, created before init_device's window
+_CONTEXT = int(1.1 * _GIB)  # CUDA context, created before init_device
 _NON_TORCH = 2 * _GIB  # NCCL and NIXL buffers
 _CUDAGRAPH = int(0.43 * _GIB)
 
 
-def _shadow_kv_budget(monkeypatch, tmp_path, peer_alloc_during_init=0):
+def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0):
     """Run init_device and the scratch-KV budget beside a resident peer engine."""
     # The peer engine is already resident on the device, and this engine's
     # CUDA context exists before init_device runs.
@@ -107,9 +113,11 @@ def _shadow_kv_budget(monkeypatch, tmp_path, peer_alloc_during_init=0):
     device = _FakeDevice(_TOTAL, peer_used=peer_used + _CONTEXT)
 
     def base_init_device(_worker):
-        device.used += _NON_TORCH + peer_alloc_during_init
+        """Allocate local buffers while the peer changes its memory use."""
+        device.used += _NON_TORCH + peer_memory_delta
 
     def profile_run():
+        """Report the local activation peak without loading a model."""
         device.peak_allocated = _TORCH_PEAK
 
     monkeypatch.setattr(gms_worker, "torch_device", lambda: device)
@@ -148,6 +156,7 @@ def _shadow_kv_budget(monkeypatch, tmp_path, peer_alloc_during_init=0):
 
 
 def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
+    """Reserve both engines' overhead while counting shared weights once."""
     kv_budget = _shadow_kv_budget(monkeypatch, tmp_path)
 
     # The wake-time KV allocation, both engines' non-KV memory and the shared
@@ -157,15 +166,22 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
     assert kv_budget > 0
 
 
-def test_shadow_kv_budget_caps_peer_allocation_during_init(monkeypatch, tmp_path):
-    # The peer wakes and allocates its KV cache while this engine initializes.
+@pytest.mark.parametrize(
+    "peer_memory_delta",
+    [0, 70 * _GIB, -_NON_TORCH, -(_CONTEXT + _TORCH_PEAK + _NON_TORCH)],
+    ids=["idle", "wake", "sleep", "exit"],
+)
+def test_shadow_kv_budget_ignores_peer_memory_changes(
+    monkeypatch, tmp_path, peer_memory_delta
+):
+    """Keep room for both engines when the peer allocates or frees memory."""
     kv_budget = _shadow_kv_budget(
-        monkeypatch, tmp_path, peer_alloc_during_init=70 * _GIB
+        monkeypatch, tmp_path, peer_memory_delta=peer_memory_delta
     )
 
-    measured_cap = gms_worker._MAX_NON_TORCH_INIT_BYTES
+    allowance = gms_worker._NON_TORCH_INIT_BYTES
     engine_non_kv = (
-        gms_worker._CUDA_CONTEXT_BYTES + _TORCH_PEAK + measured_cap + _CUDAGRAPH
+        gms_worker._CUDA_CONTEXT_BYTES + _TORCH_PEAK + allowance + _CUDAGRAPH
     )
     assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
     assert kv_budget > 0

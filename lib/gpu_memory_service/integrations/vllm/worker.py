@@ -74,13 +74,14 @@ apply_scratch_kv_patches()
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 
-# Upper bound on the non-torch memory measured over GMSWorker.init_device().
-# NCCL and workspace buffers stay well below this; a larger reading means the
-# co-located engine allocated (for example its KV cache) during the window.
-_MAX_NON_TORCH_INIT_BYTES = 2 << 30
+# Per-engine allowance for non-torch initialization memory (NCCL, workspaces).
+# Use the former 2 GiB cap as a fixed estimate: device-wide free-memory deltas
+# cannot isolate this worker when its peer allocates OR releases memory. This
+# remains an estimate, not a measured upper bound for every deployment.
+_NON_TORCH_INIT_BYTES = 2 << 30
 
-# Per-engine allowance for the CUDA context, which exists before that window
-# opens and cannot be read per process from device-wide free memory. About
+# Per-engine allowance for the CUDA context, which exists before init_device
+# and cannot be read per process from device-wide free memory. About
 # 1.1 GiB per engine process was observed on A100 80 GB.
 _CUDA_CONTEXT_BYTES = 5 << 28
 
@@ -194,33 +195,8 @@ class GMSWorker(_BaseWorker):
             timeout_ms=self.gms_ro_connect_timeout_ms,
         )
 
-        # Profile-time free memory includes the co-located engine, so measure
-        # non-torch init memory (NCCL, workspaces) here, after the RO connect.
-        # The CUDA context already exists; the budget reserves it separately as
-        # _CUDA_CONTEXT_BYTES. The reading is device-wide, so peer allocations
-        # in this window inflate it; it is capped at _MAX_NON_TORCH_INIT_BYTES.
-        measure_non_torch = is_scratch_kv_enabled()
-        if measure_non_torch:
-            free_before, _ = torch_device().mem_get_info()
-            reserved_before = torch_device().memory_reserved()
-
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
-
-        if measure_non_torch:
-            free_after, _ = torch_device().mem_get_info()
-            reserved_delta = torch_device().memory_reserved() - reserved_before
-            measured = max(0, free_before - free_after - reserved_delta)
-            if measured > _MAX_NON_TORCH_INIT_BYTES:
-                logger.warning(
-                    "[GMS] measured %.2f GiB non-torch init memory, above the "
-                    "%.2f GiB cap; the co-located engine likely allocated "
-                    "during init. Using the cap.",
-                    measured / (1 << 30),
-                    _MAX_NON_TORCH_INIT_BYTES / (1 << 30),
-                )
-                measured = _MAX_NON_TORCH_INIT_BYTES
-            self._gms_non_torch_init_bytes = measured
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -250,6 +226,7 @@ class GMSWorker(_BaseWorker):
         return available
 
     def _determine_available_memory_before_gms_publish(self) -> int:
+        """Size scratch KV with fixed non-torch allowances for both engines."""
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
@@ -283,7 +260,7 @@ class GMSWorker(_BaseWorker):
 
         weights_memory = get_imported_weights_bytes()
         invisible_weights_memory = 0 if has_pending_write else weights_memory
-        non_torch_memory = self._gms_non_torch_init_bytes
+        non_torch_memory = _NON_TORCH_INIT_BYTES
         non_kv_cache_memory = (
             torch_peak
             + invisible_weights_memory
@@ -304,7 +281,7 @@ class GMSWorker(_BaseWorker):
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
             "peer_non_kv=%.2f GiB, torch_peak=%.2f GiB, "
-            "invisible_weights=%.2f GiB, non_torch=%.2f GiB, "
+            "invisible_weights=%.2f GiB, non_torch_allowance=%.2f GiB, "
             "cuda_context=%.2f GiB, cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
             projected_available / (1 << 30),
             self.requested_memory / (1 << 30),
