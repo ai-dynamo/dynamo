@@ -22,8 +22,9 @@ jobs:
     timeout-minutes: 15
     env:
       KUBECONFIG: /teleport/kubeconfig.yaml
-      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster
-      EXPECTED_GPU: B200
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
+      EXPECTED_GPU: GB200
+      TEST_GATEWAY: "false"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:

@@ -15,6 +15,7 @@ from pathlib import Path
 CONTEXT = os.environ["KUBE_CONTEXT"]
 NAMESPACE = "dynamo-deploy-test"
 GATEWAY_NAMESPACE = "agentgateway-system"
+TEST_GATEWAY = os.environ.get("TEST_GATEWAY", "true") == "true"
 NAME = (
     f"ci-access-smoke-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
 )
@@ -105,7 +106,8 @@ def run():
     assert quota["spec"]["hard"]["requests.nvidia.com/gpu"] == "16"
     assert quota["spec"]["hard"]["limits.nvidia.com/gpu"] == "16"
     print("PASS 16-GPU quota", flush=True)
-    kube("get", "service", "inference-gateway", "-n", GATEWAY_NAMESPACE)
+    if TEST_GATEWAY:
+        kube("get", "service", "inference-gateway", "-n", GATEWAY_NAMESPACE)
     items = [
         resource(
             "Deployment",
@@ -235,6 +237,17 @@ def run():
     if os.environ["EXPECTED_GPU"] not in gpu_log:
         raise RuntimeError(f"Unexpected GPU: {gpu_log}")
     print(f"PASS GPU execution: {gpu_log.strip()}", flush=True)
+    if not TEST_GATEWAY:
+        message = (
+            "SKIP gateway traffic: this cluster has no AgentGateway installation. "
+            "HTTPRoute CRUD and port-forward RBAC were checked; actual gateway "
+            "port-forward and routing remain unverified."
+        )
+        print(message, flush=True)
+        (ARTIFACTS / "gateway-not-tested.txt").write_text(message + "\n")
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            summary.write(message + "\n")
+        return
     with (ARTIFACTS / "portforward.log").open("w") as log:
         proc = subprocess.Popen(
             [
