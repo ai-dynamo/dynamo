@@ -1070,8 +1070,7 @@ jobs:
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
-      rust_gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
-      python_gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
+      gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       # `defaulted` is applied by the repository-root conftest.py to any test that

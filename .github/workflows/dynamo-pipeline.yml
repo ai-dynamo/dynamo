@@ -10,13 +10,8 @@ name: Dynamo Pipeline
 on:
   workflow_call:
     inputs:
-      rust_gpu_runner_labels:
-        description: 'JSON GPU runner labels for native checks; defaults to the existing unpinned runner selector'
-        required: false
-        type: string
-        default: '["prod-tester-amd-gpu-v2"]'
-      python_gpu_runner_labels:
-        description: 'JSON GPU runner labels for Python tests; defaults to the existing unpinned runner selector'
+      gpu_runner_labels:
+        description: 'JSON runner labels for Rust and Python GPU tests; defaults to the existing unpinned runner selector'
         required: false
         type: string
         default: '["prod-tester-amd-gpu-v2"]'
@@ -104,10 +99,10 @@ jobs:
   # aren't reproducible on plain ubuntu-latest runners.
   rust-gpu:
     needs: image
-    runs-on: ${{ fromJson(inputs.rust_gpu_runner_labels) }}
+    runs-on: ${{ fromJson(inputs.gpu_runner_labels) }}
     container:
       # Use the registry local to the selected GPU runner, as shared-test does.
-      image: ${{ contains(fromJson(inputs.rust_gpu_runner_labels), 'us-east-1') && vars.ECR_REGISTRY_EAST || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ contains(fromJson(inputs.gpu_runner_labels), 'us-east-1') && vars.ECR_REGISTRY_EAST || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -267,7 +262,7 @@ jobs:
       framework: dynamo  # matches the framework passed to image
       test_type: gpu
       amd_runner: prod-tester-amd-gpu-v2
-      amd_runner_labels: ${{ inputs.python_gpu_runner_labels }}
+      amd_runner_labels: ${{ inputs.gpu_runner_labels }}
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'

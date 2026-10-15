@@ -65,8 +65,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
-      rust_gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
-      python_gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
+      gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
