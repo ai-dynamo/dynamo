@@ -33,6 +33,13 @@ def test_inventory_excludes_removed_packages_but_retains_payloads(tmp_path):
             f"Package: {name}\nStatus: {status}\nVersion: 1.0-1\n"
             "Architecture: amd64\nMaintainer: Test <test@example.com>\n"
             "Description: Synthetic inventory fixture\n"
+            # Prove that the removed package's listed conffile is gone. An
+            # absent conffile list is intentionally retained conservatively.
+            + (
+                "Conffiles:\n /etc/removed.conf " + "0" * 32 + "\n"
+                if name == "removed"
+                else ""
+            )
             for name, status in packages.items()
         )
     )

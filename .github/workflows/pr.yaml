@@ -125,6 +125,8 @@ jobs:
   backend-status-check:
     runs-on: ubuntu-latest
     needs:
+      - vllm-compliance-audit
+      - trtllm-compliance-audit
       - changed-files
       - operator
       - operator-integration
@@ -1084,7 +1086,7 @@ jobs:
   # they syft-scan the pushed image and diff it against the build's osrb-deps.csv
   # to surface anything shipped-but-unattributed. They need:[<fw>-build] and run
   # in PARALLEL with the test jobs (the slow syft pull+scan stays off the test
-  # critical path). Soft gate: report-only, non-required. EFA-image audits are a
+  # critical path). TRT-LLM/vLLM require clean results on both architectures. EFA-image audits are a
   # follow-up (same caller pattern).
 
   vllm-compliance-audit:
@@ -1093,13 +1095,15 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
+      platforms: '["amd64", "arm64"]'
+      fail_on_findings: true
       framework: vllm
       target: runtime
       cuda_version: '13.0'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
     # No secrets: the audit scans the container's own filesystem (no registry
-    # auth / aws) — don't inherit repo secrets into a report-only job.
+    # auth / aws) — no repository secrets are needed.
 
   sglang-compliance-audit:
     name: sglang-runtime # grouped in the UI with other sglang jobs
@@ -1119,6 +1123,8 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
+      platforms: '["amd64", "arm64"]'
+      fail_on_findings: true
       framework: trtllm
       target: runtime
       cuda_version: '13.1'

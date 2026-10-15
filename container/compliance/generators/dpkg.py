@@ -107,6 +107,10 @@ _DEBIAN_TO_SPDX: dict[str, str] = {
     "FDL-1.2+": "GFDL-1.2-or-later",
     "FDL-1.3": "GFDL-1.3-only",
     "FDL-1.3+": "GFDL-1.3-or-later",
+    # NORM's NRL variants contain their own acknowledgment conditions.
+    "NRL-2-clause": "LicenseRef-NRL-2-clause",
+    "NRL-3-clause": "LicenseRef-NRL-3-clause",
+    "BSD-4-clause-UC": "BSD-4-Clause-UC",
     # Misc
     "Artistic": "Artistic-2.0",
     "Artistic-1.0": "Artistic-1.0",
@@ -449,6 +453,16 @@ def _conffiles_on_disk(name: str, root: Path) -> list[str] | None:
     return [path for path in listed if os.path.lexists(root / path.lstrip("/"))]
 
 
+def _copyright_text(name: str, root: Path) -> str | None:
+    path = root / _COPYRIGHT_DIR / name / "copyright"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # Retain Debian's complete file, including copyright holders and custom
+    # acknowledgment clauses; an SPDX identifier alone loses those conditions.
+    return text or None
+
+
 def collect_components(root: Path = Path("/")) -> list[Component]:
     """Run dpkg-query, resolve licenses, return Components.
 
@@ -507,6 +521,7 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
                 version=version,
                 spdx=spdx,
                 source_url=None,  # apt-get source URL is the right answer; see source-archival
+                license_text=_copyright_text(name, root),
             )
         )
 

@@ -288,7 +288,32 @@ def _resolve_site_packages(search_paths: list[Path]) -> list[Path]:
                 out.add(site.resolve())
         if p.is_dir() and any(p.glob("*.dist-info")):
             out.add(p.resolve())
+    # Vendored distributions carry independent license terms. Follow only
+    # explicit vendor roots, not arbitrary test-data / example dist-info trees.
+    pending = list(out)
+    while pending:
+        site = pending.pop()
+        for pattern in ("*/_vendor", "*/vendor"):
+            for vendor in site.glob(pattern):
+                if vendor.is_dir() and vendor.resolve() not in out:
+                    out.add(vendor.resolve())
+                    pending.append(vendor)
     return sorted(out)
+
+
+def installed_search_paths(root: Path = Path("/")) -> list[Path]:
+    """All installed system/venv package roots, including system-site-packages.
+
+    Do not import packages or execute a different interpreter. Enumerate only
+    known installation layouts, leaving caches and test fixtures out.
+    """
+    paths = set()
+    for prefix in ("usr", "usr/local", "opt/*", "opt/*/venv"):
+        for layout in ("lib/python*/site-packages", "lib/python*/dist-packages"):
+            paths.update(
+                path for path in root.glob(f"{prefix}/{layout}") if path.is_dir()
+            )
+    return sorted(paths)
 
 
 def _read_license_text(dist_info_dir: Path) -> str | None:
@@ -297,20 +322,23 @@ def _read_license_text(dist_info_dir: Path) -> str | None:
     Modern wheels put it under <dist-info>/licenses/LICENSE (PEP 639). Older
     wheels use <dist-info>/LICENSE or LICENSE.txt at the top of the dir.
     """
-    candidates = [
-        dist_info_dir / "licenses" / "LICENSE",
-        dist_info_dir / "licenses" / "LICENSE.txt",
-        dist_info_dir / "LICENSE",
-        dist_info_dir / "LICENSE.txt",
-        dist_info_dir / "LICENSE.md",
-    ]
-    for path in candidates:
-        if path.is_file():
-            try:
-                return path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-    return None
+    candidates = set()
+    for directory in (dist_info_dir, dist_info_dir / "licenses"):
+        if directory.is_dir():
+            candidates.update(
+                path
+                for path in directory.rglob("*")
+                if path.is_file()
+                and path.name.upper().startswith(
+                    ("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS")
+                )
+            )
+    texts = []
+    for path in sorted(candidates):
+        body = path.read_text(encoding="utf-8", errors="replace").strip()
+        if body:
+            texts.append(f"--- {path.relative_to(dist_info_dir)} ---\n\n{body}")
+    return "\n\n".join(texts) or None
 
 
 def _extract_metadata_field(

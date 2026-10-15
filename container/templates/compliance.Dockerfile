@@ -61,6 +61,12 @@
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
 #     per-image `images:` lists; make_efa adds the EFA-only entries.
 
+{% set binary_attribution = framework in ["vllm", "trtllm"] and target == "runtime" %}
+{% if binary_attribution %}
+# Pinned, multi-architecture scanner. Only its executable enters the temporary
+# licenses stage; final runtime stages copy /legal alone.
+FROM anchore/syft:v1.44.0@sha256:86fde6445b483d902fe011dd9f68c4987dd94e07da1e9edc004e3c2422650de6 AS compliance_syft
+{% endif %}
 FROM {{ compliance_base_stage }} AS licenses
 
 USER root
@@ -102,6 +108,23 @@ COPY --from=epp /rust-licenses /tmp/rust-licenses
 # the policy gate below on any denied license the base carries.
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
+{% if binary_attribution %}
+COPY --from=compliance_syft /syft /tmp/compliance-syft
+RUN --mount=type=cache,target=/tmp/compliance-downloads,sharing=locked \
+    /tmp/compliance-syft dir:/ \
+        --override-default-catalogers cargo-auditable-binary-cataloger,go-module-binary-cataloger \
+        --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
+        --exclude './tmp/**' --exclude './opt/compliance/**' \
+        -o syft-json=/tmp/binary-deps.syft.json && \
+    python3 -m compliance.binary_dependencies \
+        --syft /tmp/compliance-syft --syft-sbom /tmp/binary-deps.syft.json \
+        --output /tmp/binary-deps --cache /tmp/compliance-downloads \
+        ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json}
+# Merge the harvested helper licenses with the wheel crate-license harvest.
+RUN cp -a /tmp/binary-deps/rust-licenses/. /tmp/rust-licenses/ && \
+    cp /tmp/binary-deps.syft.json /legal/binary-dependencies.syft.json && \
+    cp /tmp/binary-deps/go-enrichment.syft.json /legal/binary-go-license-evidence.syft.json
+{% endif %}
 # Resolve where this image's Python packages live at runtime rather than per
 # framework: venv-based images export VIRTUAL_ENV (trtllm, vllm xpu/cpu, dev),
 # while images that install into system Python leave it unset (vllm cuda via
@@ -110,9 +133,13 @@ ARG TARGETARCH
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
 RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
-    --ecosystem {{ compliance_ecosystems }} \
+    --ecosystem {{ compliance_ecosystems }}{% if binary_attribution %},go{% endif %} \
     ${PKG_ARG} \
-{% if target == "frontend" %}    --rust-sbom /tmp/sbom-rust-epp.cdx.json \
+{% if binary_attribution %}    --installed-root / \
+    --rust-sbom /tmp/binary-deps/rust.cdx.json \
+    --go-sbom /tmp/binary-deps/go.cdx.json \
+    --go-licenses-dir /tmp/binary-deps/go-licenses \
+{% endif %}{% if target == "frontend" %}    --rust-sbom /tmp/sbom-rust-epp.cdx.json \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
