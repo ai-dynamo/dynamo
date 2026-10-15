@@ -31,7 +31,6 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _extract_sglang_stop_reason,
     _kv_cache_hit_engine_data,
     _native_payload_is_batched,
-    _native_user_stop_token_ids,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _ordered_cancellation_request_id,
@@ -847,7 +846,7 @@ async def test_native_generate_stream_forwards_opaque_response_and_token_ids():
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
 
 
-async def _native_terminal_chunks(finish_reason, user_stop_token_ids=None, **usage):
+async def _native_terminal_chunks(finish_reason, **usage):
     """Run a non-terminal and a terminal native chunk through the decode path."""
     responses = [
         {"output_ids": [101], "meta_info": {"id": "r", "finish_reason": None}},
@@ -871,7 +870,6 @@ async def _native_terminal_chunks(finish_reason, user_stop_token_ids=None, **usa
                 ]
             ),
             _Context(),
-            user_stop_token_ids=user_stop_token_ids,
         )
     )
     # The opaque response reaches the client unchanged and unmutated.
@@ -915,20 +913,6 @@ async def test_native_generate_stream_maps_terminal_finish_reason(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("matched", "expected"), [(7, 7), (2, None)])
-async def test_native_generate_stream_reports_user_stop_reason_only(matched, expected):
-    # The user asked to stop on 7; SGLang also reports hidden EOS matches (2).
-    user_stop_token_ids = _native_user_stop_token_ids(
-        {"stop": [], "stop_token_ids": [7, True, "8"]}
-    )
-    assert user_stop_token_ids == {7}
-    final = await _native_terminal_chunks(
-        {"type": "stop", "matched": matched}, user_stop_token_ids
-    )
-    assert final.get("stop_reason") == expected
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("usage", "expected"),
     [
@@ -939,15 +923,6 @@ async def test_native_generate_stream_reports_user_stop_reason_only(matched, exp
                 "completion_tokens": 2,
                 "total_tokens": 6,
                 "prompt_tokens_details": {"cached_tokens": 3},
-            },
-        ),
-        (
-            {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": 9},
-            {
-                "prompt_tokens": 4,
-                "completion_tokens": 2,
-                "total_tokens": 6,
-                "prompt_tokens_details": {"cached_tokens": 4},
             },
         ),
         (

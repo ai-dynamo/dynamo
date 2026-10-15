@@ -206,17 +206,6 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _native_user_stop_token_ids(sampling_params: Any) -> set[int]:
-    """The user's stop token ids in a native SGLang ``sampling_params``."""
-    if not isinstance(sampling_params, Mapping):
-        return set()
-    return {
-        token_id
-        for token_id in (sampling_params.get("stop_token_ids") or [])
-        if isinstance(token_id, int) and not isinstance(token_id, bool)
-    }
-
-
 def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | None:
     """Build Dynamo's completion_usage from SGLang's terminal meta_info."""
     prompt_tokens = meta_info.get("prompt_tokens")
@@ -230,16 +219,13 @@ def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | N
     }
     cached_tokens = meta_info.get("cached_tokens")
     if cached_tokens is not None and cached_tokens > 0:
-        usage["prompt_tokens_details"] = {
-            "cached_tokens": min(cached_tokens, prompt_tokens)
-        }
+        usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
     return usage
 
 
 def _native_terminal_fields(
     finish_reason: Mapping[str, Any],
     meta_info: Mapping[str, Any],
-    user_stop_token_ids: frozenset[int] | set[int],
 ) -> Dict[str, Any]:
     """Typed terminal fields for Dynamo's router and request tracking.
 
@@ -256,9 +242,6 @@ def _native_terminal_fields(
         }
     else:
         fields = {"finish_reason": "stop"}
-    stop_reason = _extract_sglang_stop_reason(finish_reason, user_stop_token_ids)
-    if stop_reason is not None:
-        fields["stop_reason"] = stop_reason
     completion_usage = _sglang_completion_usage(meta_info)
     if completion_usage is not None:
         fields["completion_usage"] = completion_usage
@@ -750,7 +733,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 report_kv_cache_hit=not _has_parallel_prefix_warmup(
                     native_sampling_params
                 ),
-                user_stop_token_ids=_native_user_stop_token_ids(native_sampling_params),
             ):
                 yield output
             return
@@ -967,7 +949,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
         report_kv_cache_hit: bool = True,
-        user_stop_token_ids: frozenset[int] | set[int] = frozenset(),
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -1030,9 +1011,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if isinstance(finish_reason, dict):
                     output = {
                         **output,
-                        **_native_terminal_fields(
-                            finish_reason, meta_info, user_stop_token_ids
-                        ),
+                        **_native_terminal_fields(finish_reason, meta_info),
                     }
                 if report_kv_cache_hit and self._reports_kv_cache_hit and finish_reason:
                     # Native Generate is routed too; the frontend forwards only
