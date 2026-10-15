@@ -3,7 +3,10 @@
 
 mod support;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dynamo_backend_common::{
@@ -12,6 +15,8 @@ use dynamo_backend_common::{
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_speech_nim_sidecar::{
     asr::AsrAdapter,
+    client,
+    config::Mode,
     proto::{
         AudioEncoding, asr::streaming_recognize_request::StreamingRequest,
         tts::SynthesizeSpeechResponse,
@@ -534,4 +539,100 @@ async fn asr_cancels_even_if_transcript_output_is_backpressured() {
     ctx.kill();
     within(call.responses.closed()).await;
     assert!(within(output.next()).await.is_none());
+}
+
+// More control acknowledgements than the bounded queue can hold must not
+// prevent the input pump from reaching a commit or clear.
+#[tokio::test]
+async fn asr_control_backpressure_does_not_block_commit_or_clear() {
+    for clear in [false, true] {
+        let mut server = Server::start().await;
+        let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
+        let mut session = Session::start(&adapter).await;
+        session.send(append());
+        let mut call = within(server.asr.recv()).await.unwrap();
+        for _ in 0..2 {
+            within(call.request.get_mut().message())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        for _ in 0..128 {
+            session.send(session_update());
+        }
+        if clear {
+            session.send(json!({"type": "input_audio_buffer.clear"}));
+        } else {
+            session.send(commit());
+        }
+        let expected = if clear {
+            "input_audio_buffer.cleared"
+        } else {
+            "input_audio_buffer.committed"
+        };
+        let mut updates = 0;
+        let mut handled = false;
+        for _ in 0..129 {
+            let event = session.next().await;
+            if event["type"] == "session.updated" {
+                updates += 1;
+            } else {
+                assert_eq!(event["type"], expected);
+                assert!(!handled);
+                handled = true;
+            }
+        }
+        assert_eq!(updates, 128);
+        assert!(handled);
+        if clear {
+            within(call.responses.closed()).await;
+        } else {
+            assert!(
+                within(call.request.get_mut().message())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            call.responses
+                .send(Ok(transcript("still responsive", true)))
+                .await
+                .unwrap();
+            drop(call.responses);
+            assert_eq!(session.next().await["delta"], "still responsive");
+            assert_eq!(session.next().await["transcript"], "still responsive");
+        }
+        session.context.kill();
+    }
+}
+
+#[tokio::test]
+async fn startup_waits_for_model_service_and_honors_deadline() {
+    for tts in [false, true] {
+        let server = Server::start().await;
+        let mode = if tts {
+            Mode::Tts(server.tts_config())
+        } else {
+            Mode::Asr(server.asr_config())
+        };
+        server.ready.store(false, Ordering::SeqCst);
+        let connect = client::connect(&mode);
+        tokio::pin!(connect);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut connect)
+                .await
+                .is_err()
+        );
+        server.ready.store(true, Ordering::SeqCst);
+        let channels = within(connect).await.unwrap();
+        assert_eq!(
+            channels.len(),
+            mode.worker().connection.grpc.grpc_connections.get()
+        );
+        server.ready.store(false, Ordering::SeqCst);
+        let error = within(client::connect(&mode))
+            .await
+            .err()
+            .expect("empty model service must time out");
+        assert!(error.to_string().contains("startup deadline"), "{error:#}");
+    }
 }

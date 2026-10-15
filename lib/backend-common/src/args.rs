@@ -105,7 +105,8 @@ pub struct CommonArgs {
     pub enable_rl: bool,
 }
 
-fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
+/// Apply the worker namespace suffix once, for backends with a custom CLI.
+pub fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
     let Ok(suffix) = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") else {
         return Ok(namespace.to_owned());
     };

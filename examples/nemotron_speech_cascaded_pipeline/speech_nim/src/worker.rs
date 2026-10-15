@@ -3,9 +3,12 @@
 
 //! Example-local registration and lifecycle glue. Shared LLM workers are unchanged.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use dynamo_backend_common::{ModelInput, Worker, WorkerConfig};
+use dynamo_backend_common::{
+    ModelInput, Worker, WorkerConfig,
+    worker::{grace_period_secs, graceful_shutdown_timeout},
+};
 use dynamo_llm::{
     local_model::{LocalModel, LocalModelBuilder},
     model_type::ModelType,
@@ -15,8 +18,8 @@ use dynamo_runtime::{
     DistributedRuntime, Runtime, pipeline::network::Ingress,
     system_status_server::SystemProbePolicy,
 };
+use dynamo_sidecar_common::GrpcChannelPool;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 
 use crate::{
     asr::AsrAdapter,
@@ -26,10 +29,7 @@ use crate::{
 };
 
 pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyhow::Result<()> {
-    let worker = match &args.mode {
-        Mode::Asr(c) => &c.worker,
-        Mode::Tts(c) => &c.worker,
-    };
+    let worker = args.mode.worker();
     let startup = async {
         let drt = DistributedRuntime::new_with_probe_policy(
             runtime.clone(),
@@ -37,8 +37,8 @@ pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> a
             SystemProbePolicy::RuntimeOnly,
         )
         .await?;
-        tracing::info!("Speech runtime connected; waiting for the NIM gRPC channel");
-        let channel = client::connect(&worker.connection).await?;
+        tracing::info!("Speech runtime connected; waiting for Speech NIM readiness");
+        let channel = client::connect(&args.mode).await?;
         Ok::<_, anyhow::Error>((drt, channel))
     };
     let runtime_shutdown = runtime.shutdown_started_token();
@@ -61,13 +61,13 @@ pub async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> a
 /// Serve a connected backend using an existing runtime, including in CPU tests.
 pub async fn serve(
     mode: Mode,
-    channel: Channel,
+    channel: Arc<GrpcChannelPool>,
     drt: DistributedRuntime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     match mode {
         Mode::Tts(config) => {
-            let (namespace, component, endpoint) = config.worker.endpoint_parts("speech-tts")?;
+            let (namespace, component, endpoint) = config.worker.endpoint_parts("speech-tts");
             let worker_config = WorkerConfig {
                 namespace,
                 component,
@@ -91,12 +91,11 @@ pub async fn serve(
 
 async fn run_asr(
     config: AsrConfig,
-    channel: Channel,
+    channel: Arc<GrpcChannelPool>,
     drt: DistributedRuntime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let (namespace, component, endpoint_name) =
-        config.worker.endpoint_parts("speech-asr-realtime")?;
+    let (namespace, component, endpoint_name) = config.worker.endpoint_parts("speech-asr-realtime");
     let endpoint = drt
         .namespace(namespace)?
         .component(component)?
@@ -136,8 +135,17 @@ async fn run_asr(
         _ = shutdown.cancelled() => Ok(()),
         _ = runtime_shutdown.cancelled() => Err(anyhow::anyhow!("runtime shut down while serving speech")),
     };
-    adapter.close();
+    drt.runtime().mark_shutting_down();
+    let withdraw = endpoint.unregister_endpoint_instance().await;
     let detach = LocalModel::detach_from_endpoint(&endpoint, None).await;
-    let stop = started.shutdown().await;
-    result.and(detach).and(stop)
+    tokio::time::sleep(Duration::from_secs_f64(grace_period_secs())).await;
+    // The request plane drains sessions; use the same budget as other workers
+    // so an idle realtime connection cannot extend shutdown indefinitely.
+    let stop = tokio::time::timeout(graceful_shutdown_timeout(), started.shutdown()).await;
+    adapter.close();
+    let stop = stop.unwrap_or_else(|_| {
+        tracing::warn!("ASR shutdown drain timed out; cancelling remaining sessions");
+        Ok(())
+    });
+    result.and(withdraw).and(detach).and(stop)
 }

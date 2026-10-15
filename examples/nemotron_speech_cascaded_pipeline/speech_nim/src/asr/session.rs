@@ -10,17 +10,15 @@ use tokio::{
     sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use super::{AsrAdapter, turn, validation};
 use crate::events;
 
-enum Output {
-    Event(Value),
-    Turn {
-        events: mpsc::Receiver<Value>,
-        cancelled: CancellationToken,
-    },
+struct TurnOutput {
+    events: mpsc::Receiver<Value>,
+    cancelled: CancellationToken,
 }
 
 struct OpenTurn {
@@ -43,7 +41,8 @@ impl OpenTurn {
 
 struct Session {
     adapter: AsrAdapter,
-    output: mpsc::Sender<Output>,
+    control: mpsc::Sender<Value>,
+    output: mpsc::Sender<TurnOutput>,
     active: Option<OpenTurn>,
     turns: JoinSet<()>,
     engine_slot: Arc<Semaphore>,
@@ -75,7 +74,7 @@ impl Session {
             let finished = CancellationToken::new();
             let id = events::id("item");
             self.output
-                .send(Output::Turn {
+                .send(TurnOutput {
                     events: event_rx,
                     cancelled: cancelled.clone(),
                 })
@@ -118,7 +117,7 @@ impl Session {
     }
 
     async fn emit(&self, event: Value) {
-        let _ = self.output.send(Output::Event(event)).await;
+        let _ = self.control.send(event).await;
     }
 
     async fn handle(&mut self, event: Value) {
@@ -247,10 +246,11 @@ pub(super) fn serve(
     context: Arc<dyn AsyncEngineContext>,
 ) -> BoxStream<'static, Value> {
     async_stream::stream! {
-        let (tx, mut rx) = mpsc::channel(64);
+        let (control_tx, mut control_rx) = mpsc::channel(64);
+        let (turn_tx, turn_rx) = mpsc::channel(2);
         let shutdown = adapter.shutdown.clone();
         let session = Session {
-            adapter, output: tx, active: None, turns: JoinSet::new(),
+            adapter, control: control_tx, output: turn_tx, active: None, turns: JoinSet::new(),
             engine_slot: Arc::new(Semaphore::new(1)),
         };
         // Dropping the response stream aborts the input pump, whose JoinSet
@@ -265,27 +265,28 @@ pub(super) fn serve(
                 _ = session.pump(input) => {},
             }
         }));
+        // The initial session acknowledgement must precede every turn event.
+        let first = tokio::select! {
+            biased;
+            _ = context.stopped() => return,
+            _ = context.killed() => return,
+            event = control_rx.recv() => event,
+        };
+        if let Some(event) = first { yield event; }
+        // Keep turns ordered, but drain control replies concurrently so they
+        // cannot block the input pump from reaching commit or clear.
+        let turns = ReceiverStream::new(turn_rx).flat_map(|turn| {
+            ReceiverStream::new(turn.events).take_until(turn.cancelled.cancelled_owned())
+        });
+        let mut output = futures::stream::select(ReceiverStream::new(control_rx), turns).boxed();
         loop {
-            let item = tokio::select! {
+            let event = tokio::select! {
                 biased;
                 _ = context.stopped() => break,
                 _ = context.killed() => break,
-                item = rx.recv() => item,
+                event = output.next() => event,
             };
-            match item {
-                Some(Output::Event(event)) => yield event,
-                Some(Output::Turn { mut events, cancelled }) => loop {
-                    let event = tokio::select! {
-                        biased;
-                        _ = context.stopped() => return,
-                        _ = context.killed() => return,
-                        _ = cancelled.cancelled() => break,
-                        event = events.recv() => event,
-                    };
-                    match event { Some(event) => yield event, None => break }
-                },
-                None => break,
-            }
+            match event { Some(event) => yield event, None => break }
         }
     }
     .boxed()

@@ -15,28 +15,28 @@ use dynamo_runtime::{
     pipeline::{Error, ManyIn, ManyOut},
     protocols::annotated::Annotated,
 };
+use dynamo_sidecar_common::GrpcChannelPool;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 
 use crate::config::AsrConfig;
 
 #[derive(Clone)]
 pub struct AsrAdapter {
     config: Arc<AsrConfig>,
-    channel: Channel,
+    channels: Arc<GrpcChannelPool>,
     slots: Arc<Semaphore>,
     shutdown: CancellationToken,
 }
 
 impl AsrAdapter {
-    pub fn new(config: AsrConfig, channel: Channel) -> Self {
+    pub fn new(config: AsrConfig, channels: Arc<GrpcChannelPool>) -> Self {
         let slots = Arc::new(Semaphore::new(config.max_concurrent_turns.get()));
         Self {
             config: Arc::new(config),
-            channel,
+            channels,
             slots,
             shutdown: CancellationToken::new(),
         }

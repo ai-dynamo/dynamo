@@ -3,7 +3,10 @@
 
 //! Single-request, streaming-response audio speech adapter.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -11,10 +14,11 @@ use dynamo_backend_common::{DynamoError, EngineConfig, GenerateContext, RawEngin
 use dynamo_llm::protocols::openai::audios::{
     AudioData, AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest,
 };
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, invalid_argument, status_to_dynamo};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, invalid_argument, status_to_dynamo,
+};
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
-use tonic::transport::Channel;
 
 use crate::proto::{
     AudioEncoding,
@@ -24,12 +28,12 @@ use crate::{config::TtsConfig, events};
 
 pub struct TtsEngine {
     config: TtsConfig,
-    channel: Channel,
+    channels: Arc<GrpcChannelPool>,
 }
 
 impl TtsEngine {
-    pub fn new(config: TtsConfig, channel: Channel) -> Self {
-        Self { config, channel }
+    pub fn new(config: TtsConfig, channels: Arc<GrpcChannelPool>) -> Self {
+        Self { config, channels }
     }
 
     fn validate(&self, request: &NvCreateAudioSpeechRequest) -> Result<(), DynamoError> {
@@ -121,7 +125,7 @@ impl RawEngine for TtsEngine {
             ..Default::default()
         };
         let request = futures::stream::once(async { rpc_request });
-        let mut client = RivaSpeechSynthesisClient::new(self.channel.clone())
+        let mut client = RivaSpeechSynthesisClient::new(self.channels.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
         let model = self.config.model_name.clone();
         Ok(async_stream::try_stream! {

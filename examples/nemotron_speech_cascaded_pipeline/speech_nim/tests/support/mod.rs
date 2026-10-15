@@ -1,9 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use clap::Parser;
+use dynamo_sidecar_common::GrpcChannelPool;
 use dynamo_speech_nim_sidecar::{
     client,
     config::{Args, AsrConfig, Mode, TtsConfig},
@@ -12,7 +20,7 @@ use dynamo_speech_nim_sidecar::{
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tokio_util::task::AbortOnDropHandle;
-use tonic::{Request, Response, Status, Streaming, transport::Channel};
+use tonic::{Request, Response, Status, Streaming};
 
 pub async fn within<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(5), future)
@@ -30,6 +38,7 @@ type TtsCall = Call<SynthesizeSpeechRequest, SynthesizeSpeechResponse>;
 
 #[derive(Clone)]
 struct SpeechNim {
+    ready: Arc<AtomicBool>,
     asr: mpsc::UnboundedSender<AsrCall>,
     tts: mpsc::UnboundedSender<TtsCall>,
 }
@@ -60,7 +69,16 @@ impl riva_speech_recognition_server::RivaSpeechRecognition for SpeechNim {
         &self,
         _: Request<RivaSpeechRecognitionConfigRequest>,
     ) -> Result<Response<RivaSpeechRecognitionConfigResponse>, Status> {
-        Err(Status::unimplemented("unused model config"))
+        Ok(Response::new(RivaSpeechRecognitionConfigResponse {
+            model_config: if self.ready.load(Ordering::SeqCst) {
+                vec![riva_speech_recognition_config_response::Config {
+                    model_name: "asr".into(),
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            },
+        }))
     }
 }
 
@@ -90,11 +108,21 @@ impl riva_speech_synthesis_server::RivaSpeechSynthesis for SpeechNim {
         &self,
         _: Request<RivaSynthesisConfigRequest>,
     ) -> Result<Response<RivaSynthesisConfigResponse>, Status> {
-        Err(Status::unimplemented("unused model config"))
+        Ok(Response::new(RivaSynthesisConfigResponse {
+            model_config: if self.ready.load(Ordering::SeqCst) {
+                vec![riva_synthesis_config_response::Config {
+                    model_name: "tts".into(),
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            },
+        }))
     }
 }
 
 pub struct Server {
+    pub ready: Arc<AtomicBool>,
     port: u16,
     pub asr: mpsc::UnboundedReceiver<AsrCall>,
     pub tts: mpsc::UnboundedReceiver<TtsCall>,
@@ -107,7 +135,9 @@ impl Server {
         let port = listener.local_addr().unwrap().port();
         let (asr_tx, asr) = mpsc::unbounded_channel();
         let (tts_tx, tts) = mpsc::unbounded_channel();
+        let ready = Arc::new(AtomicBool::new(true));
         let service = SpeechNim {
+            ready: ready.clone(),
             asr: asr_tx,
             tts: tts_tx,
         };
@@ -124,6 +154,7 @@ impl Server {
                 .unwrap();
         });
         Self {
+            ready,
             port,
             asr,
             tts,
@@ -135,9 +166,9 @@ impl Server {
         let Mode::Asr(config) = Args::parse_from([
             "sidecar",
             "asr",
-            "--nim-port",
-            &self.port.to_string(),
-            "--nim-startup-timeout-s",
+            "--grpc-endpoint",
+            &format!("127.0.0.1:{}", self.port),
+            "--grpc-startup-deadline-secs",
             "2",
             "--timeout-s",
             "0.5",
@@ -153,9 +184,9 @@ impl Server {
         let Mode::Tts(config) = Args::parse_from([
             "sidecar",
             "tts",
-            "--nim-port",
-            &self.port.to_string(),
-            "--nim-startup-timeout-s",
+            "--grpc-endpoint",
+            &format!("127.0.0.1:{}", self.port),
+            "--grpc-startup-deadline-secs",
             "2",
         ])
         .mode
@@ -165,8 +196,8 @@ impl Server {
         config
     }
 
-    pub async fn connection(&self) -> Channel {
-        within(client::connect(&self.asr_config().worker.connection))
+    pub async fn connection(&self) -> Arc<GrpcChannelPool> {
+        within(client::connect(&Mode::Asr(self.asr_config())))
             .await
             .unwrap()
     }

@@ -49,10 +49,10 @@ print_launch_banner --no-curl \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
 "$SPEECH_NIM_SIDECAR_BIN" asr \
-  --nim-port "$ASR_NIM_PORT" --model-name "$ASR_MODEL_NAME" &
+  --grpc-endpoint "127.0.0.1:$ASR_NIM_PORT" --model-name "$ASR_MODEL_NAME" &
 
 "$SPEECH_NIM_SIDECAR_BIN" tts \
-  --nim-port "$TTS_NIM_PORT" --model-name "$TTS_MODEL_NAME" \
+  --grpc-endpoint "127.0.0.1:$TTS_NIM_PORT" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 
 # Word splitting is intentional for optional CLI argument strings.

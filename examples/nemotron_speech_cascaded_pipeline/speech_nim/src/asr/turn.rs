@@ -55,7 +55,7 @@ pub(super) async fn run(
             streaming_request: Some(request),
             ..Default::default()
         });
-    let mut client = RivaSpeechRecognitionClient::new(adapter.channel.clone())
+    let mut client = RivaSpeechRecognitionClient::new(adapter.channels.next_channel())
         .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
     let transcribe = async {
         let mut responses = client.streaming_recognize(requests).await?.into_inner();
