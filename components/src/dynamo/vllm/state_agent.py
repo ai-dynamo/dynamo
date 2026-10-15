@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+from dynamo.common.utils.topology import read_topology_config
 from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
@@ -169,6 +170,12 @@ async def start_attachment_owner(
         _state_agent_worker_type(config),
         (dp_start, dp_size),
     )
+    # KVCR runs in this worker's pod, so its cache owners share the worker's island.
+    topology_domains = (
+        read_topology_config().topology_domains
+        if kv_transfer_hint_sources is not None
+        else {}
+    )
     kv_state_endpoint = config.kv_state_endpoint or (
         f"{config.namespace}/{config.component}/{config.endpoint}"
     )
@@ -197,6 +204,7 @@ async def start_attachment_owner(
                     {
                         "source_control_endpoint": kv_transfer_hint_source.source_control_endpoint,
                         "worker_type": kv_transfer_hint_source.worker_type,
+                        "topology_domains": topology_domains,
                     }
                     if kv_transfer_hint_source is not None
                     else None
