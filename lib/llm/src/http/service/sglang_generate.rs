@@ -243,7 +243,6 @@ fn preprocessed_request(
         })
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
-            expected_output_tokens: max_tokens,
             priority_jump: Some(routing_priority.max(0) as f64),
             priority: Some(routing_priority),
             cache_namespace,
