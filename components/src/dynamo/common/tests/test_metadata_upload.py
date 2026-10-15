@@ -42,6 +42,7 @@ def test_fallback_url_must_be_a_nonempty_string(fallback_url, message) -> None:
 @pytest.mark.asyncio
 async def test_primary_failure_uploads_same_serialized_payload_to_fallback(
     monkeypatch,
+    caplog,
 ) -> None:
     payload = b"serialized-metadata"
     serialize = Mock(return_value=payload)
@@ -63,6 +64,9 @@ async def test_primary_failure_uploads_same_serialized_payload_to_fallback(
         call("s3://primary/prefix", "choice_2.msgpack.zst", payload),
         call("file:///fallback/prefix", "choice_2.msgpack.zst", payload),
     ]
+    assert "Primary metadata upload failed (OSError); trying fallback" in caplog.text
+    assert "s3://primary/prefix" not in caplog.text
+    assert "primary unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -100,3 +104,54 @@ async def test_cancelled_primary_does_not_use_fallback(monkeypatch) -> None:
     upload.assert_awaited_once_with(
         "s3://primary/prefix", "choice_0.msgpack.zst", b"data"
     )
+
+
+@pytest.mark.asyncio
+async def test_local_upload_roundtrips_numpy_payload(tmp_path) -> None:
+    msgspec = pytest.importorskip("msgspec")
+    numpy = pytest.importorskip("numpy")
+    zstandard = pytest.importorskip("zstandard")
+    pytest.importorskip("fsspec")
+
+    target = tmp_path / "metadata"
+    uploader = MetadataUploader(url=target.as_uri())
+    values = numpy.asarray([[1.5, 2.5]], dtype=numpy.float32)
+
+    await uploader.upload_choice(0, {"scores": values[:, ::-1]})
+
+    compressed = (target / "choice_0.msgpack.zst").read_bytes()
+    payload = msgspec.msgpack.decode(
+        zstandard.ZstdDecompressor().decompress(compressed)
+    )
+    assert payload["schema_version"] == 1
+    assert payload["metadata"]["scores"] == {
+        "type": "ndarray",
+        "dtype": "float32",
+        "shape": [1, 2],
+        "data": numpy.ascontiguousarray(values[:, ::-1]).tobytes(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_upload_roundtrips_bfloat16_tensor(tmp_path) -> None:
+    msgspec = pytest.importorskip("msgspec")
+    torch = pytest.importorskip("torch")
+    zstandard = pytest.importorskip("zstandard")
+    pytest.importorskip("fsspec")
+
+    target = tmp_path / "metadata"
+    uploader = MetadataUploader(url=target.as_uri())
+    tensor = torch.tensor([1, 2], dtype=torch.bfloat16)
+
+    await uploader.upload_choice(1, {"routes": tensor})
+
+    compressed = (target / "choice_1.msgpack.zst").read_bytes()
+    payload = msgspec.msgpack.decode(
+        zstandard.ZstdDecompressor().decompress(compressed)
+    )
+    assert payload["metadata"]["routes"] == {
+        "type": "tensor",
+        "dtype": "bfloat16",
+        "shape": [2],
+        "data": tensor.view(torch.uint8).numpy().tobytes(),
+    }

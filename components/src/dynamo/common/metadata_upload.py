@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, cast
+
+logger = logging.getLogger(__name__)
 
 
 def _backend_metadata_upload_settings(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -184,9 +187,13 @@ class MetadataUploader:
         try:
             try:
                 await _upload_bytes(self.url, storage_path, data)
-            except Exception:
+            except Exception as exc:
                 if self.fallback_url is None:
                     raise
+                logger.warning(
+                    "Primary metadata upload failed (%s); trying fallback",
+                    type(exc).__name__,
+                )
                 await _upload_bytes(self.fallback_url, storage_path, data)
         finally:
             del data
