@@ -13,8 +13,11 @@ from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_ids,
+    cancel_metrics_task,
+    finish_worker_teardown,
     get_local_dp_rank_range,
     handle_non_leader_node,
+    run_to_completion,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -629,6 +632,56 @@ def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     publisher.cleanup()
 
 
+@pytest.mark.parametrize(
+    ("layout", "expected_ranks"),
+    [
+        ({"dp_size": 4}, [0, 1, 2, 3]),
+        ({"attn_dp_size": 8, "nnodes": 2, "node_rank": 1}, [4, 5, 6, 7]),
+        # A scale joiner's one-rank group must still relay its own rank.
+        ({"ep_join_mode": "scale", "nnodes": 2, "node_rank": 1}, [0]),
+    ],
+    ids=["pure-dp", "attn-dp-multinode", "elastic-ep-scale-joiner"],
+)
+def test_init_fpm_relay_follows_local_dp_rank_bounds(
+    monkeypatch, layout, expected_ranks
+):
+    relayed = []
+
+    class FakeFpmEventRelay:
+        def __init__(self, *, endpoint, zmq_endpoint):
+            relayed.append(zmq_endpoint)
+
+    monkeypatch.setattr("dynamo.llm.FpmEventRelay", FakeFpmEventRelay, raising=False)
+    server_args = SimpleNamespace(
+        forward_pass_metrics_ipc_name="ipc:///tmp/fpm",
+        dp_size=1,
+        nnodes=1,
+        node_rank=0,
+    )
+    for key, value in layout.items():
+        setattr(server_args, key, value)
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+        ),
+        config=SimpleNamespace(
+            server_args=server_args,
+            dynamo_args=SimpleNamespace(
+                enable_local_indexer=False,
+                kv_state_endpoint=None,
+                use_kv_events=False,
+            ),
+        ),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    relays = publisher.init_fpm_relay()
+
+    assert len(relays) == len(expected_ranks)
+    assert relayed == [f"ipc:///tmp/fpm.{rank}" for rank in expected_ranks]
+
+
 def test_init_kv_event_publish_uses_effective_kv_event_setting():
     server_args = SimpleNamespace(
         kv_events_config='{"publisher": "null", "endpoint": "tcp://*:5557"}',
@@ -954,3 +1007,187 @@ async def test_metrics_fanout_reaches_sibling_gateways(tmp_path, monkeypatch):
             if s is not None:
                 s.close(linger=0)
         ctx.term()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_waits_for_a_real_shaped_task():
+    """The real metrics tasks (publisher.run, _idle) park on a single await and
+    unwind with no further awaits after cancel(). Cancelling one must leave it
+    done and cancelled, and must not raise at the caller."""
+
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        await asyncio.Event().wait()
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    await cancel_metrics_task(metrics_task)
+
+    assert metrics_task.done()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_real_failure():
+    """A non-cancellation failure inside the metrics task still surfaces."""
+
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await cancel_metrics_task(metrics_task)
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_caller_cancellation():
+    """A cancellation aimed at the caller while it is suspended inside
+    cancel_metrics_task must reach the caller."""
+
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_unwind = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_unwind.wait()
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    outer = asyncio.create_task(cancel_metrics_task(metrics_task))
+    await unwinding.wait()
+    outer.cancel()
+    release_unwind.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_finishes_the_body_when_the_caller_is_cancelled():
+    """The whole point: a cancellation aimed at the caller must not truncate
+    the teardown body, and must be reported rather than raised."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    steps = []
+
+    async def body():
+        steps.append("first")
+        started.set()
+        await release.wait()
+        steps.append("second")
+
+    result = {}
+
+    async def caller():
+        result["cancelled"] = await run_to_completion(body())
+        steps.append("caller.observed")
+
+    outer = asyncio.create_task(caller())
+    await started.wait()
+    outer.cancel()
+    release.set()
+
+    await outer
+
+    assert result["cancelled"] is True
+    assert steps == ["first", "second", "caller.observed"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_propagates_a_body_failure():
+    """A teardown step blowing up is a real error and must not be swallowed."""
+
+    async def body():
+        raise RuntimeError("cleanup blew up")
+
+    with pytest.raises(RuntimeError, match="cleanup blew up"):
+        await run_to_completion(body())
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch, caplog):
+    """A caller cancelling faster than the warn interval must still get the
+    "teardown is taking a while" warning."""
+    release = asyncio.Event()
+    ticked = asyncio.Event()
+    now = [0.0]
+
+    def fake_monotonic():
+        ticked.set()
+        return now[0]
+
+    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 10.0)
+    monkeypatch.setattr(publisher_mod, "monotonic", fake_monotonic)
+
+    outer = asyncio.create_task(run_to_completion(release.wait()))
+    # Each cancel lands under the 10s interval; only the elapsed total crosses it.
+    for t in (6.0, 12.0):
+        await ticked.wait()
+        ticked.clear()
+        now[0] = t
+        outer.cancel()
+    await ticked.wait()
+    release.set()
+
+    assert await outer is True
+    assert "Worker teardown still running" in caplog.text
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_finish_worker_teardown_continues_after_metrics_task_failure():
+    """A metrics task that fails (not just cancels) during teardown -- e.g. a
+    real ZMQ error -- must not skip cleanup() and run_deferred_handlers(), and
+    must still surface once they have run."""
+
+    started = asyncio.Event()
+
+    async def failing_metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(failing_metrics_loop())
+    await started.wait()
+
+    steps = []
+
+    def cleanup():
+        steps.append("cleanup")
+
+    async def run_deferred_handlers():
+        steps.append("run_deferred_handlers")
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+
+    assert steps == ["cleanup", "run_deferred_handlers"]

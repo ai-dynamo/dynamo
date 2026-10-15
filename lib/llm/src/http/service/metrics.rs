@@ -285,20 +285,6 @@ pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock:
     .expect("Failed to create worker_last_inter_token_latency gauge")
 });
 
-/// Register the global per-worker TTFT/ITL/input-tokens Prometheus metrics with the given registry.
-///
-/// This should be called once during HTTP service setup to expose the metrics
-/// via the `/metrics` endpoint.
-///
-/// # Errors
-/// Returns an error if the metrics are already registered with the registry.
-pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
-    registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
-    registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // LoRA allocation metrics (updated by LoraController each tick)
 // ---------------------------------------------------------------------------
@@ -479,6 +465,7 @@ pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
 }
 
 const MAX_BUCKET_COUNT: usize = 512;
+const MAX_BUCKET_LIST_BYTES: usize = MAX_BUCKET_COUNT * 32;
 
 fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
     min.is_finite()
@@ -582,6 +569,46 @@ fn parse_bucket_config(
     }
 
     (min, max, count)
+}
+
+fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
+    if value.len() > MAX_BUCKET_LIST_BYTES {
+        return None;
+    }
+
+    let buckets = value
+        .split(',')
+        .map(|item| item.trim().parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    if buckets.len() > MAX_BUCKET_COUNT
+        || buckets
+            .iter()
+            .any(|bucket| !bucket.is_finite() || *bucket < 0.0)
+        || buckets.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+
+    Some(buckets)
+}
+
+fn inter_token_latency_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    if let Some(value) = env(env_metrics::DYN_METRICS_ITL_BUCKETS) {
+        return parse_bucket_list(&value).unwrap_or_else(|| {
+            tracing::warn!(
+                env_var = env_metrics::DYN_METRICS_ITL_BUCKETS,
+                value_len = value.len(),
+                max_value_bytes = MAX_BUCKET_LIST_BYTES,
+                "Invalid explicit ITL histogram buckets, using defaults"
+            );
+            generate_log_buckets(0.001, 80.0, 20)
+        });
+    }
+
+    let (min, max, count) = parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
+    generate_log_buckets(min, max, count)
 }
 
 /// State for metrics handler.
@@ -857,14 +884,16 @@ impl Metrics {
     ///
     /// ## Histogram Bucket Configuration
     ///
-    /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
-    /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
+    /// Histograms use log-spaced buckets rounded to 2 significant figures unless noted otherwise.
+    /// Bucket configuration can be customized via environment variables (MIN: minimum value,
+    /// MAX: maximum value, COUNT: number of buckets):
     ///
     /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 80.0, 20)
+    /// - `DYN_METRICS_ITL_BUCKETS` - Comma-separated inter-token latency bucket boundaries
+    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Log-spaced inter-token latency configuration (defaults: 0.001, 80.0, 20)
     /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
@@ -1059,10 +1088,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) =
-            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
-        let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
+        let inter_token_latency_buckets = inter_token_latency_buckets(env);
 
         let inter_token_latency = HistogramVec::new(
             HistogramOpts::new(
@@ -2472,6 +2498,9 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     reasoning_field: ReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
+    if let Some(data) = annotated.data.as_mut() {
+        data.tool_call_completion.clear();
+    }
 
     if let Some(metrics) = annotated
         .data
@@ -2885,6 +2914,63 @@ mod tests {
     }
 
     #[test]
+    fn explicit_itl_buckets_take_precedence_over_log_config() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_BUCKETS", "0.01, 0.02, 0.05"),
+            ("DYN_METRICS_ITL_MIN", "1"),
+            ("DYN_METRICS_ITL_MAX", "10"),
+            ("DYN_METRICS_ITL_COUNT", "3"),
+        ]);
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &env);
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.03);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        assert_eq!(bounds, vec![0.01, 0.02, 0.05]);
+    }
+
+    #[test]
+    fn invalid_explicit_itl_buckets_fall_back_to_defaults() {
+        for value in [
+            "0.01,nope",
+            "0.01,NaN",
+            "-0.01,0.02",
+            "0.02,0.01",
+            "0.01,0.01",
+        ] {
+            let pairs = [
+                ("DYN_METRICS_ITL_BUCKETS", value),
+                ("DYN_METRICS_ITL_MAX", "30"),
+                ("DYN_METRICS_ITL_COUNT", "8"),
+            ];
+            let env = fake_env(&pairs);
+            assert_eq!(
+                inter_token_latency_buckets(&env),
+                generate_log_buckets(0.001, 80.0, 20)
+            );
+        }
+
+        let oversized_value = format!("{:>width$}", "0", width = MAX_BUCKET_LIST_BYTES + 1);
+        let pairs = [("DYN_METRICS_ITL_BUCKETS", oversized_value.as_str())];
+        let env = fake_env(&pairs);
+        assert_eq!(
+            inter_token_latency_buckets(&env),
+            generate_log_buckets(0.001, 80.0, 20)
+        );
+    }
+
+    #[test]
     fn test_generate_log_buckets_edge_cases() {
         // Test empty buckets
         let buckets = generate_log_buckets(1.0, 100.0, 0);
@@ -3058,6 +3144,7 @@ mod tests {
                 chunk_tokens: 4,
                 ..Default::default()
             }),
+            tool_call_completion: Vec::new(),
         };
         let annotated = crate::types::Annotated::from_data(data);
 
@@ -3838,6 +3925,20 @@ mod tests {
         assert!(annotated.event.is_none());
         assert!(annotated.comment.is_none());
 
+        annotated.data.as_mut().unwrap().tool_call_completion = vec![
+            crate::protocols::openai::chat_completions::ToolCallCompletion {
+                choice_index: 0,
+                tool_index: 0,
+                complete: true,
+            },
+        ];
+        let transported: crate::types::Annotated<NvCreateChatCompletionStreamResponse> =
+            serde_json::from_value(serde_json::to_value(&annotated).unwrap()).unwrap();
+        assert_eq!(
+            transported.data.as_ref().unwrap().tool_call_completion,
+            annotated.data.as_ref().unwrap().tool_call_completion
+        );
+
         let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
         let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
@@ -3858,6 +3959,7 @@ mod tests {
             json.get("llm_metrics").is_none(),
             "typed metrics must be skipped on the SSE wire"
         );
+        assert!(json.get("tool_call_completion").is_none());
 
         drop(collector);
 
@@ -4546,6 +4648,7 @@ mod tests {
                     nvext: None,
                     prompt_logprobs: None,
                     llm_metrics: None,
+                    tool_call_completion: Vec::new(),
                 },
             ),
             event: None,
@@ -4892,8 +4995,10 @@ mod tests {
             impl std::future::Future<Output = crate::request_trace::payload_stream::PayloadOutcome>,
         ) {
             let plain = observe_and_aggregate(preprocessed(false, outputs.clone())).await;
-            let (captured, future) =
-                scan_aggregate_with_future(Box::pin(preprocessed(true, outputs)));
+            let (captured, future) = scan_aggregate_with_future(
+                Box::pin(preprocessed(true, outputs)),
+                crate::protocols::openai::ParsingOptions::default(),
+            );
             let capture = observe_and_aggregate(captured).await;
             (plain, capture, future)
         }
@@ -4932,8 +5037,9 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
-                prompt_logprobs: None,
                 llm_metrics,
+                prompt_logprobs: None,
+                tool_call_completion: Vec::new(),
             };
             Annotated {
                 data: Some(response),
@@ -5131,8 +5237,10 @@ mod tests {
             };
             let (plain_registry, _) =
                 observe_and_aggregate(futures::stream::iter(dual_carrier())).await;
-            let (captured, _future) =
-                scan_aggregate_with_future(futures::stream::iter(dual_carrier()));
+            let (captured, _future) = scan_aggregate_with_future(
+                futures::stream::iter(dual_carrier()),
+                crate::protocols::openai::ParsingOptions::default(),
+            );
             let (capture_registry, _) = observe_and_aggregate(captured).await;
 
             let expected = MetricSignature {

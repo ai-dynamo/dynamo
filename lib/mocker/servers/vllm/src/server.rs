@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
 use dynamo_mocker::scheduler::MockerMetrics;
@@ -55,6 +55,7 @@ impl fmt::Display for ServerMode {
 pub struct MockerServerConfig {
     pub model: String,
     pub mode: ServerMode,
+    pub supports_multimodal: bool,
     pub seed: u64,
     pub max_concurrent_requests: usize,
 }
@@ -64,6 +65,7 @@ impl Default for MockerServerConfig {
         Self {
             model: "mocker-model".to_string(),
             mode: ServerMode::Aggregated,
+            supports_multimodal: false,
             seed: 42,
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
         }
@@ -82,9 +84,9 @@ pub struct VllmMockerService {
 }
 
 impl VllmMockerService {
-    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockerConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            engine_args.engine_type == EngineType::Vllm,
+            engine_args.backend == EngineType::Vllm,
             "Mocker engine_type must be vllm"
         );
         anyhow::ensure!(engine_args.dp_size == 1, "Mocker dp_size must be 1");
@@ -97,6 +99,12 @@ impl VllmMockerService {
             "Mocker worker_type must be aggregated; use the server mode for the emulated wire role"
         );
         let engine_args = engine_args.normalized()?;
+        if config.supports_multimodal && engine_args.enable_prefix_caching {
+            tracing::warn!(
+                "Multimodal mock prefix caching uses token IDs only: different images can share \
+                 a cache entry. Disable prefix caching for image deployments."
+            );
+        }
         let max_concurrent_requests = config.max_concurrent_requests;
         let model_info = pb::ModelInfo {
             model_id: config.model.clone(),
@@ -105,7 +113,7 @@ impl VllmMockerService {
             supports_text_input: false,
             supports_token_ids_input: true,
             supports_lora: false,
-            supports_multimodal: false,
+            supports_multimodal: config.supports_multimodal,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
         };
@@ -133,14 +141,14 @@ impl VllmMockerService {
                 .map_err(|_| anyhow::anyhow!("block_size exceeds the Control API range"))?,
             total_kv_blocks: u64::try_from(engine_args.num_gpu_blocks)
                 .map_err(|_| anyhow::anyhow!("num_gpu_blocks exceeds the Control API range"))?,
-            max_running_requests: engine_args
-                .max_num_seqs
+            max_running_requests: (engine_args.max_num_seqs != usize::MAX)
+                .then_some(engine_args.max_num_seqs)
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("max_num_seqs exceeds the Control API range"))?
                 .unwrap_or_default(),
-            max_batched_tokens: engine_args
-                .max_num_batched_tokens
+            max_batched_tokens: (engine_args.max_num_batched_tokens != usize::MAX)
+                .then_some(engine_args.max_num_batched_tokens)
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| {
@@ -154,8 +162,8 @@ impl VllmMockerService {
         // emulate disaggregated requests.
         let sink = if engine_args.needs_kv_publisher() && config.mode != ServerMode::Decode {
             match ZmqKvEventSink::bind(
-                engine_args.zmq_kv_events_port,
-                engine_args.zmq_replay_port,
+                engine_args.runtime.zmq_kv_events_port,
+                engine_args.runtime.zmq_replay_port,
                 DP_RANK,
                 server_info.kv_block_size,
             ) {

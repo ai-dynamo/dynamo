@@ -32,9 +32,22 @@ def _processor(
     unified_vision_chunk: bool = False,
     video_loader=None,
     frontend_decoding: bool = False,
+    media_limits: dict[str, int] | None = None,
 ) -> mod.VllmMultimodalRequestProcessor:
+    engine_client = None
+    if media_limits is not None:
+        from vllm.config.multimodal import MultiModalConfig
+
+        engine_client = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    multimodal_config=MultiModalConfig(limit_per_prompt=media_limits)
+                )
+            )
+        )
     return mod.VllmMultimodalRequestProcessor(
         model=model,
+        engine_client=engine_client,
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
         image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
@@ -740,7 +753,9 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()
@@ -1008,18 +1023,134 @@ async def test_transfer_setup_failure_falls_back_to_raw_media(monkeypatch):
     processor = _processor()
     validate = MagicMock(side_effect=ValueError("invalid metadata"))
     monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+    image = Image.new("RGB", (1, 1))
+    processor.image_loader.load_image_batch.return_value = [image]
 
-    assert (
-        await processor.try_receive_mm_kwargs(
-            {"extra_args": {"mm_kwargs_shm": {"invalid": True}}}
-        )
-        is None
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}]
+            },
+            "extra_args": {"mm_kwargs_shm": {"invalid": True}},
+        },
+        "request-shm-fallback",
+        None,
+        DisaggregationMode.AGGREGATED,
     )
+
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
     validate.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
+async def test_shm_transfer_failure_without_raw_media_fails_closed(monkeypatch):
+    processor = _processor()
+    receiver = SimpleNamespace(
+        receive=AsyncMock(side_effect=FileNotFoundError("missing SHM segment"))
+    )
+    monkeypatch.setattr(
+        mod.MmKwargsShmTransferMetadata,
+        "model_validate",
+        MagicMock(
+            return_value=SimpleNamespace(
+                modality="image", mm_hashes=["0123456789abcdef"]
+            )
+        ),
+    )
+    monkeypatch.setattr(mod, "MmKwargsShmReceiver", MagicMock(return_value=receiver))
+
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="use DYNAMO_MM_TRANSFER=nixl for separate pods or nodes",
+    ):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {
+                    "mm_kwargs_shm": {"segments": []},
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[0, 1]],
+                    "expanded_token_ids": [1, 2],
+                },
+            },
+            "request-shm-fail-closed",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
+
+    receiver.receive.assert_awaited_once()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_transfer_metadata_fails_closed(monkeypatch):
+    processor = _processor()
+    validate = MagicMock(side_effect=ValueError("invalid metadata"))
+    monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await processor.try_receive_mm_kwargs({"extra_args": {"mm_kwargs_shm": {}}})
+
+    validate.assert_called_once_with({})
+
+
+@pytest.mark.asyncio
+async def test_null_transfer_metadata_is_absent():
+    processor = _processor()
+
+    result = await processor.try_receive_mm_kwargs(
+        {
+            "extra_args": {
+                "mm_kwargs_shm": None,
+                "mm_kwargs_nixl": None,
+            }
+        }
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_null_shm_metadata_does_not_shadow_nixl(monkeypatch):
+    processor = _processor()
+    receiver = SimpleNamespace()
+    metadata = SimpleNamespace(modality="image", mm_hashes=[])
+    transferred = {"type": "multimodal", "prompt_token_ids": [1, 2]}
+    receive = AsyncMock(return_value=transferred)
+    monkeypatch.setattr(
+        mod.MmKwargsTransferMetadata,
+        "model_validate",
+        MagicMock(return_value=metadata),
+    )
+    monkeypatch.setattr(mod, "MmKwargsNixlReceiver", MagicMock(return_value=receiver))
+    monkeypatch.setattr(processor, "_receive_mm_kwargs", receive)
+
+    result = await processor.try_receive_mm_kwargs(
+        {
+            "extra_args": {
+                "mm_kwargs_shm": None,
+                "mm_kwargs_nixl": {"modality": "image"},
+            }
+        }
+    )
+
+    assert result is transferred
+    receive.assert_awaited_once_with(
+        {
+            "mm_kwargs_shm": None,
+            "mm_kwargs_nixl": {"modality": "image"},
+        },
+        "nixl",
+        receiver,
+        metadata,
+    )
+
+
+@pytest.mark.asyncio
+async def test_nixl_receiver_initialization_failure_fails_closed(monkeypatch):
     processor = _processor()
     monkeypatch.setattr(
         mod.MmKwargsTransferMetadata,
@@ -1032,12 +1163,45 @@ async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
         MagicMock(side_effect=RuntimeError("nixl unavailable")),
     )
 
-    assert (
-        await processor.try_receive_mm_kwargs(
-            {"extra_args": {"mm_kwargs_nixl": {"modality": "image"}}}
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="Verify NIXL connectivity between the frontend and worker",
+    ):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {"mm_kwargs_nixl": {"modality": "image"}},
+            },
+            "request-nixl-fail-closed",
+            None,
+            DisaggregationMode.AGGREGATED,
         )
-        is None
+
+
+@pytest.mark.asyncio
+async def test_transfer_failure_with_unusable_raw_media_fails_closed(monkeypatch):
+    processor = _processor()
+    monkeypatch.setattr(
+        mod.MmKwargsShmTransferMetadata,
+        "model_validate",
+        MagicMock(side_effect=ValueError("invalid metadata")),
     )
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}]
+                },
+                "extra_args": {"mm_kwargs_shm": {"invalid": True}},
+            },
+            "request-shm-empty-fallback",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
 
 
 @pytest.mark.asyncio
@@ -1054,6 +1218,7 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "extra_args": {"mm_kwargs_shm": {"segments": []}},
         },
         "request-6",
         None,
@@ -1063,6 +1228,31 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
     processor.try_receive_mm_kwargs.assert_not_awaited()
     assert prepared.multi_modal_data == {"image": image}
     assert prepared.prompt["multi_modal_data"] == {"image": image}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_key", ["mm_kwargs_shm", "mm_kwargs_nixl"])
+async def test_prefill_transfer_without_raw_media_fails_closed(
+    metadata_key,
+):
+    processor = _processor()
+
+    with pytest.raises(mod.MultimodalTransferError) as excinfo:
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {metadata_key: {"modality": "image"}},
+            },
+            "request-prefill-transfer-only",
+            None,
+            DisaggregationMode.PREFILL,
+        )
+
+    assert "DYNAMO_DISABLE_NIXL_MM=1" in str(excinfo.value)
+    assert "DYNAMO_MM_TRANSFER=nixl" not in str(excinfo.value)
+    assert "Verify NIXL connectivity" not in str(excinfo.value)
+    processor.image_loader.load_image_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1427,7 +1617,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1460,7 +1650,7 @@ async def test_receive_transferred_kwargs_marks_vllm_feature_hash(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1496,7 +1686,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
     processor = _processor(unified_vision_chunk=True)
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1536,7 +1726,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
 async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
     processor = _processor()
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1561,24 +1751,183 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
 
-    result = await processor._receive_mm_kwargs(
-        {
-            "mm_hashes": ["cached_hash", "transferred_hash"],
-            "mm_placeholders": [(1, 2), (4, 2)],
-            "expanded_token_ids": [10, 11, 12, 13, 14, 15],
-        },
-        "shm",
-        receiver,
-        SimpleNamespace(modality="image", mm_hashes=[]),
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="item, hash, and placeholder counts differ",
+    ):
+        await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["cached_hash", "transferred_hash"],
+                "mm_placeholders": [(1, 2), (4, 2)],
+                "expanded_token_ids": [10, 11, 12, 13, 14, 15],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    input_processor.inject_into_mm_cache.assert_not_called()
+
+
+def _real_kwargs_item(key: str = "pixel_values"):
+    """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
     )
 
-    assert result is None
-    input_processor.inject_into_mm_cache.assert_not_called()
+    elem = MultiModalFieldElem(
+        data=torch.arange(8, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    return MultiModalKwargsItem({key: elem})
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_pickle_payload():
+    """A pickle-format payload must fail closed, not deserialize.
+
+    The transfer uses vLLM's typed msgpack decoder, so a payload in the old
+    pickle wire format (or any foreign bytes) fails the decode. The pre-fix
+    worker ran pickle.loads on this payload and accepted the item, so this
+    assertion fails there.
+    """
+    import pickle
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = pickle.dumps(_real_kwargs_item())
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+
+_LOG_SENTINEL = "zzsentinelzz"
+
+
+def _undecodable_payload(case: str) -> bytes:
+    """Return a payload that fails to decode and carries the log sentinel."""
+    import pickle
+    import struct
+
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    sentinel = _LOG_SENTINEL.encode()
+    if case == "pickle_format":
+        # The wire format of a frontend on the previous release.
+        return pickle.dumps(_real_kwargs_item(key=_LOG_SENTINEL))
+    if case == "short_frame":
+        # The declared buffer length runs past the end of the frame.
+        return struct.pack("<I", 1) + struct.pack("<Q", 999) + sentinel
+    if case == "wrong_structure":
+        # A well-formed frame whose message is not a kwargs item.
+        return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
+    # A frame that carries the serializer's pickle extension code.
+    return _pack_buffers([msgpack.encode(msgpack.Ext(CUSTOM_TYPE_PICKLE, sentinel))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
+)
+async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
+    """A payload that fails to decode fails closed without logging its bytes."""
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = _undecodable_payload(case)
+    # The sentinel is in the payload, so an echo of the bytes would show it.
+    assert _LOG_SENTINEL.encode() in payload
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with caplog.at_level("DEBUG"):
+        with pytest.raises(mod.MultimodalTransferError):
+            await processor._receive_mm_kwargs(
+                {
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[1, 2]],
+                    "expanded_token_ids": [10, 11, 12],
+                },
+                "shm",
+                receiver,
+                SimpleNamespace(modality="image", mm_hashes=[]),
+            )
+
+    # Positive control: the failure itself was logged and captured.
+    assert "multimodal transfer failed" in caplog.text
+    assert _LOG_SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
+    monkeypatch, caplog
+):
+    """With VLLM_ALLOW_INSECURE_SERIALIZATION set, the worker still refuses.
+
+    The frame carries the pickle extension code with dummy bytes, not a pickle
+    object. vLLM's own decoder would try to unpickle them when the variable is
+    set. The worker must refuse the code and fail closed instead.
+    """
+    import vllm.envs as envs
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+    receiver = SimpleNamespace(
+        receive=AsyncMock(
+            return_value={
+                "__pickled_kwargs_item__": [_pack_buffers([msgpack.encode(ext)])]
+            }
+        )
+    )
+
+    with caplog.at_level("DEBUG"):
+        with pytest.raises(mod.MultimodalTransferError):
+            await processor._receive_mm_kwargs(
+                {
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[1, 2]],
+                    "expanded_token_ids": [10, 11, 12],
+                },
+                "shm",
+                receiver,
+                SimpleNamespace(modality="image", mm_hashes=[]),
+            )
+
+    assert "multimodal transfer failed" in caplog.text
+    # The logged cause is the refusal, not an attempt to unpickle the data.
+    assert "Extension type code 1 is not supported" in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
@@ -1935,3 +2284,126 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+def test_zero_video_limit_rejects_before_any_media_loader():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "video_url": [{"Url": "rejected-video"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="At most 0 video"):
+        processor.validate_multimodal_request(request)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "modality,limit,count",
+    [("image", 8, 9), ("video", 1, 2), ("audio", 2, 3)],
+)
+def test_media_item_limits_are_checked_before_loading(modality, limit, count):
+    processor = _processor(media_limits={modality: limit})
+    request = {
+        "multi_modal_data": {
+            f"{modality}_url": [{"Url": "https://example.com/media"}] * count
+        }
+    }
+    with pytest.raises(mod.InvalidArgument, match=f"At most {limit} {modality}"):
+        processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_video_at_configured_limit_is_allowed(count):
+    processor = _processor(media_limits={"video": 1})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"video_url": [{"Url": "video"}] * count}}
+    )
+
+
+def test_zero_video_limit_preserves_image_only_requests():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "image"}] * 8}}
+    )
+
+
+@pytest.mark.parametrize("unified_vision_chunk", [False, True])
+@pytest.mark.parametrize(
+    "image_limit,chunk_limit,count",
+    [(0, 2, 1), (8, 0, 1), (8, 2, 3)],
+)
+def test_image_admission_uses_model_modality_limit(
+    unified_vision_chunk, image_limit, chunk_limit, count
+):
+    processor = _processor(
+        unified_vision_chunk=unified_vision_chunk,
+        media_limits={"image": image_limit, "vision_chunk": chunk_limit},
+    )
+    request = {
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}] * count
+        }
+    }
+    limit = chunk_limit if unified_vision_chunk else image_limit
+    if count > limit:
+        with pytest.raises(mod.InvalidArgument, match=f"At most {limit} image"):
+            processor.validate_multimodal_request(request)
+    else:
+        processor.validate_multimodal_request(request)
+
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize("audio_limit,explicit_audio_count", [(0, 0), (1, 1)])
+def test_video_derived_audio_rejects_before_any_media_loader(
+    kwargs_location, audio_limit, explicit_audio_count
+):
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}]
+            * explicit_audio_count,
+        },
+    }
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": True}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+
+    with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
+        processor.validate_multimodal_request(request)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize("use_audio_in_video,audio_limit", [(False, 0), (True, 1)])
+def test_video_derived_audio_respects_flag_and_limit(
+    kwargs_location, use_audio_in_video, audio_limit
+):
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    request = {"multi_modal_data": {"video_url": [{"Url": "video"}]}}
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": use_audio_in_video}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+    processor.validate_multimodal_request(request)

@@ -1262,6 +1262,8 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Resolved response transport of the bound endpoint's runtime.
+    response_plane: OnceLock<ResponsePlaneMode>,
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
@@ -1308,6 +1310,7 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            response_plane: OnceLock::new(),
             quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
@@ -1419,7 +1422,8 @@ where
             .copied()
     }
 
-    fn bind_lifecycle_endpoint(&self, endpoint: &crate::component::Endpoint) {
+    fn bind_endpoint_config(&self, endpoint: &crate::component::Endpoint) {
+        let _ = self.response_plane.set(endpoint.drt().response_plane());
         // Keep an explicitly constructed ingress role; otherwise observe model
         // registration even when it happens after the endpoint starts serving.
         let _ = self
