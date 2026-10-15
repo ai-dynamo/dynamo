@@ -249,7 +249,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         };
         let load = if inputs.contains(WorkerInputs::LOAD) {
             let available = worker_load.is_some();
-            let worker_load = worker_load.unwrap_or_default();
+            let worker_load = worker_load.unwrap_or_else(|| self.request.worker_load_for(worker));
             WorkerLoadInput {
                 available,
                 active_prefill_tokens: worker_load.active_prefill_tokens,

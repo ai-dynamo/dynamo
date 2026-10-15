@@ -75,7 +75,7 @@ trtllm_exit_trap() {
 trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
-TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
+TRTLLM_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_GRPC_PORT:-50051}")
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a
