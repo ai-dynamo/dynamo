@@ -24,6 +24,7 @@ fn transfer_timing(delay_ms: Option<f64>) -> HandoffTransferTiming {
     HandoffTransferTiming {
         mode: KvTransferTimingMode::FullPrompt,
         full_prompt_tokens: 1,
+        state_bytes: 0,
         kv_bytes_per_token: delay_ms.map(|delay_ms| (delay_ms * 1_000_000.0) as usize),
         bandwidth_gb_s: delay_ms.map(|_| 1.0),
     }
@@ -131,6 +132,7 @@ fn timing_mode_selects_full_or_destination_missing_footprint() {
                 transfer_timing: HandoffTransferTiming {
                     mode,
                     full_prompt_tokens: 8,
+                    state_bytes: 0,
                     kv_bytes_per_token: Some(1_000_000),
                     bandwidth_gb_s: Some(1.0),
                 },
@@ -163,6 +165,7 @@ fn full_destination_hit_keeps_zero_delay_transfer_transition() {
             transfer_timing: HandoffTransferTiming {
                 mode: KvTransferTimingMode::DestinationMissing,
                 full_prompt_tokens: 8,
+                state_bytes: 0,
                 kv_bytes_per_token: Some(1_000_000),
                 bandwidth_gb_s: Some(1.0),
             },
@@ -179,6 +182,29 @@ fn full_destination_hit_keeps_zero_delay_transfer_transition() {
         transfer.action,
         HandoffAction::StartTransfer { delay_ms: 0.0, .. }
     ));
+}
+
+#[test]
+fn non_token_state_is_preserved_across_the_handoff_compatibility_boundary() {
+    let timing = HandoffTransferTiming {
+        mode: KvTransferTimingMode::DestinationMissing,
+        full_prompt_tokens: 8,
+        state_bytes: 2_000_000,
+        kv_bytes_per_token: Some(1_000_000),
+        bandwidth_gb_s: Some(1.0),
+    };
+    assert_eq!(timing.delay_ms(0), Some(2.0));
+    assert_eq!(timing.delay_ms(4), Some(6.0));
+    assert_eq!(timing.full_prompt_delay_ms(), Some(10.0));
+
+    let encoded = serde_json::to_value(timing).unwrap();
+    let decoded: HandoffTransferTiming = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded, timing);
+    let mut legacy = encoded;
+    legacy.as_object_mut().unwrap().remove("state_bytes");
+    let decoded: HandoffTransferTiming = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.state_bytes, 0);
+    assert_eq!(decoded.delay_ms(0), Some(0.0));
 }
 
 #[test]

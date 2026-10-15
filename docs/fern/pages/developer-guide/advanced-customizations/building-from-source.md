@@ -64,8 +64,11 @@ cd lib/bindings/python
 maturin develop --uv
 ```
 
-For AISimulate offline replay, use `maturin develop --uv --features ais-forward-pass`
-in this step.
+For the optional Dynamo replay integration, use
+`maturin develop --uv --features ais-forward-pass` in this step. Standalone
+AISimulate conversation-aware simulation uses the AISimulate wheel directly;
+it does not require this Dynamo binding. See the
+[AISimulate AgentX quickstart](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/agentic/quickstart.md).
 
 ## 6. Install GPU Memory Service
 

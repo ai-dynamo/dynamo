@@ -54,8 +54,8 @@ lib/sidecar/
     │   ├── router_sidecar_mocker_integration.rs  # Sidecar children, discovery, routing and shutdown
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
-    │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
-    │       ├── sglang.rs      # SGLang protocol and Mocker adapter
+    │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
+    │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -174,18 +174,27 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Four common scenarios registered for both vLLM and SGLang; active cancellation, consumer drop and peer teardown initially enrolled for vLLM; vLLM request/logprob fields, admission rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | Registration and error recovery, readiness, startup failure/interruption, request isolation, SIGTERM withdrawal/drain; vLLM prefill/decode handoff through the real router | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `tests/serve/test_sidecar.py` | Real vLLM logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
-SGLang currently registers the four baseline scenarios. Its process and active
-work enrollment requires implementing and exercising the additional fixture
-contract. TensorRT-LLM is not enrolled here.
+Both vLLM and SGLang register the shared wire and process scenarios.
+TensorRT-LLM is not enrolled here.
 
-CPU handoff checks the routing and opaque metadata contract. A Mocker cannot
-prove that a real engine accepts the serialized request, executes a
-structured-output constraint, releases its real scheduler work, or transfers
-GPU KV cache.
+The alias and health-publication scenarios use `ProcessFixture` controls for
+both backends. vLLM keeps Control healthy while the fixture controls Inference
+readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery,
+parser settings inherited from engine metadata, changed engine roles and native
+trace headers remain SGLang-specific because vLLM has different contracts for
+those values.
+
+CPU handoff checks opaque vLLM metadata and SGLang concurrent bootstrap
+coordination. CPU handoff cancellation holds the peers before Mocker admission;
+it proves transport cleanup and recovery, not native scheduler or transfer
+cleanup. A Mocker cannot prove that a real engine accepts the serialized request,
+executes a structured-output constraint, releases its real scheduler work, or
+transfers GPU KV cache.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
 KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
@@ -196,9 +205,16 @@ establish complete parity with the legacy Python backend.
 ### Relationship to serving E2E tests
 
 `tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
-and real engines. It checks HTTP serving, distinct prefill/decode workers and
-KV-aware routing. These deployment checks remain separate from the CPU Mocker
-tests.
+and real engines through the existing launch scripts. vLLM payloads validate
+HTTP streaming, logprobs, structured output, distinct prefill/decode workers and
+KV-aware routing, including exact token/usage accounting. Payloads also check
+HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers.
+GPU assertions share each deployment's existing startup and teardown.
+
+GPU requests and worker discovery use frontend HTTP, with engine metrics for
+scheduler and transfer assertions. Explicit native stop, consumer drop and exact
+cancelled-terminal delivery remain Rust CPU adapter assertions; frontend HTTP
+disconnection checks real-engine cleanup and recovery.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
@@ -209,11 +225,16 @@ The legacy Python backend suite is also distributed by behavior, including
 1. Choose the boundary being protected. Parsing and state transitions without
    I/O belong beside production code. Direct native RPC behavior belongs in
    `sidecar_mocker_integration.rs`; Worker/discovery or process lifetime belongs in
-   `router_sidecar_mocker_integration.rs`.
+   `router_sidecar_mocker_integration.rs`. Assertions requiring real inference or
+   GPU state belong in `tests/serve/test_sidecar.py`, as frontend HTTP payloads or
+   HTTP routing checks on an existing deployment. Keep direct native-runtime
+   clients in Rust CPU tests.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
-   sidecar child. Keep protocol messages in the backend's support file.
+   sidecar child. Its alias and readiness controls keep protocol messages in the
+   backend's support file, so another backend can enroll without copying the
+   scenario body.
 3. Register common baseline scenarios once in the small enrollment macro. Both
    backends invoke the same macro, producing a separate ordinary Tokio test for
    every scenario. The macro only declares tests; it does not run or select them
@@ -242,7 +263,8 @@ Build the sidecar binary and run the testkit together from the repository root:
 
 ```sh
 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 \
-  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sidecar-testkit
+  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
+    -p dynamo-sidecar-testkit
 ```
 
 Use normal test parallelism. These suites need a Linux host with the repository's
@@ -250,13 +272,28 @@ Rust build prerequisites, permission to bind loopback sockets and spawn child
 processes, and writable temporary storage. Running them needs no GPU, engine
 installation, model download or external discovery service.
 
-The workspace's ordinary `cargo test --locked --all-targets` builds the vLLM
-executable through its executable integration target. A testkit-only command
+The workspace's ordinary `cargo test --locked --all-targets` builds both sidecar
+executables through their executable integration targets. A testkit-only command
 can instead pick up an older binary from the build directory. Always build the
-vLLM package alongside testkit when validating source changes. After that build,
+vLLM and SGLang packages alongside testkit when validating source changes. After that build,
 you can select a suite or test by name:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration
 cargo test --locked -p dynamo-sidecar-testkit --test router_sidecar_mocker_integration
 ```
+
+### Running GPU E2E tests
+
+Run the sidecar serving tests in the vLLM backend image, with the production
+sidecar binary available:
+
+```sh
+python3 -m pytest tests/serve/test_sidecar.py -m "vllm and gpu_1" -v
+```
+
+The disaggregated case runs both engines on one GPU. The usual
+`predownload_models` fixture prepares model weights, and the serve runner owns
+engine startup, readiness and cleanup. Post-merge and nightly CI execute these
+assertions through the existing sidecar E2E jobs. No separate GPU test executable
+or native-test build artifact is needed.

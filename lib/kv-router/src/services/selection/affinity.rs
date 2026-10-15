@@ -1263,7 +1263,6 @@ mod tests {
         assert_eq!(table.query_target("s", None).unwrap(), None);
     }
 
-    /// Live tables keep their runtime clock and reject manual advancement.
     #[tokio::test]
     async fn runtime_clock_rejects_manual_advancement() {
         assert!(table().advance_clock(Instant::now()).is_err());

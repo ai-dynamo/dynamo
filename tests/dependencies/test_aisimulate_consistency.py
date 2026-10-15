@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from importlib import metadata
@@ -113,6 +114,7 @@ def _locked_cargo_version(path: Path, dependency: dict) -> Version:
 def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
+    cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     python_version = _exact_version(python_requirement)
     container_requirement = _requirements_file_aisimulate_requirement(
         AISIMULATE_REQUIREMENTS
@@ -135,11 +137,11 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
         benchmarks = tomllib.load(handle)
     assert _exact_version(_python_requirement(benchmarks)) == python_version
+    assert _python_requirement(benchmarks).url == python_requirement.url
     assert "aisimulate" not in pyproject.get("tool", {}).get("uv", {}).get(
         "sources", {}
     )
 
-    cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert not {"path", "branch", "tag"} & cargo_dependency.keys()
     if "git" in cargo_dependency:
         assert cargo_dependency["git"] == "https://github.com/ai-dynamo/aisimulate.git"
@@ -178,9 +180,6 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     assert binding_dependency["optional"] is True
     assert binding_dependency["features"] == ["python"]
 
-    with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
-        benchmarks = tomllib.load(handle)
-    assert _exact_version(_python_requirement(benchmarks)) == python_version
     for manifest in (cargo, binding_cargo):
         assert not manifest.get(
             "patch"
@@ -250,10 +249,19 @@ def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
 def test_installed_aisimulate_matches_the_declared_release() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
-    pyproject, _ = _root_configs()
+    pyproject, cargo = _root_configs()
+    dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     expected = _exact_version(_python_requirement(pyproject))
 
     assert Version(metadata.version("aisimulate")) == expected
+    direct_url = metadata.distribution("aisimulate").read_text("direct_url.json")
+    origin = json.loads(direct_url) if direct_url is not None else {}
+    # Staged wheels do not retain VCS install metadata. When pip installed the
+    # declared Git requirement directly, verify the checkout as well as its version.
+    if "git" in dependency and "vcs_info" in origin:
+        assert origin["url"] == dependency["git"]
+        assert origin["vcs_info"]["commit_id"] == dependency["rev"]
+        assert origin["subdirectory"] == "python/aisimulate"
 
 
 def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:

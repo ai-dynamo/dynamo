@@ -168,7 +168,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:28cf3bd866ed1f8b1db32c9274e3d411bd86be823798ae3be78e9b2506ba7d79
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm

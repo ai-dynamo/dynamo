@@ -29,7 +29,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:530147a638d4a0fd99aa36d5f054e202909f7e13ed66bd6543a7706711970cf1
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
@@ -247,7 +246,7 @@ spec:
           containers:
           - args:
             - --experimental-external-draft-endpoint
-            - test-lpu-gpu-specdecode/backend/generate
+            - $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/backend/generate
             command:
             - python
             - -m

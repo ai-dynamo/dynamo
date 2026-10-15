@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import textwrap
@@ -143,11 +144,22 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         "dynamo-mocker/python-replay",
     ]
     assert "aic-forward-pass" not in features
+    canonical_core = workspace_cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
-        **workspace_cargo["workspace"]["dependencies"]["aisimulate-core"],
+        **canonical_core,
         "optional": True,
         "features": ["python"],
     }
+    requirement = next(
+        Requirement(item)
+        for item in root_project["dependencies"]
+        if canonicalize_name(Requirement(item).name) == "aisimulate"
+    )
+    assert requirement.url is None
+    assert (
+        str(requirement.specifier).replace("==", "=").replace(".dev", "-dev.")
+        == canonical_core["version"]
+    )
 
 
 def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
@@ -178,3 +190,47 @@ def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
         entry for entry in release.entry_points if entry.name == "aiconfigurator"
     )
     assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"
+
+
+def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
+    if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
+        pytest.skip("AISimulate supports Python 3.11 through 3.13")
+
+    # Adapters consume the public launch contract; layout identity remains
+    # owned by AISimulate rather than a private helper imported by Dynamo.
+    from aisimulate.runner import materialize_engine_launch_config
+
+    config = materialize_engine_launch_config(
+        "vllm",
+        "",
+        {},
+        {
+            "aic_model_path": "resolved-model",
+            "num_gpu_blocks": 4,
+            "tensor_parallel_size": 2,
+            "kv_cache_bytes_per_token": 1024,
+            "kv_bytes_per_token": 4096,
+            "native_host_offload": {
+                "scope": "cluster_shared",
+                "num_host_blocks": 8,
+                "h2d_bandwidth_gbps": 7.0,
+            },
+            "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+        },
+        "aggregated",
+    )
+    engine = config["engine"]
+    host = engine["native_host_offload"]
+    assert config["tensor_parallel_size"] == 2
+    assert engine["kv_cache_bytes_per_token"] == 1024
+    assert engine["kv_transfer_bytes_per_token"] == 4096
+    assert host["scope"] == "cluster_shared"
+    assert host["num_host_blocks"] == 8
+    assert host["h2d_bandwidth_gbps"] == 7.0
+    assert json.loads(host["kv_layout_id"]) == {
+        "model": "resolved-model",
+        "backend": "vllm",
+        "tp": 2,
+        "block_size": engine["block_size"],
+        "bytes_per_token": 1024,
+    }

@@ -340,8 +340,13 @@ def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=Non
     assert (
         json.loads(result.stdout)["completed_requests"] == report["completed_requests"]
     )
-    assert report["summary"]["completed_requests"] == report["completed_requests"]
-    assert report["coverage"]["per_request_records"] == len(report["per_request"])
+    if stack == "dynamo":
+        assert report["summary"]["completed_requests"] == report["completed_requests"]
+        assert report["coverage"]["per_request_records"] == len(report["per_request"])
+    else:
+        # The default AISimulate stack writes the canonical flat report. The
+        # optional Dynamo adapter retains its historical summary alias.
+        assert "summary" not in report
     assert report["per_request"] == [
         json.loads(line)
         for line in (output / "requests.jsonl").read_text().splitlines()
@@ -573,8 +578,12 @@ def test_native_compositions_preserve_telemetry_and_capture(tmp_path, affinity):
         _assert_conversation_bindings(native, "aggregated", "session")
         assert report.metadata["routing_policy"] == native["routing_policy"]
     else:
-        assert "routing_policy" not in native
-        assert "routing_policy" not in report.metadata
+        assert report.metadata["routing_policy"] == native["routing_policy"]
+        policy = native["routing_policy"]
+        assert policy["native_policy"] == "dynamo.DefaultWorkerSelector"
+        # Ordinary KV routing identifies the native policy but does not claim
+        # conversation-affinity decisions or bindings.
+        assert policy["roles"] == {}
         assert native["first_admission_prefix_cache_reused_ratio"] > 0
 
 

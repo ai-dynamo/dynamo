@@ -20,6 +20,7 @@ from aisimulate.runner import (
     EngineReplayRunner,
     EngineReplayRunnerFactory,
     _execution_target_model,
+    materialize_engine_launch_config,
 )
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
@@ -31,7 +32,7 @@ from aisimulate.sweeper.replay import (
 )
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay.api import (
     TelemetryOptions,
     _add_agentic_model_projection,
@@ -39,7 +40,6 @@ from dynamo.replay.api import (
     _planner_replay_adapter,
     run_trace_replay,
 )
-from dynamo.replay.config import lower_upstream_engine_args
 from dynamo.router.simulation.config import ConversationAffinityConfig
 
 _PLANNER_HOOK = HookCapability(
@@ -91,6 +91,15 @@ class DynamoReplayRunnerFactory:
                 "weka",
             ),
             supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
+            supports_agentic_host_offload=(
+                engine_capabilities.supports_agentic_host_offload
+            ),
+            # The composed mocker path preserves HBM-only MTP and decode-speedup
+            # support. The shared G2 gate and native guard reject that combination.
+            supports_agentic_speculative_decoding=True,
+            supports_agentic_snapshots=engine_capabilities.supports_agentic_snapshots,
+            supports_agentic_warmup=engine_capabilities.supports_agentic_warmup,
+            supports_agentic_profile=engine_capabilities.supports_agentic_profile,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(
@@ -100,11 +109,6 @@ class DynamoReplayRunnerFactory:
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             supports_state_cache=True,
-            supports_agentic_snapshots=True,
-            supports_agentic_warmup=True,
-            supports_agentic_profile=True,
-            supports_agentic_host_offload=False,
-            supports_agentic_speculative_decoding=False,
             agentic_qualification="functional_only",
         )
 
@@ -407,19 +411,25 @@ class _DynamoReplayRuntime:
         if self.planner_config is not None:
             deployment = self.spec.backend_deployment
 
-            def args(payload):
+            def args(payload, role):
                 return (
                     None
                     if payload is None
-                    else MockEngineArgs.from_json(
-                        json.dumps(lower_upstream_engine_args(payload))
+                    else normalize_mocker_config(
+                        materialize_engine_launch_config(
+                            deployment.backend,
+                            deployment.backend_version,
+                            deployment.parallel_config,
+                            payload,
+                            role,
+                        )
                     )
                 )
 
             scope = _planner_replay_adapter()(
-                extra_engine_args=args(deployment.agg_engine_args),
-                prefill_engine_args=args(deployment.prefill_engine_args),
-                decode_engine_args=args(deployment.decode_engine_args),
+                extra_engine_args=args(deployment.agg_engine_args, "aggregated"),
+                prefill_engine_args=args(deployment.prefill_engine_args, "prefill"),
+                decode_engine_args=args(deployment.decode_engine_args, "decode"),
                 planner_config_arg=_planner_config_arg(self.planner_config),
                 performance_model_metadata=deployment.performance_model_metadata,
                 benchmark_granularity=self.benchmark_granularity,

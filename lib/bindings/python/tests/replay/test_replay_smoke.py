@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from dynamo.llm import KvRouterConfig
-from dynamo.mocker import MockEngineArgs, run_mocker_trace_replay
+from dynamo.mocker import run_mocker_trace_replay
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import ReplayReport, run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -34,6 +35,51 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.timeout(120),
 ]
+
+
+@pytest.mark.parametrize("entrypoint", ["trace", "synthetic"])
+@pytest.mark.parametrize(
+    ("lag_ms", "replay_mode", "router_mode", "message"),
+    [
+        (-1.0, "offline", "kv_router", "finite and non-negative"),
+        (float("inf"), "offline", "kv_router", "finite and non-negative"),
+        (float("nan"), "offline", "kv_router", "finite and non-negative"),
+        (1.0, "online", "kv_router", "only supports replay_mode='offline'"),
+        (1.0, "offline", "round_robin", "only supports router_mode='kv_router'"),
+    ],
+)
+def test_legacy_replay_rejects_invalid_kv_event_lag(
+    tmp_path, entrypoint, lag_ms, replay_mode, router_mode, message
+):
+    kwargs = {
+        "extra_engine_args": _vllm_args(),
+        "kv_event_lag_ms": lag_ms,
+        "replay_mode": replay_mode,
+        "router_mode": router_mode,
+    }
+    with pytest.raises(ValueError, match=message):
+        if entrypoint == "trace":
+            run_trace_replay(_write_trace_and_args(tmp_path), **kwargs)
+        else:
+            run_synthetic_trace_replay(64, 2, 2, **kwargs)
+
+
+@pytest.mark.parametrize("entrypoint", ["trace", "synthetic"])
+@pytest.mark.parametrize("lag_ms", [None, 0.0, 10.0])
+def test_legacy_kv_event_lag_preserves_replay_completions(tmp_path, entrypoint, lag_ms):
+    kwargs = {
+        "extra_engine_args": _vllm_args(),
+        "kv_event_lag_ms": lag_ms,
+        "router_mode": "kv_router",
+        "num_workers": 2,
+    }
+    if entrypoint == "trace":
+        report = run_trace_replay(_write_trace_and_args(tmp_path), **kwargs)
+    else:
+        report = run_synthetic_trace_replay(64, 2, 2, request_rate=10.0, **kwargs)
+    _assert_basic_report_counts(
+        report, num_requests=2, input_tokens=64, output_tokens=2
+    )
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -223,12 +269,16 @@ def test_per_request_capture_records_queued_routes_and_dp_identity():
         8,
         2,
         4,
-        extra_engine_args=MockEngineArgs(
-            block_size=4,
-            num_gpu_blocks=64,
-            max_num_seqs=4,
-            speedup_ratio=1000.0,
-            dp_size=2,
+        extra_engine_args=normalize_mocker_config(
+            {
+                "dp_size": 2,
+                "engine": {
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "max_num_seqs": 4,
+                    "speedup_ratio": 1000.0,
+                },
+            }
         ),
         num_workers=1,
         replay_mode="offline",
@@ -251,11 +301,15 @@ def test_per_request_capture_records_queued_routes_and_dp_identity():
         8,
         8,
         4,
-        extra_engine_args=MockEngineArgs(
-            block_size=4,
-            num_gpu_blocks=6,
-            max_num_seqs=1,
-            speedup_ratio=1000.0,
+        extra_engine_args=normalize_mocker_config(
+            {
+                "engine": {
+                    "block_size": 4,
+                    "num_gpu_blocks": 6,
+                    "max_num_seqs": 1,
+                    "speedup_ratio": 1000.0,
+                }
+            }
         ),
         num_workers=2,
         replay_mode="offline",
@@ -946,7 +1000,9 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
 
     report = run_trace_replay(
         trace_path,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        extra_engine_args=normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+        ),
         num_workers=1,
         replay_mode=replay_mode,
     )
@@ -1049,7 +1105,9 @@ def test_run_trace_replay_rejects_disagg_worker_counts_for_aggregated_mode(tmp_p
     ):
         run_trace_replay(
             trace_path,
-            extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+            extra_engine_args=normalize_mocker_config(
+                {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+            ),
             num_workers=1,
             num_prefill_workers=2,
             num_decode_workers=2,

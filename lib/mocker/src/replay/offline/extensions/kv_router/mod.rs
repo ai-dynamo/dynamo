@@ -3,7 +3,7 @@
 
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,30 +12,34 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::WorkerAffinityTarget;
+use dynamo_kv_router::indexer::{
+    KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails,
+    query_lower_tiers_with_options,
+};
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
-    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    SchedulingContext, WorkerPlacement,
+    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
+    ScheduleMode, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
-use dynamo_kv_router::services::selection::affinity::Hold;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
     SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerLoadProjection, WorkerSelectionInput, WorkerSelector, scheduling::TierOverlapBlocks,
+    WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
 };
 use dynamo_tokens::SequenceHash;
+use futures::executor::block_on;
+use futures::future::try_join_all;
 use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::MockerConfig;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
@@ -48,14 +52,7 @@ use aisimulate_core::replay::{
     ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
 
-mod affinity;
-use affinity::ReplayAffinity;
-pub(in crate::replay) use affinity::RoutingEvidence;
-pub use affinity::{ReplayAffinityConfig, ReplayAffinityMode};
-
 mod composition;
-#[cfg(feature = "python-replay")]
-pub(in crate::replay) use composition::validate_affinity_router_config;
 pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
 
 #[derive(Clone, Copy)]
@@ -92,6 +89,34 @@ impl KvEventSummary {
             },
             dynamo_kv_router::protocols::KvCacheEventData::Cleared => Self::Cleared,
         }
+    }
+}
+
+struct KvEventLabel {
+    worker_id: WorkerId,
+    dp_rank: u32,
+    event_id: u64,
+    summary: KvEventSummary,
+}
+
+impl KvEventLabel {
+    fn new(event: &RouterEvent) -> Self {
+        Self {
+            worker_id: event.worker_id,
+            dp_rank: event.event.dp_rank,
+            event_id: event.event.event_id,
+            summary: KvEventSummary::from_data(&event.event.data),
+        }
+    }
+}
+
+impl fmt::Display for KvEventLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "worker={} dp_rank={} event_id={} data={}",
+            self.worker_id, self.dp_rank, self.event_id, self.summary
+        )
     }
 }
 
@@ -210,6 +235,9 @@ pub(crate) struct OfflineRouterSnapshot {
 struct SyncReplayIndexer {
     block_size: u32,
     tree: RadixTree,
+    /// Non-device (for example cluster-shared G2 `HostPinned`) residency,
+    /// allocated on the first lower-tier event so G1-only replays pay nothing.
+    lower_tier: Option<LowerTierIndexers>,
     /// Disaggregated decode placement never observes KV events, so its tree
     /// stays empty and hashing a prompt to query it would be wasted work.
     has_indexed_events: bool,
@@ -220,13 +248,18 @@ impl SyncReplayIndexer {
         Self {
             block_size,
             tree: RadixTree::new(),
+            lower_tier: None,
             has_indexed_events: false,
         }
     }
 
-    fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
+    fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+        lora_name: Option<&str>,
+    ) -> TieredMatchDetails {
         if !self.has_indexed_events {
-            return OverlapScores::default();
+            return TieredMatchDetails::default();
         }
         let sequence = compute_block_hash_for_seq(
             tokens,
@@ -236,20 +269,68 @@ impl SyncReplayIndexer {
                 ..Default::default()
             },
         );
-        self.tree.find_matches(sequence, false)
+        self.find_matches_for_hashes(sequence)
     }
 
-    fn find_matches_for_hashes(&self, local_block_hashes: Vec<LocalBlockHash>) -> OverlapScores {
-        self.tree.find_matches(local_block_hashes, false)
+    fn find_matches_for_hashes(&self, sequence: Vec<LocalBlockHash>) -> TieredMatchDetails {
+        let Some(lower_tier) = &self.lower_tier else {
+            return TieredMatchDetails {
+                device: self.tree.find_match_details(sequence, false),
+                lower_tier: Default::default(),
+            };
+        };
+        let device = self.tree.find_match_details(sequence.clone(), false);
+        let lower_tier = query_lower_tiers_with_options(
+            lower_tier,
+            &sequence,
+            &device,
+            LowerTierQueryOptions::default(),
+        );
+        TieredMatchDetails { device, lower_tier }
     }
 
-    fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
-        // TODO: support lower tier events in replay indexer
-        if !event.storage_tier.is_gpu() {
-            return Ok(());
+    /// Applies a batch in order. Lower-tier events are queued on their indexer
+    /// threads without a per-event round trip; one wait at the end acks them
+    /// all, so later placements still observe the whole batch.
+    fn apply_events(&mut self, events: Vec<RouterEvent>) -> Result<()> {
+        let mut lower_tier_acks = Vec::new();
+        for event in events {
+            let label = KvEventLabel::new(&event);
+            self.has_indexed_events = true;
+            if event.storage_tier.is_gpu() {
+                self.tree
+                    .apply_event(event)
+                    .with_context(|| format!("failed to apply replay KV event {label}"))?;
+                continue;
+            }
+            let block_size = self.block_size;
+            let indexer = self
+                .lower_tier
+                .get_or_insert_with(|| LowerTierIndexers::new(1, block_size))
+                .get_or_create(event.storage_tier);
+            lower_tier_acks.push(async move {
+                indexer
+                    .apply_event_and_wait(event)
+                    .await
+                    .with_context(|| format!("failed to apply replay KV event {label}"))
+            });
         }
-        self.has_indexed_events = true;
-        self.tree.apply_event(event).map_err(Into::into)
+        block_on(try_join_all(lower_tier_acks))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
+        self.apply_events(vec![event])
+    }
+
+    fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.tree.remove_worker(worker_id);
+        if let Some(lower_tier) = &self.lower_tier {
+            for indexer in lower_tier.all() {
+                block_on(indexer.remove_worker(worker_id));
+            }
+        }
     }
 
     #[cfg(test)]
@@ -274,15 +355,14 @@ struct PendingRequest {
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
-    overlaps: OverlapScores,
+    /// Tiered overlap scored by the configured router (G1 plus weighted G2 hits).
+    overlap: OverlapSignals,
     track_prefill_tokens: bool,
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
-    group_key: Option<String>,
-    affinity_hold: Option<Hold>,
 }
 
 impl PendingRequest {
@@ -294,32 +374,15 @@ impl PendingRequest {
     /// still need the sequence take it back from the returned request.
     fn scheduling_request(
         &mut self,
-        block_size: usize,
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) -> SchedulingRequest {
-        let effective_overlap_blocks = self
-            .overlaps
-            .scores
-            .iter()
-            .map(|(worker, overlap)| (*worker, *overlap as f64))
-            .collect();
-        let effective_cached_tokens = self
-            .overlaps
-            .scores
-            .iter()
-            .map(|(worker, overlap)| (*worker, *overlap as usize * block_size))
-            .collect();
         SchedulingRequest {
             mode: ScheduleMode::Tracked {
                 request_id: self.request_id(),
             },
             token_seq: self.token_seq.take(),
             isl_tokens: self.isl_tokens,
-            overlap: OverlapSignals {
-                tier_overlap_blocks: TierOverlapBlocks::default(),
-                effective_overlap_blocks,
-                effective_cached_tokens,
-            },
+            overlap: std::mem::take(&mut self.overlap),
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             worker_loads,
@@ -334,18 +397,8 @@ impl PendingRequest {
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
-            affinity_target: self.affinity_hold.as_ref().and_then(Hold::target),
-            // An acquired bound lease promises this exact dispatch target.
-            // Reuse native eligibility for capacity and cache-cost accounting.
-            pinned_worker: self
-                .affinity_hold
-                .as_ref()
-                .and_then(Hold::target)
-                .and_then(|target| {
-                    target
-                        .dp_rank
-                        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
-                }),
+            affinity_target: None,
+            pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -368,7 +421,11 @@ pub(crate) struct OfflineReplayRouter {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
-    affinity: Option<ReplayAffinity>,
+    /// Simulated delay before KV events reach the indexer; `0.0` applies them synchronously.
+    /// Completions never lag: a live router learns them in-band on the response path.
+    kv_event_lag_ms: f64,
+    /// Lagged KV event batches in arrival order, keyed by the replay time they become visible.
+    lagged_kv_events: VecDeque<(f64, Vec<RouterEvent>)>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -377,7 +434,7 @@ pub(in crate::replay) struct KvRouterPlacement {
 
 impl KvRouterPlacement {
     pub(in crate::replay) fn new_with_selector_seed(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -398,22 +455,8 @@ impl KvRouterPlacement {
         Ok(Self { router })
     }
 
-    pub(in crate::replay) fn with_affinity(
-        mut self,
-        config: Option<ReplayAffinityConfig>,
-        role: &'static str,
-        capture: bool,
-        evidence: RoutingEvidence,
-    ) -> Result<Self> {
-        if let Some(config) = config {
-            self.router.affinity = Some(ReplayAffinity::new(
-                config,
-                self.router.decay_time_epoch,
-                role,
-                capture,
-                evidence,
-            )?);
-        }
+    pub(in crate::replay) fn with_kv_event_lag_ms(mut self, lag_ms: f64) -> Result<Self> {
+        self.router.set_kv_event_lag_ms(lag_ms)?;
         Ok(self)
     }
 
@@ -532,59 +575,12 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn observe(&mut self, observation: RouterEventBatch, now_ms: f64) -> Result<Vec<Placement>> {
-        if let Some(affinity) = &mut self.router.affinity {
-            affinity.advance(now_ms)?;
-        }
-        let effects = self.router.on_kv_events(observation.0)?;
+        let effects = self.router.on_kv_events_at(observation.0, now_ms)?;
         Ok(self.placements(effects.admissions))
     }
 
     fn cancel_pending(&mut self, request_id: Uuid) -> bool {
         self.router.cancel_pending(request_id)
-    }
-
-    fn dispatch_committed(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
-        if let Some(affinity) = &mut self.router.affinity {
-            affinity.advance(now_ms)?;
-            affinity.commit(request_id)?;
-        }
-        Ok(())
-    }
-
-    fn dispatch_aborted(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
-        if let Some(affinity) = &mut self.router.affinity {
-            affinity.advance(now_ms)?;
-            affinity.release(request_id, true)?;
-            self.router
-                .slots
-                .free(&request_id.to_string(), self.router.decay_now(now_ms))?;
-        }
-        Ok(())
-    }
-
-    fn advance_clock(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
-        let Some(affinity) = &mut self.router.affinity else {
-            return Ok(Vec::new());
-        };
-        affinity.advance(now_ms)?;
-        let reschedule = affinity.ready;
-        let ready = affinity.take_ready(&self.router.workers_with_configs)?;
-        let mut admissions = Vec::new();
-        for pending in ready {
-            admissions.extend(self.router.schedule_pending(pending, now_ms)?.admissions);
-        }
-        if reschedule {
-            admissions.extend(self.router.drain_pending(self.router.decay_now(now_ms))?);
-        }
-        Ok(self.placements(admissions))
-    }
-
-    fn next_wakeup_ms(&self) -> Option<f64> {
-        self.router
-            .affinity
-            .as_ref()
-            .filter(|affinity| affinity.ready && self.router.pending_count() > 0)
-            .map(|affinity| affinity.now_ms)
     }
 
     fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
@@ -624,7 +620,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 
 impl OfflineReplayRouter {
     pub(crate) fn new(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -639,7 +635,7 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn new_with_selector_seed(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -672,8 +668,31 @@ impl OfflineReplayRouter {
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
             tracking_hash,
-            affinity: None,
+            kv_event_lag_ms: 0.0,
+            lagged_kv_events: VecDeque::new(),
         })
+    }
+
+    pub(crate) fn set_kv_event_lag_ms(&mut self, lag_ms: f64) -> Result<()> {
+        if !lag_ms.is_finite() || lag_ms < 0.0 {
+            return Err(anyhow!(
+                "kv_event_lag_ms must be finite and non-negative, got {lag_ms}"
+            ));
+        }
+        self.kv_event_lag_ms = lag_ms;
+        Ok(())
+    }
+
+    /// Apply, in arrival order, every lagged KV event batch visible at `now_ms`. KV events change
+    /// no load, so this never admits queued requests on its own.
+    fn apply_due_kv_events(&mut self, now_ms: f64) -> Result<()> {
+        while let Some((_, events)) = self
+            .lagged_kv_events
+            .pop_front_if(|(visible_ms, _)| *visible_ms <= now_ms)
+        {
+            self.on_kv_events(events)?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -711,23 +730,9 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let mut pending =
+        self.apply_due_kv_events(now_ms)?;
+        let pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
-        if let Some(affinity) = &mut self.affinity {
-            affinity.advance(now_ms)?;
-            if !affinity.acquire(&mut pending, &self.workers_with_configs)? {
-                affinity.wait(pending);
-                return Ok(RouterEffects::default());
-            }
-        }
-        self.schedule_pending(pending, now_ms)
-    }
-
-    fn schedule_pending(
-        &mut self,
-        mut pending: PendingRequest,
-        now_ms: f64,
-    ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -735,7 +740,7 @@ impl OfflineReplayRouter {
         {
             Some(class_index) => (class_index, None),
             None => {
-                let snapshot = self.snapshot_for(&mut pending);
+                let snapshot = self.snapshot_for(&pending);
                 (
                     self.profile.resolve_class_index(
                         pending.policy_class.as_deref(),
@@ -747,16 +752,10 @@ impl OfflineReplayRouter {
         };
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
-            && (self.pending.has_backlog(class_index)
-                || Self::request_workers_busy(
-                    &pending,
-                    &self.slots.active_tokens(decay_now),
-                    &self.workers_with_configs,
-                    class,
-                ));
+            && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
 
         if should_queue {
-            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&mut pending));
+            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             self.pending
@@ -769,32 +768,17 @@ impl OfflineReplayRouter {
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
-                    pending
-                        .affinity_hold
-                        .as_ref()
-                        .and_then(Hold::target)
-                        .and_then(|target| {
-                            target.dp_rank.map(|dp| {
-                                WorkerPlacement::Exact(WorkerWithDpRank::new(target.worker_id, dp))
-                            })
-                        })
-                        .unwrap_or(WorkerPlacement::Any),
+                    WorkerPlacement::Any,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
-            // Native Exact lanes can leave another worker/rank runnable even
-            // with backlog. Let PolicyQueue decide, without waiting for an
-            // unrelated completion on the busy affinity target.
-            return Ok(RouterEffects {
-                admissions: if self.affinity.is_some() {
-                    self.drain_pending(decay_now)?
-                } else {
-                    Vec::new()
-                },
-            });
+            return Ok(RouterEffects::default());
         }
 
-        let uuid = pending.uuid;
+        let uuid = request
+            .metadata()
+            .uuid
+            .expect("offline replay requests must have UUIDs before router submission");
         let outcome = self.admit_request(pending, decay_now)?;
         Ok(RouterEffects {
             admissions: vec![WorkerAdmission {
@@ -807,25 +791,22 @@ impl OfflineReplayRouter {
         })
     }
 
+    pub(crate) fn on_kv_events_at(
+        &mut self,
+        events: Vec<RouterEvent>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        if self.kv_event_lag_ms == 0.0 {
+            return self.on_kv_events(events);
+        }
+        self.apply_due_kv_events(now_ms)?;
+        self.lagged_kv_events
+            .push_back((now_ms + self.kv_event_lag_ms, events));
+        Ok(RouterEffects::default())
+    }
+
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
-        if let Some(affinity) = &self.affinity {
-            anyhow::ensure!(
-                events.iter().all(|event| event.storage_tier.is_gpu()),
-                "conversation affinity supports device KV events only"
-            );
-            affinity.record_events(events.len())?;
-        }
-        for event in events {
-            let worker_id = event.worker_id;
-            let event_id = event.event.event_id;
-            let dp_rank = event.event.dp_rank;
-            let summary = KvEventSummary::from_data(&event.event.data);
-            self.indexer.apply_event(event).with_context(|| {
-                format!(
-                    "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
-                )
-            })?;
-        }
+        self.indexer.apply_events(events)?;
         Ok(RouterEffects::default())
     }
 
@@ -834,9 +815,7 @@ impl OfflineReplayRouter {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        if let Some(affinity) = &mut self.affinity {
-            affinity.advance(now_ms)?;
-        }
+        self.apply_due_kv_events(now_ms)?;
         let decay_now = self.decay_now(now_ms);
         self.slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
@@ -851,10 +830,7 @@ impl OfflineReplayRouter {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        if let Some(affinity) = &mut self.affinity {
-            affinity.advance(now_ms)?;
-            affinity.release(uuid, false)?;
-        }
+        self.apply_due_kv_events(now_ms)?;
         let decay_now = self.decay_now(now_ms);
         self.slots
             .free(&uuid.to_string(), decay_now)
@@ -868,20 +844,11 @@ impl OfflineReplayRouter {
     pub(crate) fn cancel_pending(&mut self, uuid: Uuid) -> bool {
         let before = self.pending.pending_count();
         self.pending.retain(|request| request.uuid != uuid);
-        let removed = self.pending.pending_count() != before;
-        if let Some(affinity) = &mut self.affinity {
-            affinity.ready |= removed;
-            return affinity.cancel_waiter(uuid) || removed;
-        }
-        removed
+        self.pending.pending_count() != before
     }
 
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.pending_count()
-            + self
-                .affinity
-                .as_ref()
-                .map_or(0, ReplayAffinity::waiting_count)
     }
 
     /// Register a new worker with the router without disturbing existing slot state.
@@ -927,11 +894,17 @@ impl OfflineReplayRouter {
         self.slots
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
-        self.indexer.tree.remove_worker(wid);
+        self.indexer.remove_worker(wid);
+        // Lagged events from the removed worker would re-add blocks it no longer owns.
+        self.lagged_kv_events.retain_mut(|(_, events)| {
+            events.retain(|event| event.worker_id != wid);
+            !events.is_empty()
+        });
         Ok(())
     }
 
     pub(crate) fn on_topology_changed(&mut self, now_ms: f64) -> Result<RouterEffects> {
+        self.apply_due_kv_events(now_ms)?;
         if self.workers_with_configs.is_empty() {
             return Ok(RouterEffects::default());
         }
@@ -950,10 +923,11 @@ impl OfflineReplayRouter {
             .map(|entry| {
                 let mut overlap_blocks_by_worker = entry
                     .payload()
-                    .overlaps
-                    .scores
+                    .overlap
+                    .tier_overlap_blocks
+                    .device
                     .iter()
-                    .map(|(worker, overlap)| (worker.worker_id as usize, *overlap))
+                    .map(|(worker, overlap)| (worker.worker_id as usize, *overlap as u32))
                     .collect::<Vec<_>>();
                 overlap_blocks_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
 
@@ -1012,9 +986,9 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
-        let (overlaps, token_seq) = match replay_hashes {
+        let (tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
-                let overlaps =
+                let tiered =
                     self.indexer
                         .find_matches_for_hashes(crate::loadgen::local_block_hashes(
                             replay_hashes.local_block_hashes,
@@ -1039,11 +1013,11 @@ impl OfflineReplayRouter {
                         None,
                     )
                 };
-                (overlaps, token_seq)
+                (tiered, token_seq)
             }
             None => {
                 let tokens = request_view.prompt_tokens_for_placement()?;
-                let overlaps = self.indexer.find_matches_for_request(&tokens, None);
+                let tiered = self.indexer.find_matches_for_request(&tokens, None);
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
                     self.tracking_hash_scope(),
@@ -1052,15 +1026,16 @@ impl OfflineReplayRouter {
                     BlockHashOptions::default(),
                     None,
                 );
-                (overlaps, token_seq)
+                (tiered, token_seq)
             }
         };
+        let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
 
         Ok(PendingRequest {
             uuid,
             token_seq,
             isl_tokens: input_length,
-            overlaps,
+            overlap,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
                 u32::try_from(max_output_tokens)
@@ -1069,13 +1044,7 @@ impl OfflineReplayRouter {
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
-            group_key: self
-                .affinity
-                .as_ref()
-                .map(|affinity| affinity.config.group_key(request, session_id.as_deref()))
-                .transpose()?,
             session_id,
-            affinity_hold: None,
         })
     }
 
@@ -1094,12 +1063,13 @@ impl OfflineReplayRouter {
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let mut scheduling_request =
-            request.scheduling_request(self.block_size as usize, worker_loads);
+        let mut scheduling_request = request.scheduling_request(worker_loads);
         let eligibility = scheduling_request.eligibility();
-        let best_available_overlap_blocks = request
-            .overlaps
-            .scores
+        // Best and selected overlap use the same weighted, rounded blocks as
+        // the production router's overlap metric.
+        let best_available_overlap_blocks = scheduling_request
+            .overlap
+            .effective_overlap_blocks
             .iter()
             .filter(|(worker, _)| {
                 self.workers_with_configs
@@ -1107,7 +1077,7 @@ impl OfflineReplayRouter {
                     .is_some_and(|config| eligibility.allows_worker(worker.worker_id, config))
                     && worker.dp_rank < self.dp_size
             })
-            .map(|(_, overlap)| *overlap)
+            .map(|(_, overlap)| overlap.round() as u32)
             .max()
             .unwrap_or(0);
         let selection = self
@@ -1135,7 +1105,7 @@ impl OfflineReplayRouter {
 
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
-        let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
+        let overlap_blocks = selection.effective_overlap_blocks.round() as u32;
 
         self.slots
             .add_request(
@@ -1152,25 +1122,6 @@ impl OfflineReplayRouter {
             )
             .map_err(anyhow::Error::from)?;
 
-        if let Some(affinity) = &mut self.affinity {
-            affinity.stage(
-                request.uuid,
-                request
-                    .affinity_hold
-                    .take()
-                    .context("affinity admission has no hold")?,
-                WorkerAffinityTarget {
-                    worker_id: selection.worker.worker_id,
-                    dp_rank: Some(selection.worker.dp_rank),
-                },
-                request
-                    .group_key
-                    .as_deref()
-                    .context("affinity admission has no group key")?,
-                overlap_blocks,
-                best_available_overlap_blocks,
-            )?;
-        }
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,
@@ -1181,19 +1132,16 @@ impl OfflineReplayRouter {
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         let mut admissions = Vec::new();
-        if self.affinity.is_some() {
-            self.pending.recheck_all_workers();
-        }
         loop {
             // Most completions find an empty queue, which never consults the
             // predicate, so only snapshot active tokens once one is needed.
             let mut active_tokens = None;
             let slots = &self.slots;
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, request| {
+            let Some(popped) = self.pending.pop_next(|_, class, _| {
                 let active_tokens =
                     active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
-                !Self::request_workers_busy(request, active_tokens, workers, class)
+                !Self::all_workers_busy_with(active_tokens, workers, class)
             }) else {
                 break;
             };
@@ -1212,34 +1160,9 @@ impl OfflineReplayRouter {
         Ok(admissions)
     }
 
-    fn request_workers_busy(
-        request: &PendingRequest,
-        active_tokens: &HashMap<WorkerWithDpRank, usize>,
-        workers: &HashMap<WorkerId, ReplayWorkerConfig>,
-        class: &PolicyClassConfig,
-    ) -> bool {
-        if let Some(target) = request.affinity_hold.as_ref().and_then(Hold::target) {
-            return workers.get(&target.worker_id).is_none_or(|config| {
-                let start = target.dp_rank.unwrap_or(config.data_parallel_start_rank());
-                let end = target
-                    .dp_rank
-                    .map_or(start.saturating_add(config.data_parallel_size()), |rank| {
-                        rank + 1
-                    });
-                (start..end).all(|rank| {
-                    class.worker_is_busy(
-                        active_tokens
-                            .get(&WorkerWithDpRank::new(target.worker_id, rank))
-                            .copied()
-                            .unwrap_or(0),
-                        config
-                            .max_num_batched_tokens()
-                            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
-                    )
-                })
-            });
-        }
-        Self::all_workers_busy_with(active_tokens, workers, class)
+    fn all_workers_busy(&self, class: &PolicyClassConfig, decay_now: Instant) -> bool {
+        let active_tokens = self.slots.active_tokens(decay_now);
+        Self::all_workers_busy_with(&active_tokens, &self.workers_with_configs, class)
     }
 
     fn all_workers_busy_with(
@@ -1261,24 +1184,15 @@ impl OfflineReplayRouter {
         })
     }
 
-    fn snapshot_for(&self, request: &mut PendingRequest) -> QueueSnapshot {
-        if self.affinity.is_some() {
-            let mut native =
-                request.scheduling_request(self.block_size as usize, FxHashMap::default());
-            let cached_tokens =
-                SchedulingContext::new(&native, &self.workers_with_configs).best_cached_tokens();
-            request.token_seq = native.token_seq.take();
-            return QueueSnapshot::new(request.isl_tokens, cached_tokens);
-        }
+    fn snapshot_for(&self, request: &PendingRequest) -> QueueSnapshot {
         let cached_tokens = request
-            .overlaps
-            .scores
+            .overlap
+            .effective_cached_tokens
             .iter()
             .filter(|(worker, _)| self.workers_with_configs.contains_key(&worker.worker_id))
-            .map(|(_, overlap)| *overlap)
+            .map(|(_, cached_tokens)| *cached_tokens)
             .max()
-            .unwrap_or(0) as usize
-            * self.block_size as usize;
+            .unwrap_or(0);
         QueueSnapshot::new(request.isl_tokens, cached_tokens)
     }
 
@@ -1330,7 +1244,7 @@ mod tests {
     use dynamo_kv_router::protocols::{
         BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId, compute_block_hash_for_seq,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
@@ -1339,7 +1253,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
-    use crate::common::protocols::{DirectRequest, MockEngineArgs};
+    use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
     use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
 
@@ -1358,20 +1272,24 @@ mod tests {
         }
     }
 
-    fn replay_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(256))
-            .build()
-            .unwrap()
+    fn replay_args() -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 256
+            }
+        }))
+        .unwrap()
     }
 
-    fn queueing_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap()
+    fn queueing_args() -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap()
     }
 
     fn router_config() -> KvRouterConfig {
@@ -1498,7 +1416,7 @@ mod tests {
                 Some("session-a".to_string()),
             )
             .unwrap();
-        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+        let scheduling_request = pending.scheduling_request(FxHashMap::default());
 
         assert_eq!(
             scheduling_request
@@ -1545,18 +1463,150 @@ mod tests {
     }
 
     #[test]
-    fn lower_tier_events_do_not_enter_offline_primary_index() {
+    fn lower_tier_events_are_indexed_outside_the_primary_tree() {
         let mut indexer = SyncReplayIndexer::new(64);
+        let worker = WorkerWithDpRank::new(7, 0);
 
         indexer
             .apply_event(store_event(7, 1, 101, StorageTier::HostPinned))
             .unwrap();
         assert_eq!(indexer.debug_snapshot().total_cached_blocks, 0);
+        let tiered = indexer.find_matches_for_hashes(vec![LocalBlockHash(101)]);
+        assert_eq!(tiered.device.overlap_scores.scores.get(&worker), None);
+        assert_eq!(
+            tiered.lower_tier[&StorageTier::HostPinned]
+                .hits
+                .get(&worker),
+            Some(&1)
+        );
 
         indexer
             .apply_event(store_event(7, 2, 101, StorageTier::Device))
             .unwrap();
         assert_eq!(indexer.debug_snapshot().total_cached_blocks, 1);
+
+        indexer.remove_worker(7);
+        let tiered = indexer.find_matches_for_hashes(vec![LocalBlockHash(101)]);
+        assert!(tiered.device.overlap_scores.scores.is_empty());
+        assert!(
+            tiered
+                .lower_tier
+                .values()
+                .all(|matches| matches.hits.is_empty())
+        );
+    }
+
+    /// One store event covering a whole prompt, as AISimulate relays a
+    /// cluster-shared G2 pool's residency (`HostPinned`) to each subscribed rank.
+    fn prompt_store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        local_hashes: &[LocalBlockHash],
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        chain_store_event(worker_id, event_id, 0, local_hashes, storage_tier)
+    }
+
+    /// Stores `local_hashes` as prompt blocks `first..`, chained under block
+    /// `first - 1` so a lower tier can continue a device match.
+    fn chain_store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        first: usize,
+        local_hashes: &[LocalBlockHash],
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        let block_hash = |index: usize| ExternalSequenceBlockHash(1_000 + index as u64);
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: first.checked_sub(1).map(block_hash),
+                    start_position: None,
+                    blocks: local_hashes
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, hash)| KvCacheStoredBlockData {
+                            block_hash: block_hash(first + offset),
+                            tokens_hash: *hash,
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    #[test]
+    fn host_pinned_hits_are_weighted_into_offline_placement() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2)
+            .expect("router construction");
+        let target = request_with_priorities(1, 7, 256, 0, 0);
+        let local_hashes = compute_block_hash_for_seq(
+            &target.tokens,
+            router.block_size,
+            BlockHashOptions::default(),
+        );
+        assert_eq!(local_hashes.len(), 4);
+        router
+            .on_kv_events(vec![prompt_store_event(
+                1,
+                1,
+                &local_hashes,
+                StorageTier::HostPinned,
+            )])
+            .unwrap();
+
+        let effects = router.on_request_arrival(&target, None, 0.0).unwrap();
+        // Four G2 blocks at the default host_cache_hit_weight of 0.75 score
+        // three effective blocks, counted the same way for best and selected.
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 1,
+                overlap_blocks: 3,
+                best_available_overlap_blocks: 3,
+                isl_blocks: 4,
+            }]
+        );
+    }
+
+    #[test]
+    fn host_pinned_blocks_extend_a_partial_device_match() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2)
+            .expect("router construction");
+        let target = request_with_priorities(1, 7, 256, 0, 0);
+        let local_hashes = compute_block_hash_for_seq(
+            &target.tokens,
+            router.block_size,
+            BlockHashOptions::default(),
+        );
+        assert_eq!(local_hashes.len(), 4);
+        // Worker 1 holds block 0 in G1 and blocks 1..4 in G2.
+        router
+            .on_kv_events(vec![
+                chain_store_event(1, 1, 0, &local_hashes[..1], StorageTier::Device),
+                chain_store_event(1, 2, 1, &local_hashes[1..], StorageTier::HostPinned),
+            ])
+            .unwrap();
+
+        let effects = router.on_request_arrival(&target, None, 0.0).unwrap();
+        // One G1 block plus three G2 blocks at 0.75 is 3.25, rounded to 3.
+        // Without the device-to-host continuation the G2 chain would not match.
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 1,
+                overlap_blocks: 3,
+                best_available_overlap_blocks: 3,
+                isl_blocks: 4,
+            }]
+        );
     }
 
     #[test]
@@ -2245,254 +2295,148 @@ policy_classes:
         );
     }
 
-    fn affinity_placement(dp_size: u32, queued: bool, capture: bool) -> super::KvRouterPlacement {
-        let mut args = queueing_args();
-        args.dp_size = dp_size;
-        let config = if queued {
-            queueing_router_config()
-        } else {
-            KvRouterConfig {
-                router_queue_threshold: None,
-                ..Default::default()
-            }
-        };
-        super::KvRouterPlacement::new_with_selector_seed(&args, Some(config), None, 1, None)
-            .unwrap()
-            .with_affinity(
-                Some(super::ReplayAffinityConfig {
-                    mode: super::ReplayAffinityMode::Session,
-                    ttl_seconds: 1.0,
-                }),
-                "aggregated",
-                capture,
-                super::RoutingEvidence::default(),
+    fn admitted_uuids(effects: super::RouterEffects) -> Vec<Uuid> {
+        effects
+            .admissions
+            .iter()
+            .map(|admission| admission.uuid)
+            .collect()
+    }
+
+    #[test]
+    fn lagged_kv_events_stay_invisible_to_routing_until_due() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        let first = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&first.tokens, router.block_size);
+        router
+            .on_kv_events_at(
+                vec![store_event(
+                    0,
+                    1,
+                    hashes.local_block_hashes[0],
+                    StorageTier::Device,
+                )],
+                0.0,
             )
-            .unwrap()
+            .unwrap();
+
+        let hidden = router
+            .on_request_arrival(&first, Some(hashes.clone()), 49.0)
+            .unwrap();
+        assert_eq!(hidden.admissions[0].best_available_overlap_blocks, 0);
+        let visible = router
+            .on_request_arrival(&request(2, 7), Some(hashes), 50.0)
+            .unwrap();
+        assert_eq!(visible.admissions[0].best_available_overlap_blocks, 1);
     }
 
-    fn affinity_place(
-        placement: &mut super::KvRouterPlacement,
-        id: u128,
-        session: &str,
-        now: f64,
-    ) -> aisimulate_core::replay::PlacementEffects {
-        use aisimulate_core::replay::PlacementPolicy;
-        placement
-            .place(
-                &request(id, 7),
-                super::KvReplayMetadata::default(),
-                Some(session.into()),
-                now,
+    #[test]
+    fn completions_stay_immediate_under_kv_event_lag() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        let admitted = router.debug_snapshot(0.0);
+        assert_eq!(admitted.active_tokens_by_worker, vec![(0, 64)]);
+        assert_ne!(admitted.active_blocks_by_worker, vec![(0, 0)]);
+
+        router
+            .on_prefill_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        assert_eq!(
+            router.debug_snapshot(10.0).active_tokens_by_worker,
+            vec![(0, 0)]
+        );
+        router
+            .on_request_completed(Uuid::from_u128(1), 20.0)
+            .unwrap();
+        assert_eq!(
+            router.debug_snapshot(20.0).active_blocks_by_worker,
+            vec![(0, 0)]
+        );
+
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        assert_eq!(router.pending_count(), 1);
+
+        let released = router
+            .on_request_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(released), vec![Uuid::from_u128(2)]);
+        assert_eq!(router.pending_count(), 0);
+    }
+
+    #[test]
+    fn completion_drain_applies_due_kv_events_first() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        router
+            .on_kv_events_at(vec![store_event(0, 1, 11, StorageTier::Device)], 0.0)
+            .unwrap();
+        router
+            .on_kv_events_at(vec![store_event(0, 2, 12, StorageTier::Device)], 20.0)
+            .unwrap();
+        assert_eq!(router.debug_snapshot(20.0).indexer.total_cached_blocks, 0);
+
+        // The batch due at 50 ms lands before the drain at 60 ms; the batch due at 70 ms does not.
+        let released = router
+            .on_request_completed(Uuid::from_u128(1), 60.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(released), vec![Uuid::from_u128(2)]);
+        assert_eq!(router.debug_snapshot(60.0).indexer.total_cached_blocks, 1);
+    }
+
+    #[test]
+    fn finalized_worker_removal_drops_its_lagged_kv_events() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 2).unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_kv_events_at(
+                vec![
+                    store_event(0, 1, 11, StorageTier::Device),
+                    store_event(1, 2, 12, StorageTier::Device),
+                ],
+                0.0,
             )
-            .unwrap()
-    }
+            .unwrap();
+        router.remove_worker(1).unwrap();
+        router.finalize_worker_removal(1).unwrap();
 
-    fn immediate_target(effects: aisimulate_core::replay::PlacementEffects) -> usize {
-        match effects.decision {
-            aisimulate_core::replay::PlacementDecision::Immediate(placement) => {
-                placement.scheduler_id
-            }
-            other => panic!("expected immediate admission, got {other:?}"),
-        }
-    }
-
-    fn affinity_commit(placement: &mut super::KvRouterPlacement, id: u128, now: f64) {
-        <super::KvRouterPlacement as aisimulate_core::replay::PlacementPolicy<DirectRequest>>::dispatch_committed(placement, Uuid::from_u128(id), now).unwrap();
-    }
-
-    fn affinity_tick(
-        placement: &mut super::KvRouterPlacement,
-        now: f64,
-    ) -> Vec<aisimulate_core::replay::Placement> {
-        <super::KvRouterPlacement as aisimulate_core::replay::PlacementPolicy<DirectRequest>>::advance_clock(placement, now).unwrap()
-    }
-
-    #[test]
-    fn affinity_dispatch_abort_releases_initializer_and_same_time_waiter() {
-        use aisimulate_core::replay::{PlacementDecision, PlacementPolicy};
-        let mut placement = affinity_placement(2, false, true);
-        immediate_target(affinity_place(&mut placement, 1, "conversation", 0.0));
-        assert!(matches!(
-            affinity_place(&mut placement, 2, "conversation", 0.0).decision,
-            PlacementDecision::Queued
-        ));
-        <super::KvRouterPlacement as PlacementPolicy<DirectRequest>>::dispatch_aborted(
-            &mut placement,
-            Uuid::from_u128(1),
-            0.0,
-        )
-        .unwrap();
+        router.on_topology_changed(50.0).unwrap();
         assert_eq!(
-            <super::KvRouterPlacement as PlacementPolicy<DirectRequest>>::next_wakeup_ms(
-                &placement
-            ),
-            Some(0.0)
-        );
-        let released = affinity_tick(&mut placement, 0.0);
-        assert_eq!(released.len(), 1);
-        assert_eq!(released[0].request_id, Uuid::from_u128(2));
-        affinity_commit(&mut placement, 2, 0.0);
-        let bound = immediate_target(affinity_place(&mut placement, 3, "conversation", 0.0));
-        assert_eq!(bound, released[0].scheduler_id);
-        affinity_commit(&mut placement, 3, 0.0);
-        let evidence = placement
-            .router
-            .affinity
-            .as_ref()
-            .unwrap()
-            .evidence
-            .snapshot()
-            .unwrap();
-        assert_eq!(evidence["roles"]["aggregated"]["dispatch_aborts"], 1);
-        assert_eq!(
-            evidence["roles"]["aggregated"]["decisions"][2]["binding_reused"],
-            true
-        );
-        assert_eq!(placement.router.pending_count(), 0);
-    }
-
-    #[test]
-    fn affinity_exact_dp_queue_does_not_block_other_rank_and_rechecks_on_release() {
-        use aisimulate_core::replay::PlacementDecision;
-        let mut placement = affinity_placement(2, true, true);
-        let target = immediate_target(affinity_place(&mut placement, 1, "a", 0.0));
-        affinity_commit(&mut placement, 1, 0.0);
-        assert!(matches!(
-            affinity_place(&mut placement, 2, "a", 0.0).decision,
-            PlacementDecision::Queued
-        ));
-        let other = immediate_target(affinity_place(&mut placement, 3, "b", 0.0));
-        assert_ne!(target, other, "native queue must skip the busy Exact lane");
-        affinity_commit(&mut placement, 3, 0.0);
-        let released = placement
-            .router
-            .on_prefill_completed(Uuid::from_u128(1), 1.0)
-            .unwrap();
-        assert_eq!(released.admissions.len(), 1);
-        assert_eq!(released.admissions[0].uuid, Uuid::from_u128(2));
-        assert_eq!(released.admissions[0].worker_idx, target);
-        affinity_commit(&mut placement, 2, 1.0);
-        assert_eq!(placement.router.pending_count(), 0);
-    }
-
-    #[test]
-    fn affinity_cancel_queued_initializer_allows_follower_to_initialize() {
-        use aisimulate_core::replay::PlacementDecision;
-        let mut placement = affinity_placement(1, true, true);
-        immediate_target(affinity_place(&mut placement, 1, "busy", 0.0));
-        affinity_commit(&mut placement, 1, 0.0);
-        for id in [2, 3] {
-            assert!(matches!(
-                affinity_place(&mut placement, id, "waiting", 0.0).decision,
-                PlacementDecision::Queued
-            ));
-        }
-        assert!(placement.router.cancel_pending(Uuid::from_u128(2)));
-        assert!(affinity_tick(&mut placement, 0.0).is_empty());
-        let released = placement
-            .router
-            .on_request_completed(Uuid::from_u128(1), 1.0)
-            .unwrap();
-        assert_eq!(released.admissions.len(), 1);
-        assert_eq!(released.admissions[0].uuid, Uuid::from_u128(3));
-        affinity_commit(&mut placement, 3, 1.0);
-        assert_eq!(placement.router.pending_count(), 0);
-    }
-
-    #[test]
-    fn affinity_queued_bound_lease_outlives_ttl_then_idle_binding_expires() {
-        use aisimulate_core::replay::PlacementDecision;
-        let mut placement = affinity_placement(1, true, true);
-        immediate_target(affinity_place(&mut placement, 1, "a", 0.0));
-        affinity_commit(&mut placement, 1, 0.0);
-        assert!(matches!(
-            affinity_place(&mut placement, 2, "a", 0.0).decision,
-            PlacementDecision::Queued
-        ));
-        let released = placement
-            .router
-            .on_request_completed(Uuid::from_u128(1), 2000.0)
-            .unwrap();
-        assert_eq!(released.admissions.len(), 1);
-        affinity_commit(&mut placement, 2, 2000.0);
-        placement
-            .router
-            .on_request_completed(Uuid::from_u128(2), 2001.0)
-            .unwrap();
-        immediate_target(affinity_place(&mut placement, 3, "a", 3002.0));
-        let evidence = placement
-            .router
-            .affinity
-            .as_ref()
-            .unwrap()
-            .evidence
-            .snapshot()
-            .unwrap();
-        let decisions = evidence["roles"]["aggregated"]["decisions"]
-            .as_array()
-            .unwrap();
-        assert_eq!(decisions[1]["binding_reused"], true);
-        assert_eq!(decisions[2]["binding_reused"], false);
-    }
-
-    #[test]
-    fn affinity_queue_cost_uses_bound_rank_not_another_ranks_cached_prefix() {
-        let mut placement = affinity_placement(2, true, true);
-        let target = immediate_target(affinity_place(&mut placement, 1, "a", 0.0));
-        affinity_commit(&mut placement, 1, 0.0);
-        let tokens_hash =
-            compute_block_hash_for_seq(&request(2, 7).tokens, 64, BlockHashOptions::default())[0].0;
-        placement
-            .router
-            .on_kv_events(vec![store_event_for_rank(
-                0,
-                (1 - target) as u32,
-                1,
-                tokens_hash,
-                StorageTier::Device,
-            )])
-            .unwrap();
-        let mut pending = placement
-            .router
-            .build_pending_request(&request(2, 7), 2, None, Some("a".into()))
-            .unwrap();
-        assert!(
-            placement
-                .router
-                .affinity
-                .as_ref()
-                .unwrap()
-                .acquire(&mut pending, &placement.router.workers_with_configs)
-                .unwrap()
-        );
-        let snapshot = placement.router.snapshot_for(&mut pending);
-        assert_eq!(
-            snapshot.cached_tokens, 0,
-            "another DP's cache cannot reduce a bound request's WSPT cost"
-        );
-        assert_eq!(snapshot.scheduling_cost_tokens, 64);
-        assert!(
-            pending.token_seq.is_some(),
-            "queue accounting must preserve booking hashes"
+            router.debug_snapshot(50.0).indexer.cached_blocks_by_worker,
+            vec![(0, 1)]
         );
     }
 
     #[test]
-    fn affinity_clock_errors_preserve_time_and_uncaptured_evidence_keeps_counters() {
-        let mut placement = affinity_placement(1, false, false);
-        immediate_target(affinity_place(&mut placement, 1, "a", 1.0));
-        affinity_commit(&mut placement, 1, 1.0);
-        let affinity = placement.router.affinity.as_mut().unwrap();
-        for invalid in [f64::MAX, f64::NAN, 0.0] {
-            assert!(affinity.advance(invalid).is_err());
-            assert_eq!(affinity.now_ms, 1.0);
-        }
-        let evidence = affinity.evidence.snapshot().unwrap();
-        assert_eq!(evidence["roles"]["aggregated"]["decision_count"], 1);
-        assert_eq!(evidence["roles"]["aggregated"]["post_dispatch_checks"], 1);
-        assert_eq!(
-            evidence["roles"]["aggregated"]["decisions"],
-            serde_json::json!([])
-        );
+    fn kv_event_lag_is_validated_and_scoped_to_the_call() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        assert!(router.set_kv_event_lag_ms(-1.0).is_err());
+        assert!(router.set_kv_event_lag_ms(f64::NAN).is_err());
+        assert!(crate::replay::with_kv_event_lag_ms(f64::INFINITY, || ()).is_err());
+
+        let inside =
+            crate::replay::with_kv_event_lag_ms(25.0, crate::replay::kv_event_lag_ms).unwrap();
+        assert_eq!(inside, 25.0);
+        assert_eq!(crate::replay::kv_event_lag_ms(), 0.0);
     }
 }
