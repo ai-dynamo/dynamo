@@ -74,23 +74,18 @@ class _FakeDevice:
         self.peak_allocated = 0
 
     def mem_get_info(self):
-        """Return device-wide free and total bytes."""
         return self.total - self.used, self.total
 
     def memory_reserved(self):
-        """Return this engine's torch reservation."""
         return self.reserved
 
     def max_memory_allocated(self):
-        """Return this engine's peak torch allocation."""
         return self.peak_allocated
 
     def reset_peak_memory_stats(self):
-        """Clear the torch peak before profiling."""
         self.peak_allocated = 0
 
     def synchronize(self):
-        """Model a device with no pending asynchronous work."""
         pass
 
 
