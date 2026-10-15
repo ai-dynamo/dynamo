@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Dev deploy access smoke
+
+on:
+  push:
+    branches:
+      - test/deploy-test-dev-smoke-20261015
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev-access-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    env:
+      KUBECONFIG: /teleport/kubeconfig.yaml
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster
+      EXPECTED_GPU: B200
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check bot access, deploy one-GPU job, and exercise gateway
+        run: python3 .github/scripts/deploy_dev_smoke.py
+      - name: Save smoke evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: dev-deploy-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-access-smoke-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 7
