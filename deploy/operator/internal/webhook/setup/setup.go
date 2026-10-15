@@ -12,7 +12,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhookmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/mutation"
@@ -27,12 +26,9 @@ type Options struct {
 	// DGDRDefaultImage is the default DGDR profiler image, put into
 	// DGDR spec.image when unset; empty derives
 	// dynamo-planner:<OperatorVersion>.
-	DGDRDefaultImage string
-	// AISimulateDefaultImage is the AISimulate runner image put into a v1beta2 DGDR's
-	// spec.aisimulate.image when unset; empty leaves it unset.
-	AISimulateDefaultImage string
-	OperatorPrincipal      string
-	Gate                   features.Gate
+	DGDRDefaultImage  string
+	OperatorPrincipal string
+	Gate              features.Gate
 }
 
 func Setup(mgr ctrl.Manager, opts Options) error {
@@ -76,13 +72,6 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	// Like the v1beta2 defaulter, this only handles requests the API server sends, and the
-	// Helm chart sends none until the v1beta2 API is enabled.
-	dgdrV1Beta2Handler := webhookvalidation.NewDynamoGraphDeploymentRequestV1Beta2Handler()
-	if err := dgdrV1Beta2Handler.RegisterWithManager(mgr, gate); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest v1beta2 webhook: %w", err)
-	}
-
 	if isClusterWide {
 		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 			Complete(); err != nil {
@@ -118,21 +107,6 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRDefaultImage)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
-	}
-
-	// The v1beta2 DGDR defaulter is registered unconditionally: it only handles requests the
-	// API server sends, and the Helm chart sends none until the v1beta2 API is enabled.
-	dgdrV1Beta2Defaulter := webhookdefaulting.NewDGDRV1Beta2Defaulter(webhookdefaulting.DGDRV1Beta2DefaulterOptions{
-		Hardware: webhookdefaulting.NewGPUHardwareDiscoverer(&gpu.Discoverer{
-			Reader:     mgr.GetAPIReader(),
-			DCGM:       gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
-			Cache:      gpu.NewGPUDiscoveryCache(),
-			NodeLabels: gate.Enabled(features.GPUDiscovery),
-		}),
-		AISimulateImage: opts.AISimulateDefaultImage,
-	})
-	if err := dgdrV1Beta2Defaulter.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest v1beta2 defaulting webhook: %w", err)
 	}
 
 	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetAPIReader(), cfg)

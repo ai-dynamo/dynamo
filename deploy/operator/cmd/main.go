@@ -62,7 +62,6 @@ import (
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -118,8 +117,6 @@ func initCRDSchemes() {
 
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
 
-	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
-
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
@@ -160,7 +157,6 @@ func main() {
 	var operatorImage string
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
-	var dgdrAISimulateDefaultImage string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -174,8 +170,6 @@ func main() {
 		"Image pull policy for operator helper init containers")
 	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
 		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
-	flag.StringVar(&dgdrAISimulateDefaultImage, "dgdr-aisimulate-default-image", "",
-		"Default DGDR v1beta2 spec.aisimulate.image, put in when unset; empty leaves the field unset")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -508,7 +502,7 @@ func main() {
 	}
 
 	if err := registerWebhookHandlers(
-		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, dgdrAISimulateDefaultImage, gates,
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
 	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
@@ -648,7 +642,6 @@ func registerWebhookHandlers(
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
 	dgdrDefaultImage string,
-	dgdrAISimulateDefaultImage string,
 	gate features.Gate,
 ) error {
 	var operatorPrincipal string
@@ -660,13 +653,12 @@ func registerWebhookHandlers(
 	}
 
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
-		Config:                 operatorCfg,
-		RuntimeConfig:          runtimeConfig,
-		OperatorVersion:        operatorVersion,
-		DGDRDefaultImage:       dgdrDefaultImage,
-		AISimulateDefaultImage: dgdrAISimulateDefaultImage,
-		OperatorPrincipal:      operatorPrincipal,
-		Gate:                   gate,
+		Config:            operatorCfg,
+		RuntimeConfig:     runtimeConfig,
+		OperatorVersion:   operatorVersion,
+		DGDRDefaultImage:  dgdrDefaultImage,
+		OperatorPrincipal: operatorPrincipal,
+		Gate:              gate,
 	}); err != nil {
 		return err
 	}
