@@ -33,6 +33,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 from . import envs
 
@@ -377,11 +378,6 @@ def update_engine_config_with_dynamo(
         ensure_side_channel_host()
 
     defaults: Dict[str, Any] = {
-        # As of vLLM >=0.10.0 the engine unconditionally calls
-        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
-        # skip tokenizer initialisation.  Setting this to **False** avoids
-        # a NoneType error when the processor accesses the tokenizer.
-        "skip_tokenizer_init": False,
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
@@ -620,31 +616,23 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses a NIXL connector.
 
     Covers NixlConnector and its NixlPullConnector alias (pull), plus
-    NixlPushConnector (push), both directly and nested inside a wrapper
-    connector (PdConnector or MultiConnector, via
-    kv_connector_extra_config.connectors).
+    NixlPushConnector (push), both directly and nested inside MultiConnector
+    or PdConnector (kv_connector_extra_config.connectors).
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
-    connector = getattr(kv_cfg, "kv_connector", None)
-    if connector in _NIXL_CONNECTOR_NAMES:
+    if kv_cfg.kv_connector in _NIXL_CONNECTOR_NAMES:
         return True
-    # Wrapper connectors (PdConnector and vLLM's MultiConnector, matching
-    # kv_connector_protocols.MULTI_CONNECTOR_WRAPPERS) nest sub-connectors in
-    # kv_connector_extra_config as dicts like {"kv_connector": "NixlConnector"}.
-    if connector in ("PdConnector", "MultiConnector"):
-        extra = getattr(kv_cfg, "kv_connector_extra_config", None)
-        if not isinstance(extra, dict):
-            return False
-        entries = extra.get("connectors", [])
-        if not isinstance(entries, list):
-            return False
-        return any(
-            isinstance(entry, dict)
-            and entry.get("kv_connector") in _NIXL_CONNECTOR_NAMES
-            for entry in entries
-        )
+    # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
+        extra = kv_cfg.kv_connector_extra_config or {}
+        for entry in extra.get("connectors", []):
+            if (
+                isinstance(entry, dict)
+                and entry.get("kv_connector") in _NIXL_CONNECTOR_NAMES
+            ):
+                return True
     return False
 
 
