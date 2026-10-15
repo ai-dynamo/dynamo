@@ -83,15 +83,8 @@ def cold_model(monkeypatch):
     return model
 
 
-@pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
-@pytest.mark.parametrize(
-    ("target", "throughput", "nextn"),
-    [("load", False, 0), ("sla", True, 0), ("sla", False, 3)],
-)
-def test_idle_pool_reaches_minimum_after_restart(
-    mode, target, throughput, nextn, cold_model
-):
-    config = _config(mode, target, throughput, nextn)
+def _drive_idle_pool_after_restart(config):
+    mode = config.mode
     state = PlannerScalingState(config, _caps())
     prefill = 4 if mode in ("prefill", "disagg") else 0
     decode = 4 if mode in ("decode", "disagg", "agg") else 0
@@ -101,7 +94,7 @@ def test_idle_pool_reaches_minimum_after_restart(
             state = PlannerScalingState(config, _caps())
         state.observe_worker_counts(_inventory(prefill, decode))
         state.begin_tick()
-        if throughput:
+        if config.enable_throughput_scaling:
             decision = state.advance_throughput_from_prediction(
                 TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0),
                 predicted_num_req=0,
@@ -120,6 +113,31 @@ def test_idle_pool_reaches_minimum_after_restart(
                 prefill = decision.num_prefill
             if decision.num_decode is not None:
                 decode = decision.num_decode
+    return prefill, decode
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
+@pytest.mark.parametrize(
+    ("target", "throughput", "nextn"),
+    [("load", False, 0), ("sla", True, 0), ("sla", False, 3)],
+)
+def test_idle_pool_reaches_minimum_after_restart(
+    mode, target, throughput, nextn, cold_model
+):
+    prefill, decode = _drive_idle_pool_after_restart(
+        _config(mode, target, throughput, nextn)
+    )
+    assert prefill == (1 if mode in ("prefill", "disagg") else 0)
+    assert decode == (1 if mode in ("decode", "disagg", "agg") else 0)
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
+@pytest.mark.parametrize("throughput", [False, True])
+def test_model_independent_idle_scaling_retains_a_worker_with_zero_floor(
+    mode, throughput, cold_model
+):
+    config = _config(mode, "sla", throughput).model_copy(update={"min_endpoint": 0})
+    prefill, decode = _drive_idle_pool_after_restart(config)
     assert prefill == (1 if mode in ("prefill", "disagg") else 0)
     assert decode == (1 if mode in ("decode", "disagg", "agg") else 0)
 

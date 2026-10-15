@@ -239,7 +239,7 @@ class ThroughputScalingMixin:
         engine_rps = capacity.rps if capacity is not None else 0.0
         model_not_ready = demand_rps != 0 and (capacity is None or engine_rps <= 0)
         if demand_rps == 0:
-            desired = resolve_min_endpoint(self._config, "decode")
+            desired = max(1, resolve_min_endpoint(self._config, "decode"))
         elif capacity is None or engine_rps <= 0:
             # No capacity estimate, so the demand division below cannot run;
             # hold at the current count so the endpoint floor still applies.
@@ -324,7 +324,7 @@ class ThroughputScalingMixin:
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[int]:
         if demand_rps == 0:
-            return resolve_min_endpoint(self._config, "prefill")
+            return max(1, resolve_min_endpoint(self._config, "prefill"))
         capacity = self._prefill_regression.find_engine_capacity_rps(
             isl=isl,
             osl=osl,
@@ -362,7 +362,7 @@ class ThroughputScalingMixin:
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
         if demand_rps == 0:
-            return resolve_min_endpoint(self._config, "decode")
+            return max(1, resolve_min_endpoint(self._config, "decode"))
         accept_length = self._current_decode_accept_length()
         capacity = self._decode_regression.find_engine_capacity_rps(
             isl=isl,

@@ -263,6 +263,9 @@ model. A valid zero-demand throughput prediction can also reduce a pool without
 a capacity estimate. Missing observations do not count as idle. Replica floors,
 GPU budgets, pending rollout checks, and downstream actuation constraints still
 apply. A restarted Planner uses observed deployment counts to resume decisions.
+These model-independent idle paths retain at least one worker per active role,
+even when `min_endpoint: 0`: without a publisher or a ready capacity model, they
+cannot independently wake a fully stopped pool.
 
 ### Scheduling / plugin pipeline
 

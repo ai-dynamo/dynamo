@@ -69,7 +69,8 @@ class LoadScalingMixin:
                 )
             ):
                 return None
-        return max(resolve_min_endpoint(self._config, component), num_workers - 1)
+        # This FPM-driven path cannot wake a pool after its last publisher exits.
+        return max(1, resolve_min_endpoint(self._config, component), num_workers - 1)
 
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
