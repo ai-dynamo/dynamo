@@ -31,9 +31,9 @@ This guarantee covers the frontend-to-worker discovery metadata and wire protoco
 
 ### SGLang 1.5.x Embedding Workers
 
-Dynamo 1.5.x SGLang embedding workers register a generation-shaped payload for active health checks by default. The embedding handler requires `model` and `input`, so the default canary fails and can prevent the worker from becoming ready in a mixed-version deployment.
+Dynamo 1.5.x SGLang embedding workers register a generation-shaped payload for active health checks by default. The embedding handler requires `model` and `input`, so the default canary fails when active health checks are enabled and can prevent the worker from becoming ready. This affects both same-version and mixed-version deployments, regardless of the frontend version. The N-2 compatibility matrix exposed the issue.
 
-When running these workers with active health checks enabled, set `DYN_HEALTH_CHECK_PAYLOAD` to an embedding request in the DGD worker configuration. Use the worker's served model name and a text input. This explicit configuration is required for the 1.5 release line's mixed-version compatibility path; the Operator does not supply it automatically.
+When active health checks are enabled (`DYN_HEALTH_CHECK_ENABLED=true`), set `DYN_HEALTH_CHECK_PAYLOAD` to an embedding request in the DGD worker configuration. Use the worker's served model name and a text input. Active checks are disabled by default in the runtime, but the Operator enables them by default for workers with runtime version 1.5.0 or later. See [Active Worker Health Checks](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks). The Operator does not supply the payload override automatically.
 
 The following DGD fragment shows the setting for an embedding worker. Merge the `env` entry into the worker's existing `main` container and replace `your-model` with its served model name:
 
@@ -50,7 +50,9 @@ spec:
                   value: '{"model":"your-model","input":"Test"}'
 ```
 
-The payload can also be supplied through `valueFrom`, `envFrom`, or `--health-check-payload`. Keep an existing custom payload if it already contains a compatible embedding request. This requirement is specific to Dynamo 1.5.x SGLang embedding workers; it does not apply to chat workers.
+The environment variable can also be supplied through `valueFrom` or `envFrom`. The `--health-check-payload` CLI flag is not honored by 1.5.x SGLang embedding workers; use `DYN_HEALTH_CHECK_PAYLOAD` instead. Keep an existing custom payload if it already contains a compatible embedding request. This requirement is specific to Dynamo 1.5.x SGLang embedding workers; it does not apply to chat workers.
+
+The fix is included in the [1.6.0 release branch](https://github.com/ai-dynamo/dynamo/tree/release/1.6.0) and is targeted for Dynamo 1.6.0. It registers an embedding-shaped `SglangEmbeddingHealthCheckPayload` by default, so workers with this fix do not need the override for this issue.
 
 ### Rolling Update Behavior
 
