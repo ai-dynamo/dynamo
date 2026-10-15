@@ -305,6 +305,67 @@ impl Stream for DeduplicatingStream {
     }
 }
 
+/// Bind a direct-ZMQ PUB socket and return it with its advertised endpoint.
+fn bind_direct_zmq_publisher(topic: &str) -> Result<(ZmqPubTransport, String)> {
+    let advertised_host = event_plane_host_from_env()?;
+    let bind_endpoint = if advertised_host.is_ipv4() {
+        "tcp://0.0.0.0:0"
+    } else {
+        "tcp://[::]:0"
+    };
+    let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
+        let topic = topic.to_string();
+        move || -> Result<(ZmqPubTransport, String)> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("Failed to create Tokio runtime for ZMQ")?;
+
+            rt.block_on(ZmqPubTransport::bind(bind_endpoint, &topic))
+                .with_context(|| {
+                    format!(
+                        "Failed to bind direct ZMQ publisher at {bind_endpoint} for advertised address {advertised_host}; check DYN_EVENT_PLANE_HOST and host IP support"
+                    )
+                })
+        }
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("ZMQ initialization thread panicked"))??;
+
+    let public_endpoint = direct_zmq_public_endpoint(advertised_host, &actual_bind_endpoint)?;
+    tracing::info!(%public_endpoint, "direct ZMQ publisher advertised endpoint");
+    Ok((pub_transport, public_endpoint))
+}
+
+/// A direct-ZMQ PUB socket that several publishers of one topic share.
+///
+/// Frames already carry the publisher ID, so a subscriber connects once and
+/// routes each publisher by that frame. Each publisher keeps its own ID,
+/// sequence, and discovery record.
+#[derive(Clone)]
+pub struct SharedZmqPublisherSocket {
+    tx: Arc<dyn EventTransportTx>,
+    topic: String,
+    endpoint: String,
+}
+
+impl SharedZmqPublisherSocket {
+    pub fn bind(topic: impl Into<String>) -> Result<Self> {
+        let topic = topic.into();
+        let (pub_transport, endpoint) = bind_direct_zmq_publisher(&topic)?;
+        Ok(Self {
+            tx: Arc::new(pub_transport),
+            topic,
+            endpoint,
+        })
+    }
+
+    /// The advertised endpoint every publisher on this socket registers.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
+
 /// Keep publisher IDs exactly representable in float64-backed JSON metadata.
 fn discovery_safe_publisher_id(random_id: u64) -> u64 {
     random_id & MAX_JSON_SAFE_PUBLISHER_ID
@@ -428,11 +489,41 @@ impl EventPublisher {
         Self::new_internal(drt, scope, topic.into(), transport_kind).await
     }
 
+    /// Create an endpoint-identity publisher on a PUB socket shared with other
+    /// publishers. It keeps its own publisher ID, sequence, and discovery record,
+    /// which advertises the shared endpoint.
+    pub async fn for_endpoint_id_on_shared_socket(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        socket: &SharedZmqPublisherSocket,
+    ) -> Result<Self> {
+        Self::new_on_transport(
+            drt,
+            EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            socket.topic.clone(),
+            EventTransportKind::Zmq,
+            Some(socket),
+        )
+        .await
+    }
+
     async fn new_internal(
         drt: &DistributedRuntime,
         scope: EventScope,
         topic: String,
         transport_kind: EventTransportKind,
+    ) -> Result<Self> {
+        Self::new_on_transport(drt, scope, topic, transport_kind, None).await
+    }
+
+    async fn new_on_transport(
+        drt: &DistributedRuntime,
+        scope: EventScope,
+        topic: String,
+        transport_kind: EventTransportKind,
+        shared_socket: Option<&SharedZmqPublisherSocket>,
     ) -> Result<Self> {
         // Publishers are discovery objects in their own right. A single process
         // can host multiple publishers for the same scope/topic, each with its
@@ -464,6 +555,13 @@ impl EventPublisher {
                 let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                 TransportSetup::Nats(transport as Arc<dyn EventTransportTx>, codec)
             }
+            EventTransportKind::Zmq if let Some(socket) = shared_socket => {
+                TransportSetup::ZmqDirect(
+                    socket.tx.clone(),
+                    Arc::new(Codec::Msgpack(MsgpackCodec)),
+                    socket.endpoint.clone(),
+                )
+            }
             EventTransportKind::Zmq => {
                 // Check for broker mode
                 if let Some(broker) = resolve_zmq_broker(drt, &scope).await? {
@@ -486,35 +584,7 @@ impl EventPublisher {
                     )
                 } else {
                     // DIRECT MODE: Bind PUB socket
-                    let advertised_host = event_plane_host_from_env()?;
-                    let bind_endpoint = if advertised_host.is_ipv4() {
-                        "tcp://0.0.0.0:0"
-                    } else {
-                        "tcp://[::]:0"
-                    };
-                    let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
-                        let topic = topic.clone();
-                        move || -> Result<(ZmqPubTransport, String)> {
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .context("Failed to create Tokio runtime for ZMQ")?;
-
-                            rt.block_on(ZmqPubTransport::bind(bind_endpoint, &topic))
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to bind direct ZMQ publisher at {bind_endpoint} for advertised address {advertised_host}; check DYN_EVENT_PLANE_HOST and host IP support"
-                                    )
-                                })
-                        }
-                    })
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("ZMQ initialization thread panicked"))??;
-
-                    let public_endpoint =
-                        direct_zmq_public_endpoint(advertised_host, &actual_bind_endpoint)?;
-                    tracing::info!(%public_endpoint, "direct ZMQ publisher advertised endpoint");
-
+                    let (pub_transport, public_endpoint) = bind_direct_zmq_publisher(&topic)?;
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                     TransportSetup::ZmqDirect(
                         Arc::new(pub_transport) as Arc<dyn EventTransportTx>,
