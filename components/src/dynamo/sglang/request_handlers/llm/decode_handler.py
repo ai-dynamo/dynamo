@@ -47,9 +47,11 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     IMAGE_URL_KEY,
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     extract_media_urls,
     extract_mm_hashes,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_utils import request_cache_salt
 from dynamo.sglang.thinking_budget import (
@@ -709,6 +711,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             raise_if_unextracted_multimodal(request)
+            reject_unconsumed_media(
+                request, consumes_media=engine_consumes_media(self.engine)
+            )
 
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
@@ -784,6 +789,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     yield out
         else:
             raise_if_unextracted_multimodal(request)
+            reject_unconsumed_media(
+                request, consumes_media=engine_consumes_media(self.engine)
+            )
 
             # Extract media URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.

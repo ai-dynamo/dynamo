@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
 use dynamo_mocker::scheduler::MockerMetrics;
@@ -103,7 +103,7 @@ pub struct SglangMockerService {
 }
 
 impl SglangMockerService {
-    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockerConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.model.trim().is_empty(), "model must not be empty");
         anyhow::ensure!(
             config.context_length > 0,
@@ -130,7 +130,7 @@ impl SglangMockerService {
 
         let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
-            engine_args.engine_type == EngineType::Sglang,
+            engine_args.backend == EngineType::Sglang,
             "Mocker engine_type must be sglang"
         );
         anyhow::ensure!(engine_args.dp_size == 1, "Mocker dp_size must be 1");
@@ -148,8 +148,8 @@ impl SglangMockerService {
             .ok_or_else(|| anyhow::anyhow!("num_gpu_blocks * block_size overflows usize"))?;
         let sink = if engine_args.needs_kv_publisher() && config.mode != ServerMode::Decode {
             match ZmqKvEventSink::bind(
-                engine_args.zmq_kv_events_port,
-                engine_args.zmq_replay_port,
+                engine_args.runtime.zmq_kv_events_port,
+                engine_args.runtime.zmq_replay_port,
                 DP_RANK,
                 page_size,
             ) {
@@ -182,10 +182,12 @@ impl SglangMockerService {
             page_size,
             kv_events,
             max_total_num_tokens,
-            max_running_requests: engine_args
-                .max_num_seqs
-                .unwrap_or(engine_args.num_gpu_blocks),
-            max_prefill_tokens: engine_args.max_num_batched_tokens.unwrap_or(8_192),
+            max_running_requests: engine_args.effective_handoff_capacity(),
+            max_prefill_tokens: if engine_args.max_num_batched_tokens == usize::MAX {
+                engine_args.sglang.max_prefill_tokens
+            } else {
+                engine_args.max_num_batched_tokens
+            },
         };
         let engine = LiveEngine::start_with_config(
             engine_args,

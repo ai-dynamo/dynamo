@@ -466,6 +466,7 @@ fn cached_prompt_tokens(
     meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
         audio_tokens: None,
         cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+        ..Default::default()
     })
 }
 
