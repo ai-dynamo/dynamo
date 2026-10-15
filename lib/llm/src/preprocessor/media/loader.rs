@@ -140,12 +140,8 @@ fn policy_rejection(message: impl Into<String>) -> DynamoError {
         .build()
 }
 
-/// Classify a fetch or decode failure caused by the client's media as a 400.
-///
-/// Policy rejections pass through unchanged so they keep their own message.
-/// The full cause stays in the private diagnostic for the frontend log; the
-/// client sees only the fixed `public` text, because the cause can carry the
-/// URL (with any presigned signature) or decoder output.
+/// Classify a client-media fetch or decode failure as a 400; policy rejections pass through.
+/// The client sees only `public`; the cause may hold a presigned URL or decoder output.
 fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Error {
     if MediaFetcher::is_policy_rejection(&error) {
         return error;
@@ -803,9 +799,8 @@ mod tests {
         );
     }
 
-    /// Media the frontend cannot fetch or decode is the client's fault: the
-    /// error must be `InvalidArgument` (HTTP 400) with a fixed public message
-    /// that leaks neither the URL nor the payload.
+    /// Unfetchable or undecodable media must be `InvalidArgument` (HTTP 400) with a fixed
+    /// public message that leaks neither the URL nor the payload.
     #[tokio::test]
     async fn test_bad_media_is_invalid_argument() {
         use base64::Engine as _;
