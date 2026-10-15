@@ -34,10 +34,10 @@ func configureNodeLocalConductorRuntime(
 }
 
 // applyModelPaths binds nonempty canonical projections into a fresh runtime container.
-func applyModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+func applyModelPaths(container *corev1.Container, projections []*Model, modelStoragePath string) error {
 	type modelPathBinding struct {
 		name       string
-		projection *ModelProjection
+		projection *Model
 	}
 	bindings := []modelPathBinding{{"LPX_MODEL_PATH", projections[0]}}
 	if projections[0].pipeline == PipelineSpecDecode {

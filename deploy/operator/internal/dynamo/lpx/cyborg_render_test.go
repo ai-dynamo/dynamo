@@ -24,11 +24,11 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	projection.stage = testRenderComponentName
+	projection.componentName = testRenderComponentName
 	projection.configuredBuild.ioFPGACount = 1
 	projection.configuredBuild.ioFanoutFactor = 1
 	workload := &Workload{
-		modelProjections:     []*ModelProjection{projection},
+		models:               []*Model{projection},
 		scalingGroupReplicas: 2496,
 	}
 	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
@@ -88,7 +88,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	build := normalized
 	build.ioFPGACount = 2
 	build.ioFanoutFactor = 2
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
+	projectionBatch, err := appendModelProjections(nil, modelProjectionInput{
 		Pipeline: PipelineHybrid, Models: []string{"default"},
 		Build:           normalized,
 		RuntimeBuildRef: "model-build",
@@ -127,7 +127,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
-	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+	rendered, err := renderSelectedForTest(pcs, []*Model{projection}, input)
 	require.NoError(t, err)
 	cyborg := namedClique(t, rendered, "cond")
 
@@ -153,7 +153,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
-	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
+	_, err = renderSelectedForTest(imageEntrypointPCS, []*Model{projection}, input)
 	require.NoError(t, err)
 	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
@@ -180,7 +180,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
-			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
+			_, err := renderSelectedForTest(pcs, []*Model{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			require.ErrorContains(t, err, test.wantError)

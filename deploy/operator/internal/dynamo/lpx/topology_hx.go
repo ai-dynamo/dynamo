@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -18,7 +20,7 @@ const (
 	hxLPUDevice         = "lpu"
 )
 
-func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
+func (hxTopology) project(intent modelProjectionInput, transcript digestTranscript) (Model, error) {
 	runtimeBuild := *intent.Build
 	manifestPartitions := runtimeBuild.partitions
 
@@ -26,10 +28,10 @@ func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript
 
 	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, runtimeBuild.selectedPropSyncChains, "selected HX prop-sync chain")
 	if err != nil {
-		return ModelProjection{}, err
+		return Model{}, err
 	}
 	if intent.Pipeline != PipelineHybrid && len(edgePositions) != len(manifestPartitions)-1 {
-		return ModelProjection{}, fmt.Errorf("HX LPU-only workloads require a complete adjacent prop-sync connector chain")
+		return Model{}, fmt.Errorf("HX LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 
 	partitions := manifestPartitions
@@ -39,9 +41,9 @@ func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript
 	if len(partitions) < len(manifestPartitions) {
 		if intent.Pipeline == PipelineHybrid {
 			if intent.LocalPartitions != nil {
-				return ModelProjection{}, fmt.Errorf("%w: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload", ErrUnsupportedRuntime)
+				return Model{}, fmt.Errorf("%w: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload", ErrUnsupportedRuntime)
 			}
-			return ModelProjection{}, fmt.Errorf("packed HX prop-sync requires an LPU-only workload")
+			return Model{}, fmt.Errorf("packed HX prop-sync requires an LPU-only workload")
 		}
 		edgePositions = nil
 
@@ -55,7 +57,7 @@ func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript
 		case nodes == 32:
 			partition.hxExtent = []int64{width, 8, 2, 2}
 		default:
-			return ModelProjection{}, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.numChips)
+			return Model{}, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.numChips)
 		}
 	}
 
@@ -64,7 +66,7 @@ func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript
 	// match the manifest order.
 	remote, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, intent.Build, partitions)
 	if err != nil {
-		return ModelProjection{}, err
+		return Model{}, err
 	}
 	if len(localPartitionIDs) > 0 {
 		edgePositions = retainedPropSyncEdges(partitions, remote, edgePositions)
@@ -76,7 +78,7 @@ func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript
 	runtimeBuild.selectedPropSyncChains = nil
 	allocationMetadata, connectors, err := projectHXPropSync(partitions, edgePositions)
 	if err != nil {
-		return ModelProjection{}, err
+		return Model{}, err
 	}
 
 	// Record identity fields after validating the shared component geometry.
@@ -95,7 +97,7 @@ func projectHXComponent(intent ModelProjectionInput, transcript digestTranscript
 
 	transcript.field("allocation-metadata", allocationMetadata)
 	bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-	return ModelProjection{
+	return Model{
 		configuredBuild:    runtimeBuild,
 		allocationMetadata: allocationMetadata,
 		partitions:         partitions,
@@ -194,4 +196,84 @@ func projectHXPropSync(partitions []buildPartition, edgePositions []int) (json.R
 		},
 	})
 	return metadata, connectors, nil
+}
+
+func (hxTopology) decodePartition(subject, topology string, raw topologyGeometry) (buildPartition, error) {
+	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", raw.DevicesPerNode())
+	if err != nil {
+		return buildPartition{}, err
+	}
+	partition := buildPartition{topology: topology, numChips: int(raw.NumChips()), devicesPerNode: devicesPerNode}
+	if !raw.HasTopologyMetadata() {
+		chips := partition.numChips
+		if chips <= 0 || chips > devicesPerNode || devicesPerNode%chips != 0 {
+			return buildPartition{}, fmt.Errorf("V3 %s without topologyMetadata requires a one-node stage whose chip count divides %d", subject, devicesPerNode)
+		}
+		partition.hxExtent = []int64{int64(devicesPerNode), 1, 1, 1}
+		return partition, nil
+	}
+
+	// Decode HX metadata directly and report read errors at their source.
+	metadata, err := raw.metadata()
+	if err != nil {
+		return buildPartition{}, fmt.Errorf("reading V3 %s topologyMetadata: %w", subject, err)
+	}
+	family, err := metadata.TopologyFamily()
+	if err != nil {
+		return buildPartition{}, fmt.Errorf("reading V3 %s topologyMetadata.topologyFamily: %w", subject, err)
+	}
+	if strings.TrimSpace(family) != hxTopologyFamily {
+		return buildPartition{}, fmt.Errorf("V3 %s topologyMetadata.topologyFamily = %q, want %q", subject, strings.TrimSpace(family), hxTopologyFamily)
+	}
+	shape, err := metadata.PartitionShape()
+	if err != nil {
+		return buildPartition{}, fmt.Errorf("reading V3 %s topologyMetadata.partitionShape: %w", subject, err)
+	}
+	extent := make([]int64, shape.Len())
+	for index := range extent {
+		extent[index] = int64(shape.At(index))
+	}
+
+	// A partial-node shape describes its logical chips; physical HX reservations use full nodes.
+	subnode := len(extent) == 4 && extent[0] > 0 && extent[0] < int64(devicesPerNode) &&
+		int64(devicesPerNode)%extent[0] == 0 && extent[1] == 1 && extent[2] == 1 && extent[3] == 1
+	if !subnode && (len(extent) != 4 || extent[0] != int64(devicesPerNode) || extent[1] < 1 || extent[1] > 8 ||
+		(!((extent[2] == 1 || extent[2] == 2) && extent[3] == 1) && !(extent[1] == 8 && extent[2] == 2 && extent[3] == 2))) {
+		return buildPartition{}, fmt.Errorf("V3 %s has unsupported HX extent %v", subject, extent)
+	}
+
+	// Match the source chip count before rounding its scheduler reservation up to a whole node.
+	count := extent[0] * extent[1] * extent[2] * extent[3]
+	if count != int64(raw.NumChips()) {
+		return buildPartition{}, fmt.Errorf("V3 %s topologyMetadata.partitionShape contains %d chips, want numChips %d", subject, count, raw.NumChips())
+	}
+	extent[0] = int64(devicesPerNode)
+	partition.hxExtent = extent
+	return partition, nil
+}
+
+// hxTopology describes HX16x8x2x3 devices, called V3 by the scheduler wire API.
+type hxTopology struct{}
+
+func (hxTopology) String() string                   { return string(lpxv1alpha1.TargetFamilyHx16x8x2x3) }
+func (hxTopology) target() lpxv1alpha1.TargetFamily { return lpxv1alpha1.TargetFamilyHx16x8x2x3 }
+func (hxTopology) lpuResource() corev1.ResourceName { return v3LPUResourceName }
+func (hxTopology) projectionVersion() string        { return hxProjectionVersion }
+func (hxTopology) workloadMode(pipeline Pipeline) lpxv1alpha1.WorkloadMode {
+	if pipeline == PipelineHybrid {
+		return lpxv1alpha1.WorkloadModeV3HxStrictHybrid
+	}
+	return lpxv1alpha1.WorkloadModeV3HxLPUOnly
+}
+func (hxTopology) normalizePartitions(filename string, _ []buildPartition, partialSelection bool) error {
+	if partialSelection {
+		return fmt.Errorf("V3 %s partSelect builds are not supported", filename)
+	}
+	return nil
+}
+func (hxTopology) partitionRequest(index int, partition buildPartition) lpxv1alpha1.PartitionRequest {
+	request := newPartitionRequest(index, partition)
+	extent := append([]int64(nil), partition.hxExtent...)
+	request.Extent = &extent
+	return request
 }

@@ -197,12 +197,12 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		architecture deploymentcapnpv1.LpuArchitecture
-		family       BuildFamily
+		family       buildTopology
 		topology     string
 		chips        uint32
 	}{
-		{"LP20", deploymentcapnpv1.LpuArchitecture_lp20, BuildFamilyXT, registryTestTopology, 8},
-		{"LP30", deploymentcapnpv1.LpuArchitecture_lp30, BuildFamilyHX, hxTopologyFamily, 16},
+		{"LP20", deploymentcapnpv1.LpuArchitecture_lp20, xtBuildTopology, registryTestTopology, 8},
+		{"LP30", deploymentcapnpv1.LpuArchitecture_lp30, hxBuildTopology, hxTopologyFamily, 16},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Materialize deployment and opaque execution without a report or JSON")
@@ -231,17 +231,17 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, buildContractDeploymentV1, normalized.contractFormat)
 			require.EqualValues(t, 4, normalized.ioFPGACount)
-			require.Equal(t, test.family, normalized.family)
+			require.Equal(t, test.family, normalized.topology)
 
 			t.Log("Pass the selected deployment file to Cyborg before authored environment references")
-			projections, err := appendModelProjections(nil, ModelProjectionInput{
+			projections, err := appendModelProjections(nil, modelProjectionInput{
 				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 			})
 			require.NoError(t, err)
 			require.Len(t, projections, 1)
 			projection := projections[0]
 			require.Equal(t, buildContractDeploymentV1, projection.contractFormat)
-			require.Equal(t, test.family, projection.configuredBuild.family)
+			require.Equal(t, test.family, projection.configuredBuild.topology)
 			container := corev1.Container{Env: []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"}}}
 			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
 			require.Equal(t, []corev1.EnvVar{
@@ -334,7 +334,7 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			require.NoError(t, err)
 			detail, err := partitions.At(0).Detail().Lpu()
 			require.NoError(t, err)
-			wantFamily := BuildFamilyXT
+			wantFamily := xtBuildTopology
 			wantNodes := 1
 			wantIO := int32(4)
 			switch name {
@@ -346,7 +346,7 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				wantIO = 1
 			case "HX metadata", "HX legacy geometry", "HX subnode":
 				detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp30)
-				wantFamily = BuildFamilyHX
+				wantFamily = hxBuildTopology
 				require.NoError(t, detail.SetTopology(hxTopologyFamily))
 				detail.SetNumChips(16)
 				detail.SetDevicesPerNode(16)
@@ -401,12 +401,12 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			t.Log("Preserve scheduler geometry while excluding non-LPU execution details")
 			build, err := buildFromGbuildDeploymentV1("gs://models/build", deployment)
 			require.NoError(t, err)
-			require.Equal(t, wantFamily, build.family)
+			require.Equal(t, wantFamily, build.topology)
 			require.Equal(t, wantIO, build.ioFPGACount)
 			require.Equal(t, name == "CPU embeddings", build.supportsCPUEmbeddings)
 			require.Equal(t, name == hybridCUDA, build.hasCUDAPartitions)
 			require.Len(t, build.partitions, 1)
-			if wantFamily == BuildFamilyHX {
+			if wantFamily == hxBuildTopology {
 				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.partitions[0].hxExtent)
 			} else {
 				require.Equal(t, wantNodes, build.partitions[0].effectiveNodeCount())

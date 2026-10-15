@@ -25,7 +25,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	fixture.selectedPropSyncChains = nil
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
+	projectionBatch, err := appendModelProjections(nil, modelProjectionInput{
 		Pipeline:        PipelineHybrid,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
@@ -33,9 +33,9 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
-	projection.stage = testRenderComponentName
+	projection.componentName = testRenderComponentName
 	workload := &Workload{
-		modelProjections:     []*ModelProjection{projection},
+		models:               []*Model{projection},
 		scalingGroupReplicas: 1,
 	}
 
@@ -99,10 +99,10 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			projection := projectTestBuild(t, snapshot, PipelineHybrid)
-			projection.stage = testRenderComponentName
+			projection.componentName = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
-			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
+			workload := &Workload{models: []*Model{projection}, scalingGroupReplicas: 1}
 			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
 			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
@@ -163,16 +163,16 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 5, deviceType: manifestcapnp.DeviceType_cuda})
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
 			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projections, err := appendModelProjections(nil, ModelProjectionInput{
+			projections, err := appendModelProjections(nil, modelProjectionInput{
 				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
-			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.family)
+			require.Equal(t, hxBuildTopology, projections[0].configuredBuild.topology)
 
 			t.Log("Render the hybrid workload with an authored Cyborg configuration mount")
-			projections[0].stage = testRenderComponentName
-			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
+			projections[0].componentName = testRenderComponentName
+			workload := &Workload{models: projections, scalingGroupReplicas: 1}
 			workload.digest, err = workloadSetDigest(projections)
 			require.NoError(t, err)
 			plan, err := workload.PlanNodeLocalMaterialization("test-pcs")

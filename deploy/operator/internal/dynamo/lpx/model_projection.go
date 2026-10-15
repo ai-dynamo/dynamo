@@ -32,9 +32,9 @@ func (d WorkloadDigest) String() string {
 	return fmt.Sprintf("sha256:%x", d[:])
 }
 
-// ModelProjectionInput is the complete producer-owned input to one component's
+// modelProjectionInput is the complete producer-owned input to one component's
 // immutable model projections. It excludes Grove materialization and scheduler output.
-type ModelProjectionInput struct {
+type modelProjectionInput struct {
 	// Pipeline selects the DGD pipeline shape being projected.
 	Pipeline Pipeline
 	// Models contains the validated, nonempty logical model identities in canonical order.
@@ -48,21 +48,21 @@ type ModelProjectionInput struct {
 	LocalPartitions *dynamov1beta1.LPXLocalPartitions
 }
 
-// ModelProjection holds scheduler request inputs and runtime rendering state
+// Model holds scheduler request inputs and runtime rendering state
 // derived for one model. Completed component data is shared read-only; only the
 // resolver assigns the stage before publishing the immutable projections.
-type ModelProjection struct {
+type Model struct {
 	digest                 WorkloadDigest
 	compilerSnapshotDigest string
 	runtimeBuildRef        string
-	model                  string
-	stage                  string
+	name                   string
+	componentName          string
 	pipeline               Pipeline
 	configuredBuild        Build
 	contractFormat         buildContractFormat
 	allocationMetadata     json.RawMessage
 	// partitions describes the partitions requested from LPX. Packing can combine
-	// several configuredBuild.Partitions into one LPX partition.
+	// several configuredBuild.partitions into one LPX partition.
 	partitions []buildPartition
 	connectors []lpxv1alpha1.PropSyncConnectorRequest
 	// propSyncEdges lists each position in partitions whose successor continues
@@ -75,33 +75,33 @@ type ModelProjection struct {
 }
 
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.
-func (p *ModelProjection) AgentReplicas() int {
+func (p *Model) AgentReplicas() int {
 	return p.agentReplicas
 }
 
 // Digest returns the immutable projection digest. The receiver must be non-nil.
-func (p *ModelProjection) Digest() WorkloadDigest {
+func (p *Model) Digest() WorkloadDigest {
 	return p.digest
 }
 
 // CompilerSnapshotDigest returns the immutable compiler snapshot identity.
-func (p *ModelProjection) CompilerSnapshotDigest() string {
+func (p *Model) CompilerSnapshotDigest() string {
 	return p.compilerSnapshotDigest
 }
 
-// Model returns the logical model identity. The receiver must be non-nil.
-func (p *ModelProjection) Model() string {
-	return p.model
+// Name returns the logical model identity. The receiver must be non-nil.
+func (p *Model) Name() string {
+	return p.name
 }
 
-// ComponentName returns the DGD component that supplies this model.
-func (p *ModelProjection) ComponentName() string {
-	return p.stage
+// Component returns the DGD component that supplies this model.
+func (p *Model) Component() string {
+	return p.componentName
 }
 
 // RequestSpec returns a fresh node-local request for one Grove scaling-group
 // replica. The receiver and plan must be non-nil; neither input is mutated.
-func (p *ModelProjection) RequestSpec(
+func (p *Model) RequestSpec(
 	plan *MaterializationPlan,
 	agentPodCliqueName string,
 ) lpxv1alpha1.LPUPipelineRequestSpec {
@@ -113,19 +113,7 @@ func (p *ModelProjection) RequestSpec(
 	mappings := make([]lpxv1alpha1.NodeLocalPartitionMapping, len(p.partitions))
 	for index, partition := range p.partitions {
 		partitionID := fmt.Sprintf("partition-%03d", index)
-		request := lpxv1alpha1.PartitionRequest{
-			ID:                  partitionID,
-			Ordinal:             int64(index),
-			CompilerPartitionID: int64(uint32(partition.sourcePartitionID)),
-		}
-		if p.configuredBuild.family == BuildFamilyXT {
-			shape, _ := xtShape(partition)
-			request.XtShape = &shape
-		}
-		if partition.hxExtent != nil {
-			extent := slices.Clone(partition.hxExtent)
-			request.Extent = &extent
-		}
+		request := p.configuredBuild.topology.partitionRequest(index, partition)
 		partitions[index] = request
 		mappings[index] = lpxv1alpha1.NodeLocalPartitionMapping{
 			ModelPartitionID: int64(index),
@@ -142,12 +130,12 @@ func (p *ModelProjection) RequestSpec(
 		},
 		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
 		PropSyncConnectors: connectors,
-		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.family),
+		TargetFamily:       p.configuredBuild.topology.target(),
 		WorkloadMode:       p.schedulerWorkloadMode(),
 		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
 		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
 			AgentPodCliqueRef: lpxv1alpha1.PodCliqueReference{Name: agentPodCliqueName},
-			Model:             p.model,
+			Model:             p.name,
 			PartitionMappings: mappings,
 		},
 		Partitions: partitions,
@@ -159,16 +147,14 @@ func (p *ModelProjection) RequestSpec(
 }
 
 // schedulerWorkloadMode translates the normalized build family and pipeline at the LPX wire boundary.
-func (p *ModelProjection) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
-	// HX and XT have separate wire values for the same two runtime shapes.
-	if p.configuredBuild.family == BuildFamilyHX {
-		if p.pipeline == PipelineHybrid {
-			return lpxv1alpha1.WorkloadModeV3HxStrictHybrid
-		}
-		return lpxv1alpha1.WorkloadModeV3HxLPUOnly
+func (p *Model) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
+	return p.configuredBuild.topology.workloadMode(p.pipeline)
+}
+
+func newPartitionRequest(index int, partition buildPartition) lpxv1alpha1.PartitionRequest {
+	return lpxv1alpha1.PartitionRequest{
+		ID:                  fmt.Sprintf("partition-%03d", index),
+		Ordinal:             int64(index),
+		CompilerPartitionID: int64(uint32(partition.sourcePartitionID)),
 	}
-	if p.pipeline == PipelineHybrid {
-		return lpxv1alpha1.WorkloadModeV2StrictHybrid
-	}
-	return lpxv1alpha1.WorkloadModeV2LPUOnly
 }

@@ -108,14 +108,14 @@ func TestManifestPartitionsRequireUniformDeviceCounts(t *testing.T) {
 	t.Log("Cover uniform and mixed device counts for both LPU families")
 	for _, test := range []struct {
 		name       string
-		family     BuildFamily
+		family     buildTopology
 		nodeWidths [2]int
 		wantErr    string
 	}{
-		{name: "XT uniform", family: BuildFamilyXT, nodeWidths: [2]int{8, 8}},
-		{name: "HX uniform", family: BuildFamilyHX, nodeWidths: [2]int{16, 16}},
-		{name: "XT mixed", family: BuildFamilyXT, nodeWidths: [2]int{8, 16}, wantErr: "LPU partition 3 has devicesPerNode 16, want 8"},
-		{name: "HX mixed", family: BuildFamilyHX, nodeWidths: [2]int{16, 8}, wantErr: "LPU partition 3 has devicesPerNode 8, want 16"},
+		{name: "XT uniform", family: xtBuildTopology, nodeWidths: [2]int{8, 8}},
+		{name: "HX uniform", family: hxBuildTopology, nodeWidths: [2]int{16, 16}},
+		{name: "XT mixed", family: xtBuildTopology, nodeWidths: [2]int{8, 16}, wantErr: "LPU partition 3 has devicesPerNode 16, want 8"},
+		{name: "HX mixed", family: hxBuildTopology, nodeWidths: [2]int{16, 8}, wantErr: "LPU partition 3 has devicesPerNode 8, want 16"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -125,7 +125,7 @@ func TestManifestPartitionsRequireUniformDeviceCounts(t *testing.T) {
 				{sourcePartitionID: 7, numChips: test.nodeWidths[0], devicesPerNode: test.nodeWidths[0]},
 				{sourcePartitionID: 3, numChips: 2 * test.nodeWidths[1], devicesPerNode: test.nodeWidths[1]},
 			}
-			if test.family == BuildFamilyHX {
+			if test.family == hxBuildTopology {
 				partitions[0].hxExtent = []int64{int64(test.nodeWidths[0]), 1, 1, 1}
 				partitions[1].hxExtent = []int64{int64(test.nodeWidths[1]), 2, 1, 1}
 			}
@@ -151,7 +151,7 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	}
 	family, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, hx, false)
 	require.NoError(t, err)
-	require.Equal(t, BuildFamilyHX, family)
+	require.Equal(t, hxBuildTopology, family)
 	require.Equal(t, []int{7, 3}, []int{hx[0].sourcePartitionID, hx[1].sourcePartitionID})
 
 	t.Log("Classify XT partitions while sorting by source partition identity")
@@ -161,6 +161,6 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	}
 	family, err = classifyManifestPartitions(gbuildManifestV2CapnpFile, xt, false)
 	require.NoError(t, err)
-	require.Equal(t, BuildFamilyXT, family)
+	require.Equal(t, xtBuildTopology, family)
 	require.Equal(t, []int{3, 7}, []int{xt[0].sourcePartitionID, xt[1].sourcePartitionID})
 }

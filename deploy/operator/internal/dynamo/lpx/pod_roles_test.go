@@ -65,26 +65,26 @@ func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *
 	t.Log("Vary the supplied device count independently of family selection, including initially absent resource maps")
 	tests := []struct {
 		name             string
-		family           BuildFamily
+		family           buildTopology
 		devicesPerNode   int
 		emptyResources   bool
 		expectedResource corev1.ResourceName
 		expectedQuantity resource.Quantity
 	}{
 		{
-			name: "XT supplied count", family: BuildFamilyXT, devicesPerNode: 4,
+			name: "XT supplied count", family: xtBuildTopology, devicesPerNode: 4,
 			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("4"),
 		},
 		{
-			name: "HX supplied count", family: BuildFamilyHX, devicesPerNode: 32,
+			name: "HX supplied count", family: hxBuildTopology, devicesPerNode: 32,
 			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("32"),
 		},
 		{
-			name: "XT absent resource maps", family: BuildFamilyXT, devicesPerNode: 8, emptyResources: true,
+			name: "XT absent resource maps", family: xtBuildTopology, devicesPerNode: 8, emptyResources: true,
 			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("8"),
 		},
 		{
-			name: "HX absent resource maps", family: BuildFamilyHX, devicesPerNode: 16, emptyResources: true,
+			name: "HX absent resource maps", family: hxBuildTopology, devicesPerNode: 16, emptyResources: true,
 			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
 		},
 	}

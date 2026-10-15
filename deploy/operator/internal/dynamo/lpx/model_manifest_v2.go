@@ -173,7 +173,7 @@ func addLPUArtifactsFromManifestV2(
 
 	// Publish the scheduler-facing artifact projection.
 	build.partitions = partitions
-	build.family = family
+	build.topology = family
 
 	return nil
 }
@@ -213,9 +213,9 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (buildParti
 
 	switch architecture.Text() {
 	case chipArchHX:
-		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
+		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, hxBuildTopology)
 	case chipArchXT:
-		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
+		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, xtBuildTopology)
 	default:
 		return buildPartition{}, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
 	}

@@ -202,7 +202,7 @@ func addLPUArtifactsFromDeploymentV1(
 
 	// Publish the scheduler-facing artifact projection.
 	build.partitions = partitions
-	build.family = family
+	build.topology = family
 
 	return nil
 }
@@ -231,9 +231,9 @@ func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (
 	}
 	switch detail.Architecture() {
 	case deploymentcapnpv1.LpuArchitecture_lp20:
-		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
+		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, xtBuildTopology)
 	case deploymentcapnpv1.LpuArchitecture_lp30:
-		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
+		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, hxBuildTopology)
 	default:
 		return buildPartition{}, fmt.Errorf("%s LPU partition %d unsupported chip architecture %d", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
 	}
