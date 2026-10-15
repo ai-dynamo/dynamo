@@ -9,6 +9,7 @@ import asyncio
 import base64
 import math
 import os
+import sqlite3
 import threading
 from copy import deepcopy
 from functools import cache
@@ -414,7 +415,7 @@ class VllmArtifactSession:
                     self.settings["destination"],
                     mode=self.settings["mode"],
                 )
-            except (ValueError, TypeError, RuntimeError, OSError):
+            except (ValueError, TypeError, RuntimeError, OSError, sqlite3.Error):
                 return {
                     "kind": "generation_artifact",
                     "mode": self.settings["mode"],

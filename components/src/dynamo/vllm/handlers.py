@@ -4126,7 +4126,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "artifact capture currently requires aggregated token-mode generation"
                 )
             contents = artifact_settings.get("contents", [])
-            if any(name in contents for name in ("selected_logprobs", "topk_logprobs")):
+            requested_contents = contents if isinstance(contents, list) else []
+            needs_logprobs = any(
+                name in requested_contents
+                for name in ("selected_logprobs", "topk_logprobs")
+            )
+            if needs_logprobs:
                 if sampling_params.logprobs == -1 or getattr(
                     sampling_params, "logprob_token_ids", None
                 ):
@@ -4145,11 +4150,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument("artifact capture requires an exact token prompt")
             artifact_runtime = None
             if artifact_settings.get("mode") != "inline_base64":
-                from dynamo.artifacts.runtime import configured_artifact_runtime
+                from dynamo.artifacts.runtime import (
+                    ArtifactAuthorityClosed,
+                    configured_artifact_runtime,
+                )
 
                 artifact_runtime = configured_artifact_runtime()
                 if artifact_runtime is None:
-                    raise RuntimeError("artifact delivery authority is not configured")
+                    raise InvalidArgument(
+                        "artifact delivery authority is not configured"
+                    )
             try:
                 artifact_session = VllmArtifactSession.from_request(
                     request,
@@ -4162,16 +4172,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     router_profile=self.artifact_router_profile,
                     token_start=(
                         getattr(sampling_params, "routed_experts_prompt_start", 0)
-                        if getattr(sampling_params, "routed_experts_prompt_start", None)
+                        if "moe_routes" in requested_contents
+                        and getattr(
+                            sampling_params, "routed_experts_prompt_start", None
+                        )
                         is not None
                         else 0
                     ),
-                    logprob_width=max(1, sampling_params.logprobs or 0),
+                    logprob_width=(
+                        max(1, sampling_params.logprobs or 0) if needs_logprobs else 1
+                    ),
                     runtime=artifact_runtime,
                 )
             except CaptureCapacityError as exc:
                 raise WorkerOverloaded(str(exc)) from None
             except ValueError as exc:
+                if artifact_runtime is not None and isinstance(
+                    exc, ArtifactAuthorityClosed
+                ):
+                    raise WorkerOverloaded(str(exc)) from None
                 raise InvalidArgument(str(exc)) from None
 
         # In disagg decode mode, defer engine_client.abort() until the first

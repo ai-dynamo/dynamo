@@ -1115,15 +1115,28 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("engine_finish_reason", "expected_finish_reason", "should_submit"),
+    (
+        "engine_finish_reason",
+        "expected_finish_reason",
+        "should_submit",
+        "submit_error",
+        "client_logprobs",
+    ),
     [
-        ("abort", "cancelled", False),
-        ("error: engine failed", "error: engine failed", False),
-        ("stop", "stop", True),
+        ("abort", "cancelled", False, None, None),
+        ("error: engine failed", "error: engine failed", False, None, None),
+        ("stop", "stop", True, None, None),
+        ("stop", "stop", True, sqlite3.OperationalError("database is locked"), None),
+        ("stop", "stop", True, None, 1025),
     ],
 )
 async def test_artifact_terminal_delivery_only_on_success(
-    monkeypatch, engine_finish_reason, expected_finish_reason, should_submit
+    monkeypatch,
+    engine_finish_reason,
+    expected_finish_reason,
+    should_submit,
+    submit_error,
+    client_logprobs,
 ):
     from dynamo.artifacts.vllm import capture as artifact_capture
 
@@ -1140,7 +1153,9 @@ async def test_artifact_terminal_delivery_only_on_success(
         "token_ids": [10, 11],
         "sampling_options": {},
         "stop_conditions": {"max_tokens": 2},
-        "output_options": {},
+        "output_options": (
+            {"logprobs": client_logprobs} if client_logprobs is not None else {}
+        ),
         "extra_args": {
             "nvext": {
                 "metadata_upload": {
@@ -1171,6 +1186,8 @@ async def test_artifact_terminal_delivery_only_on_success(
     runtime = SimpleNamespace(
         validate=MagicMock(), submit=AsyncMock(return_value=receipt)
     )
+    if submit_error is not None:
+        runtime.submit.side_effect = submit_error
     budget = artifact_capture.CaptureBudget(1 << 20)
     monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
     monkeypatch.setattr(
@@ -1213,7 +1230,12 @@ async def test_artifact_terminal_delivery_only_on_success(
 
     assert chunks[-1]["finish_reason"] == expected_finish_reason
     if should_submit:
-        assert chunks[-1]["engine_data"]["metadata_upload"] == receipt
+        delivered = chunks[-1]["engine_data"]["metadata_upload"]
+        if submit_error is None:
+            assert delivered == receipt
+        else:
+            assert delivered["state"] == "failed"
+            assert delivered["error_code"] == "delivery_rejected"
         runtime.submit.assert_awaited_once()
         assert observations == [None, "stop"]
     else:
@@ -1225,11 +1247,11 @@ async def test_artifact_terminal_delivery_only_on_success(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("output_options", "expected_top_count"),
-    [({}, None), ({"logprobs": 0}, 0), ({"logprobs": 1}, 2)],
+    ("output_options", "expected_top_count", "route_start"),
+    [({}, None, None), ({"logprobs": 0}, 0, None), ({"logprobs": 1}, 2, 99)],
 )
 async def test_artifact_logprobs_do_not_widen_client_output(
-    output_options, expected_top_count
+    monkeypatch, output_options, expected_top_count, route_start
 ):
     from dynamo.artifacts.vllm.format import decode_generation_artifact
 
@@ -1290,6 +1312,15 @@ async def test_artifact_logprobs_do_not_widen_client_output(
         )
 
     handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    if route_start is not None:
+        build = mod.build_sampling_params
+
+        def with_route_start(*args, **kwargs):
+            sampling = build(*args, **kwargs)
+            sampling.routed_experts_prompt_start = route_start
+            return sampling
+
+        monkeypatch.setattr(mod, "build_sampling_params", with_route_start)
     context = MagicMock()
     context.id.return_value = "artifact-request"
 
@@ -1343,6 +1374,60 @@ async def test_artifact_operation_status_validates_identifier_and_hides_store_er
         "status": "error",
         "message": "artifact status unavailable",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_state", ["missing", "closing"])
+async def test_artifact_authority_unavailable_returns_typed_error(
+    monkeypatch, authority_state
+):
+    from dynamo.artifacts.runtime import ArtifactAuthorityClosed
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = None
+    if authority_state == "closing":
+        authority = SimpleNamespace(
+            validate=MagicMock(side_effect=ArtifactAuthorityClosed("closed"))
+        )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    expected = (
+        mod.InvalidArgument if authority_state == "missing" else mod.WorkerOverloaded
+    )
+    with pytest.raises(expected):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
 
 
 @pytest.mark.asyncio
