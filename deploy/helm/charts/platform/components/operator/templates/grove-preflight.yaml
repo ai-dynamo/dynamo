@@ -2,117 +2,48 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- $grove := dig "grove" dict (.Values.global | default dict) -}}
-{{- if and ($grove.enabled | default false) (not ($grove.install | default false)) .Values.grovePreflight.enabled -}}
 {{- $config := .Values.grovePreflight -}}
+{{- if and ($grove.enabled | default false) (not ($grove.install | default false)) $config.enabled -}}
 {{- if and $config.deploymentName (not $config.namespace) -}}
 {{- fail "grovePreflight.namespace is required when grovePreflight.deploymentName is set" -}}
 {{- end -}}
 {{- $name := printf "%s-grove-preflight" (include "dynamo-operator.fullname" . | trunc 47 | trimSuffix "-") -}}
 {{- $identity := printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 8 -}}
-{{- $clusterName := printf "%s-%s" ($name | trunc 54 | trimSuffix "-") $identity -}}
-{{- $contract := .Files.Get "files/grove-preflight/compatibility.json" | fromJson -}}
+{{- $rbac := printf "%s-%s" ($name | trunc 54 | trimSuffix "-") $identity -}}
+{{- $annotations := dict "helm.sh/hook" "pre-install,pre-upgrade" "helm.sh/hook-weight" "-20" "helm.sh/hook-delete-policy" "before-hook-creation" -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ $name }}
   namespace: {{ .Release.Namespace }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
+  annotations: {{- toYaml $annotations | nindent 4 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $clusterName }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
+  name: {{ $rbac }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
 rules:
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    resourceNames:
-      {{- range $crd, $_ := $contract.crdSchemaDigests }}
-      - {{ $crd }}
-      {{- end }}
-    verbs: [get]
-  {{- if not $config.namespace }}
   - apiGroups: [apps]
     resources: [deployments]
-    verbs: [list]
-  {{- end }}
+    verbs: [get, list]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $clusterName }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-20"
-    helm.sh/hook-delete-policy: before-hook-creation
+  name: {{ $rbac }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $clusterName }}
+  name: {{ $rbac }}
 subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
-{{- if $config.namespace }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ $clusterName }}
-  namespace: {{ $config.namespace }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
-rules:
-  - apiGroups: [apps]
-    resources: [deployments]
-    {{- if $config.deploymentName }}
-    resourceNames: [{{ $config.deploymentName | quote }}]
-    verbs: [get]
-    {{- else }}
-    verbs: [list]
-    {{- end }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ $clusterName }}
-  namespace: {{ $config.namespace }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-20"
-    helm.sh/hook-delete-policy: before-hook-creation
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ $clusterName }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ $name }}
-    namespace: {{ .Release.Namespace }}
-{{- end }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
-data:
-  check.py: |
-    {{- .Files.Get "files/grove-preflight/check.py" | nindent 4 }}
-  compatibility.json: |
-    {{- .Files.Get "files/grove-preflight/compatibility.json" | nindent 4 }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -131,16 +62,13 @@ spec:
       serviceAccountName: {{ $name }}
       restartPolicy: Never
       {{- with $config.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.controllerManager.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
+      tolerations: {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.controllerManager.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
+      affinity: {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
         runAsNonRoot: true
@@ -150,32 +78,18 @@ spec:
       containers:
         - name: preflight
           image: {{ $config.image | quote }}
-          imagePullPolicy: IfNotPresent
-          command: [python3, -B, /preflight/check.py]
-          env:
-            - name: GROVE_NAMESPACE
-              value: {{ $config.namespace | quote }}
-            - name: GROVE_DEPLOYMENT
-              value: {{ $config.deploymentName | quote }}
-            - name: GROVE_CONTAINER
-              value: {{ $config.containerName | quote }}
+          command: [python3, -c]
+          args:
+            - |
+              {{- .Files.Get "files/grove-preflight/check.py" | nindent 14 }}
+            - {{ $config.namespace | quote }}
+            - {{ $config.deploymentName | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
           resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 128Mi
-          volumeMounts:
-            - name: preflight
-              mountPath: /preflight
-              readOnly: true
-      volumes:
-        - name: preflight
-          configMap:
-            name: {{ $name }}
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
 {{- end }}

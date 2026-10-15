@@ -34,7 +34,6 @@ grovePreflight:
   namespace: ""
   # Requires namespace; empty discovers Deployments containing containerName.
   deploymentName: ""
-  containerName: grove-operator
 
 # The LPX scheduler and its CRDs must be installed separately.
 lpx:

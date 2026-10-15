@@ -152,72 +152,27 @@ dependency or platform chart does not upgrade separately managed Grove installat
 
 #### External Grove installation preflight
 
-When `global.grove.enabled=true` and `global.grove.install=false`, a read-only
-`pre-install,pre-upgrade` hook Job checks the external Grove controller before Helm applies
-the operator Deployment. The Job requires a release-tagged controller image at or above
-the bundled Grove minimum, a completed controller rollout, and established CRDs with schemas
-matching this chart's tested compatibility data. Controller tags and CRDs are checked separately;
-Grove API discovery alone cannot prove support for injected pod environment variables.
-
-By default, the Job discovers Deployments containing a container named `grove-operator`
-across namespaces. Missing or ambiguous controllers, custom or digest-only image versions,
-unknown CRD schemas, and API authorization errors fail the preflight. To select a specific
-controller and restrict Deployment read permissions to that object:
+With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
+`pre-install,pre-upgrade` Job verifies the Grove controller version (currently alpha.15 or
+later), completed rollout, and established CRDs before applying the operator Deployment.
+It does not verify CRD schema/version equality; upgrade Grove and matching CRDs first.
+Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
+To resolve missing or ambiguous discovery, select the controller explicitly:
 
 ```yaml
-global:
-  grove:
-    enabled: true
-    install: false
 dynamo-operator:
   grovePreflight:
     namespace: grove-system
     deploymentName: grove-operator
-    containerName: grove-operator
 ```
 
-The Job uses Python's standard library, with no package installation or external network
-requests. Restricted clusters can override `dynamo-operator.grovePreflight.image` with a
-Python 3 image from an internal registry and set `imagePullSecrets`. Its default deadline is
-120 seconds, with at most two retries. A failed Job is retained for diagnosis:
-
-```bash
-kubectl logs -n <release-namespace> job/<operator-fullname>-grove-preflight
-```
-
-Helm and Flux HelmRelease execute these hooks before install/upgrade; Argo CD maps them to
-PreSync hooks. Hook resources have weights so the ServiceAccount, configuration, and read-only
-RBAC exist before the Job. Do not disable hooks or use Argo CD selective sync for operator
-upgrades that require this gate. If Grove is managed by another release/Application, upgrade
-it and its CRDs first; this Job does not order independent releases. Merely rendering manifests
-with `helm template` does not perform the check, and applying them with `kubectl apply` does
-not enforce hook ordering. A separate deployment gate may explicitly disable this hook:
-
-```yaml
-dynamo-operator:
-  grovePreflight:
-    enabled: false
-```
-
-Disabling the hook is not evidence of compatibility. Bundled Grove installations and disabled
-Grove integration omit the preflight automatically. No live operator compatibility gate is added.
-
-The CRD schema allowlist is intentionally conservative: unknown schemas, including schemas
-from a newer Grove release, need updated chart compatibility data. The Job does not claim
-to attest custom controller binaries, and release tags must accurately identify their contents.
-When updating the bundled Grove dependency, regenerate its schema digests from a clean checkout
-of that exact Grove tag (requires PyYAML), then run `make test`:
-
-```bash
-python3 components/operator/tests/update_grove_contract.py /path/to/grove
-```
-
-Successful Jobs are deleted. Supporting hook resources use `before-hook-creation` only so
-Helm cannot delete their permissions before the Job starts. They persist until the next
-install/upgrade recreates them; Helm uninstall does not remove hook resources. Remove the
-preflight ServiceAccount, ConfigMap, ClusterRole, ClusterRoleBinding, and optional Role and
-RoleBinding manually when retiring the release. The cluster-scoped RBAC names include a hash
-of the release namespace and name to separate installations.
+Helm and Flux execute these hooks; Argo CD maps them to PreSync. Offline rendering does not
+run the check. Disabled hooks, selective sync, and raw `kubectl apply` bypass the gate;
+independent Grove releases must be upgraded first. Set `grovePreflight.enabled=false` only
+with a separate compatibility gate. Override `image`/`imagePullSecrets` for restricted registries.
+The Job has a 120-second deadline and two retries. Failed Jobs retain diagnostic logs;
+successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
+persist until the next attempt and require manual removal when retiring the release.
 
 **Existing deployments:** The operator origin version gates alias injection. An operator-only
 upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to

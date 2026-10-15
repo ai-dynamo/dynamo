@@ -80,8 +80,6 @@ dynamo-operator:
     namespace: ""
     # -- External Grove Deployment name. Requires namespace; empty discovers by container name.
     deploymentName: ""
-    # -- Container holding the external Grove controller image.
-    containerName: grove-operator
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
