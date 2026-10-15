@@ -195,20 +195,21 @@ struct ProxiedDispatch {
 impl StreamingDispatch<u64, TestResponse> for ProxiedDispatch {
     async fn generate(
         &self,
-        request: SingleIn<AddressedRequest<u64>>,
+        request: SingleIn<AddressedRequest<&u64>>,
     ) -> Result<ManyOut<TestResponse>, Error> {
-        let (addressed, context) = request.transfer(());
+        let (addressed, context) = request.into_parts();
         let establish_timeout = addressed.establish_timeout();
         let (payload, address, instance) = addressed.into_parts();
         let (_, endpoint_path) = address.split_once('/').unwrap();
-        let proxied = AddressedRequest::with_instance(
-            payload,
-            format!("{}/{endpoint_path}", self.proxy),
-            instance.unwrap(),
-        )
-        .with_establish_timeout(establish_timeout);
-        let (_, request) = context.transfer(proxied);
-        StreamingDispatch::<u64, TestResponse>::generate(self.inner.as_ref(), request).await
+        let proxied = context.map(|()| {
+            AddressedRequest::with_instance(
+                payload,
+                format!("{}/{endpoint_path}", self.proxy),
+                instance.unwrap(),
+            )
+            .with_establish_timeout(establish_timeout)
+        });
+        StreamingDispatch::<u64, TestResponse>::generate(self.inner.as_ref(), proxied).await
     }
 
     async fn generate_bidirectional(

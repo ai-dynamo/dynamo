@@ -15,7 +15,7 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     component::{Component, Instance},
-    pipeline::{AddressedPushRouter, AddressedRequest, AsyncEngine, ManyOut, SingleIn},
+    pipeline::{AddressedPushRouter, AddressedRequest, ManyOut, SingleIn, StreamingDispatch},
     protocols::maybe_error::MaybeError,
 };
 use futures::StreamExt;
@@ -108,7 +108,7 @@ impl RuntimeWorkerQueryTransport {
         let instance_id = instance.instance_id;
         let endpoint_name = instance.endpoint.clone();
         let addressed_request =
-            SingleIn::new(request).map(|req| AddressedRequest::for_instance(req, instance));
+            SingleIn::new(&request).map(|req| AddressedRequest::for_instance(req, instance));
         let mut stream: ManyOut<WorkerKvQueryResponse> = self
             .addressed
             .generate(addressed_request)

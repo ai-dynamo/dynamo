@@ -4,7 +4,11 @@
 use super::*;
 
 use anyhow::Result;
-use dynamo_runtime::{component::Component, pipeline::PushRouter, protocols::annotated::Annotated};
+use dynamo_runtime::{
+    component::Component,
+    pipeline::{PushRouter, SingleIn},
+    protocols::annotated::Annotated,
+};
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -61,7 +65,7 @@ impl ControlClient {
     async fn execute<T: DeserializeOwned>(&self, message: ControlMessage) -> Result<T> {
         let mut stream = self
             .client
-            .direct(message.into(), self.instance_id as u64)
+            .direct(SingleIn::new(&message), self.instance_id as u64)
             .await?;
         let resp = stream
             .next()
