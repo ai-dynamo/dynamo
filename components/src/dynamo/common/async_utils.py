@@ -11,6 +11,17 @@ from typing import Any, TypeVar
 T = TypeVar("T")
 
 
+def _report_delayed_exception(future: asyncio.Future[Any], message: str) -> None:
+    """Report work that failed while its cancelled caller was waiting for it."""
+    if future.cancelled():
+        return
+    exception = future.exception()
+    if exception is not None:
+        future.get_loop().call_exception_handler(
+            {"message": message, "exception": exception, "future": future}
+        )
+
+
 async def run_sync_in_thread(
     function: Callable[..., T], /, *args: Any, **kwargs: Any
 ) -> T:
@@ -32,8 +43,9 @@ async def run_sync_in_thread(
                 await asyncio.wait({worker})
             except asyncio.CancelledError:
                 continue
-        if not worker.cancelled():
-            worker.exception()
+        _report_delayed_exception(
+            worker, "Thread operation failed after its caller was cancelled"
+        )
         raise
 
 
@@ -49,6 +61,7 @@ async def run_async_to_completion(awaitable: Awaitable[T]) -> T:
                 await asyncio.wait({task})
             except asyncio.CancelledError:
                 continue
-        if not task.cancelled():
-            task.exception()
+        _report_delayed_exception(
+            task, "Async operation failed after its caller was cancelled"
+        )
         raise

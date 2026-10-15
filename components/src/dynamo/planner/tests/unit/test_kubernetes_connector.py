@@ -2052,6 +2052,54 @@ async def test_set_component_replicas_retries_adapter_to_dgd_transition(
 
 
 @pytest.mark.asyncio
+async def test_set_component_replicas_stops_authority_retry_after_prior_batch_write(
+    kubernetes_connector, mock_kube_api
+):
+    initial = _deployment(
+        _adapter_component("prefill", "prefill", replicas=1),
+        _adapter_component("worker", "decode", replicas=0),
+    )
+    transitioned = _deployment(
+        _adapter_component("prefill", "prefill", replicas=1),
+        _component("worker", "decode", replicas=0),
+    )
+    transitioned["metadata"]["resourceVersion"] = "2"
+    mock_kube_api.get_graph_deployment.side_effect = [
+        initial,
+        initial,
+        transitioned,
+    ]
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        _scaling_adapter("prefill", replicas=1),
+        _scaling_adapter("worker", replicas=0),
+    ]
+
+    with pytest.raises(RuntimeError, match="partial application"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name="prefill",
+                    desired_replicas=2,
+                ),
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                ),
+            ],
+            blocking=False,
+        )
+
+    assert mock_kube_api.update_scaling_adapter_replicas.call_args_list == [
+        call("test-graph", "prefill", 2, resource_version="101"),
+        call("test-graph", "worker", 1, resource_version="101"),
+    ]
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_set_component_replicas_retries_deleted_adapter_after_authority_change(
     kubernetes_connector, mock_kube_api
 ):

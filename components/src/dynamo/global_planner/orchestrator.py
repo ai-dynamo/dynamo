@@ -379,19 +379,21 @@ class Orchestrator:
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
 
-        return await run_async_to_completion(
-            self._apply_approved_targets(
-                grouped_targets, ordered_participants, blocking=blocking
-            )
+        terminal, applied = await run_async_to_completion(
+            self._apply_approved_targets(grouped_targets, ordered_participants)
         )
+        if terminal is not None or not blocking:
+            return terminal
+
+        for pid in applied:
+            await self.capacity_manager.wait_for_ready(pid)
+        return None
 
     async def _apply_approved_targets(
         self,
         grouped_targets: dict[str, list[TargetReplica]],
         ordered_participants: list[str],
-        *,
-        blocking: bool,
-    ) -> Optional[ScaleOutcome]:
+    ) -> tuple[Optional[ScaleOutcome], list[str]]:
         """Apply an admitted plan completely before honoring cancellation."""
 
         # TODO(global-planner): Persist enough state to repair or roll back a
@@ -407,10 +409,13 @@ class Orchestrator:
                         f"Multi-partner transfer aborted: unknown "
                         f"first participant ({pid})"
                     )
-                    return ScaleOutcome(
-                        status=ScaleStatus.ERROR,
-                        message=f"Multi-partner transfer: unknown participant {pid}",
-                        current_replicas={},
+                    return (
+                        ScaleOutcome(
+                            status=ScaleStatus.ERROR,
+                            message=f"Multi-partner transfer: unknown participant {pid}",
+                            current_replicas={},
+                        ),
+                        applied,
                     )
                 logger.error(
                     f"Multi-partner transfer: unknown participant {pid} "
@@ -418,7 +423,7 @@ class Orchestrator:
                 )
                 continue
             try:
-                await self.capacity_manager.scale(pid, tgts, blocking=blocking)
+                await self.capacity_manager.scale(pid, tgts, blocking=False)
                 applied.append(pid)
             except DynamoGraphDeploymentNotReadyError as patch_err:
                 if i == 0:
@@ -442,7 +447,7 @@ class Orchestrator:
                     f"{patch_err}; will self-correct on next tick"
                 )
 
-        return None
+        return None, applied
 
     # ------------------------------------------------------------------ #
     # Budget arbitration (decision)                                      #

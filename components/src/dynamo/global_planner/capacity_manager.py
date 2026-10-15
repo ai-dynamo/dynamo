@@ -6,10 +6,10 @@
 :class:`CapacityManager` is the infrastructure-facing base class the
 :class:`~dynamo.global_planner.orchestrator.Orchestrator` drives to **observe**
 current pool state and **scale** replicas. It defines a neutral,
-infrastructure-agnostic surface (``observe`` / ``scale`` / ``discover`` /
-``ensure_participant`` / ``participant_exists`` / ``remember_roles`` /
-``current_replicas``) keyed by opaque ``participant_id``; the orchestrator never
-sees Kubernetes concepts.
+infrastructure-agnostic surface (``observe`` / ``scale`` / ``wait_for_ready`` /
+``discover`` / ``ensure_participant`` / ``participant_exists`` /
+``remember_roles`` / ``current_replicas``) keyed by opaque ``participant_id``;
+the orchestrator never sees Kubernetes concepts.
 
 The concrete Kubernetes backend is
 :class:`~dynamo.global_planner.kubernetes_capacity_manager.KubernetesCapacityManager`.
@@ -100,6 +100,10 @@ class CapacityManager:
         blocking: bool,
     ) -> None:
         """Apply desired replica targets to one participant."""
+        raise NotImplementedError
+
+    async def wait_for_ready(self, participant_id: str) -> None:
+        """Wait until one participant has settled after an accepted scale."""
         raise NotImplementedError
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:

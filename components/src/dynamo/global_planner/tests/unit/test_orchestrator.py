@@ -206,6 +206,9 @@ class FakeCapacityManager(CapacityManager):
             if st in self.pools[participant_id]:
                 self.pools[participant_id][st][0] = t.desired_replicas
 
+    async def wait_for_ready(self, participant_id):
+        return None
+
     def current_replicas(self, participant_id):
         self.current_replicas_thread_id = get_ident()
         return {st: r for st, (r, _g) in self.pools[participant_id].items()}
@@ -309,6 +312,42 @@ async def test_cancelled_cross_participant_transfer_finishes_admitted_plan():
         await transfer
     assert cm.pools["default/a"]["decode"][0] == 1
     assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
+async def test_cancelled_readiness_wait_releases_scale_lock():
+    class BlockingReadyCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.ready_wait_started = asyncio.Event()
+            self.release_ready_wait = asyncio.Event()
+
+        async def wait_for_ready(self, participant_id):
+            self.ready_wait_started.set()
+            await self.release_ready_wait.wait()
+
+    cm = BlockingReadyCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm)
+    first = asyncio.create_task(
+        orch.submit(
+            "default/a",
+            _targets(prefill=2),
+            blocking=True,
+            deployment_name="default/a",
+            caller_name="default/a",
+        )
+    )
+    await cm.ready_wait_started.wait()
+    assert cm.pools["default/a"]["prefill"][0] == 2
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first, 1)
+
+    second = await asyncio.wait_for(_submit(orch, "default/a", _targets(prefill=3)), 1)
+    assert second.status == ScaleStatus.SUCCESS
+    assert cm.pools["default/a"]["prefill"][0] == 3
 
 
 @pytest.mark.asyncio

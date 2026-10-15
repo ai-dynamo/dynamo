@@ -3,6 +3,7 @@
 
 """Keep Kubernetes authentication support consistent across install paths."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,14 @@ def _requirements_file_kubernetes_requirement(path: Path) -> Requirement:
     return matches[0]
 
 
+def _dockerfile_kubernetes_requirement(path: Path) -> Requirement:
+    matches = re.findall(
+        r'"(kubernetes(?:\[[^]]+\])?[^"]*)"', path.read_text(encoding="utf-8")
+    )
+    assert len(matches) == 1, f"{path} must install one Kubernetes dependency"
+    return Requirement(matches[0])
+
+
 def test_kubernetes_requirements_preserve_google_auth_extra() -> None:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         dependencies = tomllib.load(handle)["project"]["dependencies"]
@@ -51,11 +60,15 @@ def test_kubernetes_requirements_preserve_google_auth_extra() -> None:
         _requirements_file_kubernetes_requirement(
             ROOT / "container/deps/requirements.planner.txt"
         ),
+        _dockerfile_kubernetes_requirement(
+            ROOT / "recipes/nemotron-3-nano-omni/Dockerfile"
+        ),
     ]
 
     assert all(requirement.extras == {"google-auth"} for requirement in requirements)
     assert project.specifier == SpecifierSet(">=37.0.1,<38.0.0")
     assert all(
         requirement.specifier == SpecifierSet("==37.0.1")
-        for requirement in requirements[1:]
+        for requirement in requirements[1:3]
     )
+    assert requirements[3].specifier == project.specifier

@@ -81,6 +81,10 @@ class _ReplicaTargetCommittedConflict(ApiException):
     """A conflict found only after a replica write returned successfully."""
 
 
+class _ReplicaAuthorityChanged(ApiException):
+    """A committed write targeted an object that is no longer authoritative."""
+
+
 @dataclass(frozen=True)
 class _ReplicaUpdatePlan:
     """One fully resolved replica target from a single DGD snapshot."""
@@ -115,6 +119,12 @@ class _ReplicaUpdateTracker:
     def run(self, write: Callable[[], None]) -> None:
         try:
             write()
+        except _ReplicaAuthorityChanged as error:
+            if self.possibly_applied:
+                raise RuntimeError(
+                    "replica update stopped after partial application; refusing to retry"
+                ) from error
+            raise
         except (
             AmbiguousKubernetesWriteError,
             _ReplicaTargetCommittedConflict,
@@ -1620,6 +1630,7 @@ class KubernetesConnector(PlannerConnector):
                 )
             except (
                 AmbiguousKubernetesWriteError,
+                _ReplicaAuthorityChanged,
                 _ReplicaTargetCommittedConflict,
             ) as error:
                 raise RuntimeError(
@@ -1691,6 +1702,10 @@ class KubernetesConnector(PlannerConnector):
                 reason="DGD authority could not be verified after DGDSA Scale PATCH committed",
             ) from error
         if rejection is not None:
+            expected_uid = (deployment.get("metadata", {}) or {}).get("uid")
+            current_uid = (refreshed.get("metadata", {}) or {}).get("uid")
+            if isinstance(expected_uid, str) and current_uid == expected_uid:
+                raise _ReplicaAuthorityChanged(status=409, reason=rejection)
             raise _ReplicaTargetCommittedConflict(status=409, reason=rejection)
 
     @staticmethod

@@ -307,6 +307,11 @@ class KubernetesCapacityManager(CapacityManager):
         connector = self.connectors[participant_id]
         await connector.set_component_replicas(targets, blocking=blocking)
 
+    async def wait_for_ready(self, participant_id: str) -> None:
+        """Wait for one participant without repeating its accepted write."""
+        connector = self.connectors[participant_id]
+        await connector.wait_for_deployment_ready()
+
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         connector = self.connectors[participant_id]
         role_hints = self._component_roles.get(participant_id, {})

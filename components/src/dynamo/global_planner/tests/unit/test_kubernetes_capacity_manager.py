@@ -87,6 +87,7 @@ def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
     connector = MagicMock()
     connector.parent_dgd_name = parent_dgd_name
     connector.set_component_replicas = AsyncMock()
+    connector.wait_for_deployment_ready = AsyncMock()
     connector.kube_api = MagicMock()
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
     cm.connectors[key] = connector
@@ -226,6 +227,16 @@ async def test_scale_calls_connector():
     ]
     await cm.scale("default/my-dgd", targets, blocking=True)
     connector.set_component_replicas.assert_awaited_once_with(targets, blocking=True)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ready_calls_connector():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+
+    await cm.wait_for_ready("default/my-dgd")
+
+    connector.wait_for_deployment_ready.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------- #
