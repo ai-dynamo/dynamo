@@ -40,6 +40,7 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
+    native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -170,6 +171,7 @@ impl SglangSidecarEngine {
             "sglang sidecar bootstrapped native gRPC discovery"
         );
 
+        let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
         let config = WorkerConfig {
             runtime: common.runtime,
@@ -205,6 +207,7 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
+                native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -287,6 +290,7 @@ impl LLMEngine for SglangSidecarEngine {
             &self.endpoint,
             &discovery,
             self.transport.connect_attempt_timeout,
+            self.native_http_max_event_bytes,
         )? {
             Some(native_http) => {
                 match native_http
