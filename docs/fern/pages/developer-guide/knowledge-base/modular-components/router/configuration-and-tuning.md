@@ -263,7 +263,14 @@ avoids re-sending the session's KV to a decode rank that already caches it (SGLa
 `--disaggregation-decode-enable-radix-cache`); moving evens the barrier. A large value (for
 example `1e9`) gives hard stickiness, `0` moves whenever another rank gives a lower wait. With
 `--router-session-affinity-mode hard` the host pins the session before the policy runs; use
-`soft` so the policy can apply this rule. The
+`soft` so the policy can apply this rule. A move that stays on the bound rank's host can reload
+the session from a host-memory KV tier shared by that host's ranks (for example Mooncake) instead
+of the network, so it costs less: set `dp_ranks_per_host` to the number of DP ranks per host
+(ranks are assumed contiguous, so ranks `[k*n, (k+1)*n)` share host `k`; the default `0` means
+unknown and charges every move in full) and `same_host_move_cost` to the cost of such a move
+relative to a cross-host one (default `0.22`, the 50 GB/s network to 225 GB/s chip-to-host ratio on
+GB200). The policy then moves to the rank with the largest saving minus threshold times move cost.
+The
 within-group token term uses each rank's per-request context (`active_sequence_blocks`) rather
 than its deduplicated KV footprint, because attention time scales with the context every
 request reads, not with the blocks that are physically resident.
