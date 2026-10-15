@@ -431,6 +431,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         # Make generation_result iterable (background task will try to read it)
         generation_result.__aiter__ = MagicMock(return_value=generation_result)
         never_resolve = asyncio.get_event_loop().create_future()
@@ -448,6 +449,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         guard.signal_first_token()
@@ -462,6 +464,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         result_queue = asyncio.Queue()
 
         async def mock_anext(self_mock):
@@ -485,10 +488,37 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_task_skips_abort_when_first_result_finishes(self):
+        """A one-chunk response is finished by its first result; no abort after it."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            val = await result_queue.get()
+            generation_result.finished = True
+            return val
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()
+
+        await result_queue.put("only_token")
+        await asyncio.sleep(0.05)
+
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_guard_in_non_disagg_mode(self):
         """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
         handler = self._make_handler()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         killed_future.set_result(None)
@@ -500,12 +530,29 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_finished_request_is_not_aborted(self):
+        """The frontend stops streams it considers complete and the worker sees
+        a kill; a request TRT-LLM already finished must not be cancelled."""
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = True
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-finished"
+
+        await handler._handle_cancellation(generation_result, context)
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
         self, monkeypatch
     ):
         handler = self._make_handler()
         handler.shutdown_event = asyncio.Event()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         context.async_killed_or_stopped.return_value = killed_future
@@ -541,6 +588,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         context = MagicMock()

@@ -207,8 +207,23 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
+    @property
+    def finished(self) -> bool:
+        ...
+
     def abort(self) -> None:
         ...
+
+
+def _abort_unless_finished(generation_result: _Abortable, request_id: str) -> None:
+    """The frontend stops streams it considers complete and the worker sees that
+    as a kill, so an unconditional abort() sends an executor cancel for a
+    request TRT-LLM already finished."""
+    if generation_result.finished:
+        logging.debug(f"Skip abort of finished Request ID: {request_id}")
+        return
+    generation_result.abort()
+    logging.debug(f"Aborted Request ID: {request_id}")
 
 
 class _DeferredAbort:
@@ -228,6 +243,10 @@ class _DeferredAbort:
         """Called by generate_locally() when first generation result is yielded."""
         self._first_token_received = True
 
+    @property
+    def finished(self) -> bool:
+        return self._generation_result.finished
+
     def abort(self) -> None:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
@@ -246,6 +265,9 @@ class _DeferredAbort:
                 break  # First result = KV transfer complete
         except Exception:
             pass
+        if self._generation_result.finished:
+            logging.debug("Deferred abort: deferred path, request already finished")
+            return
         self._generation_result.abort()
         logging.debug("Deferred abort: deferred path, engine abort fired")
 
@@ -508,8 +530,7 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            generation_result.abort()
-            logging.debug(f"Aborted Request ID: {context.id()}")
+            _abort_unless_finished(generation_result, context.id())
 
             # Clean up any remaining background task
             for task in pending:
