@@ -267,6 +267,7 @@ impl ErrorClass {
             Self::Backend(BackendError::Cancelled) => "BackendCancelled",
             Self::Backend(BackendError::EngineShutdown) => "BackendEngineShutdown",
             Self::Backend(BackendError::StreamIncomplete) => "BackendStreamIncomplete",
+            Self::Backend(BackendError::WorkerOverloaded) => "BackendWorkerOverloaded",
             Self::InvalidRequest => "InvalidRequest",
             Self::Unauthenticated => "Unauthenticated",
             Self::PermissionDenied => "PermissionDenied",
@@ -304,6 +305,7 @@ impl ErrorClass {
                     Self::DeadlineExceeded
                 }
                 BackendError::Cancelled => Self::Cancelled,
+                BackendError::WorkerOverloaded => Self::CapacityExhausted,
             },
             canonical @ (Self::Cancelled
             | Self::Unavailable
@@ -352,6 +354,8 @@ pub enum BackendError {
     EngineShutdown,
     /// The response stream was terminated before completion (e.g., engine dropped mid-stream).
     StreamIncomplete,
+    /// The worker's transient admission budget is exhausted.
+    WorkerOverloaded,
 }
 
 impl fmt::Display for BackendError {
@@ -366,6 +370,7 @@ impl fmt::Display for BackendError {
             BackendError::Cancelled => write!(f, "Cancelled"),
             BackendError::EngineShutdown => write!(f, "EngineShutdown"),
             BackendError::StreamIncomplete => write!(f, "StreamIncomplete"),
+            BackendError::WorkerOverloaded => write!(f, "WorkerOverloaded"),
         }
     }
 }
@@ -473,6 +478,7 @@ impl ErrorReason {
                 BackendError::Cancelled => "backend.cancelled",
                 BackendError::EngineShutdown => "backend.engine_shutdown",
                 BackendError::StreamIncomplete => "backend.stream_incomplete",
+                BackendError::WorkerOverloaded => "capacity.worker_overloaded",
             },
             ErrorClass::InvalidRequest => "request.invalid",
             ErrorClass::Unauthenticated => "request.unauthenticated",
@@ -857,6 +863,7 @@ impl DynamoError {
             | ErrorClass::RateLimited => ErrorClass::ResourceExhausted,
             ErrorClass::Unavailable => ErrorClass::Unavailable,
             ErrorClass::WorkerUnavailable => ErrorClass::WorkerUnavailable,
+            ErrorClass::Backend(BackendError::WorkerOverloaded) => ErrorClass::ResourceExhausted,
             ErrorClass::Backend(error) => ErrorClass::Backend(error),
         }
     }
@@ -1609,6 +1616,14 @@ mod tests {
         assert_eq!(
             ErrorClass::Backend(BackendError::StreamIncomplete).to_string(),
             "BackendStreamIncomplete"
+        );
+        assert_eq!(
+            ErrorClass::Backend(BackendError::WorkerOverloaded).normalized(),
+            ErrorClass::CapacityExhausted
+        );
+        assert_eq!(
+            ErrorReason::for_class(ErrorClass::Backend(BackendError::WorkerOverloaded)).as_str(),
+            "capacity.worker_overloaded"
         );
         assert_eq!(
             ErrorClass::Backend(BackendError::ResponseTimeout).to_string(),

@@ -1342,7 +1342,18 @@ fn frontend_router_metadata_does_not_require_engine_support() {
     )
     .unwrap();
     for (fields, is_supported) in [
-        (json!(["worker_id", "timing"]), true),
+        (
+            json!([
+                "worker_id",
+                "timing",
+                "completion_token_ids",
+                "prompt_token_ids",
+                "prompt_logprobs",
+                "detailed_finish_reason",
+                "stop_reason"
+            ]),
+            true,
+        ),
         (json!(["worker_id", "engine_data"]), false),
     ] {
         let mut request = request();

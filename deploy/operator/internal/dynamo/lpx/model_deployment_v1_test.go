@@ -306,7 +306,8 @@ func TestDeploymentContractBoundsAcquisition(t *testing.T) {
 }
 
 func TestDeploymentContractSupportedGeometry(t *testing.T) {
-	for _, name := range []string{"host XT", "HX metadata", "HX legacy geometry", "HX subnode", "XT sixteen-chip node", "partial XT", "hybrid CPU", "CPU embeddings"} {
+	const hybridCUDA = "hybrid CUDA"
+	for _, name := range []string{"host XT", "HX metadata", "HX legacy geometry", "HX subnode", "XT sixteen-chip node", "partial XT", "hybrid CPU", hybridCUDA, "CPU embeddings"} {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Configure one supported geometry on a deployment-only fixture")
 			deployment := newDeploymentV1ContractFixture(t)
@@ -360,14 +361,19 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 				require.NoError(t, err)
 				selected.At(0).SetDeviceType(commoncapnpv1.DeviceType_lpu)
 				selected.At(0).SetPartitionId(3)
-			case "hybrid CPU":
+			case "hybrid CPU", hybridCUDA:
 				expanded, err := deployment.NewPartitions(2)
 				require.NoError(t, err)
 				require.NoError(t, expanded.Set(0, partitions.At(0)))
 				ref, err := expanded.At(1).NewPartition()
 				require.NoError(t, err)
-				ref.SetDeviceType(commoncapnpv1.DeviceType_cpu)
-				_, err = expanded.At(1).Detail().NewCpu()
+				if name == hybridCUDA {
+					ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
+					_, err = expanded.At(1).Detail().NewCuda()
+				} else {
+					ref.SetDeviceType(commoncapnpv1.DeviceType_cpu)
+					_, err = expanded.At(1).Detail().NewCpu()
+				}
 				require.NoError(t, err)
 			case "CPU embeddings":
 				program, err := config.Program()
@@ -381,6 +387,7 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			require.Equal(t, wantFamily, build.Family)
 			require.Equal(t, wantIO, build.IOFPGACount)
 			require.Equal(t, name == "CPU embeddings", build.SupportsCPUEmbeddings)
+			require.Equal(t, name == hybridCUDA, build.HasCUDAPartitions)
 			require.Len(t, build.Partitions, 1)
 			if wantFamily == BuildFamilyHX {
 				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.Partitions[0].HXExtent)

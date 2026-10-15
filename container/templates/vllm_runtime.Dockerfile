@@ -637,6 +637,7 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/artifacts /workspace/components/src/dynamo/artifacts
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chown=dynamo:0 lib /workspace/lib
 
@@ -667,6 +668,10 @@ ENTRYPOINT []
 
 
 FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+# Verify artifact capture and delivery imports in the shipped runtime, not only the test image.
+RUN python3 -c 'import dynamo.artifacts.vllm.capture; import dynamo.artifacts.runtime'
+{% endif %}
 {% if target not in ("dev", "local-dev") and device != "cpu" %}
 COPY --from=licenses /legal /legal
 {% endif %}

@@ -2764,6 +2764,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "prometheus",
+ "proptest",
  "prost 0.13.5",
  "rand 0.9.4",
  "rayon",
