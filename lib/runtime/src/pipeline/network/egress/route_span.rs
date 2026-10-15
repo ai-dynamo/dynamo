@@ -211,6 +211,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Backend(BackendError::Cancelled) => "backend_cancelled",
         ErrorType::Backend(BackendError::EngineShutdown) => "engine_shutdown",
         ErrorType::Backend(BackendError::StreamIncomplete) => "stream_incomplete",
+        ErrorType::Backend(BackendError::WorkerOverloaded) => "backend_worker_overloaded",
         ErrorType::InvalidRequest => "invalid_request",
         ErrorType::Unauthenticated => "unauthenticated",
         ErrorType::PermissionDenied => "permission_denied",
@@ -250,9 +251,10 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => {
             "rejected"
         }
-        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded | ErrorType::WorkerDraining => {
-            "rejected"
-        }
+        ErrorType::ResourceExhausted
+        | ErrorType::WorkerOverloaded
+        | ErrorType::WorkerDraining
+        | ErrorType::Backend(BackendError::WorkerOverloaded) => "rejected",
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
         // Deadline expiry matches the HTTP metric classification, which labels
         // deadline-exceeded 429 responses as `cancelled`.

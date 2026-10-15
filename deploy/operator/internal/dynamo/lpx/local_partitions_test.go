@@ -77,7 +77,6 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			t.Log("Create a hybrid build with chain 7-8 and an independent partition 11")
 			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 			build := normalized.build
-			build.CompilationMode = BuildCompilationModeHybrid
 			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
 			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
 			third := build.Partitions[1]
@@ -215,7 +214,6 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			t.Log("Project a hybrid build with chain 7-8 and an independent partition 11")
 			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 			build := normalized.build
-			build.CompilationMode = BuildCompilationModeHybrid
 			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
 			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
 			third := build.Partitions[1]
@@ -265,7 +263,6 @@ func TestProjectModelV2LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 	t.Log("Create a hybrid build with one more physical partition than the LPX limit")
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
 	build.SelectedPropSyncChains = nil
 	template := build.Partitions[0]
 	build.Partitions = make([]BuildPartition, 0, maxLPXPartitions+1)
@@ -349,7 +346,6 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			t.Log("Create a hybrid HX build with partitions 1-4, a selected chain 2-3, and one CUDA artifact")
 			fixture := newV3CompilerFixture()
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = 4
 			for id := uint32(2); id <= 4; id++ {
 				partition := fixture.partitions[0]
 				partition.id = id
@@ -455,7 +451,6 @@ func TestProjectModelV3LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 	t.Log("Create a hybrid HX build with one more partition than the LPX limit")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.numLPUNodes = maxLPXPartitions + 1
 	for id := uint32(2); id <= maxLPXPartitions+1; id++ {
 		partition := fixture.partitions[0]
 		partition.id = id
