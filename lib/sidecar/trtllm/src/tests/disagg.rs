@@ -72,9 +72,13 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
             "data:image/png;base64,c2Vjb25k",
         ],
     );
-    req.extra_args = Some(json!({
-        "mm_hashes": ["0123456789abcdef", "fedcba9876543210"]
-    }));
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            Some("first-image".to_string()),
+            Some("second-image".to_string()),
+        ],
+    )]));
 
     let prefill = build_generate_request(
         &req,
@@ -87,8 +91,8 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
     assert!(is_context_only(&prefill));
     assert_eq!(prefill.stopping.as_ref().unwrap().max_tokens, Some(1));
     assert_eq!(prefill.media.len(), 2);
-    assert_eq!(prefill.media[0].uuid, "0123456789abcdef");
-    assert_eq!(prefill.media[1].uuid, "fedcba9876543210");
+    assert_eq!(prefill.media[0].uuid, "first-image");
+    assert_eq!(prefill.media[1].uuid, "second-image");
 
     req.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: crate::disagg::session_to_json(fake_session())

@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::client::{ModelLimits, TrtllmClient};
+use crate::client::{ModelMetadata, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request, engine_error};
 use crate::engine::TrtllmSidecarEngine;
 use crate::model::ConfiguredModel;
@@ -465,16 +465,16 @@ fn impatient_transport() -> GrpcTransportConfig {
 
 /// Engine limits as `Control.GetModelInfo` would report them, with no
 /// separate output cap.
-fn limits(context_length: u32) -> Option<ModelLimits> {
-    Some(ModelLimits {
+fn limits(context_length: u32) -> Option<ModelMetadata> {
+    Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
         supports_image: false,
     })
 }
 
-fn image_limits(context_length: u32) -> Option<ModelLimits> {
-    Some(ModelLimits {
+fn image_limits(context_length: u32) -> Option<ModelMetadata> {
+    Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
         supports_image: true,

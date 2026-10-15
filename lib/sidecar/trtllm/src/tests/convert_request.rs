@@ -89,10 +89,6 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
         "image_url".to_string(),
         vec![Some("first-image".to_string()), None],
     )]));
-    req.extra_args = Some(json!({
-        "mm_hashes": ["routing-hash-one", "routing-hash-two"]
-    }));
-
     let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
         .expect("image request");
     assert_eq!(proto.media.len(), 2);
@@ -114,7 +110,7 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
 }
 
 #[test]
-fn mm_routing_hashes_are_forwarded_as_image_uuids_in_order() {
+fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
     let mut req = request();
     add_images(
         &mut req,
@@ -129,34 +125,7 @@ fn mm_routing_hashes_are_forwarded_as_image_uuids_in_order() {
 
     let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
         .expect("image request");
-    assert_eq!(proto.media[0].uuid, "0123456789abcdef");
-    assert_eq!(proto.media[1].uuid, "fedcba9876543210");
-}
-
-#[test]
-fn malformed_or_misaligned_mm_routing_hashes_are_rejected() {
-    for (hashes, expected) in [
-        (json!("not-an-array"), "array of strings"),
-        (json!(["only-one"]), "must match"),
-        (json!(["one", ""]), "non-empty string"),
-        (json!(["one", 2]), "non-empty string"),
-    ] {
-        let mut req = request();
-        add_images(
-            &mut req,
-            [
-                "https://example.com/first.png",
-                "https://example.com/second.png",
-            ],
-        );
-        req.extra_args = Some(json!({"mm_hashes": hashes}));
-        let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
-            .expect_err("malformed routing hashes must fail closed");
-        assert!(
-            error.to_string().contains(expected),
-            "unexpected error: {error}"
-        );
-    }
+    assert!(proto.media.iter().all(|item| item.uuid.is_empty()));
 }
 
 #[test]
@@ -365,7 +334,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         &req,
         "req",
         "model",
-        Some(ModelLimits {
+        Some(ModelMetadata {
             context_length: Some(4096),
             max_output_tokens: Some(256),
             supports_image: false,
