@@ -562,6 +562,12 @@ impl DistributedRuntime {
         self.runtime.shutdown_and_wait(drain_timeout).await
     }
 
+    /// Deregister and bound the complete teardown, including transport cleanup.
+    pub async fn shutdown_with_budget(&self, remaining: std::time::Duration) -> Result<()> {
+        self.discovery_client.shutdown();
+        self.runtime.shutdown_with_budget(remaining).await
+    }
+
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         Namespace::new(self.clone(), name.into())
