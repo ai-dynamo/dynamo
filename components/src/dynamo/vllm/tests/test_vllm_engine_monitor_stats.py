@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for VllmEngineMonitor._periodic_log_stats."""
+"""Tests for vLLM engine monitoring and its scoped lifetime."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -217,3 +217,113 @@ async def test_health_failure_during_worker_shutdown_stops_monitor(
     monitor._shutdown_engine.assert_not_called()
     monitor.runtime.shutdown.assert_not_called()
     exit_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_monitor_context_stops_background_tasks(mock_engine):
+    monitor = _make_monitor(mock_engine)
+
+    async with monitor:
+        assert not monitor._monitor_task.done()
+        assert not monitor._stats_task.done()
+
+    assert monitor._monitor_task.cancelled()
+    assert monitor._stats_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_monitor_context_preserves_wake_failure(mock_engine):
+    monitor = _make_monitor(mock_engine)
+
+    with pytest.raises(RuntimeError, match="wake failed"):
+        async with monitor:
+            raise RuntimeError("wake failed")
+
+    assert monitor._monitor_task.cancelled()
+    assert monitor._stats_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_monitor_context_stops_tasks_on_cancellation(mock_engine):
+    monitor = _make_monitor(mock_engine)
+    entered = asyncio.Event()
+
+    async def wait_in_standby():
+        async with monitor:
+            entered.set()
+            await asyncio.Future()
+
+    standby = asyncio.create_task(wait_in_standby())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        standby.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await standby
+    finally:
+        standby.cancel()
+        await asyncio.gather(standby, return_exceptions=True)
+
+    assert monitor._monitor_task.cancelled()
+    assert monitor._stats_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_monitor_stop_awaits_task_cleanup(mock_engine):
+    monitor = _make_monitor(mock_engine)
+    started = [asyncio.Event(), asyncio.Event()]
+    stopped = [asyncio.Event(), asyncio.Event()]
+
+    async def background_task(index):
+        started[index].set()
+        try:
+            await asyncio.Future()
+        finally:
+            await asyncio.sleep(0)
+            stopped[index].set()
+
+    tasks = [asyncio.create_task(background_task(index)) for index in range(2)]
+    monitor._monitor_task, monitor._stats_task = tasks
+    try:
+        async with monitor:
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started)), timeout=1.0
+            )
+
+        assert all(event.is_set() for event in stopped)
+        assert all(task.done() for task in tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_monitor_stop_surfaces_background_failure(mock_engine):
+    monitor = _make_monitor(mock_engine)
+    monitor._monitor_task.set_exception(RuntimeError("health task failed"))
+
+    with pytest.raises(RuntimeError, match="health task failed"):
+        async with monitor:
+            pass
+
+    assert monitor._stats_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_dead_standby_uses_existing_fail_stop_shutdown(mock_engine):
+    class WorkerExit(Exception):
+        pass
+
+    mock_engine.check_health.side_effect = EngineDeadError()
+    monitor = _make_monitor(mock_engine)
+    monitor._shutdown_engine = MagicMock()
+
+    with patch(
+        "dynamo.vllm.engine_monitor.os._exit", side_effect=WorkerExit
+    ) as exit_process:
+        with pytest.raises(WorkerExit):
+            await monitor._check_engine_health()
+
+    monitor._shutdown_engine.assert_called_once_with()
+    monitor.runtime.shutdown.assert_called_once_with()
+    exit_process.assert_called_once_with(1)
