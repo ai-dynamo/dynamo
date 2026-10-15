@@ -73,6 +73,183 @@ fn request_maps_sampling_stop_and_output_fields() {
 }
 
 #[test]
+fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
+    let mut req = request();
+    // Routing-only multimodal metadata has already served its purpose by the
+    // time the request reaches a worker and must not block engine delivery.
+    req.mm_routing_info = Some(Default::default());
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "data:image/png;base64,aW1hZ2U=",
+        ],
+    );
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("first-image".to_string()), None],
+    )]));
+    req.extra_args = Some(json!({
+        "mm_hashes": ["routing-hash-one", "routing-hash-two"]
+    }));
+
+    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect("image request");
+    assert_eq!(proto.media.len(), 2);
+    assert_eq!(proto.media[0].modality, pb::Modality::Image as i32);
+    assert_eq!(
+        proto.media[0].source,
+        Some(pb::media_item::Source::Url(
+            "https://example.com/first.png".to_string()
+        ))
+    );
+    assert_eq!(proto.media[0].uuid, "first-image");
+    assert_eq!(
+        proto.media[1].source,
+        Some(pb::media_item::Source::DataUri(
+            "data:image/png;base64,aW1hZ2U=".to_string()
+        ))
+    );
+    assert!(proto.media[1].uuid.is_empty());
+}
+
+#[test]
+fn mm_routing_hashes_are_forwarded_as_image_uuids_in_order() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "https://example.com/second.png",
+        ],
+    );
+    req.extra_args = Some(json!({
+        "mm_hashes": ["0123456789abcdef", "fedcba9876543210"]
+    }));
+
+    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect("image request");
+    assert_eq!(proto.media[0].uuid, "0123456789abcdef");
+    assert_eq!(proto.media[1].uuid, "fedcba9876543210");
+}
+
+#[test]
+fn malformed_or_misaligned_mm_routing_hashes_are_rejected() {
+    for (hashes, expected) in [
+        (json!("not-an-array"), "array of strings"),
+        (json!(["only-one"]), "must match"),
+        (json!(["one", ""]), "non-empty string"),
+        (json!(["one", 2]), "non-empty string"),
+    ] {
+        let mut req = request();
+        add_images(
+            &mut req,
+            [
+                "https://example.com/first.png",
+                "https://example.com/second.png",
+            ],
+        );
+        req.extra_args = Some(json!({"mm_hashes": hashes}));
+        let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+            .expect_err("malformed routing hashes must fail closed");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn image_media_requires_the_loaded_models_advertised_capability() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/image.png"]);
+
+    for model_limits in [None, limits(4096)] {
+        let error = build_generate_request(&req, "req", "model", model_limits, AGG)
+            .expect_err("a text-only or unknown model must reject images");
+        assert!(
+            error
+                .to_string()
+                .contains("does not advertise image support"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_media_modalities_and_sources_are_rejected() {
+    for (key, expected) in [
+        ("video_url", "video_url"),
+        ("audio_url", "audio_url"),
+        ("future_media", "future_media"),
+    ] {
+        let mut req = request();
+        req.multi_modal_data = Some(HashMap::from([(
+            key.to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.com/media".to_string(),
+            )],
+        )]));
+        let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+            .expect_err("only images are supported");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+
+    let mut req = request();
+    add_images(&mut req, ["file:///tmp/image.png"]);
+    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect_err("the engine cannot fetch a local Dynamo path");
+    assert!(error.to_string().contains("http, https, or data URI"));
+
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::UuidOnly("cached-image".to_string())],
+    )]));
+    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect_err("OpenEngine cannot resolve a source-less UUID");
+    assert!(error.to_string().contains("requires an image source"));
+}
+
+#[test]
+fn image_metadata_that_cannot_be_honored_is_rejected() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/image.png"]);
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("one".to_string()), Some("two".to_string())],
+    )]));
+    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect_err("UUIDs must align positionally");
+    assert!(error.to_string().contains("UUID count"));
+
+    req.multi_modal_uuids = None;
+    req.mm_processor_kwargs = Some(serde_json::json!({"do_resize": false}));
+    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect_err("processor overrides cannot be dropped");
+    assert!(error.to_string().contains("mm_processor_kwargs"));
+
+    req.mm_processor_kwargs = Some(serde_json::json!({}));
+    req.media_io_kwargs = Some(serde_json::json!({"image": {"mode": "RGB"}}));
+    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect_err("media I/O overrides cannot be dropped");
+    assert!(error.to_string().contains("media_io_kwargs"));
+}
+
+#[test]
+fn image_request_without_max_tokens_is_left_for_engine_derivation() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/image.png"]);
+    req.stop_conditions.max_tokens = None;
+    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        .expect("the engine derives against the expanded prompt");
+    assert_eq!(proto.stopping.expect("stopping").max_tokens, None);
+}
+
+#[test]
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
@@ -191,6 +368,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            supports_image: false,
         }),
         AGG,
     )

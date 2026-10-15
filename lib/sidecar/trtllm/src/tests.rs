@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
-    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
+    OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -60,6 +60,10 @@ struct FakeTrtllm {
     empty_model_info: Arc<AtomicBool>,
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
+    /// Portable coarse-grained model capability.
+    supports_multimodal: Arc<AtomicBool>,
+    /// TensorRT-LLM's finer-grained modality advertisement.
+    advertises_image: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -109,7 +113,10 @@ impl pb::inference_server::Inference for FakeTrtllm {
         }
 
         let request_id = request.request_id.clone();
-        let prompt_tokens = prompt_len(&request);
+        // Image markers expand inside TensorRT-LLM after Dynamo tokenizes the
+        // text prompt. Simulate that so the integration test proves Dynamo
+        // trusts the engine's terminal usage rather than the unexpanded input.
+        let prompt_tokens = prompt_len(&request) + if request.media.is_empty() { 0 } else { 64 };
         let wants_logprobs = wants_logprobs(&request);
         let context_only = is_context_only(&request);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -249,6 +256,14 @@ impl pb::control_server::Control for FakeTrtllm {
         if self.unavailable_model_info.load(Ordering::SeqCst) {
             return Err(Status::unavailable("not serving yet"));
         }
+        let supports_multimodal = self.supports_multimodal.load(Ordering::SeqCst);
+        let modalities = if self.advertises_image.load(Ordering::SeqCst) {
+            vec![prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("image".to_string())),
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
@@ -256,6 +271,19 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
+            supports_multimodal: Some(supports_multimodal),
+            extra: Some(prost_types::Struct {
+                fields: [(
+                    "trtllm_supported_modalities".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::ListValue(
+                            prost_types::ListValue { values: modalities },
+                        )),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
             ..Default::default()
         }))
     }
@@ -441,7 +469,26 @@ fn limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
         max_output_tokens: None,
+        supports_image: false,
     })
+}
+
+fn image_limits(context_length: u32) -> Option<ModelLimits> {
+    Some(ModelLimits {
+        context_length: Some(context_length),
+        max_output_tokens: None,
+        supports_image: true,
+    })
+}
+
+fn add_images(request: &mut PreprocessedRequest, images: impl IntoIterator<Item = &'static str>) {
+    request.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        images
+            .into_iter()
+            .map(|image| MultimodalData::RawUrl(image.to_string()))
+            .collect(),
+    )]));
 }
 
 fn engine(endpoint: &str, connections: usize) -> TrtllmSidecarEngine {
