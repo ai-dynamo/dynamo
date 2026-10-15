@@ -11,9 +11,10 @@ each default, and leaves the webhook handler as a narrow request boundary.
 - Mirror the Go API type tree. A parent owns defaults coordinating its scalar
   fields or children and delegates local child behavior to functions named after
   the exact child Go type.
-- Keep admission handlers narrow: verify the admission GVK and concrete Go type,
-  obtain request-scoped inputs, call one root structural traversal, and return
-  the result. Do not put recursive API policy in handler methods.
+- Keep webhook handlers narrow: verify the admission GVK and concrete Go type,
+  obtain request-scoped inputs, call the root `default<Type>` function, and return.
+  Put each field default in the structural function for the API type that declares
+  that field.
 - Treat conversion as an explicit boundary. Register admission for the canonical
   hub representation and dispatch foreign-version behavior from the converted
   object shape, including version envelopes. Do not dispatch semantic behavior
