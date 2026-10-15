@@ -22,6 +22,7 @@ const SGLANG_SCHEDULER_LABELS: &[&str] = &[
     "tp_rank",
     "pp_rank",
     "moe_ep_rank",
+    "dp_rank",
 ];
 const SGLANG_REQUEST_LABELS: &[&str] = &["model_name", "engine_type"];
 
@@ -84,10 +85,14 @@ struct VllmDpHandles {
 }
 
 struct SglangHandles {
+    scheduler_metrics: HashMap<u32, SglangDpHandles>,
+    request_metrics: NativeRequestMetricHandles,
+}
+
+struct SglangDpHandles {
     num_running_reqs: IntGauge,
     num_queue_reqs: IntGauge,
     cache_hit_rate: Gauge,
-    request_metrics: NativeRequestMetricHandles,
 }
 
 #[derive(Clone)]
@@ -260,18 +265,29 @@ impl NativeMockerMetrics {
                 Some(NativeMetricHandles::Vllm(handles))
             }
             NativeCollectors::Sglang(collectors) => {
-                let scheduler_label_values = [model_name, "sglang", "0", "0", "0"];
+                let mut scheduler_metrics = HashMap::with_capacity(self.dp_size as usize);
+                for dp_rank in 0..self.dp_size {
+                    let rank = dp_rank.to_string();
+                    let scheduler_label_values =
+                        [model_name, "sglang", "0", "0", "0", rank.as_str()];
+                    scheduler_metrics.insert(
+                        dp_rank,
+                        SglangDpHandles {
+                            num_running_reqs: collectors
+                                .num_running_reqs
+                                .with_label_values(&scheduler_label_values),
+                            num_queue_reqs: collectors
+                                .num_queue_reqs
+                                .with_label_values(&scheduler_label_values),
+                            cache_hit_rate: collectors
+                                .cache_hit_rate
+                                .with_label_values(&scheduler_label_values),
+                        },
+                    );
+                }
                 let request_label_values = [model_name, "sglang"];
                 Some(NativeMetricHandles::Sglang(SglangHandles {
-                    num_running_reqs: collectors
-                        .num_running_reqs
-                        .with_label_values(&scheduler_label_values),
-                    num_queue_reqs: collectors
-                        .num_queue_reqs
-                        .with_label_values(&scheduler_label_values),
-                    cache_hit_rate: collectors
-                        .cache_hit_rate
-                        .with_label_values(&scheduler_label_values),
+                    scheduler_metrics,
                     request_metrics: NativeRequestMetricHandles::Sglang {
                         num_requests_total: collectors
                             .num_requests_total
@@ -327,34 +343,22 @@ impl NativeMockerMetrics {
                 }
             }
             Some(NativeMetricHandles::Sglang(handles)) => {
-                let running = state
-                    .latest_snapshots
-                    .values()
-                    .map(|snapshot| snapshot.running_requests)
-                    .sum::<u64>();
-                let queued = state
-                    .latest_snapshots
-                    .values()
-                    .map(|snapshot| snapshot.waiting_requests)
-                    .sum::<u64>();
-                let cache_hits = state
-                    .latest_snapshots
-                    .values()
-                    .map(|snapshot| snapshot.sglang_cache_hit_tokens)
-                    .sum::<u64>();
-                let cache_total = state
-                    .latest_snapshots
-                    .values()
-                    .map(|snapshot| snapshot.sglang_cache_total_tokens)
-                    .sum::<u64>();
+                let Some(handles) = handles.scheduler_metrics.get(&metrics.dp_rank) else {
+                    return;
+                };
 
-                handles.num_running_reqs.set(clamp_u64_to_i64(running));
-                handles.num_queue_reqs.set(clamp_u64_to_i64(queued));
+                handles
+                    .num_running_reqs
+                    .set(clamp_u64_to_i64(metrics.running_requests));
+                handles
+                    .num_queue_reqs
+                    .set(clamp_u64_to_i64(metrics.waiting_requests));
                 // No prefill tokens means no new observation, not a 0% cache hit rate.
-                if cache_total > 0 {
-                    handles
-                        .cache_hit_rate
-                        .set(cache_hits as f64 / cache_total as f64);
+                if metrics.sglang_cache_total_tokens > 0 {
+                    handles.cache_hit_rate.set(
+                        metrics.sglang_cache_hit_tokens as f64
+                            / metrics.sglang_cache_total_tokens as f64,
+                    );
                 }
             }
             None => {}
@@ -725,6 +729,41 @@ mod tests {
             .sum()
     }
 
+    fn assert_sglang_scheduler_scrape(
+        registry: &MetricsRegistry,
+        expected: &[(u32, f64, f64, f64)],
+    ) {
+        let text = registry.prometheus_expfmt_combined().unwrap();
+        for (index, name) in [
+            "sglang:num_running_reqs",
+            "sglang:num_queue_reqs",
+            "sglang:cache_hit_rate",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(text.contains(&format!("# TYPE {name} gauge\n")));
+            let prefix = format!("{name}{{");
+            let samples = text
+                .lines()
+                .filter(|line| line.starts_with(prefix.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(samples.len(), expected.len(), "{name}: {samples:?}");
+            for &(dp_rank, running, queued, cache_hit_rate) in expected {
+                let series = format!(
+                    "{name}{{dp_rank=\"{dp_rank}\",engine_type=\"sglang\",model_name=\"llama\",moe_ep_rank=\"0\",pp_rank=\"0\",tp_rank=\"0\"}} "
+                );
+                let value = samples
+                    .iter()
+                    .find_map(|sample| sample.strip_prefix(series.as_str()))
+                    .unwrap_or_else(|| panic!("missing series {series} in {text}"))
+                    .parse::<f64>()
+                    .unwrap();
+                assert_eq!(value, [running, queued, cache_hit_rate][index], "{series}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn vllm_scrape_contract_uses_native_names_and_engine_labels() {
         let registry = MetricsRegistry::new();
@@ -795,61 +834,47 @@ mod tests {
         let metrics = NativeMockerMetrics::new(EngineType::Sglang, 2).unwrap();
         metrics.register(&registry).unwrap();
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 2, 10, 1, 3, 0, 2, 4));
-        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 2, 10, 4, 5, 0, 1, 2));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 2, 10, 4, 5, 0, 3, 12));
 
-        let mut timing = metrics
-            .request_timing("llama", 0, false, Instant::now())
-            .await;
-        timing.record_tokens(1);
-        timing.record_normal_completion();
+        for dp_rank in 0..2 {
+            let mut timing = metrics
+                .request_timing("llama", dp_rank, false, Instant::now())
+                .await;
+            timing.record_tokens(1);
+            timing.record_tokens(1);
+            timing.record_normal_completion();
+        }
 
-        let running = gather_family(&registry, "sglang:num_running_reqs");
-        assert_eq!(running.get_field_type(), MetricType::GAUGE);
-        let running_metric = running.get_metric().first().unwrap();
-        assert_eq!(running_metric.gauge.as_ref().unwrap().value(), 5.0);
-        assert_eq!(
-            metric_labels(running_metric),
-            HashSet::from([
-                "model_name".to_string(),
-                "engine_type".to_string(),
-                "tp_rank".to_string(),
-                "pp_rank".to_string(),
-                "moe_ep_rank".to_string(),
-            ])
-        );
+        assert_sglang_scheduler_scrape(&registry, &[(0, 1.0, 3.0, 0.5), (1, 4.0, 5.0, 0.25)]);
 
-        let queue = gather_family(&registry, "sglang:num_queue_reqs");
-        assert_eq!(
-            queue
-                .get_metric()
-                .first()
-                .unwrap()
-                .gauge
-                .as_ref()
-                .unwrap()
-                .value(),
-            8.0
-        );
-        let cache_hit_rate = gather_family(&registry, "sglang:cache_hit_rate");
-        assert_eq!(
-            cache_hit_rate
-                .get_metric()
-                .first()
-                .unwrap()
-                .gauge
-                .as_ref()
-                .unwrap()
-                .value(),
-            0.5
-        );
+        for _ in 0..2 {
+            metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 2, 10, 7, 2, 0, 6, 8));
+        }
+        assert_sglang_scheduler_scrape(&registry, &[(0, 1.0, 3.0, 0.5), (1, 7.0, 2.0, 0.75)]);
 
         let requests = gather_family(&registry, "sglang:num_requests_total");
         assert_eq!(requests.get_field_type(), MetricType::COUNTER);
-        let request_metric = requests.get_metric().first().unwrap();
-        assert_eq!(
-            metric_labels(request_metric),
-            HashSet::from(["model_name".to_string(), "engine_type".to_string()])
-        );
+        assert_eq!(counter_value(&registry, "sglang:num_requests_total"), 2.0);
+        for name in [
+            "sglang:num_requests_total",
+            "sglang:time_to_first_token_seconds",
+            "sglang:inter_token_latency_seconds",
+            "sglang:e2e_request_latency_seconds",
+        ] {
+            let family = gather_family(&registry, name);
+            assert_eq!(family.get_metric().len(), 1);
+            assert_eq!(
+                metric_labels(family.get_metric().first().unwrap()),
+                HashSet::from(["model_name".to_string(), "engine_type".to_string()])
+            );
+        }
+        for name in [
+            "sglang:time_to_first_token_seconds",
+            "sglang:inter_token_latency_seconds",
+            "sglang:e2e_request_latency_seconds",
+        ] {
+            assert_eq!(histogram_count(&registry, name), 2);
+        }
     }
 
     #[tokio::test]
@@ -860,25 +885,84 @@ mod tests {
         let _ = metrics
             .request_timing("llama", 0, false, Instant::now())
             .await;
-        let cache_hit_rate = || {
-            gather_family(&registry, "sglang:cache_hit_rate")
-                .get_metric()
-                .first()
-                .unwrap()
-                .gauge
-                .as_ref()
-                .unwrap()
-                .value()
-        };
+        assert_sglang_scheduler_scrape(&registry, &[(0, 0.0, 0.0, 0.0)]);
 
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 5, 10));
-        assert_eq!(cache_hit_rate(), 0.5);
+        assert_sglang_scheduler_scrape(&registry, &[(0, 0.0, 0.0, 0.5)]);
 
-        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 0, 0));
-        assert_eq!(cache_hit_rate(), 0.5);
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 2, 3, 0, 0, 0));
+        assert_sglang_scheduler_scrape(&registry, &[(0, 2.0, 3.0, 0.5)]);
 
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 0, 10));
-        assert_eq!(cache_hit_rate(), 0.0);
+        assert_sglang_scheduler_scrape(&registry, &[(0, 0.0, 0.0, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn sglang_cache_hit_rate_preserves_each_ranks_last_prefill_observation() {
+        let registry = MetricsRegistry::new();
+        let metrics = NativeMockerMetrics::new(EngineType::Sglang, 2).unwrap();
+        metrics.register(&registry).unwrap();
+        let _ = metrics
+            .request_timing("llama", 0, false, Instant::now())
+            .await;
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 1, 3, 0, 5, 10));
+        assert_sglang_scheduler_scrape(&registry, &[(0, 1.0, 3.0, 0.5), (1, 0.0, 0.0, 0.0)]);
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 0, 10, 4, 5, 0, 3, 12));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 2, 1, 0, 0, 0));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 0, 10, 7, 2, 0, 0, 0));
+        assert_sglang_scheduler_scrape(&registry, &[(0, 2.0, 1.0, 0.5), (1, 7.0, 2.0, 0.25)]);
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 0, 8));
+        assert_sglang_scheduler_scrape(&registry, &[(0, 0.0, 0.0, 0.0), (1, 7.0, 2.0, 0.25)]);
+    }
+
+    #[tokio::test]
+    async fn trtllm_scrape_contract_keeps_native_names_and_engine_labels() {
+        let registry = MetricsRegistry::new();
+        let metrics = NativeMockerMetrics::new(EngineType::Trtllm, 2).unwrap();
+        metrics.register(&registry).unwrap();
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 3, 10, 2, 4, 0, 0, 0));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 4, 10, 7, 8, 0, 0, 0));
+        let mut timing = metrics
+            .request_timing("llama", 1, false, Instant::now())
+            .await;
+        timing.record_tokens(1);
+        timing.record_normal_completion();
+
+        for (name, values) in [
+            ("trtllm:num_requests_running", [2.0, 7.0]),
+            ("trtllm:num_requests_waiting", [4.0, 8.0]),
+            ("trtllm:kv_cache_usage_perc", [0.3, 0.4]),
+            ("trtllm:gpu_cache_usage_perc", [0.3, 0.4]),
+        ] {
+            let family = gather_family(&registry, name);
+            assert_eq!(family.get_metric().len(), 2);
+            for (rank, expected) in values.into_iter().enumerate() {
+                let metric = metric_with_label(&family, "engine", &rank.to_string());
+                assert_eq!(
+                    metric_labels(metric),
+                    HashSet::from(["model_name".to_string(), "engine".to_string()])
+                );
+                assert_eq!(metric.gauge.as_ref().unwrap().value(), expected);
+            }
+        }
+        assert_eq!(
+            counter_value(&registry, "trtllm:num_preemptions_total"),
+            0.0
+        );
+        assert_eq!(
+            histogram_count(&registry, "trtllm:time_to_first_token_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_count(&registry, "trtllm:e2e_request_latency_seconds"),
+            1
+        );
+        let text = registry.prometheus_expfmt_combined().unwrap();
+        assert!(!text.contains("sglang:"));
+        assert!(!text.contains("vllm:"));
+        assert!(!text.contains("dp_rank="));
     }
 
     #[tokio::test]
