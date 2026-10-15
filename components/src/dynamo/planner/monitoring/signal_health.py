@@ -86,7 +86,7 @@ class PlannerSignalHealth:
                 )
                 reason = inputs.fpm_observations.unavailable_reasons.get(component)
             self._record(component, "fpm", expected and not stats)
-            for rejected in ("stale_fpm", "worker_join_failure"):
+            for rejected in ("stale_fpm", "worker_join_failure", "invalid_fpm"):
                 self._record(component, rejected, expected and reason == rejected)
             if (
                 self._config.enable_load_scaling

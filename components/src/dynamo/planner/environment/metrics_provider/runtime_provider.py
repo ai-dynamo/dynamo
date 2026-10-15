@@ -217,8 +217,9 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         result = {}
         for key, raw_bytes in snapshot.items():
             fpm = decode_fpm(raw_bytes)
-            if fpm is not None:
-                result[key] = fpm
+            if fpm is None:
+                return {}, "invalid_fpm"
+            result[key] = fpm
         return result, reason
 
 

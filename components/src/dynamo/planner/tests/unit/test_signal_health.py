@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from prometheus_client import CollectorRegistry
 
-from dynamo.common.forward_pass_metrics import ForwardPassMetrics, encode
+from dynamo.common.forward_pass_metrics import FPM_VERSION, ForwardPassMetrics, encode
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -63,10 +63,8 @@ def test_missing_fpm_alarms_once_after_three_observations_and_recovers(caplog):
     assert counter._value.get() == 2
 
 
-@pytest.mark.parametrize("reason", ["stale_fpm", "worker_join_failure", "missing_fpm"])
-def test_provider_reports_filtered_fpm_and_does_not_reuse_previous_sample(
-    reason, caplog
-):
+@pytest.fixture
+def runtime_provider():
     provider = RuntimeFpmProvider(
         require_prefill=False,
         require_decode=True,
@@ -76,6 +74,14 @@ def test_provider_reports_filtered_fpm_and_does_not_reuse_previous_sample(
     )
     subscriber = MagicMock()
     provider._decode_fpm_sub = subscriber
+    return provider, subscriber
+
+
+@pytest.mark.parametrize("reason", ["stale_fpm", "worker_join_failure", "missing_fpm"])
+def test_provider_reports_filtered_fpm_and_does_not_reuse_previous_sample(
+    runtime_provider, reason, caplog
+):
+    provider, subscriber = runtime_provider
     subscriber.get_recent_stats_with_health.return_value = (
         {("w", 0): encode(ForwardPassMetrics(worker_id="w"))},
         [],
@@ -94,6 +100,66 @@ def test_provider_reports_filtered_fpm_and_does_not_reuse_previous_sample(
     assert observation.unavailable_reasons == {"decode": reason}
     if reason == "worker_join_failure":
         assert "FPM worker join failure" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        b"invalid",
+        encode(ForwardPassMetrics(version=FPM_VERSION + 1, worker_id="w", dp_rank=1)),
+    ],
+    ids=["malformed", "unsupported-version"],
+)
+def test_provider_rejects_partial_decoding_and_recovers(
+    runtime_provider, invalid_payload
+):
+    provider, subscriber = runtime_provider
+    first = encode(ForwardPassMetrics(worker_id="w", dp_rank=0))
+    second = encode(ForwardPassMetrics(worker_id="w", dp_rank=1))
+    subscriber.get_recent_stats_with_health.return_value = (
+        {("w", 0): first, ("w", 1): invalid_payload},
+        [],
+        0,
+        0,
+    )
+    observation = provider.collect_fpm()
+    assert observation.decode is None
+    assert observation.unavailable_reasons == {"decode": "invalid_fpm"}
+    metrics = PluginFrameworkMetrics(registry=CollectorRegistry())
+    health = PlannerSignalHealth(PlannerConfig(mode="agg"), metrics)
+    tick = ScheduledTick(at_s=0, need_worker_fpm=True)
+    inputs = TickInput(
+        now_s=0,
+        worker_counts=WorkerCounts(ready_num_decode=1),
+        fpm_observations=observation,
+    )
+    caps = WorkerCapabilities(decode=EngineCapabilities(max_kv_tokens=1024))
+    for _ in range(3):
+        health.observe(tick, inputs, caps)
+    assert (
+        metrics.degraded_signals_total.labels(
+            component="decode", signal="invalid_fpm"
+        )._value.get()
+        == 1
+    )
+
+    subscriber.get_recent_stats_with_health.return_value = (
+        {("w", 0): first, ("w", 1): second},
+        [],
+        0,
+        0,
+    )
+    recovered = provider.collect_fpm()
+    assert set(recovered.decode) == {("w", 0), ("w", 1)}
+    assert recovered.unavailable_reasons == {}
+    inputs.fpm_observations = recovered
+    health.observe(tick, inputs, caps)
+    assert (
+        metrics.signal_unavailable.labels(
+            component="decode", signal="invalid_fpm"
+        )._value.get()
+        == 0
+    )
 
 
 def test_unsampled_ticks_and_empty_pools_do_not_alarm():
