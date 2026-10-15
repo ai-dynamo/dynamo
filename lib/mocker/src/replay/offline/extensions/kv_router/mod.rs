@@ -431,6 +431,8 @@ pub(crate) struct OfflineReplayRouter {
     /// router's session affinity. The default selector treats it as exclusive;
     /// custom policies receive it as advisory context and rebind on dispatch.
     session_bindings: HashMap<String, WorkerWithDpRank>,
+    /// When false, sessions are not bound: every turn is placed by the selected policy alone.
+    session_affinity: bool,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -463,6 +465,11 @@ impl KvRouterPlacement {
     pub(in crate::replay) fn with_kv_event_lag_ms(mut self, lag_ms: f64) -> Result<Self> {
         self.router.set_kv_event_lag_ms(lag_ms)?;
         Ok(self)
+    }
+
+    pub(in crate::replay) fn with_session_affinity(mut self, enabled: bool) -> Self {
+        self.router.session_affinity = enabled;
+        self
     }
 
     fn placement(&self, admission: WorkerAdmission) -> Placement {
@@ -677,6 +684,7 @@ impl OfflineReplayRouter {
             kv_event_lag_ms: 0.0,
             lagged_kv_events: VecDeque::new(),
             session_bindings: HashMap::new(),
+            session_affinity: true,
         })
     }
 
@@ -1053,6 +1061,7 @@ impl OfflineReplayRouter {
             policy_class: request.policy_class.clone(),
             affinity_target: session_id
                 .as_deref()
+                .filter(|_| self.session_affinity)
                 .and_then(|session_id| self.session_bindings.get(session_id))
                 .map(|worker| WorkerAffinityTarget::from(*worker)),
             session_id,
@@ -1075,7 +1084,17 @@ impl OfflineReplayRouter {
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let mut scheduling_request = request.scheduling_request(worker_loads);
-        let eligibility = scheduling_request.eligibility();
+        let mut eligibility = scheduling_request.eligibility();
+        // Same rule as the production scheduler queue: the default selector treats a live
+        // session binding as exclusive; custom policies only see it as advisory context.
+        if <DefaultWorkerSelector as WorkerSelector<ReplayWorkerConfig>>::uses_exclusive_affinity_target(
+            &self.selector,
+        )
+            && let Some(target) = scheduling_request.affinity_target
+            && eligibility.affinity_target_is_eligible(&self.workers_with_configs, target)
+        {
+            eligibility = eligibility.with_affinity_target(target);
+        }
         // Best and selected overlap use the same weighted, rounded blocks as
         // the production router's overlap metric.
         let best_available_overlap_blocks = scheduling_request
@@ -1099,7 +1118,9 @@ impl OfflineReplayRouter {
                 eligibility,
                 self.block_size,
             ))?;
-        if let Some(session_id) = &request.session_id {
+        if self.session_affinity
+            && let Some(session_id) = &request.session_id
+        {
             self.session_bindings
                 .insert(session_id.clone(), selection.worker);
         }
@@ -1439,6 +1460,43 @@ mod tests {
                 .as_ref()
                 .map(|context| context.session_id()),
             Some("session-a")
+        );
+    }
+
+    fn session_turn_workers(session_affinity: bool) -> Vec<usize> {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 4).unwrap();
+        router.session_affinity = session_affinity;
+        (1..=8u32)
+            .map(|turn| {
+                let effects = router
+                    .on_request_arrival_for_session(
+                        &request(u128::from(turn), 100 + turn),
+                        None,
+                        Some("session-a".to_string()),
+                        f64::from(turn) * 1_000.0,
+                    )
+                    .unwrap();
+                assert_eq!(effects.admissions.len(), 1);
+                effects.admissions[0].worker_idx
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_selector_keeps_session_turns_on_bound_worker() {
+        let workers = session_turn_workers(true);
+        assert!(
+            workers.iter().all(|worker| *worker == workers[0]),
+            "session turns moved workers: {workers:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_session_affinity_places_every_turn_by_load() {
+        let workers = session_turn_workers(false);
+        assert!(
+            workers.iter().any(|worker| *worker != workers[0]),
+            "every turn stayed on one worker without affinity: {workers:?}"
         );
     }
 

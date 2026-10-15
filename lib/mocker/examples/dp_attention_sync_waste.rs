@@ -17,16 +17,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_mocker::common::perf_model::{AisCallback, PerfModel};
 use dynamo_mocker::config::MockerConfig;
 use dynamo_mocker::loadgen::TraceFileFormat;
 use dynamo_mocker::replay::{
-    OfflineDisaggReplayConfig, ReplayRouterMode, ReplayRuntimeObservers, ReplayTelemetryObserver,
-    ReplayTelemetryOptions, ReplayTelemetrySnapshot, SlaThresholds,
+    OfflineDisaggReplayConfig, ReplayRouterMode, ReplayRuntimeObservers, ReplaySessionAffinity,
+    ReplayTelemetryObserver, ReplayTelemetryOptions, ReplayTelemetrySnapshot, SlaThresholds,
     simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers,
-    simulate_trace_file_with_router_mode_and_format_and_runtime_observers,
+    simulate_trace_file_with_router_mode_and_format_and_runtime_observers, with_session_affinity,
 };
 
 /// Linear CPU approximation of one forward pass on one attention-DP rank.
@@ -210,6 +210,8 @@ struct Timeline {
     steps: usize,
     placed: usize,
     unplaced: usize,
+    /// Decode (worker, rank) per turn index per session, to count turns that moved rank.
+    session_turn_ranks: BTreeMap<String, BTreeMap<usize, (usize, usize)>>,
     prefill_queue_wait_ms: Vec<f64>,
     /// Arrival → first token (ms) for every placed request; end-to-end TTFT incl. queueing.
     ttft_ms: Vec<f64>,
@@ -232,6 +234,7 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
         steps,
         placed: 0,
         unplaced: 0,
+        session_turn_ranks: BTreeMap::new(),
         prefill_queue_wait_ms: Vec::new(),
         ttft_ms: Vec::new(),
     };
@@ -267,6 +270,13 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
             continue;
         };
         timeline.placed += 1;
+        if let (Some(session_id), Some(turn_index)) = (&record.session_id, record.turn_index) {
+            timeline
+                .session_turn_ranks
+                .entry(session_id.clone())
+                .or_default()
+                .insert(turn_index, decode_rank);
+        }
         if let Some(first_token) = record.first_token_ms {
             timeline
                 .ttft_ms
@@ -558,6 +568,11 @@ struct Summary {
     disagg: bool,
     num_prefill_workers: usize,
     num_decode_workers: usize,
+    prefill_session_affinity: bool,
+    decode_session_affinity: bool,
+    /// Follow-up turns (turn_index > 0) and the fraction placed on a different decode rank than the previous turn.
+    decode_follow_up_turns: usize,
+    decode_turn_moved_fraction: f64,
     /// Engine-sampled view (unique KV blocks, running requests); secondary.
     attention_wait_fraction_of_gpu_time_sampled: f64,
     mean_request_span_per_group: f64,
@@ -592,6 +607,8 @@ struct Args {
     speedup: f64,
     sample_interval_ms: f64,
     decode_active_request_weight: f64,
+    /// Session affinity per replay role; `--prefill-session-affinity off` / `--decode-session-affinity off`.
+    session_affinity: ReplaySessionAffinity,
     timing: Timing,
 }
 
@@ -621,6 +638,14 @@ impl Args {
     }
 }
 
+fn parse_on_off(flag: &str, value: &str) -> Result<bool> {
+    match value {
+        "on" | "true" | "1" => Ok(true),
+        "off" | "false" | "0" => Ok(false),
+        other => bail!("{flag} expects on|off, got {other}"),
+    }
+}
+
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         trace: PathBuf::new(),
@@ -644,6 +669,7 @@ fn parse_args() -> Result<Args> {
         speedup: 1.0,
         sample_interval_ms: 50.0,
         decode_active_request_weight: 0.0,
+        session_affinity: ReplaySessionAffinity::default(),
         timing: Timing {
             attention_fixed_ms: 1.5,
             attention_ms_per_kv_token: 1.25e-5,
@@ -681,6 +707,20 @@ fn parse_args() -> Result<Args> {
             "--sample-interval-ms" => args.sample_interval_ms = value()?.parse()?,
             "--decode-active-request-weight" => {
                 args.decode_active_request_weight = value()?.parse()?
+            }
+            "--session-affinity" => {
+                let on = parse_on_off(&flag, &value()?)?;
+                args.session_affinity = ReplaySessionAffinity {
+                    aggregated: on,
+                    prefill: on,
+                    decode: on,
+                };
+            }
+            "--prefill-session-affinity" => {
+                args.session_affinity.prefill = parse_on_off(&flag, &value()?)?
+            }
+            "--decode-session-affinity" => {
+                args.session_affinity.decode = parse_on_off(&flag, &value()?)?
             }
             "--attention-fixed-ms" => args.timing.attention_fixed_ms = value()?.parse()?,
             "--attention-ms-per-kv-token" => {
@@ -769,49 +809,51 @@ fn main() -> Result<()> {
             observer: Box::new(Forward(Arc::clone(&shared))),
         }),
     };
-    let report = if args.disagg {
-        simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers(
-            OfflineDisaggReplayConfig {
-                prefill_args: engine_config(args.prefill_dp_size, "prefill")?,
-                decode_args: engine_config(args.decode_dp_size, "decode")?,
-                num_prefill_workers: args.prefill_workers(),
-                num_decode_workers: args.decode_workers(),
-            },
-            Some(router),
-            None,
-            &args.trace,
-            args.trace_block_size,
-            args.speedup,
-            ReplayRouterMode::KvRouter,
-            TraceFileFormat::Mooncake,
-            0.0,
-            0,
-            true,
-            args.max_sim_time_ms,
-            None,
-            SlaThresholds::default(),
-            observers,
-        )?
-    } else {
-        simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
-            engine_config(args.dp_size, "aggregated")?,
-            Some(router),
-            None,
-            &args.trace,
-            args.trace_block_size,
-            args.num_workers,
-            args.speedup,
-            ReplayRouterMode::KvRouter,
-            TraceFileFormat::Mooncake,
-            0.0,
-            0,
-            true,
-            args.max_sim_time_ms,
-            None,
-            SlaThresholds::default(),
-            observers,
-        )?
-    };
+    let report = with_session_affinity(args.session_affinity, || {
+        if args.disagg {
+            simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers(
+                OfflineDisaggReplayConfig {
+                    prefill_args: engine_config(args.prefill_dp_size, "prefill")?,
+                    decode_args: engine_config(args.decode_dp_size, "decode")?,
+                    num_prefill_workers: args.prefill_workers(),
+                    num_decode_workers: args.decode_workers(),
+                },
+                Some(router),
+                None,
+                &args.trace,
+                args.trace_block_size,
+                args.speedup,
+                ReplayRouterMode::KvRouter,
+                TraceFileFormat::Mooncake,
+                0.0,
+                0,
+                true,
+                args.max_sim_time_ms,
+                None,
+                SlaThresholds::default(),
+                observers,
+            )
+        } else {
+            simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
+                engine_config(args.dp_size, "aggregated")?,
+                Some(router),
+                None,
+                &args.trace,
+                args.trace_block_size,
+                args.num_workers,
+                args.speedup,
+                ReplayRouterMode::KvRouter,
+                TraceFileFormat::Mooncake,
+                0.0,
+                0,
+                true,
+                args.max_sim_time_ms,
+                None,
+                SlaThresholds::default(),
+                observers,
+            )
+        }
+    })?;
 
     let observer = shared.lock().take().context("observer missing")?;
     let mean_prefill_waiting_requests =
@@ -826,6 +868,13 @@ fn main() -> Result<()> {
     let samples: u64 = groups.values().map(|g| g.samples).sum();
     let n = samples.max(1) as f64;
     let timeline = build_timeline(&report.per_request, &args);
+    let (mut follow_up_turns, mut moved) = (0usize, 0usize);
+    for turns in timeline.session_turn_ranks.values() {
+        for (prev, cur) in turns.values().zip(turns.values().skip(1)) {
+            follow_up_turns += 1;
+            moved += usize::from(prev != cur);
+        }
+    }
     let dump_path = |pool: &str| {
         args.dump_steps
             .as_ref()
@@ -885,6 +934,10 @@ fn main() -> Result<()> {
         ttft_p50_ms,
         ttft_p95_ms,
         disagg: args.disagg,
+        prefill_session_affinity: args.session_affinity.prefill,
+        decode_session_affinity: args.session_affinity.decode,
+        decode_follow_up_turns: follow_up_turns,
+        decode_turn_moved_fraction: moved as f64 / follow_up_turns.max(1) as f64,
         num_prefill_workers,
         num_decode_workers,
         attention_wait_fraction_of_gpu_time_sampled: if total_pass > 0.0 {
@@ -931,13 +984,16 @@ fn main() -> Result<()> {
         summary.samples
     );
     println!(
-        "{} ttft: mean={:.0}ms p50={:.0}ms p95={:.0}ms (prefill_workers={} decode_workers={})",
+        "{} ttft: mean={:.0}ms p50={:.0}ms p95={:.0}ms (prefill_workers={} decode_workers={}) decode_affinity={} follow_up_turns={} moved_rank={:.1}%",
         summary.label,
         summary.ttft_mean_ms,
         summary.ttft_p50_ms,
         summary.ttft_p95_ms,
         summary.num_prefill_workers,
-        summary.num_decode_workers
+        summary.num_decode_workers,
+        summary.decode_session_affinity,
+        summary.decode_follow_up_turns,
+        summary.decode_turn_moved_fraction * 100.0
     );
     if let Some(prefill) = &summary.prefill_pool {
         println!(
