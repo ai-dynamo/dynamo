@@ -199,11 +199,8 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
             str(port),
             "--context-length",
             str(CONTEXT_LIMIT),
-            # Size the KV pool by token count, as build_sglang_gpu_mem_args in
-            # examples/common/gpu_utils.sh does for the Dynamo worker. With a
-            # low --mem-fraction-static alone, SGLang reserves slack from the
-            # free memory it saw before weight load; co-tenants that allocate
-            # during startup make the KV budget negative and SGLang exits -9.
+            # Cap KV by tokens, like the Dynamo worker; a low --mem-fraction-static
+            # alone exits -9 when co-tenants allocate GPU memory during startup.
             "--max-total-tokens",
             os.environ.get(
                 "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS", str(SGLANG_KV_TOKENS)
