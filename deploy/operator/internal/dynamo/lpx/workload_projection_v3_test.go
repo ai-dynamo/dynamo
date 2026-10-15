@@ -35,7 +35,6 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection := projectionBatch[0]
-	require.Equal(t, BuildCompilationModeHybrid, projection.configuredBuild.CompilationMode)
 	digest, err := workloadSetDigest([]*ModelProjection{projection})
 	require.NoError(t, err)
 	require.Equal(t, projection.Digest(), digest, "one model is the aggregate digest base case")

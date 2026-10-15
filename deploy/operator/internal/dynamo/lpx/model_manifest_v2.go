@@ -48,10 +48,6 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	if err != nil {
 		return nil, fmt.Errorf("reading %s deployment: %w", gbuildManifestV2CapnpFile, err)
 	}
-	compilationMode, err := buildCompilationMode(gbuildManifestV2CapnpFile, deployment.CompilationMode().String())
-	if err != nil {
-		return nil, err
-	}
 	if !deployment.HasProgram() {
 		return nil, fmt.Errorf("%s deployment.program is missing", gbuildManifestV2CapnpFile)
 	}
@@ -77,7 +73,6 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	}
 	build := &Build{
 		Path:                      buildRef,
-		CompilationMode:           compilationMode,
 		SelectedPropSyncChains:    chains,
 		StandaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
 		SupportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
@@ -156,17 +151,16 @@ func addLPUArtifactsFromManifestV2(
 		if err != nil {
 			return err
 		}
-		// Nonempty paths mark LPU artifacts.
+		// Project LPU artifacts while retaining whether the build also requires CUDA.
 		if partition.PartPath != "" {
 			partitions = append(partitions, partition)
+		} else {
+			ref, err := rawPartitions.At(index).Partition()
+			if err != nil {
+				return fmt.Errorf("reading %s artifact partition ref: %w", gbuildManifestV2CapnpFile, err)
+			}
+			build.HasCUDAPartitions = build.HasCUDAPartitions || ref.DeviceType() == manifestcapnpv2.DeviceType_cuda
 		}
-	}
-	// An LPU-only build cannot silently discard packaged CUDA or CPU partitions.
-	if build.CompilationMode == BuildCompilationModeLPUOnly && len(partitions) != rawPartitions.Len() {
-		return fmt.Errorf(
-			"%s deployment.compilationMode lpuOnly requires every artifact partition to use deviceType lpu",
-			gbuildManifestV2CapnpFile,
-		)
 	}
 	if len(partitions) == 0 {
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildManifestV2CapnpFile)
