@@ -26,18 +26,6 @@ tests:
             apiGroups:
               - nvidia.com
             resources:
-              - dynamographdeploymentscalingadapters
-            verbs:
-              - get
-              - list
-              - patch
-        documentIndex: 0
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - nvidia.com
-            resources:
               - dynamographdeploymentscalingadapters/scale
             verbs:
               - get
@@ -57,18 +45,6 @@ tests:
               - pods
             verbs:
               - list
-        documentIndex: 0
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - nvidia.com
-            resources:
-              - dynamographdeploymentscalingadapters
-            verbs:
-              - get
-              - list
-              - patch
         documentIndex: 0
       - contains:
           path: rules
@@ -105,18 +81,6 @@ tests:
             apiGroups:
               - nvidia.com
             resources:
-              - dynamographdeploymentscalingadapters
-            verbs:
-              - get
-              - list
-              - patch
-        documentIndex: 1
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - nvidia.com
-            resources:
               - dynamographdeploymentscalingadapters/scale
             verbs:
               - get
@@ -138,18 +102,6 @@ tests:
               - pods
             verbs:
               - list
-        documentIndex: 1
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - nvidia.com
-            resources:
-              - dynamographdeploymentscalingadapters
-            verbs:
-              - get
-              - list
-              - patch
         documentIndex: 1
       - contains:
           path: rules

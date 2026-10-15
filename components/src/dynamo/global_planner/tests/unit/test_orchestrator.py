@@ -384,6 +384,50 @@ async def test_applied_partner_before_conflict_retries_complete_budget_transacti
 
 
 @pytest.mark.asyncio
+async def test_retry_rejection_reports_write_committed_before_conflict():
+    class ConflictError(Exception):
+        pass
+
+    class AppliedThenRejectedCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.scale_attempts = []
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_attempts.append(participant_id)
+            if participant_id == "default/b":
+                if self.scale_attempts.count("default/b") == 1:
+                    raise ConflictError()
+                return ReplicaUpdateResult(accepted=False, applied=False)
+            return await super().scale(participant_id, targets, blocking)
+
+        def is_conflict(self, error):
+            return isinstance(error, ConflictError)
+
+        async def run_with_conflict_retry(self, operation):
+            try:
+                return await operation()
+            except ConflictError:
+                return await operation()
+
+    cm = AppliedThenRejectedCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    result = await _submit(orch, "default/b", _targets(decode=3))
+
+    assert result.status == ScaleStatus.ERROR
+    assert "after applying ['default/a']" in result.message
+    assert cm.scale_attempts == ["default/a", "default/b", "default/b"]
+    assert cm.pools["default/a"]["decode"][0] == 1
+    assert cm.pools["default/b"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
 async def test_submit_returns_post_write_readback():
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
@@ -755,7 +799,7 @@ async def test_readiness_wait_observes_cancel_before_waiter_task_runs():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_observation_releases_scale_lock():
+async def test_cancelled_observation_joins_worker_before_releasing_scale_lock():
     class BlockingFirstObserveCapacityManager(FakeCapacityManager):
         def __init__(self):
             super().__init__()
@@ -777,15 +821,18 @@ async def test_cancelled_observation_releases_scale_lock():
     assert await asyncio.to_thread(cm.observe_started.wait, 1)
 
     first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(first, 1)
+    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
     try:
-        second = await asyncio.wait_for(
-            _submit(orch, "default/a", _targets(prefill=3)), 1
-        )
-        assert second.status == ScaleStatus.SUCCESS
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert not second.done()
     finally:
         cm.release_observe.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first, 1)
+    result = await asyncio.wait_for(second, 1)
+    assert result.status == ScaleStatus.SUCCESS
 
 
 @pytest.mark.asyncio

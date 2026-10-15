@@ -7,6 +7,7 @@ Pool state is read from the v1beta1 DGD component model (``spec.components[]``).
 """
 
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -87,6 +88,10 @@ def _dgd_spec(
 def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
     """A v1beta1 DGD spec with a single generic worker component."""
     return _with_operator_gpu_status([_component(name, replicas, gpu=gpu, ctype=ctype)])
+
+
+def _pod(phase):
+    return SimpleNamespace(status=SimpleNamespace(phase=phase))
 
 
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
@@ -209,7 +214,7 @@ def test_discover_explicit_mode_retains_missing_deployment_with_live_pods():
         connector.kube_api.get_graph_deployment.side_effect = (
             DynamoGraphDeploymentNotFoundError("model-a", "default")
         )
-        connector.kube_api.list_pods_for_graph.return_value = [object()]
+        connector.kube_api.list_pods_for_graph.return_value = [_pod("Running")]
         mock_connector_cls.return_value = connector
 
         assert cm.discover({"default-model-a"}) == ["model-a"]
@@ -594,7 +599,7 @@ def test_observe_require_complete_raises_on_read_failure():
         cm.observe(require_complete=True)
 
 
-def test_observe_managed_deployment_not_found_fails_then_evicts_connector():
+def test_observe_managed_deployment_not_found_evicts_without_failing():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
@@ -603,9 +608,7 @@ def test_observe_managed_deployment_not_found_fails_then_evicts_connector():
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
 
-    with pytest.raises(RuntimeError) as error:
-        cm.observe(require_complete=True)
-    assert isinstance(error.value.__cause__, DynamoGraphDeploymentNotFoundError)
+    assert cm.observe(require_complete=True) == {}
     assert not cm.participant_exists("default/missing")
 
     missing = _install_connector(
@@ -614,7 +617,7 @@ def test_observe_managed_deployment_not_found_fails_then_evicts_connector():
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
-    assert cm.observe() == {"default/missing": {}}
+    assert cm.observe() == {}
     assert not cm.participant_exists("default/missing")
 
 
@@ -626,16 +629,72 @@ def test_observe_missing_deployment_waits_for_labeled_pods_to_drain():
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
-    missing.kube_api.list_pods_for_graph.side_effect = [[object()], []]
+    missing.kube_api.list_pods_for_graph.side_effect = [[_pod("Running")], []]
 
-    with pytest.raises(RuntimeError, match="labeled Pods remain"):
+    with pytest.raises(RuntimeError, match="nonterminal labeled Pods remain"):
         cm.observe(require_complete=True)
     assert cm.participant_exists("default/missing")
 
-    with pytest.raises(RuntimeError) as error:
-        cm.observe(require_complete=True)
-    assert isinstance(error.value.__cause__, DynamoGraphDeploymentNotFoundError)
+    assert cm.observe(require_complete=True) == {}
     assert not cm.participant_exists("default/missing")
+
+
+def test_observe_missing_deployment_ignores_terminal_labeled_pods():
+    cm = KubernetesCapacityManager("default")
+    missing = _install_connector(
+        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+    )
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
+    missing.kube_api.list_pods_for_graph.return_value = [
+        _pod("Succeeded"),
+        _pod("Failed"),
+    ]
+
+    assert cm.observe(require_complete=True) == {}
+    assert not cm.participant_exists("default/missing")
+
+
+def test_observe_missing_deployment_fails_closed_when_drain_read_fails():
+    cm = KubernetesCapacityManager("default")
+    missing = _install_connector(
+        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+    )
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
+    missing.kube_api.list_pods_for_graph.side_effect = RuntimeError("timeout")
+
+    with pytest.raises(RuntimeError, match="Pod drain could not be verified"):
+        cm.observe(require_complete=True)
+    assert cm.participant_exists("default/missing")
+
+
+def test_observe_explicit_mode_rediscovers_recreated_deployment():
+    cm = KubernetesCapacityManager("default")
+    cm._configured_deployment_names = {"model"}
+    deployment = _dgd_spec(1, 1)
+    old = _install_connector(cm, "default/model", deployment, parent_dgd_name="model")
+    old.kube_api.get_graph_deployment.side_effect = DynamoGraphDeploymentNotFoundError(
+        "model", "default"
+    )
+
+    assert cm.observe(require_complete=True) == {}
+    assert not cm.participant_exists("default/model")
+
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
+    ) as mock_connector_cls:
+        new = MagicMock()
+        new.parent_dgd_name = "model"
+        new.kube_api.get_graph_deployment.return_value = deployment
+        mock_connector_cls.return_value = new
+
+        snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
+    assert cm.connectors["default/model"] is new
 
 
 def test_observe_implicit_mode_lists_once_per_namespace():
@@ -669,7 +728,7 @@ def test_observe_implicit_mode_rediscovers_recreated_deployment():
     old.kube_api.list_graph_deployments.side_effect = [[], [recreated]]
     cm._inventory_api = old.kube_api
 
-    assert cm.observe() == {"default/model": {}}
+    assert cm.observe() == {}
     assert not cm.participant_exists("default/model")
 
     with patch(

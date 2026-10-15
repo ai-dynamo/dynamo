@@ -1753,18 +1753,17 @@ class KubernetesConnector(PlannerConnector):
                 direct_targets=committed_direct_targets,
             )
             components = get_components_by_name(refreshed)
-            adapters = self.kube_api.list_graph_deployment_scaling_adapters(
-                self.graph_deployment_name
-            )
             pending_state: tuple[Service, int, dict] | None = None
             for plan in stage_plans:
                 name = plan.service.name
                 component = components.get(name)
-                scaling_adapter = adapters.get(name)
-                if component is None or scaling_adapter is None:
+                if component is None:
                     raise RuntimeError(
                         "component or replica authority changed after prior updates"
                     )
+                scaling_adapter = self.kube_api.get_service_scaling_adapter(
+                    self.graph_deployment_name, name
+                )
                 service = Service(name=name, service=component)
                 current_replicas = self._replica_state_from_adapter(
                     refreshed, service, scaling_adapter

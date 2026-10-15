@@ -70,7 +70,6 @@ def mock_kube_api():
     mock_api.update_dgd_replicas_directly = Mock()
     mock_api.update_dgd_replica_targets = Mock()
     mock_api.get_service_scaling_adapter = Mock()
-    mock_api.list_graph_deployment_scaling_adapters = Mock()
     mock_api.get_service_replica_target = Mock()
     mock_api.scaling_adapter_name = Mock(side_effect=KubernetesAPI.scaling_adapter_name)
     mock_api.scaling_adapter_identity_rejection = Mock(
@@ -1269,10 +1268,6 @@ async def test_set_component_replicas_orders_reductions_before_increases(
     mock_kube_api.get_service_scaling_adapter.side_effect = lambda _graph, name: (
         _scaling_adapter(name, replicas=adapter_targets[name])
     )
-    mock_kube_api.list_graph_deployment_scaling_adapters.side_effect = lambda _graph: {
-        name: _scaling_adapter(name, replicas=replicas)
-        for name, replicas in adapter_targets.items()
-    }
     writes = []
 
     def update_adapter(_graph, name, replicas, **_kwargs):
@@ -1333,10 +1328,10 @@ async def test_set_component_replicas_retries_adapter_stage_after_direct_write(
     initial_adapter = _scaling_adapter("adapter-up", replicas=0)
     refreshed_adapter = deepcopy(initial_adapter)
     refreshed_adapter["metadata"]["resourceVersion"] = "102"
-    mock_kube_api.get_service_scaling_adapter.return_value = initial_adapter
-    mock_kube_api.list_graph_deployment_scaling_adapters.side_effect = [
-        {"adapter-up": initial_adapter},
-        {"adapter-up": refreshed_adapter},
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        initial_adapter,
+        refreshed_adapter,
     ]
     mock_kube_api.update_scaling_adapter_replicas.side_effect = [
         client.ApiException(status=409),
@@ -1390,10 +1385,10 @@ async def test_set_component_replicas_retries_second_adapter_reduction(
     mock_kube_api.get_service_scaling_adapter.side_effect = [
         first_initial,
         second_initial,
-    ]
-    mock_kube_api.list_graph_deployment_scaling_adapters.side_effect = [
-        {"first-down": first_applied, "second-down": second_initial},
-        {"first-down": first_applied, "second-down": second_refreshed},
+        first_applied,
+        second_initial,
+        first_applied,
+        second_refreshed,
     ]
     mock_kube_api.update_scaling_adapter_replicas.side_effect = [
         None,
@@ -1422,8 +1417,7 @@ async def test_set_component_replicas_retries_second_adapter_reduction(
         call("test-graph", "second-down", 1, resource_version="201"),
         call("test-graph", "second-down", 1, resource_version="202"),
     ]
-    assert mock_kube_api.get_service_scaling_adapter.call_count == 2
-    assert mock_kube_api.list_graph_deployment_scaling_adapters.call_count == 2
+    assert mock_kube_api.get_service_scaling_adapter.call_count == 6
 
 
 @pytest.mark.asyncio
@@ -1442,11 +1436,8 @@ async def test_set_component_replicas_stops_when_committed_adapter_drifts(
     mock_kube_api.get_service_scaling_adapter.side_effect = [
         first_initial,
         second_initial,
+        first_initial,
     ]
-    mock_kube_api.list_graph_deployment_scaling_adapters.return_value = {
-        "first-down": first_initial,
-        "second-down": second_initial,
-    }
 
     with pytest.raises(RuntimeError, match="partial application"):
         await kubernetes_connector.set_component_replicas(

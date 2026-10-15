@@ -63,6 +63,7 @@ class KubernetesCapacityManager(CapacityManager):
         # specialized prefill/decode components do not need a hint.
         self._component_roles: dict[str, dict[str, str]] = {}
         self._observe_all_deployments = False
+        self._configured_deployment_names: set[str] | None = set()
         self._inventory_api: KubernetesAPI | None = None
         self._replica_retry_states: ContextVar[
             dict[str, ReplicaUpdateRetryState] | None
@@ -106,6 +107,7 @@ class KubernetesCapacityManager(CapacityManager):
         LIST.
         """
         managed_deployment_names = self._managed_deployment_names(managed_deployments)
+        self._configured_deployment_names = managed_deployment_names
         self._observe_all_deployments = managed_deployment_names is None
         if managed_deployment_names is None:
             try:
@@ -130,12 +132,12 @@ class KubernetesCapacityManager(CapacityManager):
                     self.connectors[participant_id] = connector
                 try:
                     connector.kube_api.get_graph_deployment(name)
-                except DynamoGraphDeploymentNotFoundError as error:
-                    missing_error = self._missing_deployment_error(
-                        participant_id, connector, error
+                except DynamoGraphDeploymentNotFoundError:
+                    drain_error = self._deployment_drain_error(
+                        participant_id, connector
                     )
-                    if participant_id in self.connectors:
-                        logger.warning("%s", missing_error)
+                    if drain_error is not None:
+                        logger.warning("%s", drain_error)
                         deployment_names.append(name)
                         continue
                     logger.info(
@@ -191,12 +193,11 @@ class KubernetesCapacityManager(CapacityManager):
             self._inventory_api = KubernetesAPI(self.namespace)
         return self._inventory_api
 
-    def _missing_deployment_error(
+    def _deployment_drain_error(
         self,
         participant_id: str,
         connector: KubernetesConnector,
-        not_found: DynamoGraphDeploymentNotFoundError,
-    ) -> Exception:
+    ) -> RuntimeError | None:
         """Evict a missing DGD only after all of its labeled Pods have drained."""
         try:
             pods = connector.kube_api.list_pods_for_graph(connector.parent_dgd_name)
@@ -205,13 +206,19 @@ class KubernetesCapacityManager(CapacityManager):
                 f"DGD for {participant_id} is missing and Pod drain could not be "
                 f"verified: {error}"
             )
-        if pods:
+        active_pods = [
+            pod
+            for pod in pods
+            if getattr(getattr(pod, "status", None), "phase", None)
+            not in ("Succeeded", "Failed")
+        ]
+        if active_pods:
             return RuntimeError(
-                f"DGD for {participant_id} is missing while {len(pods)} labeled "
-                "Pods remain"
+                f"DGD for {participant_id} is missing while {len(active_pods)} "
+                "nonterminal labeled Pods remain"
             )
         self._discard_connector(participant_id, connector)
-        return not_found
+        return None
 
     def ensure_participant(
         self,
@@ -257,6 +264,13 @@ class KubernetesCapacityManager(CapacityManager):
         insertion races iteration.
         """
         all_pools: PoolSnapshot = {}
+        if self._configured_deployment_names is not None:
+            for name in sorted(self._configured_deployment_names):
+                key = f"{self.namespace}/{name}"
+                if key not in self.connectors:
+                    self.connectors[key] = self._new_connector(
+                        "discovered", self.namespace, name
+                    )
         connectors_snapshot = list(self.connectors.items())
         if not self._observe_all_deployments:
             for key, connector in connectors_snapshot:
@@ -264,13 +278,12 @@ class KubernetesCapacityManager(CapacityManager):
                     all_pools[key] = self._read_pools(
                         connector, self._component_roles.get(key)
                     )
-                except DynamoGraphDeploymentNotFoundError as error:
-                    self._record_observation_failure(
-                        all_pools,
-                        key,
-                        self._missing_deployment_error(key, connector, error),
-                        require_complete,
-                    )
+                except DynamoGraphDeploymentNotFoundError:
+                    drain_error = self._deployment_drain_error(key, connector)
+                    if drain_error is not None:
+                        self._record_observation_failure(
+                            all_pools, key, drain_error, require_complete
+                        )
                 except Exception as error:
                     self._record_observation_failure(
                         all_pools, key, error, require_complete
@@ -309,15 +322,11 @@ class KubernetesCapacityManager(CapacityManager):
         for key, connector in connectors_snapshot:
             if connector.parent_dgd_name in deployments_by_name:
                 continue
-            error = DynamoGraphDeploymentNotFoundError(
-                connector.parent_dgd_name, self.namespace
-            )
-            self._record_observation_failure(
-                all_pools,
-                key,
-                self._missing_deployment_error(key, connector, error),
-                require_complete,
-            )
+            drain_error = self._deployment_drain_error(key, connector)
+            if drain_error is not None:
+                self._record_observation_failure(
+                    all_pools, key, drain_error, require_complete
+                )
 
         for name, deployment in deployments_by_name.items():
             key = f"{self.namespace}/{name}"

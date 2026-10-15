@@ -233,39 +233,6 @@ def test_get_service_scaling_adapter_reads_named_dgdsa(k8s_api, mock_custom_api)
     )
 
 
-def test_list_graph_deployment_scaling_adapters_uses_dgd_label(
-    k8s_api, mock_custom_api
-):
-    matching = {
-        "metadata": {"name": "test-deployment-worker"},
-        "spec": {
-            "dgdRef": {"name": "test-deployment", "componentName": "worker"},
-            "replicas": 1,
-        },
-    }
-    mismatched = {
-        "metadata": {"name": "other-worker"},
-        "spec": {
-            "dgdRef": {"name": "other", "componentName": "worker"},
-            "replicas": 1,
-        },
-    }
-    mock_custom_api.list_namespaced_custom_object.return_value = {
-        "items": [matching, mismatched]
-    }
-
-    result = k8s_api.list_graph_deployment_scaling_adapters("test-deployment")
-
-    assert result == {"worker": matching}
-    mock_custom_api.list_namespaced_custom_object.assert_called_once_with(
-        group="nvidia.com",
-        version="v1beta1",
-        namespace=k8s_api.current_namespace,
-        plural="dynamographdeploymentscalingadapters",
-        label_selector=("nvidia.com/dynamo-graph-deployment-name=test-deployment"),
-    )
-
-
 @pytest.mark.parametrize("replicas", [False, -1, 1.5])
 def test_get_scaling_adapter_desired_replicas_rejects_invalid_values(replicas):
     adapter = {

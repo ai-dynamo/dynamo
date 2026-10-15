@@ -244,38 +244,6 @@ class KubernetesAPI:
             f"DynamoGraphDeploymentScalingAdapter {adapter_name}",
         )
 
-    def list_graph_deployment_scaling_adapters(
-        self, graph_deployment_name: str
-    ) -> dict[str, dict]:
-        """List one DGD's adapters using the operator-owned DGD label."""
-        result = _as_custom_object(
-            self.custom_api.list_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGDSA_PLURAL,
-                label_selector=(f"{DYNAMO_DGD_NAME_LABEL}={graph_deployment_name}"),
-            ),
-            f"DynamoGraphDeploymentScalingAdapter list for {graph_deployment_name}",
-        )
-        items = result.get("items")
-        if not isinstance(items, list):
-            raise TypeError("DGDSA list response has no items list")
-
-        adapters: dict[str, dict] = {}
-        for item in items:
-            adapter = _as_custom_object(item, "DynamoGraphDeploymentScalingAdapter")
-            dgd_ref = adapter.get("spec", {}).get("dgdRef", {})
-            if dgd_ref.get("name") != graph_deployment_name:
-                continue
-            component_name = dgd_ref.get("componentName")
-            if not isinstance(component_name, str) or not component_name:
-                raise ValueError("DGDSA spec.dgdRef.componentName is unavailable")
-            if component_name in adapters:
-                raise ValueError(f"duplicate DGDSA for component {component_name!r}")
-            adapters[component_name] = adapter
-        return adapters
-
     @staticmethod
     def get_scaling_adapter_desired_replicas(adapter: dict) -> int:
         """Return a validated authoritative replica target from a DGDSA."""

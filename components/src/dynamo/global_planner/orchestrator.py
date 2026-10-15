@@ -29,7 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
 
-from dynamo.common.async_utils import run_async_to_completion
+from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -264,6 +264,7 @@ class Orchestrator:
 
         admitted = asyncio.Event()
         cancel_requested = asyncio.Event()
+        committed_participants: list[str] = []
 
         def complete_after_cancel() -> bool:
             cancel_requested.set()
@@ -278,10 +279,20 @@ class Orchestrator:
                 caller_name,
                 admitted,
                 cancel_requested,
+                committed_participants,
             )
 
         async def transaction() -> Optional[ScaleOutcome]:
-            return await self.capacity_manager.run_with_conflict_retry(operation)
+            try:
+                return await self.capacity_manager.run_with_conflict_retry(operation)
+            except Exception as error:
+                if committed_participants:
+                    return self._partial_plan_error(
+                        participant_id,
+                        committed_participants,
+                        f"transaction retry failed: {error}",
+                    )[0]
+                raise
 
         if self._scale_lock is not None:
             async with self._scale_lock:
@@ -316,6 +327,7 @@ class Orchestrator:
         caller_name: str,
         admitted: asyncio.Event,
         cancel_requested: asyncio.Event,
+        committed_participants: list[str],
     ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
 
@@ -331,7 +343,7 @@ class Orchestrator:
         # budget is active. The unbounded mode approves without pool state and
         # performs a targeted post-write readback for the response.
         if self.budget_enforcement_enabled():
-            all_pools = await asyncio.to_thread(self.capacity_manager.observe, True)
+            all_pools = await run_sync_in_thread(self.capacity_manager.observe, True)
         else:
             all_pools = {}
 
@@ -343,6 +355,13 @@ class Orchestrator:
             log_caller_name=caller_name,
         )
         if not result.approved:
+            if committed_participants:
+                return self._partial_plan_error(
+                    participant_id,
+                    committed_participants,
+                    result.reject_message
+                    or "fresh budget mediation rejected the retry",
+                )[0]
             # Soft denial: budget breach is an expected operational outcome in
             # fixed-total mode, not a fault.
             return ScaleOutcome(
@@ -394,6 +413,7 @@ class Orchestrator:
             ordered_participants,
             blocking=blocking,
             cancel_requested=cancel_requested,
+            committed_participants=committed_participants,
         )
         if terminal is not None:
             return terminal
@@ -406,17 +426,17 @@ class Orchestrator:
         *,
         blocking: bool,
         cancel_requested: asyncio.Event,
+        committed_participants: list[str],
     ) -> tuple[Optional[ScaleOutcome], list[str]]:
         """Apply an admitted plan, settling each blocking step before the next."""
 
         # TODO(global-planner): Persist enough state to repair or roll back a
         # plan that still becomes partial because a later participant fails.
         completed: list[str] = []
-        applied: list[str] = []
         for pid in ordered_participants:
             tgts = grouped_targets[pid]
             if not self.capacity_manager.participant_exists(pid):
-                if not applied:
+                if not committed_participants:
                     logger.error(
                         f"Multi-partner transfer aborted: unknown participant ({pid})"
                     )
@@ -430,48 +450,57 @@ class Orchestrator:
                     )
                 logger.error(
                     f"Multi-partner transfer: unknown participant {pid} "
-                    f"after applying {applied}; stopping plan until the next tick"
+                    f"after applying {committed_participants}; "
+                    "stopping plan until the next tick"
                 )
-                return self._partial_plan_error(pid, applied, "participant is unknown")
+                return self._partial_plan_error(
+                    pid, committed_participants, "participant is unknown"
+                )
             try:
                 result = await self.capacity_manager.scale(pid, tgts, blocking=False)
             except DynamoGraphDeploymentNotReadyError as patch_err:
-                if not applied:
+                if not committed_participants:
                     raise
                 logger.warning(
                     "Multi-partner transfer: patch on %s was skipped "
                     "after applying %s because the participant is not ready: %s; "
                     "stopping plan until the next tick",
                     pid,
-                    applied,
+                    committed_participants,
                     patch_err,
                 )
                 return self._partial_plan_error(
-                    pid, applied, f"participant is not ready: {patch_err}"
+                    pid,
+                    committed_participants,
+                    f"participant is not ready: {patch_err}",
                 )
             except Exception as patch_err:
                 if self.capacity_manager.is_conflict(patch_err):
                     raise
-                if not applied:
-                    # No write has completed, so a conflict can restart the
-                    # complete transaction; other failures reach the handler.
+                if not committed_participants:
+                    # No write has completed, so preserve the original failure
+                    # for the API-layer handler.
                     raise
                 logger.error(
                     f"Multi-partner transfer: patch on {pid} "
-                    f"failed after applying {applied}: "
+                    f"failed after applying {committed_participants}: "
                     f"{patch_err}; stopping plan until the next tick"
                 )
-                return self._partial_plan_error(pid, applied, str(patch_err))
+                return self._partial_plan_error(
+                    pid, committed_participants, str(patch_err)
+                )
             if not result.accepted:
                 logger.warning(
                     "Multi-partner transfer: participant %s did not accept its "
                     "target after applying %s; stopping plan until the next tick",
                     pid,
-                    applied,
+                    committed_participants,
                 )
-                if applied:
+                if committed_participants:
                     return self._partial_plan_error(
-                        pid, applied, "participant did not accept its scale target"
+                        pid,
+                        committed_participants,
+                        "participant did not accept its scale target",
                     )
                 return (
                     ScaleOutcome(
@@ -482,8 +511,8 @@ class Orchestrator:
                     completed,
                 )
             completed.append(pid)
-            if result.applied:
-                applied.append(pid)
+            if result.applied and pid not in committed_participants:
+                committed_participants.append(pid)
             if (
                 blocking
                 and cancel_requested.is_set()
@@ -494,18 +523,18 @@ class Orchestrator:
                 try:
                     await self._wait_for_ready_or_cancel(pid, cancel_requested)
                 except Exception as readiness_error:
-                    if not applied:
+                    if not committed_participants:
                         raise
                     logger.error(
                         "Multi-partner transfer: readiness wait on %s failed "
                         "after applying %s: %s; stopping plan until the next tick",
                         pid,
-                        applied,
+                        committed_participants,
                         readiness_error,
                     )
                     return self._partial_plan_error(
                         pid,
-                        applied,
+                        committed_participants,
                         f"readiness wait failed: {readiness_error}",
                     )
 
