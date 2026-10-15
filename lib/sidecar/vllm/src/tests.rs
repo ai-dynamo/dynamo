@@ -1187,7 +1187,7 @@ async fn proto_0_5_controls_require_a_server_reporting_proto_0_6() {
     let mut old_server = server_info();
     old_server.proto_version.clear();
     // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
-    let (fake, engine) = started_engine(model_info(), old_server).await;
+    let (fake, engine) = started_engine(model_info(), old_server.clone()).await;
     for &(rejected, mutate) in cases {
         let mut request = request();
         mutate(&mut request);
@@ -1207,6 +1207,27 @@ async fn proto_0_5_controls_require_a_server_reporting_proto_0_6() {
     }
     assert_eq!(fake.service.requests.lock().await.len(), 1);
     engine.cleanup().await.expect("cleanup");
+
+    // The prefill leg fails too, before it computes KV that decode would reject.
+    let fake = FakeServer::start(FakeVllm::default()).await;
+    *fake.service.server_info_override.lock().await = Some(old_server.clone());
+    let prefill = engine_with_server_info(
+        &fake.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        model_info(),
+        old_server,
+    );
+    prefill.start(0).await.expect("start");
+    let mut request = request();
+    request.stop_conditions.max_thinking_tokens = Some(0);
+    let error = collect_result(&prefill, request)
+        .await
+        .expect_err("prefill leg")
+        .to_string();
+    assert!(error.contains("max_thinking_tokens"), "{error}");
+    assert!(fake.service.requests.lock().await.is_empty());
+    prefill.cleanup().await.expect("cleanup");
 }
 
 // Regression: the frontend must leave reasoning out of tool grammars only when

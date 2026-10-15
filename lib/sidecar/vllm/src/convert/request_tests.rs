@@ -502,9 +502,6 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         ("top_p", |r| r.sampling_options.top_p = Some(1.5)),
         ("top_p", |r| r.sampling_options.top_p = Some(f32::NAN)),
         ("reasoning_parser_kwargs", |r| {
-            r.extra_args = Some(json!({"reasoning_parser_kwargs": {"unknown_control": true}}))
-        }),
-        ("reasoning_parser_kwargs", |r| {
             r.extra_args = Some(json!({"reasoning_parser_kwargs": {"chat_template_kwargs": false}}))
         }),
         ("bad_words_token_ids", |r| {
@@ -555,6 +552,23 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         assert!(error.to_string().contains(expected), "{expected}: {error}");
         assert_invalid(error);
     }
+}
+
+#[test]
+fn reasoning_parser_kwargs_ignore_keys_the_gate_cannot_carry() {
+    let mut request = minimal_request();
+    request.extra_args = Some(json!({"reasoning_parser_kwargs": {
+        "chat_template_kwargs": {"enable_thinking": false},
+        "future_control": true,
+    }}));
+    let gate = build_generate_request(request, "id".into(), DisaggregationMode::Aggregated)
+        .unwrap()
+        .engine_reasoning_gate
+        .unwrap();
+    assert_eq!(
+        gate.chat_template_kwargs.unwrap().fields["enable_thinking"].kind,
+        Some(prost_types_v14::value::Kind::BoolValue(false))
+    );
 }
 
 #[test]

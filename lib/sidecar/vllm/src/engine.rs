@@ -203,7 +203,7 @@ impl VllmSidecarEngine {
             }
             if !dynamo_reasoning_parser {
                 return Err(client::invalid_argument(format!(
-                    "vLLM runs reasoning parser `{parser}`, which needs Dynamo's reasoning gate; set `--dyn-reasoning-parser` or start vllm-rs with `--reasoning-parser none`"
+                    "vLLM runs reasoning parser `{parser}`, which needs Dynamo's reasoning gate; set `--dyn-reasoning-parser` to this model's Dynamo reasoning parser. If the model does not reason, start vllm-rs with `--reasoning-parser none` instead"
                 )));
             }
         }
@@ -857,9 +857,10 @@ impl LLMEngine for VllmSidecarEngine {
                 "vLLM runs reasoning parser `{parser}`, but its gRPC server predates vllm-proto 0.6.0 and cannot receive this request's reasoning settings; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
             )));
         }
-        // Prefill and encode legs don't sample the response.
-        let generates = !self.mode.is_prefill() && !self.mode.is_encode();
-        if generates
+        // Fail on the prefill leg too, before it computes KV that decode would
+        // reject. Encode never samples.
+        let checks_controls = !self.mode.is_encode();
+        if checks_controls
             && request.stop_conditions.max_thinking_tokens.is_some()
             && self.model.reports_proto_0_6()
             && self.model.reasoning_parser().is_none()
@@ -873,7 +874,7 @@ impl LLMEngine for VllmSidecarEngine {
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
-        if generates && !self.model.reports_proto_0_6() {
+        if checks_controls && !self.model.reports_proto_0_6() {
             require_proto_0_6_controls(&proto_request, self.model.proto_version())?;
         }
         proto_request.model.clone_from(&self.model.served_name);

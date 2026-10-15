@@ -624,9 +624,10 @@ fn take_engine_reasoning_gate(
     let reasoning_ended = bool_extra(Some(extra), "reasoning_ended")?;
     extra.remove("reasoning_ended");
     // Keep the frontend's established envelope on the Dynamo wire. Only the
-    // vLLM boundary unwraps it into the transitional proto 0.5 gate.
+    // vLLM boundary unwraps it into the transitional proto 0.5 gate. The gate
+    // carries only `chat_template_kwargs`, so other keys from newer frontends
+    // (N-2) are ignored rather than failing every reasoning request.
     #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
     struct ReasoningParserKwargs {
         chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     }
