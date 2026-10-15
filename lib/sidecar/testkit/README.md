@@ -165,9 +165,12 @@ Each suite exercises a different request path:
 The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
 The HTTP cancellation regression uses that peer and the production sidecar engine.
 It holds an admitted request before headers or during streaming, then checks
-targeted abort before disconnect, another request's isolation and recovery. These
-CPU checks do not exercise cancellation before engine admission or during physical
-KV transfer.
+targeted abort before disconnect, another request's isolation and recovery.
+The existing SGLang aggregate GPU deployment sends chat and native `/generate`
+payloads through the Dynamo HTTP frontend, disconnects each active stream, and
+checks actual scheduler drain and successful recovery. Explicit native stop and
+consumer drop are exercised by the Rust CPU testkit. These checks do not synchronize
+cancellation before engine admission or during physical KV transfer.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -186,7 +189,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
 | `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing; the `disagg` KV-routing cases warm two prefill caches and require cache-based selection plus a completed transfer to decode | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
@@ -219,7 +222,8 @@ and real engines through the existing launch scripts. Payloads validate HTTP
 streaming, logprobs, structured output, distinct prefill/decode workers and
 KV-aware routing, including exact token/usage accounting. Payloads also check
 HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers.
-GPU assertions share each deployment's existing startup and teardown.
+GPU assertions share each deployment's existing startup and teardown, and use
+the same engine-metrics adapters for cancellation and completed transfers.
 
 GPU requests and worker discovery use frontend HTTP, with engine metrics for
 scheduler and transfer assertions. Explicit native stop, consumer drop and exact
