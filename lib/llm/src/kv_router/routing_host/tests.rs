@@ -335,7 +335,6 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn session_affinity_decisions_count_new_followed_and_rerouted_dispatches() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
