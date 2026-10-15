@@ -409,9 +409,9 @@ pub struct BlockLineage {
 /// partial window is ignored.
 ///
 /// A window that does not overlap a run is hashed in place with
-/// [`compute_block_hash_for_tokens`] (legacy 4-byte little-endian token ids).
-/// A window that overlaps a run allocates the 13-byte tagged frame from
-/// [`compute_block_bytes_with_mm`] and hashes that buffer. The chain step uses
+/// [`compute_block_hash_for_tokens`] (legacy 4-byte native-endian token ids).
+/// A window that overlaps a run allocates 13 bytes per slot (13 × `block_size`)
+/// for the tagged frame from [`compute_block_bytes_with_mm`] and hashes that buffer. The chain step uses
 /// [`compute_next_sequence_hash`] and [`PositionalLineageHash::new`], the same
 /// recurrence `TokenBlock` uses.
 ///
@@ -1428,7 +1428,7 @@ impl TokenBlockSequence {
         let block_offset = self.blocks.len() * (self.current_block.block_size as usize);
         let tokens = std::mem::take(&mut self.current_block.tokens);
         // Text windows keep the legacy in-place hash. Only a window that overlaps
-        // a run pays for the 13-byte tagged frame.
+        // a run pays for 13 bytes per slot (13 × block_size) for the tagged frame.
         let block_hash = if block_has_mm(block_offset, tokens.len(), &self.mm_runs) {
             let block_bytes = compute_block_bytes_with_mm(&tokens, block_offset, &self.mm_runs);
             compute_block_hash(&block_bytes, self.current_block.salt_hash)
@@ -3641,6 +3641,144 @@ mod tests {
         assert_eq!(lineages[1].block_hash, compute_block_hash(&mm_bytes, salt));
         // The chain still carries the middle block, so the following sequence hash differs.
         assert_ne!(lineages[2].sequence_hash, plain.blocks()[2].sequence_hash());
+    }
+
+    /// Tests cursor gate boundaries in `hash_complete_blocks` against ground-truth
+    /// `compute_block_bytes_with_mm` buffer hashing:
+    /// (a) run ending one slot into a block
+    /// (b) run starting at a block's last slot
+    /// (c) run ending exactly on a block boundary
+    /// (d) adjacent runs
+    /// and a randomized property/fuzz loop.
+    #[test]
+    fn hash_complete_blocks_cursor_gate_boundaries() {
+        let block_size: u32 = 4;
+        let salt = TEST_SALT_HASH;
+        let bs = block_size as usize;
+        // 6 complete blocks (24 tokens)
+        let tokens: Vec<Token> = (0..24).collect();
+
+        let verify_cases = |mm_runs: &[TokenBlockMmInfo]| {
+            let lineages = hash_complete_blocks(&tokens, mm_runs, block_size, salt);
+            let n_complete = tokens.len() / bs;
+            assert_eq!(lineages.len(), n_complete);
+
+            for position in 0..n_complete {
+                let block_offset = position * bs;
+                let block_tokens = &tokens[block_offset..block_offset + bs];
+                let expected_bytes = compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
+                let expected_hash = compute_block_hash(&expected_bytes, salt);
+                assert_eq!(
+                    lineages[position].block_hash, expected_hash,
+                    "Cursor gate block hash mismatch at block position {position} [offset {block_offset}..{}) run layout: {:?}",
+                    block_offset + bs,
+                    mm_runs
+                );
+            }
+        };
+
+        // Case (a): run ending one slot into a block ([4..8) block, run [1..5))
+        verify_cases(&[TokenBlockMmInfo {
+            mm_hash: 0x0A,
+            offset: 1,
+            length: 4,
+        }]);
+
+        // Case (b): run starting at a block's last slot ([4..8) block, run [7..10))
+        verify_cases(&[TokenBlockMmInfo {
+            mm_hash: 0x0B,
+            offset: 7,
+            length: 3,
+        }]);
+
+        // Case (c): run ending exactly on a block boundary ([4..8) block, run [4..8))
+        verify_cases(&[TokenBlockMmInfo {
+            mm_hash: 0x0C,
+            offset: 4,
+            length: 4,
+        }]);
+
+        // Case (d): adjacent runs ([4..8) and [8..12))
+        verify_cases(&[
+            TokenBlockMmInfo {
+                mm_hash: 0x0D1,
+                offset: 4,
+                length: 4,
+            },
+            TokenBlockMmInfo {
+                mm_hash: 0x0D2,
+                offset: 8,
+                length: 4,
+            },
+        ]);
+
+        // Combined boundary scenario covering all edge cases simultaneously
+        verify_cases(&[
+            TokenBlockMmInfo {
+                mm_hash: 0x10,
+                offset: 1,
+                length: 4, // ends at 5 (1 slot into block 1 [4..8))
+            },
+            TokenBlockMmInfo {
+                mm_hash: 0x20,
+                offset: 7,
+                length: 1, // starts at 7 (last slot of block 1 [4..8), ends at 8 boundary)
+            },
+            TokenBlockMmInfo {
+                mm_hash: 0x30,
+                offset: 8,
+                length: 3, // adjacent to previous, starts at boundary 8, ends at 11
+            },
+            TokenBlockMmInfo {
+                mm_hash: 0x40,
+                offset: 15,
+                length: 2, // starts at last slot of block 3 [12..16), ends at 17 (1 slot into block 4)
+            },
+        ]);
+
+        // Deterministic pseudo-random fuzz loop testing diverse boundaries and block sizes
+        let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let mut next_rand = |max: usize| -> usize {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((rng_state >> 33) as usize) % max
+        };
+
+        for _trial in 0..100 {
+            let fuzz_bs = (next_rand(16) + 1) as u32;
+            let n_blocks = next_rand(8) + 1;
+            let total_tokens = n_blocks * (fuzz_bs as usize) + next_rand(fuzz_bs as usize);
+            let fuzz_tokens: Vec<Token> = (0..total_tokens as u32).collect();
+
+            let mut fuzz_runs = Vec::new();
+            let mut curr_offset = next_rand(3);
+            while curr_offset < total_tokens {
+                let max_len = (fuzz_bs as usize * 2).max(1);
+                let run_len = next_rand(max_len) + 1;
+                if curr_offset + run_len > total_tokens {
+                    break;
+                }
+                fuzz_runs.push(TokenBlockMmInfo {
+                    mm_hash: rng_state,
+                    offset: curr_offset,
+                    length: run_len,
+                });
+                // Gap can be 0 (adjacent) or small gap
+                curr_offset += run_len + next_rand(4);
+            }
+
+            let lineages = hash_complete_blocks(&fuzz_tokens, &fuzz_runs, fuzz_bs, salt);
+            let bs_usize = fuzz_bs as usize;
+            for (pos, lineage) in lineages.into_iter().enumerate() {
+                let off = pos * bs_usize;
+                let win = &fuzz_tokens[off..off + bs_usize];
+                let expected_b = compute_block_bytes_with_mm(win, off, &fuzz_runs);
+                let expected_h = compute_block_hash(&expected_b, salt);
+                assert_eq!(
+                    lineage.block_hash, expected_h,
+                    "Fuzz mismatch at trial for bs={fuzz_bs}, pos={pos}, off={off}"
+                );
+            }
+        }
     }
 
     /// #11d — `offset + length` overflow is rejected as a dedicated error variant rather

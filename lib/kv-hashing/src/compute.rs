@@ -39,7 +39,8 @@ impl Request {
     /// block — fewer than `block_size` slots — is not hashed and not returned.
     ///
     /// Tokens are borrowed. Text windows are hashed in place. Only a window that
-    /// overlaps a multimodal run allocates the 13-byte tagged frame.
+    /// overlaps a multimodal run allocates 13 bytes per slot (13 × `block_size`)
+    /// for the tagged frame.
     pub fn into_blocks(&self, block_size: u32) -> Result<Vec<UniversalBlock>, KvHashingError> {
         Ok(self
             .block_lineages(block_size)?
