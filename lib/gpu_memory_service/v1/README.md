@@ -120,21 +120,34 @@ shard offset, plus the size and SHA-256 digest of every physical shard. The
 digest is calculated while the device bytes are staged through host memory, so
 save does not reread the shard.
 
-New checkpoints use schema version 2. The loader checks each weight file against its saved SHA-256 digest before restoring it, so even corruption that leaves the file size unchanged is detected.
+New checkpoints use schema version 2. Before restoring weights, the loader
+compares each shard with the SHA-256 digest saved at capture time. This detects
+corruption even when the file size is unchanged.
 
-Old checkpoints (schema version 1) remain loadable with their existing allocation, path, size, and extent checks. Each legacy load logs a warning that SHA-256 integrity verification is unavailable: these checkpoints cannot detect same-length corruption. Recapture with the current saver to get this protection. Computing a digest of an old file now cannot prove that it still contains the originally captured bytes.
+Old checkpoints (schema version 1) remain loadable. The loader still checks
+allocation IDs, paths, sizes, and extents, but it cannot detect same-length
+content changes. Each legacy load warns that SHA-256 verification is
+unavailable. Recapture with the current saver to add digests; hashing an old
+file at load time cannot establish its original contents.
 
 Without `--sharded-ssd-roots`, shard paths remain relative to the device
 artifact directory. With sharded roots, files are distributed across the
 per-device roots using the existing V0 directory convention and the manifest
 records their absolute paths.
 
-On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects RW to a fresh
-`weights` socket, recreates the exact IDs and sizes, and builds generic
-`FileTransferSource` and `GMSTransferTarget` records. Backend selection goes
-through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
+On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` reads the manifest
+and builds `FileTransferSource` records. For schema version 2, it verifies every
+shard digest before creating a transfer backend, opening a GMS session, or
+allocating restore targets. Missing or invalid digests fail the load; they never
+fall back to legacy loading. Verification reads each shard once before the
+backend reads it for transfer. Keep checkpoint files unchanged through both
+steps.
+
+After verification, the loader creates a transfer backend, connects RW to a
+fresh `weights` socket, recreates the exact IDs and sizes, and builds
+`GMSTransferTarget` records. Backend selection goes through
+`snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
 `sharded-ssd` use the same implementations and configuration as V0. The loader
-verifies every schema-version-2 shard digest before creating a transfer backend or allocating restore targets. Missing or invalid version-2 digests are errors; they never fall back to legacy loading. Keep checkpoint files unchanged during verification and transfer. Verification reads each shard once before the restore backend reads it for transfer. The loader
 synchronizes, releases its temporary mappings, commits the same socket RW to
 RO, closes its lease, and exits. The server retains the committed backing while
 the restored worker acquires a new RO lease and remaps its preserved VAs.
