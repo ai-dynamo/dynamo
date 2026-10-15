@@ -134,6 +134,19 @@ func MetricDefault(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (v1beta2.Obje
 	return DefaultMetric, true
 }
 
+// Hardware reports the effective hardware: the SKU, or "" when unresolved, and whether a
+// GPU budget is set. Typed fields and spec.aisimulate.parameters.search_space both count,
+// so admission discovers only what neither provides.
+func Hardware(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (sku string, hasBudget bool, err error) {
+	input, err := Build(spec, Options{})
+	if err != nil {
+		return "", false, err
+	}
+	searchSpace := asMap(input["search_space"])
+	sku, _ = searchSpace["hardware_sku"].(string)
+	return sku, searchSpace["gpu_budget"] != nil, nil
+}
+
 // Underlay translates the typed spec into native input. Typed fields that are unset
 // produce no key, so the native defaults and the parameters decide them.
 func Underlay(spec *v1beta2.DynamoGraphDeploymentRequestSpec) map[string]any {

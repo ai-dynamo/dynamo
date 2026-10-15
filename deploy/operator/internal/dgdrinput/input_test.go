@@ -503,3 +503,34 @@ func TestConflicts(t *testing.T) {
 		requireNoError(t, Conflicts(defaulted()))
 	})
 }
+
+func TestHardware(t *testing.T) {
+	t.Run("typed", func(t *testing.T) {
+		sku, hasBudget, err := Hardware(defaulted())
+		if err != nil || sku != "h200_sxm" || !hasBudget {
+			t.Fatalf("got %q %v %v", sku, hasBudget, err)
+		}
+	})
+	t.Run("unresolved", func(t *testing.T) {
+		spec := defaulted()
+		spec.Hardware = nil
+		sku, hasBudget, err := Hardware(spec)
+		if err != nil || sku != "" || hasBudget {
+			t.Fatalf("got %q %v %v", sku, hasBudget, err)
+		}
+	})
+	t.Run("native completes typed", func(t *testing.T) {
+		spec := withParams(defaulted(), `{"search_space":{"hardware_sku":"b200_sxm"}}`)
+		spec.Hardware.GPU.SKU = nil
+		sku, hasBudget, err := Hardware(spec)
+		if err != nil || sku != "b200_sxm" || !hasBudget {
+			t.Fatalf("got %q %v %v", sku, hasBudget, err)
+		}
+	})
+	t.Run("native null deletes typed", func(t *testing.T) {
+		sku, hasBudget, _ := Hardware(withParams(defaulted(), `{"search_space":{"gpu_budget":null}}`))
+		if sku != "h200_sxm" || hasBudget {
+			t.Fatalf("got %q %v", sku, hasBudget)
+		}
+	})
+}
