@@ -22,7 +22,7 @@ use dynamo_kv_router::plugins::{
 
 pub const POLICY_TYPE: &str = "dynamo-sglang-ep-balance";
 
-const DEFAULT_REQUEST_IMBALANCE_WEIGHT: f64 = 1.0;
+const DEFAULT_REQUEST_IMBALANCE_WEIGHT: f64 = 0.0;
 const DEFAULT_TOKEN_IMBALANCE_WEIGHT: f64 = 1.0;
 const DEFAULT_GROUP_REQUEST_WEIGHT: f64 = 1.0;
 const DEFAULT_GROUP_TOKEN_WEIGHT: f64 = 0.0;
@@ -34,6 +34,7 @@ const DEFAULT_CACHE_AFFINITY_MIN_FRACTION: f64 = 0.5;
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
     /// Within-group terms: spread of requests / KV blocks across the chosen group's DP ranks.
+    /// Requests default to 0: MoE time is per group, attention time per rank follows context.
     request_imbalance_weight: f64,
     token_imbalance_weight: f64,
     /// Group terms: mean requests / KV blocks per rank of an EP group (SGLang worker).
@@ -436,7 +437,7 @@ mod tests {
     #[test]
     fn least_loaded_group_wins_then_its_least_loaded_rank() {
         let selected = select(
-            &[[(5, 10, 1), (4, 10, 1)], [(1, 10, 1), (0, 10, 1)]],
+            &[[(5, 50, 1), (4, 40, 1)], [(1, 10, 1), (0, 5, 1)]],
             Parameters::default(),
         );
         assert_eq!(selected, WorkerWithDpRank::new(1, 1));
@@ -445,7 +446,7 @@ mod tests {
     #[test]
     fn within_group_balance_decides_among_groups_inside_tolerance() {
         let selected = select(
-            &[[(9, 10, 1), (8, 10, 1)], [(9, 10, 1), (9, 10, 1)]],
+            &[[(9, 90, 1), (8, 80, 1)], [(9, 90, 1), (9, 90, 1)]],
             Parameters::default(),
         );
         assert_eq!(selected, WorkerWithDpRank::new(0, 1));
@@ -454,7 +455,7 @@ mod tests {
     #[test]
     fn a_balanced_but_saturated_group_does_not_attract_new_requests() {
         let selected = select(
-            &[[(50, 10, 1), (50, 10, 1)], [(10, 10, 1), (5, 10, 1)]],
+            &[[(50, 500, 1), (50, 500, 1)], [(10, 100, 1), (5, 50, 1)]],
             Parameters::default(),
         );
         assert_eq!(selected, WorkerWithDpRank::new(1, 1));

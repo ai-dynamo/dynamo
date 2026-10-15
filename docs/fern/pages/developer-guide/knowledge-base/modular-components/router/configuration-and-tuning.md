@@ -247,8 +247,9 @@ for that scope, which makes it a quick way to A/B a policy against the default.
 To write your own policy instead of using a built-in one, see
 [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
-`dynamo-sglang-ep-balance` accepts `request_imbalance_weight` (1.0) and `token_imbalance_weight`
-(1.0) for the within-group spread, `group_request_weight` (1.0) and `group_token_weight` (0.0) for
+`dynamo-sglang-ep-balance` accepts `request_imbalance_weight` (0.0) and `token_imbalance_weight`
+(1.0) for the within-group spread (attention time per DP rank follows its per-request context,
+not its request count, so the default balances context only), `group_request_weight` (1.0) and `group_token_weight` (0.0) for
 the EP-group load, `group_load_tolerance` (0.1, relative) for how close a group must be to the
 least-loaded one to stay a candidate, `incomplete_group_weight` (1.0) to penalize groups whose
 ranks were partly filtered out, and `cache_affinity_min_fraction` (0.5) for the device-cache

@@ -14,7 +14,7 @@
 //! Usage: see `--help`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -180,6 +180,8 @@ struct ReconstructedWaste {
     mean_context_span_per_group: f64,
     mean_context_cv_per_group: f64,
     mean_decode_requests_per_rank: f64,
+    /// Per group: time-averaged (Σ-context tokens, decode requests) per rank over active steps.
+    per_rank_mean: BTreeMap<usize, Vec<(f64, f64)>>,
 }
 
 type Lanes = BTreeMap<usize, Vec<Vec<RankStep>>>;
@@ -209,6 +211,8 @@ struct Timeline {
     placed: usize,
     unplaced: usize,
     prefill_queue_wait_ms: Vec<f64>,
+    /// Arrival → first token (ms) for every placed request; end-to-end TTFT incl. queueing.
+    ttft_ms: Vec<f64>,
 }
 
 /// Bucket every request's prefill and decode phase into per-rank time steps. In aggregated
@@ -229,6 +233,7 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
         placed: 0,
         unplaced: 0,
         prefill_queue_wait_ms: Vec::new(),
+        ttft_ms: Vec::new(),
     };
     let (prefill_dp, decode_dp) = (args.prefill_dp(), args.decode_dp());
 
@@ -262,6 +267,11 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
             continue;
         };
         timeline.placed += 1;
+        if let Some(first_token) = record.first_token_ms {
+            timeline
+                .ttft_ms
+                .push((first_token - record.arrival_time_ms).max(0.0));
+        }
         if args.disagg {
             for route in &record.routing_history {
                 if route.pool == ReplayRequestPool::Prefill
@@ -332,7 +342,20 @@ fn build_timeline(records: &[aisimulate_core::replay::PerRequestRecord], args: &
 }
 
 /// Attention-sync waste over one pool's lanes with `dp` ranks per group.
-fn summarize_waste(lanes: &Lanes, dp: usize, steps: usize, args: &Args) -> ReconstructedWaste {
+fn summarize_waste(
+    lanes: &Lanes,
+    dp: usize,
+    steps: usize,
+    args: &Args,
+    dump: Option<&Path>,
+) -> ReconstructedWaste {
+    let mut dump = dump.map(|path| {
+        let mut out = String::from(
+            "group,step_ms,rank,decode_context_tokens,decode_requests,prefill_tokens\n",
+        );
+        out.reserve(1 << 20);
+        (path.to_path_buf(), out)
+    });
     let step_ms = args.sample_interval_ms;
     let timing = &args.timing;
     let chunk = args.max_num_batched_tokens as f64;
@@ -347,13 +370,32 @@ fn summarize_waste(lanes: &Lanes, dp: usize, steps: usize, args: &Args) -> Recon
     let mut ctx_samples = 0u64;
     let mut decode_requests_sum = 0.0;
     let mut rank_steps = 0u64;
-    for ranks in lanes.values() {
+    let mut per_rank_mean = BTreeMap::new();
+    for (group, ranks) in lanes {
+        let mut rank_sums = vec![(0.0, 0.0); dp];
+        let mut active_steps = 0u64;
         for step in 0..steps {
             let rows: Vec<RankStep> = ranks.iter().map(|lane| lane[step]).collect();
             let group_decode_requests: f64 = rows.iter().map(|r| r.decode_requests).sum();
             let group_prefill_tokens: f64 = rows.iter().map(|r| r.prefill_tokens).sum();
             if group_decode_requests == 0.0 && group_prefill_tokens == 0.0 {
                 continue;
+            }
+            active_steps += 1;
+            if let Some((_, out)) = dump.as_mut() {
+                for (rank, r) in rows.iter().enumerate() {
+                    out.push_str(&format!(
+                        "{group},{:.0},{rank},{:.0},{:.2},{:.0}\n",
+                        step as f64 * step_ms,
+                        r.decode_context_tokens,
+                        r.decode_requests,
+                        r.prefill_tokens
+                    ));
+                }
+            }
+            for (sum, r) in rank_sums.iter_mut().zip(&rows) {
+                sum.0 += r.decode_context_tokens;
+                sum.1 += r.decode_requests;
             }
             busy_rank_ms += rows
                 .iter()
@@ -411,6 +453,16 @@ fn summarize_waste(lanes: &Lanes, dp: usize, steps: usize, args: &Args) -> Recon
             decode_requests_sum += group_decode_requests;
             rank_steps += dp as u64;
         }
+        let n = active_steps.max(1) as f64;
+        per_rank_mean.insert(
+            *group,
+            rank_sums.iter().map(|(c, r)| (c / n, r / n)).collect(),
+        );
+    }
+    if let Some((path, out)) = dump
+        && let Err(err) = std::fs::write(&path, out)
+    {
+        eprintln!("failed to write {}: {err}", path.display());
     }
     let n = ctx_samples.max(1) as f64;
     ReconstructedWaste {
@@ -439,6 +491,7 @@ fn summarize_waste(lanes: &Lanes, dp: usize, steps: usize, args: &Args) -> Recon
         mean_context_span_per_group: ctx_span_sum / n,
         mean_context_cv_per_group: ctx_cv_sum / n,
         mean_decode_requests_per_rank: decode_requests_sum / rank_steps.max(1) as f64,
+        per_rank_mean,
     }
 }
 
@@ -498,7 +551,13 @@ struct Summary {
     prefill_queue_wait_p95_ms: f64,
     /// Mean engine-side queued (waiting) requests summed over prefill ranks per sample.
     mean_prefill_waiting_requests: f64,
+    /// Arrival → first token over all placed requests (ms).
+    ttft_mean_ms: f64,
+    ttft_p50_ms: f64,
+    ttft_p95_ms: f64,
     disagg: bool,
+    num_prefill_workers: usize,
+    num_decode_workers: usize,
     /// Engine-sampled view (unique KV blocks, running requests); secondary.
     attention_wait_fraction_of_gpu_time_sampled: f64,
     mean_request_span_per_group: f64,
@@ -515,7 +574,11 @@ struct Args {
     policy_yaml: Option<PathBuf>,
     label: String,
     out: Option<PathBuf>,
+    /// Write per-step per-rank lanes as `<stem>.decode.csv` / `<stem>.prefill.csv`.
+    dump_steps: Option<PathBuf>,
     num_workers: usize,
+    num_prefill_workers: Option<usize>,
+    num_decode_workers: Option<usize>,
     dp_size: usize,
     disagg: bool,
     prefill_dp_size: usize,
@@ -533,6 +596,14 @@ struct Args {
 }
 
 impl Args {
+    fn prefill_workers(&self) -> usize {
+        self.num_prefill_workers.unwrap_or(self.num_workers)
+    }
+
+    fn decode_workers(&self) -> usize {
+        self.num_decode_workers.unwrap_or(self.num_workers)
+    }
+
     fn prefill_dp(&self) -> usize {
         if self.disagg {
             self.prefill_dp_size
@@ -556,7 +627,10 @@ fn parse_args() -> Result<Args> {
         policy_yaml: None,
         label: "default".to_string(),
         out: None,
+        dump_steps: None,
         num_workers: 4,
+        num_prefill_workers: None,
+        num_decode_workers: None,
         dp_size: 4,
         disagg: false,
         prefill_dp_size: 2,
@@ -589,7 +663,10 @@ fn parse_args() -> Result<Args> {
             "--policy-yaml" => args.policy_yaml = Some(value()?.into()),
             "--label" => args.label = value()?,
             "--out" => args.out = Some(value()?.into()),
+            "--dump-steps" => args.dump_steps = Some(value()?.into()),
             "--num-workers" => args.num_workers = value()?.parse()?,
+            "--num-prefill-workers" => args.num_prefill_workers = Some(value()?.parse()?),
+            "--num-decode-workers" => args.num_decode_workers = Some(value()?.parse()?),
             "--dp-size" => args.dp_size = value()?.parse()?,
             "--disagg" => args.disagg = true,
             "--prefill-dp-size" => args.prefill_dp_size = value()?.parse()?,
@@ -620,6 +697,7 @@ fn parse_args() -> Result<Args> {
                 eprintln!(
                     "dp_attention_sync_waste --trace <mooncake.jsonl> [--policy-yaml <router-policy.yaml>] \
                      [--label <name>] [--out <summary.json>] [--num-workers N] [--dp-size N] \
+                     [--disagg --prefill-dp-size N --decode-dp-size N --num-prefill-workers N --num-decode-workers N] \
                      [--num-gpu-blocks N] [--block-size N] [--trace-block-size N] [--max-num-seqs N] \
                      [--max-num-batched-tokens N] [--max-sim-time-ms MS] [--speedup X] \
                      [--sample-interval-ms MS] [--decode-active-request-weight W] [timing flags]"
@@ -696,8 +774,8 @@ fn main() -> Result<()> {
             OfflineDisaggReplayConfig {
                 prefill_args: engine_config(args.prefill_dp_size, "prefill")?,
                 decode_args: engine_config(args.decode_dp_size, "decode")?,
-                num_prefill_workers: args.num_workers,
-                num_decode_workers: args.num_workers,
+                num_prefill_workers: args.prefill_workers(),
+                num_decode_workers: args.decode_workers(),
             },
             Some(router),
             None,
@@ -748,12 +826,29 @@ fn main() -> Result<()> {
     let samples: u64 = groups.values().map(|g| g.samples).sum();
     let n = samples.max(1) as f64;
     let timeline = build_timeline(&report.per_request, &args);
-    let mut waste = summarize_waste(&timeline.decode, args.decode_dp(), timeline.steps, &args);
+    let dump_path = |pool: &str| {
+        args.dump_steps
+            .as_ref()
+            .map(|p| p.with_extension(format!("{pool}.csv")))
+    };
+    let mut waste = summarize_waste(
+        &timeline.decode,
+        args.decode_dp(),
+        timeline.steps,
+        &args,
+        dump_path("decode").as_deref(),
+    );
     waste.placed_requests = timeline.placed;
     waste.unplaced_requests = timeline.unplaced;
-    let prefill_pool = args
-        .disagg
-        .then(|| summarize_waste(&timeline.prefill, args.prefill_dp(), timeline.steps, &args));
+    let prefill_pool = args.disagg.then(|| {
+        summarize_waste(
+            &timeline.prefill,
+            args.prefill_dp(),
+            timeline.steps,
+            &args,
+            dump_path("prefill").as_deref(),
+        )
+    });
     let mut queue_wait = timeline.prefill_queue_wait_ms;
     let prefill_queue_wait_mean_ms = if queue_wait.is_empty() {
         0.0
@@ -761,6 +856,19 @@ fn main() -> Result<()> {
         queue_wait.iter().sum::<f64>() / queue_wait.len() as f64
     };
     let prefill_queue_wait_p95_ms = percentile(&mut queue_wait, 0.95);
+    let mut ttft = timeline.ttft_ms;
+    let ttft_mean_ms = if ttft.is_empty() {
+        0.0
+    } else {
+        ttft.iter().sum::<f64>() / ttft.len() as f64
+    };
+    let ttft_p50_ms = percentile(&mut ttft, 0.5);
+    let ttft_p95_ms = percentile(&mut ttft, 0.95);
+    let (num_prefill_workers, num_decode_workers) = if args.disagg {
+        (args.prefill_workers(), args.decode_workers())
+    } else {
+        (args.num_workers, args.num_workers)
+    };
     let _ = total_max_attention;
     let summary = Summary {
         label: args.label,
@@ -773,7 +881,12 @@ fn main() -> Result<()> {
         prefill_queue_wait_mean_ms,
         prefill_queue_wait_p95_ms,
         mean_prefill_waiting_requests,
+        ttft_mean_ms,
+        ttft_p50_ms,
+        ttft_p95_ms,
         disagg: args.disagg,
+        num_prefill_workers,
+        num_decode_workers,
         attention_wait_fraction_of_gpu_time_sampled: if total_pass > 0.0 {
             total_wait / total_pass
         } else {
@@ -791,6 +904,7 @@ fn main() -> Result<()> {
         per_group: groups,
         report: serde_json::to_value(&report)?,
     };
+    let args_prefill_dp = args.prefill_dp_size;
     let json = serde_json::to_string_pretty(&summary)?;
     if let Some(out) = &args.out {
         std::fs::write(out, &json)?;
@@ -816,10 +930,21 @@ fn main() -> Result<()> {
         summary.mean_running_requests_per_group,
         summary.samples
     );
+    println!(
+        "{} ttft: mean={:.0}ms p50={:.0}ms p95={:.0}ms (prefill_workers={} decode_workers={})",
+        summary.label,
+        summary.ttft_mean_ms,
+        summary.ttft_p50_ms,
+        summary.ttft_p95_ms,
+        summary.num_prefill_workers,
+        summary.num_decode_workers
+    );
     if let Some(prefill) = &summary.prefill_pool {
         println!(
-            "{} prefill pool: sync_wait/gpu={:.4} ({:.1} gpu-s) of {:.0} gpu-s busy_rank_frac={:.3} router_queue_wait mean={:.0}ms p95={:.0}ms engine_waiting/sample={:.1}",
+            "{} prefill pool ({} workers x DP{}): sync_wait/gpu={:.4} ({:.1} gpu-s) of {:.0} gpu-s busy_rank_frac={:.3} router_queue_wait mean={:.0}ms p95={:.0}ms engine_waiting/sample={:.1}",
             summary.label,
+            summary.num_prefill_workers,
+            args_prefill_dp,
             prefill.total_wait_fraction_of_gpu_time,
             prefill.total_wait_gpu_seconds,
             prefill.modeled_gpu_seconds,
