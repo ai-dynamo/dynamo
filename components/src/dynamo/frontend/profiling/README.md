@@ -150,13 +150,28 @@ and joined to the captured process by the PID prefix of `dynamo.process.epoch`;
 a PID claimed by more than one target stays unmapped. Spans and native events
 share the coordinator clock using each target's measured offset. Engine work
 inside an operation span is shared batch work and is not attributed per kernel.
-`timeline.json.gz` is one overall timeline for the window: every selected
-request as an OTel span tree, the recording windows and control events, and
-each captured worker's Kineto or Nsight SQLite events over its recording,
+For Kineto sessions, `timeline.json.gz` is one overall Perfetto timeline for
+the window: every selected request as an OTel span tree, the recording windows
+and control events, and each captured worker's Kineto events over its recording,
 written once. `--per-request` adds `timelines/<request>.json.gz` with only the
-native events overlapping that request's operation spans. For the frontend,
-timelines show its spans, recording window and control events; its detailed
-Nsight host trace is validated and listed in the bundle but not drawn yet.
+native events overlapping that request's operation spans.
+
+For Nsight sessions the default output is `reports/`, for the Nsight Systems
+multi-report view: every target's native report, and in the frontend's report
+(or, without one, each worker's) the selected requests added as NVTX ranges in a
+"Dynamo requests" group above all processes. Each request is a row named by
+session, request and route, with its span tree nested parent-first and colored
+by kind; recording windows and control events have rows of their own. Times are
+converted with the measured clock offsets and clipped to the report's session,
+so its time window is unchanged (spans entirely outside it are counted, not
+drawn). The ranges are written with Nsight Systems' `nsys_writer` (needs the
+`nvtx` package, `ai-dynamo[profiling]`) or, as a fallback, `ImportNvtxt`, which
+places them below the processes; `reports/<target>.nvtxt` keeps them as text.
+Point `--nsys-root` at the Nsight Systems install (default: `$NSYS_HOME` or the
+install of `nsys` on `PATH`). `--perfetto` also writes the Perfetto timeline,
+which is the fallback when neither tool is available. The frontend's detailed
+Nsight host trace (OS runtime calls only where CPU sampling is not permitted) is
+validated and packaged but not drawn.
 
 ## Callable API and hosting
 

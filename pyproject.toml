@@ -53,7 +53,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 artifact-delivery = [
     "opendal==0.47.10",
 ]
-profiling = ["nvtx>=0.2.15,<1.0"]
+profiling = ["nvtx>=0.2.16,<1.0"]
 
 trtllm =[
     "uvloop",

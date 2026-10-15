@@ -1735,6 +1735,60 @@ def nsight_session(tmp_path):
     return session, otel, base
 
 
+def test_nvtx_request_ranges_follow_the_span_tree():
+    from dynamo.profiling import nvtxt
+
+    ms = 1_000_000  # realistic times: the jitter tolerance is 1 ms
+    spans = {
+        # Listed child-first with equal starts: order must come from the tree.
+        "op": (10 * ms, 50 * ms, "worker.operation.decode", 1, "dispatch"),
+        "dispatch": (10 * ms, 60 * ms, "request.dispatch", 1, "root"),
+        "root": (10 * ms, 100 * ms, "http-request", 1, None),
+        # A worker span overrunning its parent by clock-offset error.
+        "stream": (55 * ms, 70 * ms, "response.streaming", 1, "dispatch"),
+        # A sibling of "op" that crosses its end: a genuine overlap.
+        "admit": (20 * ms, 55 * ms, "worker.admission", 1, "dispatch"),
+    }
+    threads = nvtxt.tree_threads(spans)
+    assert [message for _, _, message, _ in threads[0]] == [
+        "http-request",
+        "request.dispatch",
+        "worker.operation.decode",
+        "response.streaming (clamped to parent)",
+    ]
+    assert threads[0][3][:2] == (55 * ms, 60 * ms - 1)
+    assert [message for _, _, message, _ in threads[1]] == ["worker.admission"]
+    # Equal starts become strictly nested (1 ns in), so the order is unambiguous.
+    pushes = [r for r in nvtxt.events(threads[0]) if r[1] == "push"]
+    assert [r[0] for r in pushes] == [10 * ms, 10 * ms + 1, 10 * ms + 2, 55 * ms]
+    # A sibling inside an earlier sibling (ending within the jitter tolerance)
+    # nests under it, as in Perfetto, instead of opening an overlap row.
+    siblings = {
+        "http": (0, 1000 * ms, "http-request", 1, None),
+        "lifecycle": (0, 900 * ms, "request.lifecycle", 1, "http"),
+        "stream": (100 * ms, 900 * ms + ms // 2, "response.streaming", 1, "http"),
+    }
+    threads = nvtxt.tree_threads(siblings)
+    assert len(threads) == 1
+    assert [m for _, _, m, _ in threads[0]] == [
+        "http-request",
+        "request.lifecycle",
+        "response.streaming (clamped to parent)",
+    ]
+    # The real shape, clipped to a report window: equal intervals, and the
+    # sibling that adopts the streaming span already has its own child.
+    clipped = {
+        "lifecycle": (0, 9 * ms, "request.lifecycle", 1, None),
+        "route": (0, 9 * ms, "kv_router.route_request", 1, "lifecycle"),
+        "payload": (0, 9 * ms, "handle_payload", 1, "route"),
+        "stream": (0, 9 * ms, "response.streaming", 1, "lifecycle"),
+    }
+    (row,) = nvtxt.tree_threads(clipped)
+    starts = [start for start, _, _, _ in row]
+    ends = [end for _, end, _, _ in row]
+    assert starts == sorted(set(starts)) and ends == sorted(set(ends), reverse=True)
+
+
 def test_bundle_reads_nsight_worker_exports(tmp_path):
     session, otel, base = nsight_session(tmp_path)
     bundle.build(session, [otel], tmp_path / "out", per_request=True)
@@ -1783,42 +1837,64 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
 
 def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path):
     session, otel, base = nsight_session(tmp_path)
-    importer = tmp_path / "ImportNvtxt"
+    # An install with only ImportNvtxt (no nsys_writer package or backend).
+    install = tmp_path / "nsys"
+    (install / "host-linux-x64").mkdir(parents=True)
+    importer = install / "host-linux-x64" / "ImportNvtxt"
     importer.write_text(
         f"#!{sys.executable}\n"
         "import shutil, sys\n"
         "args = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n"
         "shutil.copy(args['-i'], args['-o'])\n"
         "lines = open(args['-n']).read().splitlines()\n"
-        "count = sum(l.startswith(('RangeStartEnd,', 'Marker,')) for l in lines)\n"
+        "count = sum(l.startswith(('RangePush,', 'Marker,')) for l in lines)\n"
         "print(f'{count} events imported')\n"
     )
     importer.chmod(0o755)
-    summary = bundle.build(
-        session, [otel], tmp_path / "out", import_nvtxt=str(importer)
-    )
+    summary = bundle.build(session, [otel], tmp_path / "out", nsys_root=str(install))
     # Nsight default: native reports with request spans, no Perfetto conversion.
     assert summary["timeline"] is None
     assert not (tmp_path / "out/timeline.json.gz").exists()
     reports = summary["nsight_reports"]
+    # As in the Perfetto view, requests go to one report (the frontend's);
+    # worker reports are packaged unchanged.
     assert {t: r["status"] for t, r in reports.items()} == {
         "frontend": "merged",
-        "decode-0": "merged",
+        "decode-0": "native",
     }
-    text = (tmp_path / "out/reports/decode-0.nvtxt").read_text()
+    text = (tmp_path / "out/reports/frontend.nvtxt").read_text()
     assert "TimeBase = Manual" in text
-    assert 'NameOsThread, 900001, 2, "req t · decode-0"' in text
-    # Spans at base+2..3 ms land 2..3 ms after the session start, which is
-    # 5 s on this report's clock.
-    assert (
-        'RangeStartEnd, 5002000000, 5003000000, 2, "worker.operation.decode · decode-0"'
-        in text
+    assert 'NameOsThread, 0, 1, "Capture control"' in text
+    assert 'NameOsThread, 0, 2, "Recording · decode-0"' in text
+    assert 'NameOsThread, 0, 4, "req t · decode-0"' in text
+    # The span tree nests on its request thread; base+2..3 ms is 5.002..5.003 s
+    # on this report's clock (session start 5 s).
+    pushes = [
+        line
+        for line in text.splitlines()
+        if line.startswith("RangePush, 500200000") and line.split(", ")[2] == "4"
+    ]
+    assert [line.split('"')[1].split(" · ")[0] for line in pushes] == [
+        "http-request",
+        "kv_router.route_request",
+        "handle_payload",
+        "worker.operation.decode",
+    ]
+    assert [p.split(", ")[1] for p in pushes] == [
+        "5002000000",
+        "5002000001",
+        "5002000002",
+        "5002000003",
+    ]
+    lines = text.splitlines()
+    assert reports["frontend"]["method"] == "ImportNvtxt"
+    assert reports["frontend"]["events_imported"] == sum(
+        line.startswith(("RangePush,", "Marker,")) for line in lines
     )
-    assert 'RangeStartEnd, 5001000000, 5004000000, 1, "decode-0 recording"' in text
-    assert (
-        reports["decode-0"]["events_imported"]
-        == reports["decode-0"]["ranges"] + reports["decode-0"]["marks"]
-    )
+    # Coloured by span kind: decode operations purple, the request blue.
+    assert 'RangePush, 5002000003, 4, 0xFFB07AA1, "worker.operation.decode' in text
+    assert 'RangePush, 5002000000, 4, 0xFF4E79A7, "http-request' in text
+    assert (tmp_path / "out/reports/frontend.nsys-rep").read_bytes() == b"report"
     assert (tmp_path / "out/reports/decode-0.nsys-rep").read_bytes() == b"report"
     archived, _ = bundle.archive(tmp_path / "out", summary)
     with tarfile.open(archived) as tar:
@@ -1826,11 +1902,11 @@ def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path):
     assert {"out/reports/decode-0.nsys-rep", "out/reports/frontend.nvtxt"} <= names
     # Without ImportNvtxt the NVTXT is still written and Perfetto is the fallback.
     summary = bundle.build(
-        session, [otel], tmp_path / "plain", import_nvtxt=str(tmp_path / "missing")
+        session, [otel], tmp_path / "plain", nsys_root=str(tmp_path / "missing")
     )
-    if summary["nsight_reports"]["decode-0"]["status"] == "nvtxt_only":
+    if summary["nsight_reports"]["frontend"]["status"] == "nvtxt_only":
         assert summary["timeline"]["events"]
-        assert (tmp_path / "plain/reports/decode-0.nvtxt").exists()
+        assert (tmp_path / "plain/reports/frontend.nvtxt").exists()
 
 
 @pytest.mark.asyncio
