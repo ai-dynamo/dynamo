@@ -93,14 +93,17 @@ _TOTAL = 85_093_777_408
 _REQUESTED = int(_TOTAL * 0.92)
 _WEIGHTS = int(1.18 * _GIB)  # imported read-only from GMS, shared by both
 _TORCH_PEAK = int(0.5 * _GIB)
-_NON_TORCH = 2 * _GIB  # CUDA context, NCCL and NIXL buffers
+_CONTEXT = int(1.1 * _GIB)  # CUDA context, created before init_device's window
+_NON_TORCH = 2 * _GIB  # NCCL and NIXL buffers
 _CUDAGRAPH = int(0.43 * _GIB)
 
 
 def _shadow_kv_budget(monkeypatch, tmp_path, peer_alloc_during_init=0):
     """Run init_device and the scratch-KV budget beside a resident peer engine."""
-    # The peer engine is already resident on the device.
-    device = _FakeDevice(_TOTAL, peer_used=_WEIGHTS + _TORCH_PEAK + _NON_TORCH)
+    # The peer engine is already resident on the device, and this engine's
+    # CUDA context exists before init_device runs.
+    peer_used = _WEIGHTS + _CONTEXT + _TORCH_PEAK + _NON_TORCH
+    device = _FakeDevice(_TOTAL, peer_used=peer_used + _CONTEXT)
 
     def base_init_device(_worker):
         device.used += _NON_TORCH + peer_alloc_during_init
@@ -150,7 +153,7 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
 
     # The wake-time KV allocation, both engines' non-KV memory and the shared
     # weights must fit within the requested share of the device.
-    engine_non_kv = _TORCH_PEAK + _NON_TORCH + _CUDAGRAPH
+    engine_non_kv = _CONTEXT + _TORCH_PEAK + _NON_TORCH + _CUDAGRAPH
     assert kv_budget + _WEIGHTS + 2 * engine_non_kv <= _REQUESTED
     assert kv_budget > 0
 
@@ -162,7 +165,9 @@ def test_shadow_kv_budget_caps_peer_allocation_during_init(monkeypatch, tmp_path
     )
 
     measured_cap = gms_worker._MAX_NON_TORCH_INIT_BYTES
-    engine_non_kv = _TORCH_PEAK + measured_cap + _CUDAGRAPH
+    engine_non_kv = (
+        gms_worker._CUDA_CONTEXT_BYTES + _TORCH_PEAK + measured_cap + _CUDAGRAPH
+    )
     assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
     assert kv_budget > 0
 

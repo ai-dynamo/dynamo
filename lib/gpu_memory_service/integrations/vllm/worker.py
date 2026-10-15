@@ -79,6 +79,11 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 # co-located engine allocated (for example its KV cache) during the window.
 _MAX_NON_TORCH_INIT_BYTES = 2 << 30
 
+# Per-engine allowance for the CUDA context, which exists before that window
+# opens and cannot be read per process from device-wide free memory. About
+# 1.1 GiB per engine process was observed on A100 80 GB.
+_CUDA_CONTEXT_BYTES = 5 << 28
+
 
 def kv_reuse_enabled() -> bool:
     """Opt in to committing the KV layout so it survives this engine (default off).
@@ -191,9 +196,9 @@ class GMSWorker(_BaseWorker):
 
         # Profile-time free memory includes the co-located engine, so measure
         # non-torch init memory (NCCL, workspaces) here, after the RO connect.
-        # The CUDA context already exists and is not counted. The reading is
-        # device-wide, so peer allocations in this window inflate it; it is
-        # capped at _MAX_NON_TORCH_INIT_BYTES.
+        # The CUDA context already exists; the budget reserves it separately as
+        # _CUDA_CONTEXT_BYTES. The reading is device-wide, so peer allocations
+        # in this window inflate it; it is capped at _MAX_NON_TORCH_INIT_BYTES.
         measure_non_torch = is_scratch_kv_enabled()
         if measure_non_torch:
             free_before, _ = torch_device().mem_get_info()
@@ -283,6 +288,7 @@ class GMSWorker(_BaseWorker):
             torch_peak
             + invisible_weights_memory
             + non_torch_memory
+            + _CUDA_CONTEXT_BYTES
             + cudagraph_memory_estimate_applied
         )
         # KV is one cuMemCreate at wake beside the resident peer engine, which runs
@@ -299,7 +305,7 @@ class GMSWorker(_BaseWorker):
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
             "peer_non_kv=%.2f GiB, torch_peak=%.2f GiB, "
             "invisible_weights=%.2f GiB, non_torch=%.2f GiB, "
-            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
+            "cuda_context=%.2f GiB, cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
             projected_available / (1 << 30),
             self.requested_memory / (1 << 30),
             non_kv_cache_memory / (1 << 30),
@@ -307,6 +313,7 @@ class GMSWorker(_BaseWorker):
             torch_peak / (1 << 30),
             invisible_weights_memory / (1 << 30),
             non_torch_memory / (1 << 30),
+            _CUDA_CONTEXT_BYTES / (1 << 30),
             cudagraph_memory_estimate / (1 << 30),
             cudagraph_memory_estimate_applied / (1 << 30),
         )
