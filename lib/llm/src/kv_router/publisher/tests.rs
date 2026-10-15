@@ -2207,7 +2207,7 @@ mod worker_metrics_tests {
     async fn publish_debounces_updates_independently_per_rank() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42, false);
 
         publisher.publish(Some(0), None, Some(100)).unwrap();
         publisher.publish(Some(1), None, Some(200)).unwrap();
@@ -2244,7 +2244,7 @@ mod worker_metrics_tests {
         let publisher = WorkerMetricsPublisher::new().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let start = tokio::time::Instant::now();
-        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42, true);
         publisher.publish(Some(0), None, Some(100)).unwrap();
         publisher.publish(Some(1), Some(7), None).unwrap();
 

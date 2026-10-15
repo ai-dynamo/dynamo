@@ -1041,6 +1041,9 @@ impl HttpService {
     }
 
     fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
+        if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+            return;
+        }
         let Some(publisher) = &self.frontend_load_publisher else {
             return;
         };

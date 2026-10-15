@@ -43,3 +43,11 @@ pub use publication::{
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };
+
+/// Whether this process publishes the serving-load streams a Relay
+/// aggregates. Off unless `DYN_SERVING_LOAD_PUBLISH` is truthy.
+pub(crate) fn serving_load_publishing_enabled() -> bool {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::llm::DYN_SERVING_LOAD_PUBLISH,
+    )
+}

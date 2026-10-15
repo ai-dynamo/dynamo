@@ -153,10 +153,16 @@ impl WorkerMetricsPublisher {
     }
 
     pub(super) fn start_metrics_publishing(&self, event_publisher: EventPublisher, worker_id: u64) {
-        self.start_metrics_publishing_with(event_publisher, worker_id);
+        self.start_metrics_publishing_with(
+            event_publisher,
+            worker_id,
+            crate::kv_dc_relay::serving_load_publishing_enabled(),
+        );
     }
 
-    pub(super) fn start_metrics_publishing_with<S>(&self, sink: S, worker_id: u64)
+    /// `replay` re-sends every rank's last metrics each [`METRICS_REPLAY_INTERVAL`]
+    /// for subscribers that joined after the last change.
+    pub(super) fn start_metrics_publishing_with<S>(&self, sink: S, worker_id: u64, replay: bool)
     where
         S: WorkerMetricsSink,
     {
@@ -167,11 +173,11 @@ impl WorkerMetricsPublisher {
             let mut debouncer = WorkerMetricsDebouncer::new(PUBLISH_DEBOUNCE);
             let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
             tokio::pin!(publish_timer);
-            let mut replay = tokio::time::interval_at(
+            let mut replay_timer = tokio::time::interval_at(
                 tokio::time::Instant::now() + METRICS_REPLAY_INTERVAL,
                 METRICS_REPLAY_INTERVAL,
             );
-            replay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            replay_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut failures = FailureStreak::default();
 
             loop {
@@ -199,7 +205,7 @@ impl WorkerMetricsPublisher {
                             publish_timer.as_mut().reset(deadline);
                         }
                     }
-                    _ = replay.tick(), if !debouncer.last_metrics.is_empty() => {
+                    _ = replay_timer.tick(), if replay && !debouncer.last_metrics.is_empty() => {
                         for metrics in debouncer.last_metrics.values() {
                             publish_metrics(&sink, worker_id, metrics, &mut failures).await;
                         }

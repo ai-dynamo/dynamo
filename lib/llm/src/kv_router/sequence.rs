@@ -547,6 +547,9 @@ pub(crate) fn start_scheduler_load_publisher(
         }
     };
     let loads = Arc::new(SchedulerRankLoads::default());
+    if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+        return loads;
+    }
     let endpoint = endpoint.clone();
     tokio::spawn(run_scheduler_load_publisher(
         move || {
