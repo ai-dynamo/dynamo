@@ -465,21 +465,6 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
     None
 }
 
-fn find_queue_rejection_in_chain<'a>(
-    err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(rejection) =
-            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
-        {
-            return Some(rejection);
-        }
-        current = error.source();
-    }
-    None
-}
-
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -842,13 +827,14 @@ impl ErrorMessage {
         if super::metrics::router_admission_rejected(err.as_ref()) {
             record_local_failure(ErrorClass::CapacityExhausted);
             let code = StatusCode::TOO_MANY_REQUESTS;
-            let (message, details) = match find_queue_rejection_in_chain(err.as_ref()) {
-                Some(rejection) => (
-                    rejection.to_string(),
-                    serde_json::to_value(rejection).ok().map(Box::new),
-                ),
-                None => ("Service temporarily overloaded".to_string(), None),
-            };
+            let (message, details) =
+                match super::metrics::find_queue_rejection_in_chain(err.as_ref()) {
+                    Some(rejection) => (
+                        rejection.to_string(),
+                        serde_json::to_value(rejection).ok().map(Box::new),
+                    ),
+                    None => ("Service temporarily overloaded".to_string(), None),
+                };
             return (
                 code,
                 Json(ErrorMessage {
@@ -7625,6 +7611,30 @@ mod tests {
         assert_eq!(response.1.code, 429);
         assert_eq!(response.1.error_type, "Too Many Requests");
         assert_eq!(response.1.message, "Service temporarily overloaded");
+    }
+
+    #[test]
+    fn pinned_worker_overload_maps_to_http_429_and_stays_migratable() {
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+
+        let error =
+            crate::kv_router::scheduler_error_for_test(KvSchedulerError::PinnedWorkerOverloaded {
+                worker_id: 7,
+            });
+        assert_eq!(
+            error
+                .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                .expect("pinned overload should be a DynamoError")
+                .reason()
+                .as_str(),
+            "router.pinned_worker_overloaded"
+        );
+        assert!(crate::migration::is_migratable(error.as_ref()));
+
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.code, 429);
+        assert_eq!(response.1.error_type, "Too Many Requests");
     }
 
     #[test]

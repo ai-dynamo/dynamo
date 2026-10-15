@@ -8,7 +8,8 @@ subtitle: Configure independent load thresholds that shed traffic with HTTP 429 
 Request rejection (load shedding) rejects new requests when every eligible worker is overloaded,
 rather than accepting work that could exhaust GPU memory or degrade latency for in-flight requests.
 A router admission refusal is **HTTP 429** with OpenAI `error.type` `Too Many Requests`. That
-covers a full policy-class queue and a pool where every eligible worker is overloaded. **HTTP 529**
+covers a full policy-class queue, an overloaded pinned worker, and a pool where every eligible worker
+is overloaded. **HTTP 529**
 remains the worker and engine overload signal, still controlled by `DYN_HTTP_OVERLOAD_STATUS_CODE`,
 so clients can distinguish a router refusal from a busy worker and from **HTTP 503**, which indicates
 that the service is unavailable. Rejection metrics stay in the overload class.
@@ -134,12 +135,18 @@ Optional. A worker can independently cap concurrent engine work and queue only a
             - "32"
 ```
 
-When all `N` engine slots and the overflow queue are full, the worker rejects the request and the
-Frontend returns HTTP 529 (the configured overload status) when migration is disabled or its retry
-attempts do not find capacity.
-With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
-eligible worker first. Split or standalone routing uses global overload and fault state, so its
-retry is best-effort and can select the same worker again.
+When all `N` engine slots and the overflow queue are full, the worker rejects the request. What the
+client receives depends on migration:
+
+- Migration is disabled, or the request is pinned to one worker: HTTP 529 (the configured overload
+  status).
+- With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on
+  another eligible worker first. If the migration limit runs out first, the client receives HTTP 529.
+  If every eligible worker rejects the request as overloaded, the Frontend treats the pool as
+  exhausted and returns HTTP 429, the same as a router admission refusal.
+
+Split or standalone routing uses global overload and fault state, so its retry is best-effort and can
+select the same worker again.
 `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
 at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
 in-flight requests per worker.

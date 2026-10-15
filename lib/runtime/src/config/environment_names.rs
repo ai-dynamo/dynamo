@@ -401,8 +401,8 @@ pub mod llm {
     /// are accepted; an informational value from 100 through 199, an
     /// unparseable value, or an out-of-range value falls back to 529. The
     /// value is read and cached on first use. Router admission refusals (a
-    /// full policy queue, or every eligible worker overloaded) are HTTP 429
-    /// and do not use this variable.
+    /// full policy queue, an overloaded pinned worker, or every eligible worker
+    /// overloaded) are HTTP 429 and do not use this variable.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
     /// Emit an SSE comment at this interval while a streaming response has no

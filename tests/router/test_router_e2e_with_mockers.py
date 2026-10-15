@@ -25,12 +25,12 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_per_role_router_modes,
     _test_disagg_per_role_session_affinity,
-    _test_disagg_router_overload_529,
+    _test_disagg_router_overload_429,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
-    _test_router_overload_529,
+    _test_router_overload_429,
     _test_router_override_router_config,
     _test_router_query_instance_id,
     _test_router_threshold_none_disables_rejection,
@@ -103,7 +103,7 @@ ROUTER_AIS_CONFIG = {
     "worker_type": "aggregated",
 }
 
-ROUTER_OVERLOAD_529_CASES = (
+ROUTER_OVERLOAD_429_CASES = (
     pytest.param(
         {
             "blocks_threshold": 0.2,
@@ -128,7 +128,7 @@ ROUTER_OVERLOAD_529_CASES = (
 # signal.
 _SLOW_SPEEDUP = 0.01
 _FAST_SPEEDUP = 100.0
-ROUTER_DISAGG_OVERLOAD_529_CASES = (
+ROUTER_DISAGG_OVERLOAD_429_CASES = (
     pytest.param(
         {
             # A single prefill worker is sufficient to verify overloaded -> no
@@ -629,9 +629,9 @@ def test_mocker_session_affinity(
         )
 
 
-@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_529_CASES)
+@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_429_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
-def test_mocker_kv_router_overload_529(
+def test_mocker_kv_router_overload_429(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -655,7 +655,7 @@ def test_mocker_kv_router_overload_529(
         # Get unique port for this test
         frontend_port = allocate_frontend_ports(request, 1)[0]
 
-        _test_router_overload_529(
+        _test_router_overload_429(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
             request=request,
@@ -1235,9 +1235,9 @@ def test_router_decisions_disagg(
     )
 
 
-@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_529_CASES)
+@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_429_CASES)
 @pytest.mark.timeout(120)
-def test_mocker_disagg_router_overload_529(
+def test_mocker_disagg_router_overload_429(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -1279,7 +1279,7 @@ def test_mocker_disagg_router_overload_529(
         enable_disagg_bootstrap=False,
     ) as (prefill_workers, decode_workers):
         frontend_port = allocate_frontend_ports(request, 1)[0]
-        _test_disagg_router_overload_529(
+        _test_disagg_router_overload_429(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=4,

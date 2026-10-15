@@ -84,21 +84,22 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
-        || queue_rejection_in_chain(err)
+        || find_queue_rejection_in_chain(err).is_some()
 }
 
-fn queue_rejection_in_chain(err: &(dyn std::error::Error + 'static)) -> bool {
+pub(super) fn find_queue_rejection_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
     let mut current = Some(err);
     while let Some(error) = current {
-        if error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
-            .is_some()
+        if let Some(rejection) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
         {
-            return true;
+            return Some(rejection);
         }
         current = error.source();
     }
-    false
+    None
 }
 
 /// User-facing body for a request whose caller-supplied deadline elapsed
@@ -125,20 +126,24 @@ pub(super) fn queue_deadline_error<'a>(
     None
 }
 
-/// A terminal router refusal: a policy-class [`QueueRejection`](dynamo_kv_router::scheduling::QueueRejection)
-/// or a pool exhaustion stamped `router.admission_rejected`.
+/// A terminal router refusal: a policy-class [`QueueRejection`](dynamo_kv_router::scheduling::QueueRejection),
+/// a pool exhaustion stamped `router.admission_rejected`, or an overloaded pinned
+/// worker stamped `router.pinned_worker_overloaded`.
 ///
 /// Checked before semantic classification. That reason is a valid
 /// `CapacityExhausted`, so the generic overload policy would otherwise answer
 /// with the configured overload status.
 pub(super) fn router_admission_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    if queue_rejection_in_chain(err) {
+    if find_queue_rejection_in_chain(err).is_some() {
         return true;
     }
     let mut current = Some(err);
     while let Some(error) = current {
         if let Some(error) = error.downcast_ref::<DynamoError>()
-            && error.reason().as_str() == "router.admission_rejected"
+            && matches!(
+                error.reason().as_str(),
+                "router.admission_rejected" | "router.pinned_worker_overloaded"
+            )
         {
             return true;
         }

@@ -1476,7 +1476,7 @@ def _verify_frontend_rejection_metrics(
     )
 
 
-def _probe_overload_529_and_assert(
+def _probe_overload_429_and_assert(
     frontend_port: int,
     test_payload: dict,
     max_tokens: int,
@@ -1502,14 +1502,14 @@ def _probe_overload_529_and_assert(
     initial_rejection_count = _get_frontend_rejection_metric(
         frontend_port, model_name, "chat_completions"
     )
-    test_payload_529 = {
+    test_payload_429 = {
         **test_payload,
         "max_tokens": max_tokens,
     }
 
     logger.info("Launching streaming requests until the router returns 429...")
 
-    async def exhaust_resources_and_verify_529():
+    async def exhaust_resources_and_verify_429():
         stop_event = asyncio.Event()
         observed_statuses = []
 
@@ -1556,7 +1556,7 @@ def _probe_overload_529_and_assert(
                     random.shuffle(content_words)
                     shuffled_content = " ".join(content_words)
                     unique_payload = {
-                        **test_payload_529,
+                        **test_payload_429,
                         "messages": [
                             {
                                 **test_payload["messages"][0],
@@ -1585,7 +1585,7 @@ def _probe_overload_529_and_assert(
 
             return observed_statuses
 
-    results = asyncio.run(exhaust_resources_and_verify_529())
+    results = asyncio.run(exhaust_resources_and_verify_429())
 
     # Count outcomes
     num_succeeded = sum(1 for s in results if s == 200)
@@ -1620,7 +1620,7 @@ def _probe_overload_529_and_assert(
     )
 
 
-def _test_router_overload_529(
+def _test_router_overload_429(
     engine_workers,
     block_size: int,
     request,
@@ -1683,10 +1683,10 @@ def _test_router_overload_529(
             )
         )
 
-        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
+        _probe_overload_429_and_assert(frontend_port, test_payload, max_tokens)
 
 
-def _test_disagg_router_overload_529(
+def _test_disagg_router_overload_429(
     prefill_workers,
     decode_workers,
     block_size: int,
@@ -1759,7 +1759,7 @@ def _test_disagg_router_overload_529(
             )
         )
 
-        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
+        _probe_overload_429_and_assert(frontend_port, test_payload, max_tokens)
 
 
 def _test_router_threshold_none_disables_rejection(
@@ -1917,11 +1917,11 @@ def _test_router_threshold_none_disables_rejection(
         results = asyncio.run(verify_thresholds_and_send_load())
 
         num_succeeded = sum(1 for status in results if status == 200)
-        num_rejected = sum(1 for status in results if status == 529)
-        num_other = sum(1 for status in results if status not in (200, 529))
+        num_rejected = sum(1 for status in results if status == 429)
+        num_other = sum(1 for status in results if status not in (200, 429))
 
         logger.info(
-            "Results with explicit None thresholds: %s succeeded, %s rejected (529), %s other",
+            "Results with explicit None thresholds: %s succeeded, %s rejected (429), %s other",
             num_succeeded,
             num_rejected,
             num_other,
@@ -1930,7 +1930,7 @@ def _test_router_threshold_none_disables_rejection(
         assert num_rejected == 0, f"Expected 0 rejections, but got {num_rejected}"
         assert (
             num_other == 0
-        ), f"Expected only 200 or 529 responses, but got {num_other} other"
+        ), f"Expected only 200 or 429 responses, but got {num_other} other"
         assert num_succeeded > 0, "Expected at least one successful request"
         assert (
             num_succeeded == num_requests

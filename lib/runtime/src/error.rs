@@ -425,7 +425,8 @@ impl ErrorReason {
             "capacity.pool_exhausted"
             | "capacity.worker_overloaded"
             | "capacity.exhausted"
-            | "router.admission_rejected" => Some(ErrorClass::CapacityExhausted),
+            | "router.admission_rejected"
+            | "router.pinned_worker_overloaded" => Some(ErrorClass::CapacityExhausted),
             "backend.unknown" => Some(ErrorClass::Internal),
             "backend.protocol" => Some(ErrorClass::BackendProtocol),
             "request.unauthenticated" => Some(ErrorClass::Unauthenticated),

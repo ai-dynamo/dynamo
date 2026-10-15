@@ -103,6 +103,7 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
             | "backend.stream_incomplete"
             | "backend.worker_unavailable"
             | "capacity.worker_overloaded"
+            | "router.pinned_worker_overloaded"
     )
 }
 
@@ -1486,6 +1487,11 @@ mod tests {
                 ErrorClass::CapacityExhausted,
                 "router.admission_rejected",
                 false,
+            ),
+            (
+                ErrorClass::CapacityExhausted,
+                "router.pinned_worker_overloaded",
+                true,
             ),
             (ErrorClass::Unavailable, "transport.disconnected", true),
             (ErrorClass::Unavailable, "backend.unavailable", false),
