@@ -8,9 +8,7 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-Substitute the environment variables with `envsubst` before applying the GPU-budget manifest. The Mocker variant runs in `--no-operation` mode. See the [source README](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/README.md) for setup and verification.
-
-Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+**Prerequisites:** [Global Planner README](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/README.md)
 
 <ExampleSelector
   variants={[
@@ -46,6 +44,8 @@ Replace image, secret, storage, and hardware settings before applying. Keep supp
 </div>
 
 <div className="dynamo-example-variant" data-example-variant="kubernetes-mocker-global-planner-mocker-test-yaml">
+
+The Global Planner logs scale requests without executing them (`--no-operation`).
 
 [Source: `global-planner-mocker-test.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-mocker-test.yaml)
 
