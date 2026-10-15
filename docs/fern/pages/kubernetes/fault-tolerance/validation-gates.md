@@ -8,8 +8,8 @@ subtitle: Run your own checks against a new worker before it takes client traffi
 A worker can pass its probes and still be broken in ways only a real request shows, such as a bad
 tool-call parser or the wrong weight revision. Validation gates run your checks against a new worker
 before it becomes routable. Until every gate passes, its pod isn't Ready and, while its
-`before_publish` gates run, it gets no requests at all; liveness is unaffected, so it isn't restarted.
-Nothing changes when gates aren't set.
+`before_publish` gates run, it gets no client traffic, only the checks' own requests; liveness is
+unaffected, so it isn't restarted. Nothing changes when gates aren't set.
 
 ## Configure gates
 
