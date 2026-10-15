@@ -85,6 +85,7 @@ def test_router_loads_stage_configs_from_model_deploy_config():
         media_output_fs_url=None,
         media_output_http_url=None,
         default_video_fps=16,
+        image_png_compression_level=0,
     )
     stage_configs = [_make_stage_cfg(0)]
 
@@ -102,7 +103,13 @@ def test_router_loads_stage_configs_from_model_deploy_config():
         trust_remote_code=False,
         deploy_config_path="/deploy/glm_image.yaml",
     )
-    output_formatter.assert_called_once()
+    output_formatter.assert_called_once_with(
+        model_name=config.model,
+        media_fs=None,
+        media_http_url=None,
+        default_fps=16,
+        image_png_compression_level=0,
+    )
     assert router.stage_configs == stage_configs
 
 

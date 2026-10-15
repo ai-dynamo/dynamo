@@ -28,12 +28,6 @@ const (
 	v3OpaqueTopology   = "opaque-v3-topology"
 )
 
-type unreachableBuildSnapshotSource struct{}
-
-func (unreachableBuildSnapshotSource) AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error) {
-	return nil, fmt.Errorf("unexpected build snapshot acquisition")
-}
-
 type staticBuildSnapshotSource map[string]*BuildSnapshot
 
 func (source staticBuildSnapshotSource) AcquireBuildSnapshot(_ context.Context, buildID string) (*BuildSnapshot, error) {

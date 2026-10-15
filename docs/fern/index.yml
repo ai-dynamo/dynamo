@@ -940,7 +940,7 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
-              - page: Muse-Spark-open-816B-A42B
+              - page: Muse-Spark-Open-816B-A42B
                 path: pages/recipes/model-recipes/Muse-Spark-Open.mdx
                 slug: Muse-Spark-Open
           - section: MiniMax
