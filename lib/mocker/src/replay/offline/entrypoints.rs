@@ -38,9 +38,7 @@ use crate::scheduler::RouterEventVisibility;
 struct CompatiblePrefillLoadEstimator(ReplayPrefillLoadEstimator);
 
 #[cfg(feature = "python-replay")]
-impl aisimulate_core::replay::native_router::PrefillLoadEstimator
-    for CompatiblePrefillLoadEstimator
-{
+impl aisimulate_python::native_router::PrefillLoadEstimator for CompatiblePrefillLoadEstimator {
     fn predict_prefill_duration(
         &self,
         batch_size: usize,
@@ -148,14 +146,14 @@ pub fn run_canonical_replay_json(
             capture,
             telemetry,
         )?,
-        ReplayRouterMode::KvRouter => aisimulate_core::execute_native_router_replay(
+        ReplayRouterMode::KvRouter => aisimulate_python::execute_native_router_replay(
             &payload,
             capture,
             scaling_policy,
             telemetry,
             prefill_load_estimator.map(|estimator| {
                 std::sync::Arc::new(CompatiblePrefillLoadEstimator(estimator))
-                    as aisimulate_core::replay::native_router::ReplayPrefillLoadEstimator
+                    as aisimulate_python::native_router::ReplayPrefillLoadEstimator
             }),
         )?,
     };

@@ -88,26 +88,28 @@ def _exact_version(requirement: Requirement) -> Version:
     return Version(specifiers[0].version)
 
 
-def _locked_cargo_version(path: Path, dependency: dict) -> Version:
+def _locked_cargo_version(
+    path: Path, dependency: dict, package_name: str = "aisimulate-core"
+) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
-    matches = [package for package in packages if package["name"] == "aisimulate-core"]
-    assert len(matches) == 1, f"expected one aisimulate-core package in {path}"
+    matches = [package for package in packages if package["name"] == package_name]
+    assert len(matches) == 1, f"expected one {package_name} package in {path}"
 
     package = matches[0]
     if "git" in dependency:
         revision = dependency["rev"]
         assert package.get("source") == (
             f"git+{dependency['git']}?rev={revision}#{revision}"
-        ), f"aisimulate-core must resolve to the exact source revision in {path}"
+        ), f"{package_name} must resolve to the exact source revision in {path}"
         assert "checksum" not in package
     else:
         assert package.get("source") == (
             "registry+https://github.com/rust-lang/crates.io-index"
-        ), f"aisimulate-core must resolve from crates.io in {path}"
+        ), f"{package_name} must resolve from crates.io in {path}"
         assert re.fullmatch(
             r"[0-9a-f]{64}", str(package.get("checksum", ""))
-        ), f"aisimulate-core must have a registry checksum in {path}"
+        ), f"{package_name} must have a registry checksum in {path}"
     return Version(str(package["version"]))
 
 
@@ -164,9 +166,14 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
     assert cargo_version == python_version
+    wrapper_dependency = cargo["workspace"]["dependencies"]["aisimulate-python"]
+    assert (
+        wrapper_dependency == cargo_dependency
+    ), "the native wheel host and neutral core must use the same source and version"
     assert all(
-        _locked_cargo_version(path, cargo_dependency) == cargo_version
+        _locked_cargo_version(path, cargo_dependency, package_name) == cargo_version
         for path in LOCKFILES
+        for package_name in ("aisimulate-core", "aisimulate-python")
     )
 
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:

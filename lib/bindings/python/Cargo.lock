@@ -35,16 +35,13 @@ dependencies = [
 [[package]]
 name = "aisimulate-core"
 version = "0.13.0"
-source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=d817afbca88e0d24fc5b8189b5815d4e993ad275#d817afbca88e0d24fc5b8189b5815d4e993ad275"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=e407510d20901b7f32400a63634a2f9949864966#e407510d20901b7f32400a63634a2f9949864966"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "blake3",
  "ddsketchy",
  "derive_builder",
- "dynamo-custom-policy-builtin 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
- "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
- "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
  "fixedbitset",
  "flate2",
  "indicatif 0.18.4",
@@ -65,10 +62,29 @@ dependencies = [
  "slotmap",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aisimulate-python"
+version = "0.13.0"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=e407510d20901b7f32400a63634a2f9949864966#e407510d20901b7f32400a63634a2f9949864966"
+dependencies = [
+ "aisimulate-core",
+ "anyhow",
+ "dynamo-custom-policy-builtin 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "pyo3",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -140,7 +156,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -151,7 +167,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1403,7 +1419,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2048,7 +2064,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2143,10 +2159,10 @@ dependencies = [
 [[package]]
 name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef#094aaca91941421bb0dcb645b0f700a42d6de3ef"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "async-trait",
- "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
+ "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
  "fastrand",
  "parking_lot",
  "serde",
@@ -2169,10 +2185,10 @@ dependencies = [
 [[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef#094aaca91941421bb0dcb645b0f700a42d6de3ef"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "derive_builder",
- "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
+ "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2226,7 +2242,7 @@ dependencies = [
 [[package]]
 name = "dynamo-kv-router"
 version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef#094aaca91941421bb0dcb645b0f700a42d6de3ef"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2238,9 +2254,9 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "derive_builder",
- "dynamo-kv-hashing 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
- "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
- "dynamo-truthy 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef)",
+ "dynamo-kv-hashing 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-truthy 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
  "fastrand",
  "flume",
  "futures-util",
@@ -2396,6 +2412,7 @@ name = "dynamo-mocker"
 version = "1.6.0"
 dependencies = [
  "aisimulate-core",
+ "aisimulate-python",
  "anyhow",
  "blake3",
  "bytes",
@@ -2727,7 +2744,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokens"
 version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef#094aaca91941421bb0dcb645b0f700a42d6de3ef"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2772,7 +2789,7 @@ dependencies = [
 [[package]]
 name = "dynamo-truthy"
 version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=094aaca91941421bb0dcb645b0f700a42d6de3ef#094aaca91941421bb0dcb645b0f700a42d6de3ef"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "anyhow",
 ]
@@ -2931,7 +2948,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4009,7 +4026,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5540,7 +5557,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6960,7 +6977,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6998,7 +7015,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -7561,7 +7578,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7629,7 +7646,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8222,7 +8239,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8625,7 +8642,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10038,7 +10055,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
