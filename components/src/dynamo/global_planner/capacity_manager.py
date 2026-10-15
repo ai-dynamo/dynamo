@@ -114,6 +114,10 @@ class CapacityManager:
         """Run a complete capacity transaction with backend conflict semantics."""
         return await operation()
 
+    def is_conflict(self, error: Exception) -> bool:
+        """Whether ``error`` can safely restart the complete transaction."""
+        return False
+
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         """Read back current replica counts as ``{sub_type: replicas}``."""
         raise NotImplementedError

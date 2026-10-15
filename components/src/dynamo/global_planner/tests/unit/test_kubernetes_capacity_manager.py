@@ -99,6 +99,7 @@ def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
     connector.kube_api = MagicMock()
     connector.kube_api.current_namespace = key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
+    connector.kube_api.list_pods_for_graph = MagicMock(return_value=[])
     connector._test_deployment = spec
 
     def list_deployments():
@@ -190,11 +191,30 @@ def test_discover_explicit_mode_skips_absent_allowlisted_deployment():
         connector.kube_api.get_graph_deployment.side_effect = (
             DynamoGraphDeploymentNotFoundError("model-a", "default")
         )
+        connector.kube_api.list_pods_for_graph.return_value = []
         mock_connector_cls.return_value = connector
 
         assert cm.discover({"default-model-a"}) == []
 
     assert cm.connectors == {}
+
+
+def test_discover_explicit_mode_retains_missing_deployment_with_live_pods():
+    cm = KubernetesCapacityManager("default")
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
+    ) as mock_connector_cls:
+        connector = MagicMock()
+        connector.parent_dgd_name = "model-a"
+        connector.kube_api.get_graph_deployment.side_effect = (
+            DynamoGraphDeploymentNotFoundError("model-a", "default")
+        )
+        connector.kube_api.list_pods_for_graph.return_value = [object()]
+        mock_connector_cls.return_value = connector
+
+        assert cm.discover({"default-model-a"}) == ["model-a"]
+
+    assert cm.connectors == {"default/model-a": connector}
 
 
 def test_discover_explicit_mode_retains_unknown_deployment_fail_closed():
@@ -598,6 +618,26 @@ def test_observe_managed_deployment_not_found_fails_then_evicts_connector():
     assert not cm.participant_exists("default/missing")
 
 
+def test_observe_missing_deployment_waits_for_labeled_pods_to_drain():
+    cm = KubernetesCapacityManager("default")
+    missing = _install_connector(
+        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+    )
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
+    missing.kube_api.list_pods_for_graph.side_effect = [[object()], []]
+
+    with pytest.raises(RuntimeError, match="labeled Pods remain"):
+        cm.observe(require_complete=True)
+    assert cm.participant_exists("default/missing")
+
+    with pytest.raises(RuntimeError) as error:
+        cm.observe(require_complete=True)
+    assert isinstance(error.value.__cause__, DynamoGraphDeploymentNotFoundError)
+    assert not cm.participant_exists("default/missing")
+
+
 def test_observe_implicit_mode_lists_once_per_namespace():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
@@ -607,6 +647,7 @@ def test_observe_implicit_mode_lists_once_per_namespace():
     second = _install_connector(
         cm, "default/second", _dgd_spec(2, 2), parent_dgd_name="second"
     )
+    cm._inventory_api = first.kube_api
 
     snapshot = cm.observe(require_complete=True)
 
@@ -616,6 +657,32 @@ def test_observe_implicit_mode_lists_once_per_namespace():
     second.kube_api.list_graph_deployments.assert_not_called()
     first.kube_api.get_graph_deployment.assert_not_called()
     second.kube_api.get_graph_deployment.assert_not_called()
+
+
+def test_observe_implicit_mode_rediscovers_recreated_deployment():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    deployment = _dgd_spec(1, 1)
+    old = _install_connector(cm, "default/model", deployment, parent_dgd_name="model")
+    recreated = deepcopy(deployment)
+    recreated.setdefault("metadata", {})["name"] = "model"
+    old.kube_api.list_graph_deployments.side_effect = [[], [recreated]]
+    cm._inventory_api = old.kube_api
+
+    assert cm.observe() == {"default/model": {}}
+    assert not cm.participant_exists("default/model")
+
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
+    ) as mock_connector_cls:
+        new = MagicMock()
+        new.parent_dgd_name = "model"
+        mock_connector_cls.return_value = new
+
+        snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
+    assert cm.connectors["default/model"] is new
 
 
 def test_current_replicas():

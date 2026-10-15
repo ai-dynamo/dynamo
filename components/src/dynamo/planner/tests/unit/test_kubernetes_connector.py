@@ -1209,6 +1209,48 @@ async def test_delegated_conflict_retry_allows_reordered_targets(
 
 
 @pytest.mark.asyncio
+async def test_delegated_conflict_retry_allows_reduced_target_set(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _component("first", "worker", replicas=1),
+        _component("second", "worker", replicas=1),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.update_dgd_replica_targets.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+    kubernetes_connector.retry_conflicts = False
+    retry_state = ReplicaUpdateRetryState()
+    targets = [
+        TargetReplica(
+            sub_component_type=SubComponentType.DECODE,
+            component_name=name,
+            desired_replicas=2,
+        )
+        for name in ("first", "second")
+    ]
+
+    with pytest.raises(client.ApiException):
+        await kubernetes_connector.set_component_replicas(
+            targets,
+            blocking=False,
+            retry_state=retry_state,
+        )
+    result = await kubernetes_connector.set_component_replicas(
+        targets[:1],
+        blocking=False,
+        retry_state=retry_state,
+    )
+
+    assert result.accepted
+    assert result.applied
+    assert mock_kube_api.update_dgd_replica_targets.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_set_component_replicas_orders_reductions_before_increases(
     kubernetes_connector, mock_kube_api
 ):

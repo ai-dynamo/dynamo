@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Optional, TypeVar
 
+from kubernetes import client
 from kubernetes.aio.utils.retry import retry_on_conflict
 
 from dynamo.global_planner.capacity_manager import (
@@ -62,6 +63,7 @@ class KubernetesCapacityManager(CapacityManager):
         # specialized prefill/decode components do not need a hint.
         self._component_roles: dict[str, dict[str, str]] = {}
         self._observe_all_deployments = False
+        self._inventory_api: KubernetesAPI | None = None
         self._replica_retry_states: ContextVar[
             dict[str, ReplicaUpdateRetryState] | None
         ] = ContextVar("global_planner_replica_retry_states", default=None)
@@ -107,7 +109,7 @@ class KubernetesCapacityManager(CapacityManager):
         self._observe_all_deployments = managed_deployment_names is None
         if managed_deployment_names is None:
             try:
-                kube_api = KubernetesAPI(self.namespace)
+                kube_api = self._get_inventory_api()
                 dgds = kube_api.list_graph_deployments()
             except Exception as error:
                 logger.warning(f"Failed to discover existing deployments: {error}")
@@ -118,16 +120,24 @@ class KubernetesCapacityManager(CapacityManager):
                 if (name := dgd.get("metadata", {}).get("name", ""))
             ]
         else:
+            self._inventory_api = None
             deployment_names = []
             for name in sorted(managed_deployment_names):
                 participant_id = f"{self.namespace}/{name}"
                 connector = self.connectors.get(participant_id)
                 if connector is None:
                     connector = self._new_connector("discovered", self.namespace, name)
+                    self.connectors[participant_id] = connector
                 try:
                     connector.kube_api.get_graph_deployment(name)
-                except DynamoGraphDeploymentNotFoundError:
-                    self._discard_connector(participant_id, connector)
+                except DynamoGraphDeploymentNotFoundError as error:
+                    missing_error = self._missing_deployment_error(
+                        participant_id, connector, error
+                    )
+                    if participant_id in self.connectors:
+                        logger.warning("%s", missing_error)
+                        deployment_names.append(name)
+                        continue
                     logger.info(
                         "Configured deployment %s/%s does not exist yet",
                         self.namespace,
@@ -143,8 +153,6 @@ class KubernetesCapacityManager(CapacityManager):
                         name,
                         error,
                     )
-                if participant_id not in self.connectors:
-                    self.connectors[participant_id] = connector
                 deployment_names.append(name)
 
         registered: list[str] = []
@@ -177,6 +185,33 @@ class KubernetesCapacityManager(CapacityManager):
         if self.connectors.get(participant_id) is connector:
             del self.connectors[participant_id]
             self._component_roles.pop(participant_id, None)
+
+    def _get_inventory_api(self) -> KubernetesAPI:
+        if self._inventory_api is None:
+            self._inventory_api = KubernetesAPI(self.namespace)
+        return self._inventory_api
+
+    def _missing_deployment_error(
+        self,
+        participant_id: str,
+        connector: KubernetesConnector,
+        not_found: DynamoGraphDeploymentNotFoundError,
+    ) -> Exception:
+        """Evict a missing DGD only after all of its labeled Pods have drained."""
+        try:
+            pods = connector.kube_api.list_pods_for_graph(connector.parent_dgd_name)
+        except Exception as error:
+            return RuntimeError(
+                f"DGD for {participant_id} is missing and Pod drain could not be "
+                f"verified: {error}"
+            )
+        if pods:
+            return RuntimeError(
+                f"DGD for {participant_id} is missing while {len(pods)} labeled "
+                "Pods remain"
+            )
+        self._discard_connector(participant_id, connector)
+        return not_found
 
     def ensure_participant(
         self,
@@ -230,9 +265,11 @@ class KubernetesCapacityManager(CapacityManager):
                         connector, self._component_roles.get(key)
                     )
                 except DynamoGraphDeploymentNotFoundError as error:
-                    self._discard_connector(key, connector)
                     self._record_observation_failure(
-                        all_pools, key, error, require_complete
+                        all_pools,
+                        key,
+                        self._missing_deployment_error(key, connector, error),
+                        require_complete,
                     )
                 except Exception as error:
                     self._record_observation_failure(
@@ -240,46 +277,61 @@ class KubernetesCapacityManager(CapacityManager):
                     )
             return all_pools
 
-        connectors_by_namespace: dict[str, list[tuple[str, KubernetesConnector]]] = {}
-        for key, connector in connectors_snapshot:
-            namespace = connector.kube_api.current_namespace
-            connectors_by_namespace.setdefault(namespace, []).append((key, connector))
-
         # Implicit mode manages every DGD in the namespace, so one namespace LIST
         # is both the intended scope and cheaper than one GET per participant.
-        for connectors in connectors_by_namespace.values():
-            try:
-                deployments = connectors[0][1].kube_api.list_graph_deployments()
-                deployments_by_name: dict[str, dict] = {}
-                for deployment in deployments:
-                    name = (deployment.get("metadata", {}) or {}).get("name")
-                    if not isinstance(name, str) or not name:
-                        continue
-                    if name in deployments_by_name:
-                        raise ValueError(f"duplicate DGD {name!r} in list response")
-                    deployments_by_name[name] = deployment
-            except Exception as error:
-                for key, _ in connectors:
-                    self._record_observation_failure(
-                        all_pools, key, error, require_complete
-                    )
-                continue
+        try:
+            deployments = self._get_inventory_api().list_graph_deployments()
+            deployments_by_name: dict[str, dict] = {}
+            for deployment in deployments:
+                name = (deployment.get("metadata", {}) or {}).get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                if name in deployments_by_name:
+                    raise ValueError(f"duplicate DGD {name!r} in list response")
+                deployments_by_name[name] = deployment
+        except Exception as error:
+            if require_complete:
+                raise RuntimeError(
+                    f"Failed to list deployments in {self.namespace}: {error}"
+                ) from error
+            logger.warning(
+                "Failed to list deployments in %s: %s", self.namespace, error
+            )
+            return {key: {} for key, _ in connectors_snapshot}
 
-            for key, connector in connectors:
-                try:
-                    deployment = deployments_by_name.get(connector.parent_dgd_name)
-                    if deployment is None:
-                        self._discard_connector(key, connector)
-                        continue
-                    all_pools[key] = self._pools_from_deployment(
-                        connector,
-                        deployment,
-                        self._component_roles.get(key),
-                    )
-                except Exception as error:
-                    self._record_observation_failure(
-                        all_pools, key, error, require_complete
-                    )
+        for name in deployments_by_name:
+            key = f"{self.namespace}/{name}"
+            if key not in self.connectors:
+                self.connectors[key] = self._new_connector(
+                    "discovered", self.namespace, name
+                )
+
+        for key, connector in connectors_snapshot:
+            if connector.parent_dgd_name in deployments_by_name:
+                continue
+            error = DynamoGraphDeploymentNotFoundError(
+                connector.parent_dgd_name, self.namespace
+            )
+            self._record_observation_failure(
+                all_pools,
+                key,
+                self._missing_deployment_error(key, connector, error),
+                require_complete,
+            )
+
+        for name, deployment in deployments_by_name.items():
+            key = f"{self.namespace}/{name}"
+            connector = self.connectors[key]
+            try:
+                all_pools[key] = self._pools_from_deployment(
+                    connector,
+                    deployment,
+                    self._component_roles.get(key),
+                )
+            except Exception as error:
+                self._record_observation_failure(
+                    all_pools, key, error, require_complete
+                )
         return all_pools
 
     @staticmethod
@@ -461,6 +513,9 @@ class KubernetesCapacityManager(CapacityManager):
             return await retry_on_conflict(operation)
         finally:
             self._replica_retry_states.reset(token)
+
+    def is_conflict(self, error: Exception) -> bool:
+        return isinstance(error, client.ApiException) and error.status == 409
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         connector = self.connectors[participant_id]

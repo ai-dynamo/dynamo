@@ -1220,12 +1220,12 @@ class KubernetesConnector(PlannerConnector):
             )[1:]
             for plan in plans
         }
-        if not retry_authorities:
-            retry_authorities.update(current_authorities)
-        elif current_authorities != retry_authorities:
-            raise RuntimeError(
-                "component identity or replica authority changed during retry"
-            )
+        for name, authority in current_authorities.items():
+            if name in retry_authorities and retry_authorities[name] != authority:
+                raise RuntimeError(
+                    "component identity or replica authority changed during retry"
+                )
+        retry_authorities.update(current_authorities)
         mutations = [
             plan
             for plan in plans

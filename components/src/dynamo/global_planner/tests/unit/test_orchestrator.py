@@ -334,6 +334,56 @@ async def test_noop_before_conflict_retries_complete_budget_transaction():
 
 
 @pytest.mark.asyncio
+async def test_applied_partner_before_conflict_retries_complete_budget_transaction():
+    class ConflictError(Exception):
+        pass
+
+    class AppliedThenConflictCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.observe_calls = 0
+            self.scale_attempts = []
+
+        def observe(self, require_complete=False):
+            self.observe_calls += 1
+            return super().observe(require_complete)
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_attempts.append(participant_id)
+            if (
+                participant_id == "default/b"
+                and self.scale_attempts.count("default/b") == 1
+            ):
+                raise ConflictError()
+            return await super().scale(participant_id, targets, blocking)
+
+        def is_conflict(self, error):
+            return isinstance(error, ConflictError)
+
+        async def run_with_conflict_retry(self, operation):
+            try:
+                return await operation()
+            except ConflictError:
+                return await operation()
+
+    cm = AppliedThenConflictCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    result = await _submit(orch, "default/b", _targets(decode=3))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.observe_calls == 3
+    assert cm.scale_attempts == ["default/a", "default/b", "default/b"]
+    assert cm.pools["default/a"]["decode"][0] == 1
+    assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
 async def test_submit_returns_post_write_readback():
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)

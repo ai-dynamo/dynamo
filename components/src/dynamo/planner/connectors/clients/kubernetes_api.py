@@ -549,26 +549,14 @@ class KubernetesAPI:
         """Apply a DGD JSON Patch and surface a failed CAS test as 409."""
 
         def request() -> None:
-            self.custom_api.api_client.call_api(
-                "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
-                "PATCH",
-                {
-                    "group": NVIDIA_API_GROUP,
-                    "version": DYNAMO_API_VERSION,
-                    "namespace": self.current_namespace,
-                    "plural": DGD_PLURAL,
-                    "name": graph_deployment_name,
-                },
-                [],
-                {
-                    "Accept": "application/json",
-                    "Content-Type": JSON_PATCH_CONTENT_TYPE,
-                },
+            self.custom_api.patch_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGD_PLURAL,
+                name=graph_deployment_name,
                 body=patch,
-                response_type="object",
-                auth_settings=["BearerToken"],
-                _return_http_data_only=True,
-                collection_formats={},
+                _content_type=JSON_PATCH_CONTENT_TYPE,
             )
 
         try:

@@ -143,14 +143,13 @@ def k8s_api_with_namespace(mock_custom_api, mock_config):
 
 
 def _dgd_json_patch_bodies(mock_custom_api):
-    calls = mock_custom_api.api_client.call_api.call_args_list
+    calls = mock_custom_api.patch_namespaced_custom_object.call_args_list
     for api_call in calls:
-        assert api_call.args[0] == (
-            "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}"
-        )
-        assert api_call.args[1] == "PATCH"
-        assert api_call.args[2]["plural"] == "dynamographdeployments"
-        assert api_call.args[4]["Content-Type"] == "application/json-patch+json"
+        assert api_call.kwargs["group"] == "nvidia.com"
+        assert api_call.kwargs["version"] == "v1beta1"
+        assert api_call.kwargs["plural"] == "dynamographdeployments"
+        assert api_call.kwargs["_content_type"] == "application/json-patch+json"
+    mock_custom_api.api_client.call_api.assert_not_called()
     return [api_call.kwargs["body"] for api_call in calls]
 
 
@@ -404,7 +403,6 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
     mock_custom_api.patch_namespaced_custom_object_scale.assert_not_called()
 
-    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
     assert _dgd_json_patch_bodies(mock_custom_api) == [
         [
             {"op": "test", "path": "/metadata/uid", "value": "dgd-uid"},
@@ -446,7 +444,7 @@ def test_update_service_replicas_rereads_dgd_on_conflict(k8s_api, mock_custom_ap
             },
         },
     ]
-    mock_custom_api.api_client.call_api.side_effect = [
+    mock_custom_api.patch_namespaced_custom_object.side_effect = [
         client.ApiException(status=422, reason="testing value failed"),
         None,
     ]
@@ -485,14 +483,14 @@ def test_update_service_replicas_stops_retry_after_dgd_recreation(
             "spec": {"components": [{"name": "target", "replicas": 0}]},
         },
     ]
-    mock_custom_api.api_client.call_api.side_effect = client.ApiException(
+    mock_custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(
         status=422, reason="test operation failed"
     )
 
     with pytest.raises(RuntimeError, match="identity changed during retry"):
         k8s_api.update_service_replicas("test-deployment", "target", 2)
 
-    assert mock_custom_api.api_client.call_api.call_count == 1
+    assert mock_custom_api.patch_namespaced_custom_object.call_count == 1
 
 
 def test_update_service_replicas_preserves_non_cas_json_patch_error(
@@ -505,7 +503,7 @@ def test_update_service_replicas_preserves_non_cas_json_patch_error(
         "metadata": {"uid": "dgd-uid", "resourceVersion": "dgd-rv-1"},
         "spec": {"components": [{"name": "target", "replicas": 0}]},
     }
-    mock_custom_api.api_client.call_api.side_effect = client.ApiException(
+    mock_custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(
         status=422, reason="replicas: Invalid value"
     )
 
@@ -514,7 +512,7 @@ def test_update_service_replicas_preserves_non_cas_json_patch_error(
 
     assert error.value.status == 422
     assert mock_custom_api.get_namespaced_custom_object.call_count == 1
-    assert mock_custom_api.api_client.call_api.call_count == 1
+    assert mock_custom_api.patch_namespaced_custom_object.call_count == 1
 
 
 def test_update_service_replicas_preserves_dgd_not_found_error(
@@ -583,7 +581,6 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     }
     k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
 
-    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
     assert _dgd_json_patch_bodies(mock_custom_api) == [
         [
             {"op": "test", "path": "/metadata/uid", "value": "dgd-uid"},
@@ -629,7 +626,6 @@ def test_update_dgd_replica_targets_uses_one_targeted_json_patch(
         deployment=deployment,
     )
 
-    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
     assert _dgd_json_patch_bodies(mock_custom_api) == [
         [
             {"op": "test", "path": "/metadata/uid", "value": "dgd-uid"},

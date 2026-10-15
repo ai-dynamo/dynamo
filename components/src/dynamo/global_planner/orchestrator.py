@@ -450,6 +450,8 @@ class Orchestrator:
                     pid, applied, f"participant is not ready: {patch_err}"
                 )
             except Exception as patch_err:
+                if self.capacity_manager.is_conflict(patch_err):
+                    raise
                 if not applied:
                     # No write has completed, so a conflict can restart the
                     # complete transaction; other failures reach the handler.
