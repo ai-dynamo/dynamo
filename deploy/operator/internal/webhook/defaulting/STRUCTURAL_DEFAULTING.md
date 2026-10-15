@@ -20,6 +20,13 @@ each default, and leaves the webhook handler as a narrow request boundary.
   when conversion cannot represent the information the rule needs.
 - Preserve explicit user values. Fill only absence defined by the API and never
   silently rewrite an explicit value to make it valid.
+- Do not infer or track value provenance. Treat the decoded object as authoritative:
+  a value supplied by the user and the same value applied by CRD schema defaulting
+  are indistinguishable. Do not inspect the raw admission request, compare against
+  a known default, consult annotations, or use another side channel to reconstruct
+  whether a field was user supplied. If a rule needs to observe absence,
+  leave the field unset until mutating admission or model presence explicitly in the
+  API.
 
 ## Migration status
 
@@ -126,6 +133,8 @@ function and nested API types are handled by their exact-type functions.
 - Keep one table-driven admission-chain test per resource. Exercise the generated
   source-version schema defaults first, convert through the production path when
   versions differ, then invoke the public mutating webhook handler.
+- Prove that a user-supplied value and an identical value applied by CRD schema
+  defaulting produce the same webhook result.
 - Cover CREATE and UPDATE explicitly. For every operation-specific default, include
   the opposite operation and prove that its behavior is intentional.
 - Prove idempotence by applying defaulting twice and comparing the complete object
