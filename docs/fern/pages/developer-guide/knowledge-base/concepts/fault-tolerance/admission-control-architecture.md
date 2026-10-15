@@ -118,6 +118,44 @@ backlog of twice `max_num_seqs` per rank. A deeper queue absorbs longer bursts a
 waits; the gate does not reject requests based on how long they have waited. Set the limit to `0`
 for immediate rejection when engine capacity is unavailable.
 
+#### Size the waiting limit with Little's law
+
+[Little's law](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html) relates average occupancy,
+arrival rate, and time spent in a stage:
+
+```text
+L = C × W
+```
+
+For the engine waiting stage, `L` is the average number of waiting requests, `C` is the admission
+rate in requests per second, and `W` is the mean time in seconds from admission to the first generated
+token or completion.
+
+Measure a warmed-up worker at the highest steady load that meets your latency SLO. During this
+calibration, keep both engine limits high enough that the gate does not constrain admission, and
+confirm there is no gate queueing or rejection. Measure prefill and decode workers separately.
+
+For one worker and one known `dp_rank`, use the same steady interval to measure:
+
+- `L`: the time average of `dynamo_backend_admission_engine_request_waiting_count`.
+- `C`: the rate of `dynamo_backend_admission_request_admit_total`, summed across
+  `source="direct"` and `source="queue"`.
+
+Then `L / C` estimates `W`. This window includes engine queueing and downstream prefill waits after
+admission, but excludes the gate queue and earlier upstream processing. Frontend TTFT therefore
+measures a different window. Use a run with negligible failures and cancellations, since those also
+release waiting capacity. The result is a mean, not a median or percentile.
+
+Round `C × W` up to get an initial candidate for
+`DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT`—equivalently, round the measured `L` up.
+For example, 50 requests/second with a mean wait of 0.24 seconds gives 12 waiting requests on average.
+Validate that candidate under representative load and bursts: a hard limit at the average occupancy
+can reduce throughput, and the mean does not bound tail latency. Adjust while checking goodput and
+latency percentiles.
+
+For multi-rank workers, `dp_rank="unspecified"` does not reveal how the engine distributes those
+requests across ranks, so it cannot provide a per-rank sizing estimate.
+
 ### Metrics
 
 Each worker exposes the following metrics. In the **Labels** column, `dp_rank` is the rank ID, such as
