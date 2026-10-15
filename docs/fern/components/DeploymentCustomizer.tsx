@@ -119,6 +119,9 @@ interface SettingsState {
   update: (patch: Partial<SharedSettings>) => void;
   reset: () => void;
   pageTag: string | null;
+  /** Open state of each disclosure by key; a missing key uses the section's default. */
+  disclosures: Record<string, boolean>;
+  setOpen: (key: string, open: boolean) => void;
 }
 
 const SettingsContext = createContext<SettingsState | null>(null);
@@ -135,16 +138,22 @@ function usePageTag(): string | null {
 
 function useSettingsState(): SettingsState {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [disclosures, setDisclosures] = useState<Record<string, boolean>>({});
   const pageTag = usePageTag();
   return {
     settings,
     update: (patch) => setSettings((current) => ({ ...current, ...patch })),
     reset: () => setSettings(DEFAULT_SETTINGS),
     pageTag,
+    disclosures,
+    setOpen: (key, open) => setDisclosures((current) => ({ ...current, [key]: open })),
   };
 }
 
-/** Shares model, image, storage, and Secret choices across the manifests it wraps. */
+/**
+ * Shares model, image, storage, and Secret choices, and which sections are
+ * open, across the manifests it wraps.
+ */
 export function DeploymentCustomizerProvider({ children }: { children: ReactNode }) {
   const state = useSettingsState();
   return (
@@ -187,19 +196,91 @@ function findEmbeddedYaml(node: ReactNode): EmbeddedCode | null {
   return found;
 }
 
+/** A page's "[Source: `file`](url)" link, shown in the customizer header. */
+export interface SourceLink {
+  href: string;
+  label: string;
+  /** The page's original paragraph, rendered when the customizer falls back. */
+  element: ReactElement;
+}
+
+function isBlank(node: ReactNode): boolean {
+  return node === null || node === undefined || typeof node === "boolean" || (typeof node === "string" && node.trim() === "");
+}
+
+function textOf(node: ReactNode): string {
+  let text = "";
+  Children.forEach(node, (child) => {
+    if (typeof child === "string" || typeof child === "number") text += child;
+    else if (isValidElement(child)) text += textOf((child.props as { children?: ReactNode }).children);
+  });
+  return text;
+}
+
+function codeTextOf(node: ReactNode): string | null {
+  let found: string | null = null;
+  Children.forEach(node, (child) => {
+    if (found !== null || !isValidElement(child)) return;
+    found = child.type === "code" ? textOf(child) : codeTextOf((child.props as { children?: ReactNode }).children);
+  });
+  return found;
+}
+
+/**
+ * Reads a paragraph that holds only a link to the file embedded next. Matching
+ * on the file name rather than the "Source:" text keeps other links in place.
+ */
+function sourceLinkFor(element: ReactElement, fileName: string | undefined): SourceLink | null {
+  if (!fileName) return null;
+  const content = Children.toArray((element.props as { children?: ReactNode }).children).filter((child) => !isBlank(child));
+  const anchor = content[0];
+  if (content.length !== 1 || !isValidElement(anchor)) return null;
+  const href = (anchor.props as { href?: unknown }).href;
+  if (typeof href !== "string" || !/^https?:\/\//.test(href)) return null;
+  const path = href.split(/[?#]/)[0];
+  if (!path.endsWith(`/${fileName}`)) return null;
+  return { href, label: codeTextOf(anchor) ?? path.slice(path.lastIndexOf("/") + 1), element };
+}
+
 /**
  * Replaces each embedded YAML code block in `node` with a DeploymentCustomizer
- * that falls back to the original block.
+ * that falls back to the original block. A source-link paragraph directly
+ * before the block moves into the customizer's header.
  */
-export function withDeploymentCustomizer(node: ReactNode): ReactNode {
-  return Children.map(node, (child) => {
-    if (!isValidElement(child)) return child;
+export function withDeploymentCustomizer(node: ReactNode, link: SourceLink | null = null): ReactNode {
+  const items = Children.toArray(node);
+  const out: ReactNode[] = [];
+  let pending = link;
+  items.forEach((child, index) => {
+    if (!isValidElement(child)) {
+      out.push(child);
+      return;
+    }
     const embedded = embeddedYaml(child);
-    if (embedded) return <DeploymentCustomizer source={embedded.code} fileName={embedded.title} fallback={child} />;
+    if (embedded) {
+      out.push(
+        <DeploymentCustomizer key={child.key} source={embedded.code} fileName={embedded.title} fallback={child} link={pending} />,
+      );
+      pending = null;
+      return;
+    }
+    const next = items.slice(index + 1).find((item) => !isBlank(item));
+    const nextYaml = isValidElement(next) ? findEmbeddedYaml(next) : null;
+    const source = nextYaml ? sourceLinkFor(child, nextYaml.title) : null;
+    if (source) {
+      pending = source;
+      return;
+    }
     const children = (child.props as { children?: ReactNode }).children;
-    if (children === undefined || typeof children === "string") return child;
-    return cloneElement(child, undefined, withDeploymentCustomizer(children));
+    if (children === undefined || typeof children === "string") {
+      out.push(child);
+      return;
+    }
+    const carried = pending && findEmbeddedYaml(child) ? pending : null;
+    if (carried) pending = null;
+    out.push(cloneElement(child, undefined, withDeploymentCustomizer(children, carried)));
   });
+  return out;
 }
 
 class FallbackBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
@@ -226,19 +307,30 @@ export function DeploymentCustomizer({
   source,
   fileName,
   fallback,
+  link,
   children,
 }: {
   source?: string;
   fileName?: string;
   fallback?: ReactNode;
+  link?: SourceLink | null;
   children?: ReactNode;
 }) {
-  const embedded = source !== undefined ? { code: source, title: fileName } : findEmbeddedYaml(children);
-  const native = fallback ?? children ?? null;
-  if (!embedded) return <>{native}</>;
+  // Wrapping native embeds: customize each YAML block and keep the rest as written.
+  if (source === undefined) return <>{withDeploymentCustomizer(children)}</>;
+  const code = fallback ?? children ?? null;
+  // The page's original content: without the customizer header, the source link renders again.
+  const native = link ? (
+    <>
+      {link.element}
+      {code}
+    </>
+  ) : (
+    code
+  );
   return (
     <FallbackBoundary fallback={native}>
-      <Customizer source={embedded.code} fileName={fileName ?? embedded.title ?? "deployment.yaml"} fallback={native} />
+      <Customizer source={source} fileName={fileName ?? "deployment.yaml"} link={link ?? null} code={code} native={native} />
     </FallbackBoundary>
   );
 }
@@ -255,19 +347,35 @@ const DNS_NAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const QUANTITY = /^\d+(\.\d+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$/;
 const ENV_NAME = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
+/** Scale tables up to this many components start open; longer ones start as their summary. */
+const OPEN_SCALE_ROWS = 4;
 
-function Customizer({ source, fileName, fallback }: { source: string; fileName: string; fallback: ReactNode }) {
+function Customizer({
+  source,
+  fileName,
+  link,
+  code,
+  native,
+}: {
+  source: string;
+  fileName: string;
+  link: SourceLink | null;
+  /** The native code block alone, shown under the panel when settings cannot be applied. */
+  code: ReactNode;
+  /** The page's original content, shown instead of the customizer. */
+  native: ReactNode;
+}) {
   const id = useId();
   const shared = useContext(SettingsContext);
   const own = useSettingsState();
-  const { settings, update, reset, pageTag } = shared ?? own;
+  const { settings, update, reset, pageTag, disclosures, setOpen } = shared ?? own;
   const info = useMemo(() => attempt(() => analyzeManifest(source)), [source]);
+  const initialEnv = useMemo(() => (info ? initialEnvRows(info) : []), [info]);
 
   const [names, setNames] = useState<Record<number, string>>({});
   const [components, setComponents] = useState<Record<string, ComponentOverride>>({});
-  const [env, setEnv] = useState<EnvRow[]>(() => (info ? initialEnvRows(info) : []));
+  const [env, setEnv] = useState<EnvRow[]>(initialEnv);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
-  const [collapsed, setCollapsed] = useState(false);
 
   const placeholders = info ? hasPlaceholderImages(info.images, DEFAULT_REGISTRY) : false;
   const tagChoice = settings.tag ?? (placeholders ? pageTag ?? LATEST_TAG : "keep");
@@ -329,13 +437,13 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
     [source, info, key],
   );
 
-  if (!info || !customize) return <>{fallback}</>;
+  if (!info || !customize) return <>{native}</>;
 
   function resetAll() {
     reset();
     setNames({});
     setComponents({});
-    setEnv(info ? initialEnvRows(info) : []);
+    setEnv(initialEnv);
     setTemplateVars({});
   }
 
@@ -373,14 +481,81 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
   }
   if (tagChoice === "custom" && !customTagValid) uiNotes.push("Enter a valid image tag to apply it.");
 
+  // Open states are shared, so a section stays open or closed across examples.
+  const isOpen = (key: string, fallback: boolean) => disclosures[key] ?? fallback;
+  const disclosure = (key: string, fallback: boolean, summary: ReactNode): Disclosure => ({
+    open: isOpen(key, fallback),
+    onToggle: (open) => setOpen(key, open),
+    summary,
+  });
+  const panelOpen = isOpen("panel", true);
+  const moreOpen = isOpen("more", false);
+
+  const scaleChanged = info.components.some((component) => {
+    const override = components[component.key] ?? {};
+    return (
+      (override.replicas ?? component.replicas ?? 1) !== (component.replicas ?? 1) ||
+      (override.gpus ?? component.gpus) !== component.gpus ||
+      (override.nodes ?? component.nodes) !== component.nodes
+    );
+  });
+  const scaleSummary = `${plural(totals.gpus, "GPU")} across ${plural(totals.pods, "pod")}${scaleChanged ? " · edited" : ""}`;
+  const filledVars = info.templateVars.filter((name) => templateVars[name]?.trim()).length;
+  const variablesSummary = `${plural(info.templateVars.length, "template variable")}, ${filledVars} filled`;
+
+  const defaultStorage: StorageMode = existingPvc ? "pvc" : "download";
+  const cacheChanged =
+    storageMode !== defaultStorage ||
+    (storageMode === "pvc" &&
+      (settings.pvcName.trim() !== "" ||
+        settings.size.trim() !== DEFAULT_SETTINGS.size ||
+        settings.storageClass.trim() !== "" ||
+        settings.accessMode !== DEFAULT_SETTINGS.accessMode ||
+        (!existingPvc && settings.mountPath.trim() !== DEFAULT_SETTINGS.mountPath) ||
+        settings.createPvc !== DEFAULT_SETTINGS.createPvc ||
+        settings.downloadJob !== DEFAULT_SETTINGS.downloadJob));
+  const cacheSummary =
+    storageMode === "pvc" ? (
+      <>
+        Shared PVC <code>{pvcName}</code>
+      </>
+    ) : (
+      "Download at startup"
+    );
+  const tokenChanged = showSecret && (settings.secretMode !== DEFAULT_SETTINGS.secretMode || settings.secretName.trim() !== "");
+  const envNamed = env.filter((row) => row.name.trim() !== "");
+  const envChanges = envChangeCount(initialEnv, env);
+  const envScopeLabels = [...new Set(envNamed.map((row) => info.envScopes.find((scope) => scope.id === row.scope)?.label ?? ""))].filter(Boolean);
+  const envSummary =
+    envNamed.length === 0
+      ? `None set${envChanges ? " · edited" : ""}`
+      : `${plural(envNamed.length, "variable")} · ${envScopeLabels.join(", ")}${envChanges ? ` · ${envChanges} edited` : ""}`;
+  // Bundling only has an effect when there is a Secret or model cache file to merge.
+  const showOutput = settings.bundle || (result?.files.some((file) => file.id === "secret" || file.id === "model-cache") ?? false);
+  const moreSections = ["Model cache", ...(showSecret ? ["HF token"] : []), ...(info.envScopes.length > 0 ? ["Env vars"] : [])];
+  const moreChanges = [cacheChanged, tokenChanged, envChanges > 0, settings.bundle].filter(Boolean).length;
+
   return (
     <div className="dc">
       {!shared && <style dangerouslySetInnerHTML={{ __html: LOCAL_SELECTOR_CSS + DEPLOYMENT_CUSTOMIZER_CSS }} />}
-      <section className="lqs-panel dc-panel" aria-labelledby={`${id}-title`} data-collapsed={collapsed}>
+      <section className="lqs-panel dc-panel" aria-labelledby={`${id}-title`}>
         <div className="dc-head">
-          <div>
+          <div className="dc-head-text">
             <h3 id={`${id}-title`}>Customize this deployment</h3>
-            <p>Changes update the YAML below and stay in your browser.</p>
+            <p>
+              {link && (
+                <>
+                  <a className="dc-source" href={link.href} target="_blank" rel="noreferrer">
+                    Source: <code>{link.label}</code>
+                    <ExternalIcon />
+                  </a>
+                  <span className="dc-sep" aria-hidden="true">
+                    ·
+                  </span>
+                </>
+              )}
+              Changes update the YAML below and stay in your browser.
+            </p>
           </div>
           <div className="dc-head-actions">
             <button type="button" className="dc-button" onClick={resetAll}>
@@ -390,15 +565,15 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
             <button
               type="button"
               className="dc-button"
-              aria-expanded={!collapsed}
+              aria-expanded={panelOpen}
               aria-controls={`${id}-rows`}
-              onClick={() => setCollapsed(!collapsed)}
+              onClick={() => setOpen("panel", !panelOpen)}
             >
-              {collapsed ? "Show options" : "Hide options"}
+              {panelOpen ? "Hide options" : "Show options"}
             </button>
           </div>
         </div>
-        <div id={`${id}-rows`}>
+        <div id={`${id}-rows`} hidden={!panelOpen}>
           {(originalModel || model) && (
             <Row label="Model" htmlFor={`${id}-model`}>
               <ModelPicker id={`${id}-model`} value={model} fallback={originalModel} onChange={(next) => update({ model: next })} />
@@ -476,7 +651,7 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
           )}
 
           {info.components.length > 0 && (
-            <Row label="Scale">
+            <Row label="Scale" disclosure={disclosure("scale", info.components.length <= OPEN_SCALE_ROWS, scaleSummary)}>
               <div className="dc-table-wrap">
                 <table className="dc-table">
                   <thead>
@@ -558,164 +733,8 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
             </Row>
           )}
 
-          <Row label="Model cache">
-            {existingPvc ? (
-              <p className="dc-hint">
-                This manifest already mounts PVC <code>{existingPvc.claim}</code>
-                {existingPvc.mountPath ? (
-                  <>
-                    {" "}
-                    at <code>{existingPvc.mountPath}</code>
-                  </>
-                ) : null}
-                . Generate the claim and a download Job for it below.
-              </p>
-            ) : (
-              <Chips
-                label="Model cache"
-                value={storageMode}
-                onChange={(value) => update({ storage: value as StorageMode })}
-                options={[
-                  { id: "download", label: "Download at startup", sub: "each pod from Hugging Face" },
-                  { id: "pvc", label: "Shared PVC", sub: "download once, mount everywhere" },
-                ]}
-              />
-            )}
-            {storageMode === "pvc" && (
-              <>
-                <div className="dc-field-row">
-                  <Field label="PVC name" htmlFor={`${id}-pvc`}>
-                    <input
-                      id={`${id}-pvc`}
-                      className="lqs-input dc-mono"
-                      value={settings.pvcName}
-                      placeholder={existingPvc?.claim ?? "model-cache"}
-                      spellCheck={false}
-                      autoComplete="off"
-                      aria-invalid={!pvcNameValid}
-                      onChange={(event) => update({ pvcName: event.target.value })}
-                    />
-                  </Field>
-                  {!existingPvc && (
-                    <Field label="Mount path" htmlFor={`${id}-mount`}>
-                      <input
-                        id={`${id}-mount`}
-                        className="lqs-input dc-mono"
-                        value={settings.mountPath}
-                        placeholder={DEFAULT_MOUNT_PATH}
-                        spellCheck={false}
-                        autoComplete="off"
-                        onChange={(event) => update({ mountPath: event.target.value })}
-                      />
-                    </Field>
-                  )}
-                </div>
-                <div className="dc-checks">
-                  <Check
-                    label={claimInManifest ? "Create the PVC (defined in this manifest)" : "Create the PVC"}
-                    checked={settings.createPvc && !claimInManifest}
-                    disabled={claimInManifest}
-                    onChange={(checked) => update({ createPvc: checked })}
-                  />
-                  <Check
-                    label={jobModel ? "Download the model with a Job" : "Download the model with a Job (needs a model ID)"}
-                    checked={settings.downloadJob && !!jobModel}
-                    disabled={!jobModel}
-                    onChange={(checked) => update({ downloadJob: checked })}
-                  />
-                </div>
-                {settings.createPvc && !claimInManifest && (
-                  <div className="dc-field-row">
-                    <Field label="Size" htmlFor={`${id}-size`} narrow>
-                      <input
-                        id={`${id}-size`}
-                        className="lqs-input dc-mono"
-                        value={settings.size}
-                        placeholder="100Gi"
-                        spellCheck={false}
-                        autoComplete="off"
-                        aria-invalid={!sizeValid}
-                        onChange={(event) => update({ size: event.target.value })}
-                      />
-                    </Field>
-                    <Field label="Storage class" htmlFor={`${id}-class`}>
-                      <input
-                        id={`${id}-class`}
-                        className="lqs-input dc-mono"
-                        value={settings.storageClass}
-                        placeholder="Cluster default"
-                        spellCheck={false}
-                        autoComplete="off"
-                        onChange={(event) => update({ storageClass: event.target.value })}
-                      />
-                    </Field>
-                    <Field label="Access mode" htmlFor={`${id}-access`} narrow>
-                      <select
-                        id={`${id}-access`}
-                        className="dc-select"
-                        value={settings.accessMode}
-                        onChange={(event) => update({ accessMode: event.target.value as StorageSettings["accessMode"] })}
-                      >
-                        <option value="ReadWriteMany">ReadWriteMany</option>
-                        <option value="ReadWriteOnce">ReadWriteOnce</option>
-                      </select>
-                    </Field>
-                  </div>
-                )}
-                {(!pvcNameValid || !sizeValid) && (
-                  <p className="dc-hint dc-hint--warn">Use a lowercase DNS name for the PVC and a quantity such as 100Gi for the size.</p>
-                )}
-                <p className="dc-hint">
-                  {existingPvc
-                    ? "The download Job writes to the cache path this manifest reads."
-                    : "Workers set HF_HOME to the mount path and read the cached weights."}{" "}
-                  Size the claim for the weights plus headroom, about 2 GB per billion parameters at BF16. ReadWriteMany needs a
-                  shared storage class such as EFS, Filestore, or NFS.
-                </p>
-              </>
-            )}
-          </Row>
-
-          {showSecret && (
-            <Row label="HF token">
-              <Chips
-                label="Hugging Face token Secret"
-                value={settings.secretMode}
-                onChange={(value) => update({ secretMode: value as SecretMode })}
-                options={[
-                  { id: "kubectl", label: "kubectl command", sub: "from $HF_TOKEN" },
-                  { id: "yaml", label: "Secret YAML", sub: "paste the token" },
-                  { id: "existing", label: "Already created" },
-                  { id: "none", label: "No token", sub: "public models" },
-                ]}
-              />
-              {settings.secretMode !== "none" && (
-                <div className="dc-field-row">
-                  <Field label="Secret name" htmlFor={`${id}-secret`}>
-                    <input
-                      id={`${id}-secret`}
-                      className="lqs-input dc-mono"
-                      value={settings.secretName}
-                      placeholder={info.secret ?? "hf-token-secret"}
-                      spellCheck={false}
-                      autoComplete="off"
-                      aria-invalid={!secretNameValid}
-                      onChange={(event) => update({ secretName: event.target.value })}
-                    />
-                  </Field>
-                </div>
-              )}
-              <p className="dc-hint">
-                {settings.secretMode === "kubectl" && "Deploy steps create the Secret from the HF_TOKEN environment variable."}
-                {settings.secretMode === "yaml" && "Adds a Secret manifest; paste a token into it for gated or private models."}
-                {settings.secretMode === "existing" && "Uses a Secret that already exists in the namespace."}
-                {settings.secretMode === "none" && "Removes Secret references from the manifest. Use only with public models."}
-              </p>
-            </Row>
-          )}
-
           {info.templateVars.length > 0 && (
-            <Row label="Variables">
+            <Row label="Variables" disclosure={disclosure("variables", true, variablesSummary)}>
               <div className="dc-field-row">
                 {info.templateVars.map((name) => (
                   <Field key={name} label={name} htmlFor={`${id}-var-${name}`}>
@@ -774,20 +793,207 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
                 />
               </Field>
             </div>
-            <div className="dc-checks">
-              <Check
-                label="Bundle the Secret and model cache into one file"
-                checked={settings.bundle}
-                onChange={(checked) => update({ bundle: checked })}
-              />
-            </div>
           </Row>
 
-          {info.envScopes.length > 0 && (
-            <Row label="Env vars">
-              <EnvEditor rows={env} scopes={info.envScopes} onChange={setEnv} />
-            </Row>
-          )}
+          <div className="dc-more" data-open={moreOpen}>
+            <button
+              type="button"
+              className="dc-more-toggle"
+              aria-expanded={moreOpen}
+              aria-controls={`${id}-more`}
+              aria-labelledby={`${id}-more-title`}
+              aria-describedby={`${id}-more-list${moreChanges > 0 ? ` ${id}-more-badge` : ""}`}
+              onClick={() => setOpen("more", !moreOpen)}
+            >
+              <span className="dc-more-title" id={`${id}-more-title`}>
+                Additional options
+              </span>
+              <span className="dc-more-list" id={`${id}-more-list`}>
+                {moreSections.join(" · ")}
+              </span>
+              {moreChanges > 0 && (
+                <span className="dc-badge dc-badge--ok" id={`${id}-more-badge`}>
+                  {moreChanges === 1 ? "1 change" : `${moreChanges} changes`}
+                </span>
+              )}
+              <ChevronIcon />
+            </button>
+            <div id={`${id}-more`} hidden={!moreOpen}>
+              <Row label="Model cache" disclosure={disclosure("cache", true, cacheSummary)}>
+                {existingPvc ? (
+                  <p className="dc-hint">
+                    This manifest already mounts PVC <code>{existingPvc.claim}</code>
+                    {existingPvc.mountPath ? (
+                      <>
+                        {" "}
+                        at <code>{existingPvc.mountPath}</code>
+                      </>
+                    ) : null}
+                    . Generate the claim and a download Job for it below.
+                  </p>
+                ) : (
+                  <Chips
+                    label="Model cache"
+                    value={storageMode}
+                    onChange={(value) => update({ storage: value as StorageMode })}
+                    options={[
+                      { id: "download", label: "Download at startup", sub: "each pod from Hugging Face" },
+                      { id: "pvc", label: "Shared PVC", sub: "download once, mount everywhere" },
+                    ]}
+                  />
+                )}
+                {storageMode === "pvc" && (
+                  <>
+                    <div className="dc-field-row">
+                      <Field label="PVC name" htmlFor={`${id}-pvc`}>
+                        <input
+                          id={`${id}-pvc`}
+                          className="lqs-input dc-mono"
+                          value={settings.pvcName}
+                          placeholder={existingPvc?.claim ?? "model-cache"}
+                          spellCheck={false}
+                          autoComplete="off"
+                          aria-invalid={!pvcNameValid}
+                          onChange={(event) => update({ pvcName: event.target.value })}
+                        />
+                      </Field>
+                      {!existingPvc && (
+                        <Field label="Mount path" htmlFor={`${id}-mount`}>
+                          <input
+                            id={`${id}-mount`}
+                            className="lqs-input dc-mono"
+                            value={settings.mountPath}
+                            placeholder={DEFAULT_MOUNT_PATH}
+                            spellCheck={false}
+                            autoComplete="off"
+                            onChange={(event) => update({ mountPath: event.target.value })}
+                          />
+                        </Field>
+                      )}
+                    </div>
+                    <div className="dc-checks">
+                      <Check
+                        label={claimInManifest ? "Create the PVC (defined in this manifest)" : "Create the PVC"}
+                        checked={settings.createPvc && !claimInManifest}
+                        disabled={claimInManifest}
+                        onChange={(checked) => update({ createPvc: checked })}
+                      />
+                      <Check
+                        label={jobModel ? "Download the model with a Job" : "Download the model with a Job (needs a model ID)"}
+                        checked={settings.downloadJob && !!jobModel}
+                        disabled={!jobModel}
+                        onChange={(checked) => update({ downloadJob: checked })}
+                      />
+                    </div>
+                    {settings.createPvc && !claimInManifest && (
+                      <div className="dc-field-row">
+                        <Field label="Size" htmlFor={`${id}-size`} narrow>
+                          <input
+                            id={`${id}-size`}
+                            className="lqs-input dc-mono"
+                            value={settings.size}
+                            placeholder="100Gi"
+                            spellCheck={false}
+                            autoComplete="off"
+                            aria-invalid={!sizeValid}
+                            onChange={(event) => update({ size: event.target.value })}
+                          />
+                        </Field>
+                        <Field label="Storage class" htmlFor={`${id}-class`}>
+                          <input
+                            id={`${id}-class`}
+                            className="lqs-input dc-mono"
+                            value={settings.storageClass}
+                            placeholder="Cluster default"
+                            spellCheck={false}
+                            autoComplete="off"
+                            onChange={(event) => update({ storageClass: event.target.value })}
+                          />
+                        </Field>
+                        <Field label="Access mode" htmlFor={`${id}-access`} narrow>
+                          <select
+                            id={`${id}-access`}
+                            className="dc-select"
+                            value={settings.accessMode}
+                            onChange={(event) => update({ accessMode: event.target.value as StorageSettings["accessMode"] })}
+                          >
+                            <option value="ReadWriteMany">ReadWriteMany</option>
+                            <option value="ReadWriteOnce">ReadWriteOnce</option>
+                          </select>
+                        </Field>
+                      </div>
+                    )}
+                    {(!pvcNameValid || !sizeValid) && (
+                      <p className="dc-hint dc-hint--warn">Use a lowercase DNS name for the PVC and a quantity such as 100Gi for the size.</p>
+                    )}
+                    <p className="dc-hint">
+                      {existingPvc
+                        ? "The download Job writes to the cache path this manifest reads."
+                        : "Workers set HF_HOME to the mount path and read the cached weights."}{" "}
+                      Size the claim for the weights plus headroom, about 2 GB per billion parameters at BF16. ReadWriteMany needs a
+                      shared storage class such as EFS, Filestore, or NFS.
+                    </p>
+                  </>
+                )}
+              </Row>
+
+              {showSecret && (
+                <Row label="HF token">
+                  <Chips
+                    label="Hugging Face token Secret"
+                    value={settings.secretMode}
+                    onChange={(value) => update({ secretMode: value as SecretMode })}
+                    options={[
+                      { id: "kubectl", label: "kubectl command", sub: "from $HF_TOKEN" },
+                      { id: "yaml", label: "Secret YAML", sub: "paste the token" },
+                      { id: "existing", label: "Already created" },
+                      { id: "none", label: "No token", sub: "public models" },
+                    ]}
+                  />
+                  {settings.secretMode !== "none" && (
+                    <div className="dc-field-row">
+                      <Field label="Secret name" htmlFor={`${id}-secret`}>
+                        <input
+                          id={`${id}-secret`}
+                          className="lqs-input dc-mono"
+                          value={settings.secretName}
+                          placeholder={info.secret ?? "hf-token-secret"}
+                          spellCheck={false}
+                          autoComplete="off"
+                          aria-invalid={!secretNameValid}
+                          onChange={(event) => update({ secretName: event.target.value })}
+                        />
+                      </Field>
+                    </div>
+                  )}
+                  <p className="dc-hint">
+                    {settings.secretMode === "kubectl" && "Deploy steps create the Secret from the HF_TOKEN environment variable."}
+                    {settings.secretMode === "yaml" && "Adds a Secret manifest; paste a token into it for gated or private models."}
+                    {settings.secretMode === "existing" && "Uses a Secret that already exists in the namespace."}
+                    {settings.secretMode === "none" && "Removes Secret references from the manifest. Use only with public models."}
+                  </p>
+                </Row>
+              )}
+
+              {info.envScopes.length > 0 && (
+                <Row label="Env vars" disclosure={disclosure("env", false, envSummary)}>
+                  <EnvEditor rows={env} scopes={info.envScopes} onChange={setEnv} />
+                </Row>
+              )}
+
+              {showOutput && (
+                <Row label="Output">
+                  <div className="dc-checks">
+                    <Check
+                      label="Bundle the Secret and model cache into one file"
+                      checked={settings.bundle}
+                      onChange={(checked) => update({ bundle: checked })}
+                    />
+                  </div>
+                </Row>
+              )}
+            </div>
+          </div>
         </div>
       </section>
 
@@ -802,7 +1008,7 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
       ) : (
         <>
           <p className="dc-hint dc-hint--warn">These settings could not be applied; showing the original manifest.</p>
-          {fallback}
+          {code}
         </>
       )}
     </div>
@@ -813,8 +1019,70 @@ function Customizer({ source, fileName, fallback }: { source: string; fileName: 
 // Controls
 // ---------------------------------------------------------------------------
 
-function Row({ label, htmlFor, children }: { label: string; htmlFor?: string; children: ReactNode }) {
+interface Disclosure {
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  /** Stands in for the controls while the row is closed. */
+  summary: ReactNode;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** Counts added, removed, and edited variables relative to the manifest's own. */
+function envChangeCount(initial: EnvRow[], rows: EnvRow[]): number {
+  const current = new Map(rows.map((row) => [row.id, row]));
+  let changes = rows.filter((row) => row.orig === null && row.name.trim() !== "").length;
+  for (const row of initial) {
+    const now = current.get(row.id);
+    if (!now || now.name !== row.name || now.value !== row.value) changes++;
+  }
+  return changes;
+}
+
+function Row({
+  label,
+  htmlFor,
+  disclosure,
+  children,
+}: {
+  label: string;
+  htmlFor?: string;
+  disclosure?: Disclosure;
+  children: ReactNode;
+}) {
   const id = useId();
+  if (disclosure) {
+    const { open, onToggle, summary } = disclosure;
+    return (
+      <div className="lqs-row dc-row" data-open={open}>
+        <button
+          type="button"
+          className="lqs-label dc-row-toggle"
+          id={id}
+          aria-expanded={open}
+          aria-controls={`${id}-body`}
+          aria-describedby={open ? undefined : `${id}-summary`}
+          onClick={() => onToggle(!open)}
+        >
+          {label}
+          <ChevronIcon />
+        </button>
+        <div className="dc-row-content">
+          {!open && (
+            // Mouse shortcut only; keyboard and screen reader users get the summary through the toggle.
+            <p className="dc-row-summary" id={`${id}-summary`} onClick={() => onToggle(true)}>
+              {summary}
+            </p>
+          )}
+          <div className="dc-stack" id={`${id}-body`} role="group" aria-labelledby={id} hidden={!open}>
+            {children}
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="lqs-row">
       {htmlFor ? (
@@ -1498,6 +1766,16 @@ function ChevronIcon() {
   return (
     <Icon>
       <path d="m6 9 6 6 6-6" />
+    </Icon>
+  );
+}
+
+function ExternalIcon() {
+  return (
+    <Icon>
+      <path d="M15 3h6v6" />
+      <path d="M10 14 21 3" />
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
     </Icon>
   );
 }

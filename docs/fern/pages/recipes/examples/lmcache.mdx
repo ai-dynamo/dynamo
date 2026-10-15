@@ -8,10 +8,6 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-For Kubernetes, deploy the LMCache operator resource first. See [Deploy LMCache MP](../../kubernetes/kv-cache-offloading/lmcache.mdx).
-
-Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
-
 <ExampleSelector
   variants={[
     {"id": "kubernetes-vllm-v1beta1-agg-lmcache-yaml", "target": "kubernetes:vllm", "label": "v1beta1/agg_lmcache.yaml", "description": "Aggregated serving with LMCache MP"},
@@ -26,8 +22,7 @@ Run local commands from the repository root. Review model and GPU requirements i
 
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-v1beta1-agg-lmcache-yaml">
 
-Deploy the LMCache operator resource first. See [Deploy LMCache MP](../../kubernetes/kv-cache-offloading/lmcache.mdx)
-for the full workflow.
+**Prerequisites:** [Deploy LMCache MP](../../kubernetes/kv-cache-offloading/lmcache.mdx) to create the LMCache operator resource
 
 [Source: `agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml)
 

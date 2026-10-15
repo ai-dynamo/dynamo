@@ -8,10 +8,6 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-These examples demonstrate different runtime and testing workflows; they are not interchangeable inference backends. Follow the [Hello World README](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/README.md) or [Triton Server README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tritonserver/README.md) for those workflows.
-
-Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
-
 <ExampleSelector
   variants={[
     {"id": "kubernetes-custom-hello-world-yaml", "target": "kubernetes:custom", "label": "hello_world.yaml", "description": "Custom backend development example"},
@@ -29,6 +25,8 @@ Run local commands from the repository root. Review model and GPU requirements i
 <div className="dynamo-example-variant" data-example-variant="kubernetes-custom-hello-world-yaml">
 
 Deploys a minimal Python backend and frontend without a GPU-backed model.
+
+**Prerequisites:** [Hello World README](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/README.md)
 
 [Source: `hello_world.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/deploy/hello_world.yaml)
 
@@ -53,6 +51,8 @@ Deploys a minimal Python backend and frontend without a GPU-backed model.
 </div>
 
 <div className="dynamo-example-variant" data-example-variant="local-tritonserver-identity-sh">
+
+**Prerequisites:** [Triton Server README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tritonserver/README.md)
 
 ```bash
 (cd examples/backends/tritonserver && bash launch/identity.sh)

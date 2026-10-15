@@ -9,13 +9,10 @@ hide-toc: true
 import { ExampleSelector } from "@/components/ExampleSelector";
 
 The Kubernetes manifests were functionally validated on September 10, 2026 with one H100 GPU and
-Dynamo 1.4.2 serving images and operator. These are correctness checks, not performance benchmarks;
-the local scripts have separate model defaults. See [Text-to-Image](../../use-cases/diffusion/workflows/text-to-image.md) for requests.
-
-Replace the image placeholders with matching 1.4.2 backend runtime images, prepare `hf-token-secret`
-with `HF_TOKEN`, and review model access and GPU requirements before applying a manifest.
-Run local commands from the repository root. Request `response_format: "b64_json"` when using the
-pod-local `file:///tmp/dynamo_media` storage in these examples.
+Dynamo 1.4.2 serving images and operator; these are correctness checks, not performance benchmarks.
+Use matching 1.4.2 runtime images, and request `response_format: "b64_json"` because the
+`file:///tmp/dynamo_media` storage in these examples is pod-local. See
+[Text-to-Image](../../use-cases/diffusion/workflows/text-to-image.md) for requests.
 
 <ExampleSelector
   variants={[
