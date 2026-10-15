@@ -916,6 +916,13 @@ navigation:
               - page: Solar Open2 250B
                 path: ../pages-dev/recipes/model-recipes/solar-open2-250b.mdx
                 slug: solar-open2-250b
+          - section: Meta
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Muse-Spark-open-816B-A42B
+                path: ../pages-dev/recipes/model-recipes/Muse-Spark-Open.mdx
+                slug: Muse-Spark-Open
           - section: MiniMax
             skip-slug: true
             collapsed: true
