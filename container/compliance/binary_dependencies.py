@@ -29,9 +29,12 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-import tomllib
-
 from .generators.common import Component, spdx_license_text, write_cyclonedx
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 lint/test environments
+    import tomli as tomllib
 
 log = logging.getLogger(__name__)
 _NOTICE = re.compile(
