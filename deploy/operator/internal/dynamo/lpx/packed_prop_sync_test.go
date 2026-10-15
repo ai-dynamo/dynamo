@@ -151,10 +151,10 @@ func TestPropSyncProjection(t *testing.T) {
 			buildDir := writeCompilerFixture(t, fixture)
 			snapshot := acquireTestSnapshot(t, buildDir)
 			normalized := snapshot
-			before := *snapshot.build
-			before.Partitions = slices.Clone(snapshot.build.Partitions)
+			before := *snapshot
+			before.partitions = slices.Clone(snapshot.partitions)
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: pipeline, Models: []string{"default"}, Build: normalized,
 			})
 			if test.wantError != "" {
 				require.ErrorContains(t, err, test.wantError)
@@ -162,8 +162,8 @@ func TestPropSyncProjection(t *testing.T) {
 			}
 			require.NoError(t, err)
 			projection := projections[0]
-			require.Equal(t, before, *normalized.build)
-			original := normalized.build.Partitions
+			require.Equal(t, before, *normalized)
+			original := normalized.partitions
 
 			if test.physicalNodes == 0 {
 				t.Log("Retain separate reservations and HX device-index connectors when packing does not apply")
@@ -186,7 +186,7 @@ func TestPropSyncProjection(t *testing.T) {
 
 			t.Log("Pack one physical shape, preserve every logical source stage and remove internal connectors")
 			require.EqualValues(t, test.physicalNodes, projection.agentReplicas)
-			require.Equal(t, original[test.runtimeStart:], projection.configuredBuild.Partitions)
+			require.Equal(t, original[test.runtimeStart:], projection.configuredBuild.partitions)
 			request := projection.RequestSpec(&MaterializationPlan{}, "agents")
 			require.Len(t, request.Partitions, 1)
 			require.EqualValues(t, test.family, request.TargetFamily)

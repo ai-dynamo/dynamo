@@ -29,7 +29,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 		Pipeline:        PipelineLPX,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
-		BuildSnapshot:   snapshot,
+		Build:           snapshot,
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
@@ -164,11 +164,11 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
 			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineLPX, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
-			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.Family)
+			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.family)
 
 			t.Log("Render the hybrid workload with an authored Cyborg configuration mount")
 			projections[0].stage = testRenderComponentName

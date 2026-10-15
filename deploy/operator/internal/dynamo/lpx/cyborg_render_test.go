@@ -25,8 +25,8 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
-	projection.configuredBuild.IOFPGACount = 1
-	projection.configuredBuild.IOFanoutFactor = 1
+	projection.configuredBuild.ioFPGACount = 1
+	projection.configuredBuild.ioFanoutFactor = 1
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 2496,
@@ -85,12 +85,12 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	fixture.partitions[0].devicesPerNode = 8
 	fixture.architecture = "polaris"
 	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	build := normalized.build
-	build.IOFPGACount = 2
-	build.IOFanoutFactor = 2
+	build := normalized
+	build.ioFPGACount = 2
+	build.ioFanoutFactor = 2
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
 		Pipeline: PipelineLPX, Models: []string{"default"},
-		BuildSnapshot:   normalized,
+		Build:           normalized,
 		RuntimeBuildRef: "model-build",
 	})
 	require.NoError(t, err)

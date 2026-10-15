@@ -112,8 +112,8 @@ func TestDeploymentContractPreservesNormalizedBuild(t *testing.T) {
 			build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
 			require.NoError(t, err)
 			require.Equal(t, legacy, build)
-			require.EqualValues(t, test.devicesPerNode, build.Partitions[0].DevicesPerNode)
-			require.Equal(t, test.wantNodes, build.Partitions[0].effectiveNodeCount())
+			require.EqualValues(t, test.devicesPerNode, build.partitions[0].devicesPerNode)
+			require.Equal(t, test.wantNodes, build.partitions[0].effectiveNodeCount())
 		})
 	}
 }
@@ -226,24 +226,24 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Acquire and normalize exactly the scheduler contract")
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
+			snapshot, err := registry.AcquireBuild(t.Context(), root)
 			require.NoError(t, err)
-			require.Equal(t, buildContractDeploymentV1, snapshot.format)
+			require.Equal(t, buildContractDeploymentV1, snapshot.contractFormat)
 			normalized := snapshot
 			require.NoError(t, err)
-			require.Equal(t, buildContractDeploymentV1, normalized.format)
-			require.EqualValues(t, 4, normalized.build.IOFPGACount)
-			require.Equal(t, test.family, normalized.build.Family)
+			require.Equal(t, buildContractDeploymentV1, normalized.contractFormat)
+			require.EqualValues(t, 4, normalized.ioFPGACount)
+			require.Equal(t, test.family, normalized.family)
 
 			t.Log("Pass the selected deployment file to Cyborg before authored environment references")
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineLPX, Models: []string{"default"}, Build: normalized,
 			})
 			require.NoError(t, err)
 			require.Len(t, projections, 1)
 			projection := projections[0]
 			require.Equal(t, buildContractDeploymentV1, projection.contractFormat)
-			require.Equal(t, test.family, projection.configuredBuild.Family)
+			require.Equal(t, test.family, projection.configuredBuild.family)
 			container := corev1.Container{Env: []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"}}}
 			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
 			require.Equal(t, []corev1.EnvVar{
@@ -258,7 +258,7 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			changed, err := deployment.Message().Marshal()
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), changed, 0o600))
-			second, err := registry.AcquireBuildSnapshot(t.Context(), root)
+			second, err := registry.AcquireBuild(t.Context(), root)
 			require.NoError(t, err)
 			require.NotEqual(t, snapshot.contentID, second.contentID)
 		})
@@ -282,7 +282,7 @@ func TestDeploymentContractCorruptionNeverUsesLegacy(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Reject ambiguous publication before any legacy decoder can accept it")
-			_, err = registry.AcquireBuildSnapshot(t.Context(), root)
+			_, err = registry.AcquireBuild(t.Context(), root)
 			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, "ambiguous")
 		})
@@ -299,9 +299,9 @@ func TestDeploymentContractReadsRemoteBytesOnce(t *testing.T) {
 	}
 	registry, err := NewModelRegistry("gs://bucket/registry", client)
 	require.NoError(t, err)
-	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
+	snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
 	require.NoError(t, err)
-	require.Equal(t, buildContractDeploymentV1, snapshot.format)
+	require.Equal(t, buildContractDeploymentV1, snapshot.contractFormat)
 	require.Len(t, client.listRequests, 2)
 	require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.listRequests[0].GetFileSelector().GetPaths())
 	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.listRequests[1].GetFileSelector().GetPaths())
@@ -320,7 +320,7 @@ func TestDeploymentContractBoundsAcquisition(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Reject oversized metadata before a decoder or runtime sees it")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), root)
+	_, err = registry.AcquireBuild(t.Context(), root)
 	require.ErrorIs(t, err, errBuildFileTooLarge)
 }
 
@@ -403,15 +403,15 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			t.Log("Preserve scheduler geometry while excluding non-LPU execution details")
 			build, err := buildFromGbuildDeploymentV1("gs://models/build", deployment)
 			require.NoError(t, err)
-			require.Equal(t, wantFamily, build.Family)
-			require.Equal(t, wantIO, build.IOFPGACount)
-			require.Equal(t, name == "CPU embeddings", build.SupportsCPUEmbeddings)
-			require.Equal(t, name == hybridCUDA, build.HasCUDAPartitions)
-			require.Len(t, build.Partitions, 1)
+			require.Equal(t, wantFamily, build.family)
+			require.Equal(t, wantIO, build.ioFPGACount)
+			require.Equal(t, name == "CPU embeddings", build.supportsCPUEmbeddings)
+			require.Equal(t, name == hybridCUDA, build.hasCUDAPartitions)
+			require.Len(t, build.partitions, 1)
 			if wantFamily == BuildFamilyHX {
-				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.Partitions[0].HXExtent)
+				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.partitions[0].hxExtent)
 			} else {
-				require.Equal(t, wantNodes, build.Partitions[0].effectiveNodeCount())
+				require.Equal(t, wantNodes, build.partitions[0].effectiveNodeCount())
 			}
 		})
 	}
@@ -423,6 +423,6 @@ func TestDeploymentContractRejectsCorruptNewOnly(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), []byte("corrupt"), 0o600))
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
-	_, err = registry.AcquireBuildSnapshot(t.Context(), root)
+	_, err = registry.AcquireBuild(t.Context(), root)
 	require.ErrorContains(t, err, "parsing deployment.v1.capnp.bin")
 }

@@ -25,7 +25,7 @@ func manifestV2Payload(t *testing.T) []byte {
 	return payload
 }
 
-func TestAcquireBuildSnapshotPreservesReadFailures(t *testing.T) {
+func TestAcquireBuildPreservesReadFailures(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Define missing and temporarily unavailable manifest reads")
@@ -43,7 +43,7 @@ func TestAcquireBuildSnapshotPreservesReadFailures(t *testing.T) {
 			}
 			registry, err := NewModelRegistry("gs://bucket/registry", client)
 			require.NoError(t, err)
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
+			snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
 
 			t.Log("Preserve the transport failure separately from invalid compiler input")
 			require.ErrorIs(t, err, test.readErr)
@@ -85,9 +85,9 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 			started := time.Now()
 			build, err := normalizeRegistryFixtureBuild(testCase.ctx, registry, testCase.ref)
 			require.NoError(t, err)
-			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
-			require.Len(t, build.Partitions, 1)
-			require.Equal(t, "part-0", build.Partitions[0].PartPath)
+			require.Equal(t, "gs://bucket/registry/model/build", build.path)
+			require.Len(t, build.partitions, 1)
+			require.Equal(t, "part-0", build.partitions[0].partPath)
 			require.Len(t, client.listRequests, 2)
 			require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.listRequests[0].GetFileSelector().GetPaths())
 			require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.listRequests[1].GetFileSelector().GetPaths())
@@ -116,7 +116,7 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 	}
 }
 
-func TestAcquireBuildSnapshotRejectsMissingOrAmbiguousGCSContracts(t *testing.T) {
+func TestAcquireBuildRejectsMissingOrAmbiguousGCSContracts(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
@@ -141,7 +141,7 @@ func TestAcquireBuildSnapshotRejectsMissingOrAmbiguousGCSContracts(t *testing.T)
 			require.NoError(t, err)
 
 			t.Log("Discover both alternatives and reject the invalid build before reading any bytes")
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
+			snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
 			require.ErrorIs(t, err, test.wantErr)
 			require.ErrorContains(t, err, test.message)
 			require.Nil(t, snapshot)
@@ -151,7 +151,7 @@ func TestAcquireBuildSnapshotRejectsMissingOrAmbiguousGCSContracts(t *testing.T)
 	}
 }
 
-func TestAcquireBuildSnapshotPreservesGCSDiscoveryFailures(t *testing.T) {
+func TestAcquireBuildPreservesGCSDiscoveryFailures(t *testing.T) {
 	t.Parallel()
 
 	for _, discoveryErr := range []error{
@@ -175,7 +175,7 @@ func TestAcquireBuildSnapshotPreservesGCSDiscoveryFailures(t *testing.T) {
 				require.NoError(t, err)
 
 				t.Log("Preserve the discovery error instead of accepting an incompletely discovered build")
-				snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
+				snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
 				require.ErrorIs(t, err, discoveryErr)
 				require.NotErrorIs(t, err, errInvalidBuildManifest)
 				require.NotErrorIs(t, err, os.ErrNotExist)
