@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -321,7 +321,11 @@ def _engine_degraded(engine_block: Any) -> bool:
 
 
 def _validate_execution_measurement(
-    fpm: dict, measurement: dict, previous_forward_index: int
+    fpm: dict,
+    measurement: dict,
+    previous_forward_index: int,
+    *,
+    timing_metric: Optional[str] = None,
 ) -> int:
     """Check raw observations against their declared point/rank and timing."""
     rank = measurement["dp_rank"]
@@ -386,12 +390,15 @@ def _validate_execution_measurement(
                 or start is not None
                 or end is not None
                 or sample_fpm.get("timing_scope") != "model_step_cuda"
+                or type(timing.get("duration_seconds")) not in (int, float)
                 or timing.get("duration_seconds") != wall
                 or type(native_iteration) is not int
                 or native_iteration <= previous_native_iteration
             ):
                 raise invalid(f"raw sample {index} contradicts its native CUDA timing")
             previous_native_iteration = native_iteration
+        elif sample_fpm.get("timing_scope") == "model_step_cuda":
+            raise invalid(f"raw sample {index} contradicts its native CUDA timing")
         elif (
             end is None
             or type(end) not in (int, float)
@@ -407,6 +414,13 @@ def _validate_execution_measurement(
             )
         ):
             raise invalid(f"raw sample {index} contradicts its timing interval")
+        if (
+            timing_metric == "model_step_cuda" and timing["basis"] != "model_step_cuda"
+        ) or (
+            timing_metric == "scheduler_wall_time"
+            and timing["basis"] == "model_step_cuda"
+        ):
+            raise invalid(f"raw sample {index} contradicts its declared timing metric")
         graph = sample.get("cudagraph")
         if not isinstance(graph, dict):
             raise invalid(f"raw sample {index} has no graph observation status")
@@ -446,6 +460,16 @@ def _validate_execution_measurement(
     ):
         raise invalid("invalid reduction sample indices")
     method = estimate.get("method")
+    native_samples = [
+        sample["benchmark_sample"]["timing"]["basis"] == "model_step_cuda"
+        for sample in raw
+    ]
+    if (any(native_samples) and not all(native_samples)) or (
+        fpm.get("timing_scope") == "model_step_cuda" and not all(native_samples)
+    ):
+        raise invalid("reduction mixes CPU and native CUDA timing")
+    if any(native_samples) and method not in {"single_step", "actual_upper_median"}:
+        raise invalid("unsupported native CUDA reduction")
     if (
         (method == "single_step" and (len(raw) != 1 or indices != [0]))
         or (method == "last_step" and indices != [len(raw) - 1])
@@ -465,19 +489,19 @@ def _validate_execution_measurement(
         fpm["wall_time"], walls[len(walls) // 2], rel_tol=1e-9, abs_tol=1e-12
     ):
         raise invalid("retained wall time contradicts the raw reduction inputs")
-    if method == "actual_upper_median":
+    if method == "actual_upper_median" or all(native_samples):
         chosen_index = sorted(indices, key=lambda index: raw[index]["wall_time"])[
             len(indices) // 2
         ]
-        selected = estimate.get("selected_raw_sample_index")
+        selected = estimate.get(
+            "selected_raw_sample_index", 0 if method == "single_step" else None
+        )
         if (
             type(selected) is not int
             or selected != chosen_index
             or expected != len(raw)
-            or any(
-                sample["benchmark_sample"]["timing"]["basis"] != "model_step_cuda"
-                for sample in raw
-            )
+            or not all(native_samples)
+            or type(fpm.get("wall_time")) not in (int, float)
         ):
             raise invalid("native CUDA sample selection contradicts the reduction")
         chosen = raw[chosen_index]
@@ -490,6 +514,83 @@ def _validate_execution_measurement(
             if fpm.get(field) != chosen.get(field):
                 raise invalid(f"retained {field} differs from the selected execution")
     return previous_forward_index
+
+
+def _validate_benchmark_execution_identity(data: dict) -> Optional[dict]:
+    speculative = data.get("speculative_benchmark")
+    if not isinstance(speculative, dict) or "execution_identity" not in speculative:
+        return None
+    identity = speculative["execution_identity"]
+
+    def invalid() -> RuntimeError:
+        return RuntimeError("Self-benchmark speculative execution identity is invalid")
+
+    required = {"status", "binding", "unresolved_fields"}
+    if (
+        not isinstance(identity, dict)
+        or not required <= identity.keys()
+        or identity.keys() - required - {"sources"}
+    ):
+        raise invalid()
+    if "sources" in identity and (
+        not isinstance(identity["sources"], dict)
+        or identity["sources"].keys()
+        - {"model_revision", "draft_revision", "draft_model"}
+        or any(
+            source is not None and (not isinstance(source, str) or not source.strip())
+            for source in identity["sources"].values()
+        )
+    ):
+        raise invalid()
+    unresolved = identity["unresolved_fields"]
+    if not isinstance(unresolved, list) or any(
+        not isinstance(field, str) or not field.strip() for field in unresolved
+    ):
+        raise invalid()
+    binding = identity["binding"]
+    if identity["status"] == "unresolved":
+        if binding is not None or not unresolved:
+            raise invalid()
+        return identity
+    if (
+        identity["status"] != "resolved"
+        or unresolved
+        or not isinstance(binding, dict)
+        or set(binding) != {"model_revision", "execution_profile"}
+    ):
+        raise invalid()
+    execution = binding["execution_profile"]
+    if not isinstance(execution, dict) or set(execution) != {
+        "kind",
+        "method",
+        "num_draft_tokens",
+        "draft_model",
+        "draft_revision",
+        "timing_scope",
+    }:
+        raise invalid()
+    for revision in (binding["model_revision"], execution["draft_revision"]):
+        if (
+            not isinstance(revision, str)
+            or len(revision) != 40
+            or any(character not in "0123456789abcdef" for character in revision)
+        ):
+            raise invalid()
+    if (
+        execution["kind"] != "speculative_round"
+        or execution["method"] != "eagle3"
+        or execution["timing_scope"] != "model_step_cuda"
+        or type(execution["num_draft_tokens"]) is not int
+        or execution["num_draft_tokens"] < 1
+        or not isinstance(execution["draft_model"], str)
+        or not execution["draft_model"].strip()
+        or "\x00" in execution["draft_model"]
+        or speculative.get("method") != execution["method"]
+        or type(speculative.get("num_draft_tokens")) is not int
+        or speculative.get("num_draft_tokens") != execution["num_draft_tokens"]
+    ):
+        raise invalid()
+    return identity
 
 
 def _validate_warmup_evidence(data: dict, rank: int) -> dict:
@@ -595,6 +696,30 @@ def _merge_benchmark_rank_results(
         raise RuntimeError(
             "Self-benchmark results have invalid execution evidence contract"
         )
+    if has_execution_evidence:
+        expected_clocks: dict[object, str] = {
+            "model_step_cuda": "cuda_event_elapsed",
+            "scheduler_wall_time": "process_local_monotonic",
+            "phase_specific": "phase_specific",
+        }
+        expected_clock = expected_clocks.get(
+            cast(dict[str, Any], measurement_protocol).get("timing_metric")
+        )
+        if expected_clock is not None and cast(dict[str, Any], execution_evidence).get(
+            "timing_clock"
+        ) not in (
+            None,
+            expected_clock,
+        ):
+            raise RuntimeError(
+                "Self-benchmark execution timing clock contradicts its metric"
+            )
+    reference_execution_identity = _validate_benchmark_execution_identity(reference)
+    for _, path, data in rank_data:
+        if _validate_benchmark_execution_identity(data) != reference_execution_identity:
+            raise RuntimeError(
+                f"Self-benchmark speculative execution identity mismatch at {path}"
+            )
     warmup_ledgers = {}
     for rank, _, data in rank_data:
         if has_execution_evidence:
@@ -751,8 +876,32 @@ def _merge_benchmark_rank_results(
                         f"rank={dp_rank} benchmark_id={benchmark_id}"
                     )
                 if has_execution_evidence:
+                    timing_metric = cast(dict[str, Any], measurement_protocol).get(
+                        "timing_metric"
+                    )
+                    if timing_metric == "phase_specific":
+                        timing_by_phase = cast(
+                            dict[str, Any], measurement_protocol
+                        ).get("timing_by_phase")
+                        if not isinstance(timing_by_phase, dict):
+                            raise RuntimeError(
+                                "Self-benchmark phase-specific timing is missing its phase contract"
+                            )
+                        timing_metric = timing_by_phase.get(
+                            group["point"].get("point_type")
+                        )
+                        if timing_metric not in {
+                            "model_step_cuda",
+                            "scheduler_wall_time",
+                        }:
+                            raise RuntimeError(
+                                "Self-benchmark phase-specific timing has an invalid phase metric"
+                            )
                     previous_forward_indices[dp_rank] = _validate_execution_measurement(
-                        fpm, measurement, previous_forward_indices.get(dp_rank, -1)
+                        fpm,
+                        measurement,
+                        previous_forward_indices.get(dp_rank, -1),
+                        timing_metric=timing_metric,
                     )
                     warmups_before = preparation.get("warmup_records_before")
                     ledger = warmup_ledgers.get(dp_rank)

@@ -2483,7 +2483,8 @@ def test_cudagraph_disabled_uses_geometric_fallback(tmp_path):
     ]
 
 
-def test_decode_benchmark_rejects_unsupported_speculative_decoding(tmp_path):
+@pytest.mark.parametrize("mode", ["prefill", "decode", "agg"])
+def test_benchmark_rejects_unsupported_speculative_decoding(tmp_path, mode):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._fpm_dp_rank = 0
     stub.max_num_running_reqs = 8
@@ -2492,7 +2493,7 @@ def test_decode_benchmark_rejects_unsupported_speculative_decoding(tmp_path):
     vllm_config = SimpleNamespace(
         additional_config={
             "benchmark": {
-                "mode": "decode",
+                "mode": mode,
                 "output_path": str(tmp_path / "out.json"),
             }
         },
@@ -2570,6 +2571,102 @@ def test_eagle_decode_graph_axis_counts_requests_not_verify_tokens(eagle_benchma
     assert padding == 4
 
 
+@pytest.mark.parametrize("mode", ["prefill", "decode", "agg"])
+def test_eagle_all_modes_declare_native_cuda_timing(eagle_benchmark, mode):
+    stub = eagle_benchmark
+    config = stub._bench_capacity_config
+    config.additional_config["benchmark"]["mode"] = mode
+    stub._bench_init(config)
+    assert stub._bench_speculative_tokens == 3
+    protocol = stub._bench_measurement_protocol()
+    assert protocol["timing_metric"] == "model_step_cuda"
+    assert protocol["execution_evidence"]["timing_clock"] == "cuda_event_elapsed"
+    assert "timing_by_phase" not in protocol
+
+
+@pytest.mark.parametrize(
+    "phase", [_BenchPhase.WARMUP, _BenchPhase.PREFILL_SWEEP, _BenchPhase.DECODE_SWEEP]
+)
+def test_eagle_prefill_and_warmup_inherit_sampling(phase):
+    stub = _measurement_injection_stub(seq=1)
+    stub._bench_speculative_tokens = 3
+    stub._bench_phase = phase
+    stub._bench_sd_sampling = instrumented_scheduler_module.SamplingParams(
+        temperature=0.7, top_p=0.9, max_tokens=90
+    )
+    assert stub._bench_inject_prefill(prompt_lens=[32], max_tokens=1) == 1
+    params = stub.add_request.call_args.args[0].sampling_params
+    assert (params.temperature, params.top_p, params.max_tokens) == (0.7, 0.9, 1)
+    assert stub._bench_sd_sampling.max_tokens == 90
+
+
+def test_eagle_execution_identity_pins_without_network():
+    target_revision, draft_revision = "a" * 40, "b" * 40
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            revision="main", hf_config=SimpleNamespace(_commit_hash=target_revision)
+        ),
+        speculative_config=SimpleNamespace(
+            method="eagle3",
+            num_speculative_tokens=3,
+            model="test/draft",
+            revision=draft_revision,
+        ),
+    )
+    identity = instrumented_scheduler_module._bench_speculative_execution_identity(
+        config
+    )
+    assert identity["status"] == "resolved"
+    assert identity["unresolved_fields"] == []
+    assert identity["sources"] == {
+        "model_revision": "loaded_hf_commit",
+        "draft_revision": "explicit_revision",
+        "draft_model": "speculative_config.model",
+    }
+    assert identity["binding"] == {
+        "model_revision": target_revision,
+        "execution_profile": {
+            "kind": "speculative_round",
+            "method": "eagle3",
+            "num_draft_tokens": 3,
+            "draft_model": "test/draft",
+            "draft_revision": draft_revision,
+            "timing_scope": "model_step_cuda",
+        },
+    }
+    config.model_config.revision = "c" * 40
+    config.speculative_config.model = "/private/checkpoint"
+    config.speculative_config.revision = "main"
+    identity = instrumented_scheduler_module._bench_speculative_execution_identity(
+        config
+    )
+    assert identity["status"] == "unresolved"
+    assert identity["binding"] is None
+    assert identity["unresolved_fields"] == [
+        "model_revision",
+        "draft_model",
+        "draft_revision",
+    ]
+    config.model_config.revision = target_revision
+    config.speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            _commit_hash=draft_revision, _name_or_path="test/draft"
+        )
+    )
+    identity = instrumented_scheduler_module._bench_speculative_execution_identity(
+        config
+    )
+    assert identity["status"] == "resolved"
+    assert identity["sources"]["draft_revision"] == "loaded_hf_commit"
+    assert identity["sources"]["draft_model"] == "draft_hf_config._name_or_path"
+    config.speculative_config.revision = "c" * 40
+    identity = instrumented_scheduler_module._bench_speculative_execution_identity(
+        config
+    )
+    assert identity["binding"] is None
+    assert identity["unresolved_fields"] == ["draft_revision"]
+
+
 def test_eagle_capacity_reserves_verify_and_next_draft(eagle_benchmark):
     stub = eagle_benchmark
     stub.max_model_len = 256
@@ -2581,11 +2678,12 @@ def test_eagle_capacity_reserves_verify_and_next_draft(eagle_benchmark):
     assert stub._bench_decode_point_feasible(1, 12)
 
 
-def test_eagle_warms_captured_shapes_at_each_context(eagle_benchmark):
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_eagle_warms_captured_shapes_at_each_context(eagle_benchmark, phase):
     stub = eagle_benchmark
     points = [
         BenchmarkPoint(
-            "decode", batch_size=2, total_kv_read_tokens=kv, expected_capture_size=8
+            phase, batch_size=2, total_kv_read_tokens=kv, expected_capture_size=8
         )
         for kv in (32, 256)
     ]
@@ -2801,6 +2899,19 @@ def test_eagle_missing_tail_timing_is_bounded(eagle_benchmark):
     stub._bench_abort.assert_called_once()
 
 
+def test_eagle_missing_prefill_timing_cannot_advance_point(eagle_benchmark):
+    stub = eagle_benchmark
+    stub._bench_phase = _BenchPhase.PREFILL_SWEEP
+    stub._bench_sd_steps[41] = object()
+    stub._bench_point_result_timed_out = lambda: True
+    stub._bench_abort = MagicMock()
+    with pytest.raises(TimeoutError, match="prefill output/timing drain timed out"):
+        stub.has_requests()
+    stub._bench_abort.assert_called_once()
+    with pytest.raises(TimeoutError, match="prefill output/timing drain timed out"):
+        stub._bench_step_prefill()
+
+
 def test_eagle_late_global_output_does_not_consume_window_inflight(
     eagle_benchmark, monkeypatch
 ):
@@ -2919,22 +3030,45 @@ def test_eagle_publisher_failure_restores_factory_and_gc_policy(
     assert not scheduler_instances[0]._bench_active
 
 
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
 def test_eagle_native_join_waits_for_corrected_shape_and_preserves_publisher(
-    eagle_benchmark,
+    eagle_benchmark, monkeypatch, phase
 ):
     stub = eagle_benchmark
     stub._fpm_worker_id = "test-worker"
-    stub._bench_current_point = BenchmarkPoint(
-        "decode", benchmark_id=7, batch_size=1, total_kv_read_tokens=32
+    stub._bench_phase = (
+        _BenchPhase.PREFILL_SWEEP if phase == "prefill" else _BenchPhase.DECODE_SWEEP
     )
-    output = SimpleNamespace(forward_pass_metrics_iteration_id=None)
-    step = _SpeculativeBenchmarkStep(7, 5, "measured", {"r": 4}, {"r": 3})
-    step.sample = {"forward_index": 6, "cudagraph": {"status": "unavailable"}}
-    stub._bench_sd_outputs[id(output)] = step
+    stub._bench_current_point = BenchmarkPoint(
+        phase,
+        benchmark_id=7,
+        batch_size=1,
+        total_prefill_tokens=64 if phase == "prefill" else 0,
+        total_kv_read_tokens=32,
+    )
+    output = SimpleNamespace(
+        forward_pass_metrics_iteration_id=None,
+        total_num_scheduled_tokens=64 if phase == "prefill" else 4,
+        num_scheduled_tokens={"r": 64 if phase == "prefill" else 4},
+        scheduled_spec_decode_tokens={} if phase == "prefill" else {"r": [1, 2, 3]},
+    )
+    if phase == "decode":
+        stub._bench_sd_outputs[id(output)] = _SpeculativeBenchmarkStep(
+            7, 5, "measured", {"r": 4}, {"r": 3}
+        )
+        stub._bench_sd_live_outputs.add(id(output))
+        stub._bench_sd_inflight = 1
     published = []
     pending = SimpleNamespace(
         scheduled=instrumented_scheduler_module.ScheduledRequestMetrics(
             num_decode_requests=1, sum_decode_kv_tokens=40
+        )
+        if phase == "decode"
+        else instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1,
+            sum_prefill_tokens=64,
+            sum_prefill_kv_tokens=32,
+            var_prefill_length=3.5,
         ),
         queued=None,
         duration_seconds=None,
@@ -2960,24 +3094,65 @@ def test_eagle_native_join_waits_for_corrected_shape_and_preserves_publisher(
     stub._bench_attach_native_fpm(emitter)
     emitter.begin_iteration(stub, output)
     assert not stub._bench_sd_outputs
+    if phase == "prefill":
+        assert stub._bench_sd_max_inflight == 1
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *args: "parent-result",
+    )
+    stub._schedule_times = deque([1.0])
+    stub._extract_scheduled = lambda output: pending.scheduled
+    stub._cleanup_finished = MagicMock()
+    stub._bench_observe_warmup = MagicMock()
+    stub._bench_finish_warmup = MagicMock()
+    assert (
+        stub._update_from_output(output, SimpleNamespace(sampled_token_ids=[[1]]))
+        == "parent-result"
+    )
+    assert not stub._bench_current_fpms  # CPU completion is not the timing sample.
+    assert stub._bench_sd_inflight == 0
+    if phase == "prefill":
+        stub._bench_point_result_timed_out = lambda: False
+        stub._bench_save_current_point = MagicMock()
+        assert not stub.has_requests()
+        assert stub._bench_step_prefill() is None
+        stub._bench_save_current_point.assert_not_called()
     pending.duration_seconds = 0.009
     emitter._emit_if_ready(91)
     assert not stub._bench_current_fpms
     assert not published
     # Native rejection correction settles the real context before emission.
-    pending.scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
-        num_decode_requests=1, sum_decode_kv_tokens=37
-    )
+    if phase == "decode":
+        pending.scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_decode_requests=1, sum_decode_kv_tokens=37
+        )
     pending.decode_lengths = None
     pending.queued = instrumented_scheduler_module.QueuedRequestMetrics()
     emitter._emit_if_ready(91)
     fpm = stub._bench_current_fpms[0]
-    assert fpm["scheduled_requests"]["sum_decode_kv_tokens"] == 37
+    if phase == "decode":
+        assert fpm["scheduled_requests"]["sum_decode_kv_tokens"] == 37
+    else:
+        assert fpm["scheduled_requests"]["sum_prefill_tokens"] == 64
+        assert fpm["scheduled_requests"]["sum_prefill_kv_tokens"] == 32
+        assert fpm["scheduled_requests"]["var_prefill_length"] == 3.5
+        assert stub.has_requests()
     assert fpm["wall_time"] == 0.009
     assert fpm["timing_scope"] == "model_step_cuda"
     assert fpm["benchmark_sample"]["native_iteration_id"] == 91
     assert fpm["benchmark_sample"]["timing"]["start_monotonic"] is None
     assert published == [pending]
+    assert not stub._bench_sd_steps
+    if phase == "prefill":
+        # Seed and shape-preparation shots have no current point; even their
+        # late native observations cannot become measured samples.
+        stub._bench_current_point = None
+        emitter.begin_iteration(stub, output)
+        emitter._emit_if_ready(91)
+        assert not stub._bench_sd_steps
+        assert not stub._bench_sd_live_outputs
+        assert len(stub._bench_current_fpms) == 1
     assert not stub._bench_sd_steps
     stub._bench_remove_native_fpm_observer()
     assert emitter.begin_iteration is begin
