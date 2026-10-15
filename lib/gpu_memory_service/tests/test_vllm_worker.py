@@ -87,28 +87,31 @@ class _FakeDevice:
         pass
 
 
-def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
-    # A100 80 GB at vLLM's default gpu_memory_utilization (DYN-4950).
-    gib = 1 << 30
-    total = 85_093_777_408
-    requested = int(total * 0.92)
-    weights = int(1.18 * gib)  # imported read-only from GMS, shared by both
-    torch_peak = int(0.5 * gib)
-    non_torch = 2 * gib  # CUDA context, NCCL and NIXL buffers
-    cudagraph = int(0.43 * gib)
+_GIB = 1 << 30
+# A100 80 GB at vLLM's default gpu_memory_utilization (DYN-4950).
+_TOTAL = 85_093_777_408
+_REQUESTED = int(_TOTAL * 0.92)
+_WEIGHTS = int(1.18 * _GIB)  # imported read-only from GMS, shared by both
+_TORCH_PEAK = int(0.5 * _GIB)
+_NON_TORCH = 2 * _GIB  # CUDA context, NCCL and NIXL buffers
+_CUDAGRAPH = int(0.43 * _GIB)
+
+
+def _shadow_kv_budget(monkeypatch, tmp_path, peer_alloc_during_init=0):
+    """Run init_device and the scratch-KV budget beside a resident peer engine."""
     # The peer engine is already resident on the device.
-    device = _FakeDevice(total, peer_used=weights + torch_peak + non_torch)
+    device = _FakeDevice(_TOTAL, peer_used=_WEIGHTS + _TORCH_PEAK + _NON_TORCH)
 
     def base_init_device(_worker):
-        device.used += non_torch
+        device.used += _NON_TORCH + peer_alloc_during_init
 
     def profile_run():
-        device.peak_allocated = torch_peak
+        device.peak_allocated = _TORCH_PEAK
 
     monkeypatch.setattr(gms_worker, "torch_device", lambda: device)
     monkeypatch.setattr(gms_worker, "is_scratch_kv_enabled", lambda: True)
     monkeypatch.setattr(gms_worker, "has_pending_gms_write", lambda: False)
-    monkeypatch.setattr(gms_worker, "get_imported_weights_bytes", lambda: weights)
+    monkeypatch.setattr(gms_worker, "get_imported_weights_bytes", lambda: _WEIGHTS)
     monkeypatch.setattr(gms_worker, "get_or_create_gms_client_memory_manager", Mock())
     monkeypatch.setattr(gms_worker, "_get_dp_adjusted_local_rank", lambda *_: 0)
     monkeypatch.setattr(
@@ -134,17 +137,33 @@ def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
     )
     worker.model_runner = SimpleNamespace(
-        profile_run=profile_run, profile_cudagraph_memory=lambda: cudagraph
+        profile_run=profile_run, profile_cudagraph_memory=lambda: _CUDAGRAPH
     )
-    worker.requested_memory = requested
+    worker.requested_memory = _REQUESTED
 
     worker.init_device()
-    kv_budget = worker._determine_available_memory_before_gms_publish()
+    return worker._determine_available_memory_before_gms_publish()
+
+
+def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
+    kv_budget = _shadow_kv_budget(monkeypatch, tmp_path)
 
     # The wake-time KV allocation, both engines' non-KV memory and the shared
     # weights must fit within the requested share of the device.
-    engine_non_kv = torch_peak + non_torch + cudagraph
-    assert kv_budget + weights + 2 * engine_non_kv <= requested
+    engine_non_kv = _TORCH_PEAK + _NON_TORCH + _CUDAGRAPH
+    assert kv_budget + _WEIGHTS + 2 * engine_non_kv <= _REQUESTED
+    assert kv_budget > 0
+
+
+def test_shadow_kv_budget_caps_peer_allocation_during_init(monkeypatch, tmp_path):
+    # The peer wakes and allocates its KV cache while this engine initializes.
+    kv_budget = _shadow_kv_budget(
+        monkeypatch, tmp_path, peer_alloc_during_init=70 * _GIB
+    )
+
+    measured_cap = gms_worker._MAX_NON_TORCH_INIT_BYTES
+    engine_non_kv = _TORCH_PEAK + measured_cap + _CUDAGRAPH
+    assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
     assert kv_budget > 0
 
 

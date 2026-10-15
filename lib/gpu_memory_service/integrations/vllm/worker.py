@@ -74,6 +74,12 @@ apply_scratch_kv_patches()
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 
+# Upper bound on the non-torch memory measured over GMSWorker.init_device().
+# NCCL and workspace buffers stay well below this; a larger reading means the
+# co-located engine allocated (for example its KV cache) during the window.
+_MAX_NON_TORCH_INIT_BYTES = 2 << 30
+
+
 def kv_reuse_enabled() -> bool:
     """Opt in to committing the KV layout so it survives this engine (default off).
 
@@ -185,6 +191,9 @@ class GMSWorker(_BaseWorker):
 
         # Profile-time free memory includes the co-located engine, so measure
         # non-torch init memory (NCCL, workspaces) here, after the RO connect.
+        # The CUDA context already exists and is not counted. The reading is
+        # device-wide, so peer allocations in this window inflate it; it is
+        # capped at _MAX_NON_TORCH_INIT_BYTES.
         measure_non_torch = is_scratch_kv_enabled()
         if measure_non_torch:
             free_before, _ = torch_device().mem_get_info()
@@ -196,9 +205,17 @@ class GMSWorker(_BaseWorker):
         if measure_non_torch:
             free_after, _ = torch_device().mem_get_info()
             reserved_delta = torch_device().memory_reserved() - reserved_before
-            self._gms_non_torch_init_bytes = max(
-                0, free_before - free_after - reserved_delta
-            )
+            measured = max(0, free_before - free_after - reserved_delta)
+            if measured > _MAX_NON_TORCH_INIT_BYTES:
+                logger.warning(
+                    "[GMS] measured %.2f GiB non-torch init memory, above the "
+                    "%.2f GiB cap; the co-located engine likely allocated "
+                    "during init. Using the cap.",
+                    measured / (1 << 30),
+                    _MAX_NON_TORCH_INIT_BYTES / (1 << 30),
+                )
+                measured = _MAX_NON_TORCH_INIT_BYTES
+            self._gms_non_torch_init_bytes = measured
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
