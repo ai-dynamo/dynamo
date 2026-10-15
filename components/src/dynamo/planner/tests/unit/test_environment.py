@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from threading import get_ident
+import asyncio
+from threading import Event, get_ident
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -137,6 +138,35 @@ async def test_refresh_deployment_state_offloads_synchronous_reads():
 
     assert len(read_threads) == 4
     assert all(thread_id != event_loop_thread for thread_id in read_threads)
+
+
+@pytest.mark.asyncio
+async def test_refresh_deployment_state_cancellation_does_not_wait_for_blocked_read():
+    started = Event()
+    release = Event()
+    controller = _controller()
+
+    def worker_info(sub_component_type, backend):
+        started.set()
+        release.wait()
+        return build_worker_info_from_defaults(backend, sub_component_type)
+
+    controller.get_worker_info.side_effect = worker_info
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+    refresh = asyncio.create_task(environment._refresh_deployment_state())
+
+    assert await asyncio.to_thread(started.wait, 1)
+    refresh.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(refresh, timeout=0.2)
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

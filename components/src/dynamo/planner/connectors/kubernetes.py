@@ -26,7 +26,10 @@ from typing import Optional
 from kubernetes.client import ApiException
 
 from dynamo.common.async_utils import run_sync_in_thread
-from dynamo.common.kubernetes import RetriedRequestConflict, retry_kubernetes_write
+from dynamo.common.kubernetes import (
+    AmbiguousKubernetesWriteError,
+    retry_kubernetes_write,
+)
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
@@ -112,8 +115,19 @@ class _ReplicaUpdateTracker:
     def run(self, write: Callable[[], None]) -> None:
         try:
             write()
-        except (RetriedRequestConflict, _ReplicaTargetCommittedConflict):
+        except (
+            AmbiguousKubernetesWriteError,
+            _ReplicaTargetCommittedConflict,
+        ) as error:
             self.possibly_applied = True
+            raise RuntimeError(
+                "replica update stopped after partial application; refusing to retry"
+            ) from error
+        except ApiException as error:
+            if self.possibly_applied and error.status == 409:
+                raise RuntimeError(
+                    "replica update stopped after partial application; refusing to retry"
+                ) from error
             raise
         else:
             self.possibly_applied = True
@@ -1605,7 +1619,7 @@ class KubernetesConnector(PlannerConnector):
                     current_adapter,
                 )
             except (
-                RetriedRequestConflict,
+                AmbiguousKubernetesWriteError,
                 _ReplicaTargetCommittedConflict,
             ) as error:
                 raise RuntimeError(
@@ -1668,14 +1682,14 @@ class KubernetesConnector(PlannerConnector):
         # still assigns authority to the adapter after the Scale PATCH.
         try:
             refreshed = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
+            rejection = self._dgdsa_authority_rejection(
+                deployment, refreshed, service.name
+            )
+        except Exception as error:
             raise _ReplicaTargetCommittedConflict(
                 status=409,
-                reason="DGD conflicted after DGDSA Scale PATCH committed",
+                reason="DGD authority could not be verified after DGDSA Scale PATCH committed",
             ) from error
-        rejection = self._dgdsa_authority_rejection(deployment, refreshed, service.name)
         if rejection is not None:
             raise _ReplicaTargetCommittedConflict(status=409, reason=rejection)
 

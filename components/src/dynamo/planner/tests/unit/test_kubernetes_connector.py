@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 from kubernetes import client
 
-from dynamo.common.kubernetes import RetriedRequestConflict
+from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
@@ -720,8 +720,8 @@ async def test_add_component_does_not_repeat_ambiguous_committed_dgd_write(
 ):
     initial = _deployment(_component("worker", "decode", replicas=1))
     mock_kube_api.get_graph_deployment.return_value = initial
-    mock_kube_api.update_dgd_replicas_directly.side_effect = RetriedRequestConflict(
-        client.ApiException(status=409)
+    mock_kube_api.update_dgd_replicas_directly.side_effect = (
+        AmbiguousKubernetesWriteError(client.ApiException(status=409))
     )
 
     with pytest.raises(RuntimeError, match="may already have been applied"):
@@ -735,19 +735,18 @@ async def test_add_component_does_not_repeat_ambiguous_committed_dgd_write(
 
 
 @pytest.mark.asyncio
-async def test_add_component_does_not_repeat_committed_dgdsa_write_after_check_conflict(
-    kubernetes_connector, mock_kube_api
+@pytest.mark.parametrize("verification_status", [404, 409, 503])
+async def test_add_component_does_not_repeat_committed_dgdsa_write_after_check_failure(
+    kubernetes_connector, mock_kube_api, verification_status
 ):
     deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
     mock_kube_api.get_graph_deployment.side_effect = [
         deployment,
-        client.ApiException(status=409),
-        deployment,
+        client.ApiException(status=verification_status),
     ]
-    mock_kube_api.get_service_scaling_adapter.side_effect = [
-        _scaling_adapter("worker", replicas=0),
-        _scaling_adapter("worker", replicas=1),
-    ]
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
 
     with pytest.raises(RuntimeError, match="may already have been applied"):
         await kubernetes_connector.add_component(
@@ -1017,21 +1016,18 @@ async def test_set_component_replicas_orders_reductions_before_increases(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_reports_unready_after_partial_application(
+async def test_set_component_replicas_stops_on_conflict_after_partial_application(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(
         _adapter_component("adapter-down", "worker", replicas=2),
         _component("direct-down", "worker", replicas=2),
     )
-    unready = deepcopy(deployment)
-    unready["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
     mock_kube_api.get_graph_deployment.side_effect = [
         deployment,
         deployment,
-        unready,
     ]
-    mock_kube_api.is_deployment_ready.side_effect = [True, False]
+    mock_kube_api.is_deployment_ready.return_value = True
     mock_kube_api.is_spec_generation_observed.return_value = True
     mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
         "adapter-down", replicas=2
@@ -1059,6 +1055,7 @@ async def test_set_component_replicas_reports_unready_after_partial_application(
 
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once()
     mock_kube_api.update_dgd_replicas_directly.assert_called_once()
+    assert mock_kube_api.get_graph_deployment.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -1609,7 +1606,7 @@ async def test_startup_downscale_latches_ambiguous_committed_dgdsa_write(
     )
     mock_kube_api.get_service_replica_target.return_value = 2
 
-    with pytest.raises(client.ApiException) as exc_info:
+    with pytest.raises(RuntimeError, match="partial application"):
         await kubernetes_connector.set_component_replicas(
             [
                 TargetReplica(
@@ -1621,7 +1618,6 @@ async def test_startup_downscale_latches_ambiguous_committed_dgdsa_write(
             blocking=False,
         )
 
-    assert exc_info.value.status == 503
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once()
     assert kubernetes_connector._startup_scale_down_targets == {"worker": 1}
 

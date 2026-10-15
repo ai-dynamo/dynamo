@@ -17,17 +17,18 @@ from kubernetes.utils.retry import (
 T = TypeVar("T")
 
 
-class RetriedRequestConflict(rest.ApiException):
-    """A 409 observed after retrying an ambiguously completed request."""
+class AmbiguousKubernetesWriteError(rest.ApiException):
+    """A write may have completed before a later request failure."""
 
-    def __init__(self, conflict: Exception):
+    def __init__(self, error: Exception):
         super().__init__(
-            status=getattr(conflict, "status", 409),
-            reason=getattr(conflict, "reason", None),
-            body=getattr(conflict, "body", None),
-            data=getattr(conflict, "data", None),
+            status=409,
+            reason=f"write completion is ambiguous after {type(error).__name__}: {error}",
+            body=getattr(error, "body", None),
+            data=getattr(error, "data", None),
         )
-        self.headers = getattr(conflict, "headers", None)
+        self.headers = getattr(error, "headers", None)
+        self.original_error = error
 
 
 def client_go_api_client() -> client.ApiClient:
@@ -48,8 +49,9 @@ def is_transient_api_error(error: Exception) -> bool:
 def retry_kubernetes_request(fn: Callable[[], T]) -> T:
     """Retry one API operation on throttling and transient server errors.
 
-    If a transport or server failure is followed by a conflict, preserve that
-    ambiguity for callers that cannot safely repeat a relative mutation.
+    If a transport or server failure is followed by any terminal error,
+    preserve that ambiguity for callers that cannot safely repeat a relative
+    mutation. Absolute writes see it as a conflict and can re-read state.
     """
 
     ambiguous_completion = False
@@ -60,8 +62,6 @@ def retry_kubernetes_request(fn: Callable[[], T]) -> T:
             return fn()
         except Exception as error:
             status = getattr(error, "status", None)
-            if status == 409 and ambiguous_completion:
-                raise RetriedRequestConflict(error) from error
             if (
                 isinstance(error, rest.urllib3.exceptions.HTTPError)
                 or status == 0
@@ -70,7 +70,12 @@ def retry_kubernetes_request(fn: Callable[[], T]) -> T:
                 ambiguous_completion = True
             raise
 
-    return on_retry_after_error(DEFAULT_BACKOFF, is_transient_api_error, request)
+    try:
+        return on_retry_after_error(DEFAULT_BACKOFF, is_transient_api_error, request)
+    except Exception as error:
+        if ambiguous_completion:
+            raise AmbiguousKubernetesWriteError(error) from error
+        raise
 
 
 def retry_kubernetes_write(fn: Callable[[], T]) -> T:

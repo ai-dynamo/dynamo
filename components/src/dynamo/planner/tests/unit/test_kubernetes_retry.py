@@ -68,8 +68,37 @@ def test_conflict_after_ambiguous_request_retry_is_distinguished() -> None:
     def request() -> None:
         raise next(errors)
 
-    with pytest.raises(kubernetes.RetriedRequestConflict):
+    with pytest.raises(kubernetes.AmbiguousKubernetesWriteError):
         kubernetes.retry_kubernetes_request(request)
+
+
+def test_exhausted_server_errors_are_ambiguous() -> None:
+    attempts = 0
+
+    def request() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise client.ApiException(status=500)
+
+    with pytest.raises(kubernetes.AmbiguousKubernetesWriteError) as raised:
+        kubernetes.retry_kubernetes_request(request)
+
+    assert attempts == kubernetes.DEFAULT_BACKOFF.steps
+    assert raised.value.status == 409
+    assert raised.value.original_error.status == 500
+
+
+def test_non_retryable_error_after_server_error_is_ambiguous() -> None:
+    errors = iter([client.ApiException(status=500), client.ApiException(status=404)])
+
+    def request() -> None:
+        raise next(errors)
+
+    with pytest.raises(kubernetes.AmbiguousKubernetesWriteError) as raised:
+        kubernetes.retry_kubernetes_request(request)
+
+    assert raised.value.status == 409
+    assert raised.value.original_error.status == 404
 
 
 def test_conflict_after_throttling_remains_an_ordinary_conflict() -> None:

@@ -61,6 +61,15 @@ GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
 
 
+def _as_custom_object(value: object, resource: str) -> dict:
+    """Validate the generated CustomObjectsApi's untyped response boundary."""
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"Kubernetes API returned {type(value).__name__} instead of an object for {resource}"
+        )
+    return value
+
+
 def get_current_k8s_namespace() -> str:
     """Get the current namespace if running inside a k8s cluster"""
     try:
@@ -85,12 +94,15 @@ class KubernetesAPI:
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _read_graph_deployment_once(self, graph_deployment_name: str) -> dict:
-        return self.custom_api.get_namespaced_custom_object(
-            group=NVIDIA_API_GROUP,
-            version=DYNAMO_API_VERSION,
-            namespace=self.current_namespace,
-            plural=DGD_PLURAL,
-            name=graph_deployment_name,
+        return _as_custom_object(
+            self.custom_api.get_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGD_PLURAL,
+                name=graph_deployment_name,
+            ),
+            f"DynamoGraphDeployment {graph_deployment_name}",
         )
 
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
@@ -99,22 +111,28 @@ class KubernetesAPI:
 
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
-        result = self.custom_api.list_namespaced_custom_object(
-            group=NVIDIA_API_GROUP,
-            version=DYNAMO_API_VERSION,
-            namespace=self.current_namespace,
-            plural=DGD_PLURAL,
+        result = _as_custom_object(
+            self.custom_api.list_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGD_PLURAL,
+            ),
+            "DynamoGraphDeployment list",
         )
         return result.get("items", [])
 
     def list_worker_metadata(self) -> list[dict]:
         """List all DynamoWorkerMetadata resources in the current namespace."""
 
-        result = self.custom_api.list_namespaced_custom_object(
-            group=NVIDIA_API_GROUP,
-            version=DYNAMO_WORKER_METADATA_API_VERSION,
-            namespace=self.current_namespace,
-            plural="dynamoworkermetadatas",
+        result = _as_custom_object(
+            self.custom_api.list_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_WORKER_METADATA_API_VERSION,
+                namespace=self.current_namespace,
+                plural="dynamoworkermetadatas",
+            ),
+            "DynamoWorkerMetadata list",
         )
         return result.get("items", [])
 
@@ -174,12 +192,18 @@ class KubernetesAPI:
     ) -> int:
         """Read the authoritative scale target, including an unapplied DGDSA write."""
         try:
-            scale = self.custom_api.get_namespaced_custom_object_scale(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGDSA_PLURAL,
-                name=self.scaling_adapter_name(graph_deployment_name, service_name),
+            adapter_name = self.scaling_adapter_name(
+                graph_deployment_name, service_name
+            )
+            scale = _as_custom_object(
+                self.custom_api.get_namespaced_custom_object_scale(
+                    group=NVIDIA_API_GROUP,
+                    version=DYNAMO_API_VERSION,
+                    namespace=self.current_namespace,
+                    plural=DGDSA_PLURAL,
+                    name=adapter_name,
+                ),
+                f"DynamoGraphDeploymentScalingAdapter scale {adapter_name}",
             )
             return int(scale["spec"]["replicas"])
         except client.ApiException as e:
@@ -204,12 +228,16 @@ class KubernetesAPI:
         reconciliation error and is intentionally returned as a 404 rather
         than being hidden behind the legacy DGD fallback.
         """
-        return self.custom_api.get_namespaced_custom_object(
-            group=NVIDIA_API_GROUP,
-            version=DYNAMO_API_VERSION,
-            namespace=self.current_namespace,
-            plural=DGDSA_PLURAL,
-            name=self.scaling_adapter_name(graph_deployment_name, service_name),
+        adapter_name = self.scaling_adapter_name(graph_deployment_name, service_name)
+        return _as_custom_object(
+            self.custom_api.get_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                name=adapter_name,
+            ),
+            f"DynamoGraphDeploymentScalingAdapter {adapter_name}",
         )
 
     @staticmethod
@@ -262,12 +290,15 @@ class KubernetesAPI:
         else:
 
             def update_scale() -> None:
-                scale = self.custom_api.get_namespaced_custom_object_scale(
-                    group=NVIDIA_API_GROUP,
-                    version=DYNAMO_API_VERSION,
-                    namespace=self.current_namespace,
-                    plural=DGDSA_PLURAL,
-                    name=adapter_name,
+                scale = _as_custom_object(
+                    self.custom_api.get_namespaced_custom_object_scale(
+                        group=NVIDIA_API_GROUP,
+                        version=DYNAMO_API_VERSION,
+                        namespace=self.current_namespace,
+                        plural=DGDSA_PLURAL,
+                        name=adapter_name,
+                    ),
+                    f"DynamoGraphDeploymentScalingAdapter scale {adapter_name}",
                 )
                 patch_scale(self._resource_version(scale, adapter_name))
 

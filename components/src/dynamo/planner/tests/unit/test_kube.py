@@ -170,6 +170,13 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
     )
 
 
+def test_get_graph_deployment_rejects_non_object_response(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object.return_value = object()
+
+    with pytest.raises(TypeError, match="instead of an object"):
+        k8s_api.get_graph_deployment("test-deployment")
+
+
 def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
     """Test that update_service_replicas uses DGDSA Scale API when available"""
     mock_custom_api.patch_namespaced_custom_object_scale.return_value = None
