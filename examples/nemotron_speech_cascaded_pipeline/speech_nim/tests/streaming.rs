@@ -162,6 +162,47 @@ async fn asr_streams_before_commit_and_half_close_drains_results() {
 }
 
 #[tokio::test]
+async fn asr_eof_preserves_the_latest_interim_transcript() {
+    for prefix in ["hello", ""] {
+        let mut server = Server::start().await;
+        let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
+        let mut session = Session::start(&adapter).await;
+        session.send(append());
+        let call = within(server.asr.recv()).await.unwrap();
+        session.send(commit());
+        assert_eq!(session.next().await["type"], "input_audio_buffer.committed");
+        if !prefix.is_empty() {
+            call.responses
+                .send(Ok(transcript(prefix, true)))
+                .await
+                .unwrap();
+            assert_eq!(session.next().await["delta"], prefix);
+        }
+        call.responses
+            .send(Ok(transcript("word", false)))
+            .await
+            .unwrap();
+        assert_eq!(
+            session.next().await["delta"],
+            if prefix.is_empty() { "word" } else { " word" }
+        );
+        call.responses
+            .send(Ok(transcript("world", false)))
+            .await
+            .unwrap();
+        drop(call.responses);
+        assert_eq!(
+            session.next().await["transcript"],
+            if prefix.is_empty() {
+                "world"
+            } else {
+                "hello world"
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn asr_input_eof_commits_open_turn_without_cancelling_rpc() {
     let mut server = Server::start().await;
     let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
@@ -413,6 +454,30 @@ async fn tts_preserves_pcm_chunks_and_config() {
 }
 
 #[tokio::test]
+async fn tts_requires_explicit_pcm_format_before_rpc() {
+    let mut server = Server::start().await;
+    let engine = TtsEngine::new(server.tts_config(), server.connection().await);
+    for request in [
+        json!({"input": "Hello"}),
+        json!({"input": "Hello", "response_format": null}),
+        json!({"input": "Hello", "response_format": "wav"}),
+    ] {
+        let Err(error) = engine
+            .generate(request, GenerateContext::new(mock_context(), None))
+            .await
+        else {
+            panic!("non-PCM format was silently accepted")
+        };
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(error.to_string().contains("response_format='pcm'"));
+        assert!(server.tts.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
 async fn tts_rejects_unsupported_options_before_rpc() {
     let server = Server::start().await;
     let engine = TtsEngine::new(server.tts_config(), server.connection().await);
@@ -420,7 +485,6 @@ async fn tts_rejects_unsupported_options_before_rpc() {
         ("input", json!(" ")),
         ("model", json!("wrong")),
         ("speed", json!(2)),
-        ("response_format", json!("wav")),
         ("data_source", json!("url")),
         ("instructions", json!("whisper")),
         ("task_type", json!("Base")),
@@ -429,7 +493,7 @@ async fn tts_rejects_unsupported_options_before_rpc() {
         ("max_new_tokens", json!(0)),
         ("nvext", json!({"cfg_scale": 1.0})),
     ] {
-        let mut request = json!({"input": "Hello"});
+        let mut request = json!({"input": "Hello", "response_format": "pcm"});
         request[field] = value;
         let result = engine
             .generate(request, GenerateContext::new(mock_context(), None))
@@ -451,7 +515,7 @@ async fn tts_maps_invalid_argument_and_cancels_open_rpc_on_stop() {
     let ctx = mock_context();
     let stream = engine
         .generate(
-            json!({"input": "Hello"}),
+            json!({"input": "Hello", "response_format": "pcm"}),
             GenerateContext::new(ctx.clone(), None),
         )
         .await
@@ -464,7 +528,7 @@ async fn tts_maps_invalid_argument_and_cancels_open_rpc_on_stop() {
 
     let stream = engine
         .generate(
-            json!({"input": "Hello"}),
+            json!({"input": "Hello", "response_format": "pcm"}),
             GenerateContext::new(mock_context(), None),
         )
         .await

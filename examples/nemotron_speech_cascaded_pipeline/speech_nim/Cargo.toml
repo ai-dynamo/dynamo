@@ -21,6 +21,10 @@ license = "Apache-2.0"
 publish = false
 description = "Example-local Dynamo ASR and TTS workers for the Speech NIM gRPC API"
 
+[package.metadata.cargo-machete]
+# Referenced by protobuf code generated into OUT_DIR.
+ignored = ["prost"]
+
 # Keep example dependencies and builds independent of the main workspace.
 # Promotion to lib/sidecar can retain this package and executable name.
 [workspace]

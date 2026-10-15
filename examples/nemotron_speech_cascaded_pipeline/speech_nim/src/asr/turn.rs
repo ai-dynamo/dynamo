@@ -61,6 +61,7 @@ pub(super) async fn run(
         let mut responses = client.streaming_recognize(requests).await?.into_inner();
         let mut segments = Vec::new();
         let mut emitted = String::new();
+        let mut interim = String::new();
         while let Some(response) = responses.message().await? {
             for result in response.results {
                 let Some(alternative) = result.alternatives.into_iter().next() else {
@@ -91,14 +92,16 @@ pub(super) async fn run(
                 if result.is_final {
                     segments.push(hypothesis);
                     emitted.clear();
+                    interim.clear();
+                } else {
+                    interim = hypothesis;
                 }
             }
         }
-        Ok::<_, tonic::Status>(if segments.is_empty() {
-            emitted
-        } else {
-            segments.join(" ")
-        })
+        if !interim.is_empty() {
+            segments.push(interim);
+        }
+        Ok::<_, tonic::Status>(segments.join(" "))
     };
     tokio::pin!(transcribe);
     let result = tokio::select! {

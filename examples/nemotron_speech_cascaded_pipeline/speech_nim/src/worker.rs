@@ -3,7 +3,7 @@
 
 //! Example-local registration and lifecycle glue. Shared LLM workers are unchanged.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use dynamo_backend_common::{
     ModelInput, Worker, WorkerConfig,
@@ -136,16 +136,75 @@ async fn run_asr(
         _ = runtime_shutdown.cancelled() => Err(anyhow::anyhow!("runtime shut down while serving speech")),
     };
     drt.runtime().mark_shutting_down();
-    let withdraw = endpoint.unregister_endpoint_instance().await;
-    let detach = LocalModel::detach_from_endpoint(&endpoint, None).await;
-    tokio::time::sleep(Duration::from_secs_f64(grace_period_secs())).await;
-    // The request plane drains sessions; use the same budget as other workers
-    // so an idle realtime connection cannot extend shutdown indefinitely.
-    let stop = tokio::time::timeout(graceful_shutdown_timeout(), started.shutdown()).await;
+    let withdraw = async {
+        let unregister = endpoint.unregister_endpoint_instance().await;
+        let detach = LocalModel::detach_from_endpoint(&endpoint, None).await;
+        unregister.and(detach)
+    };
+    let stop = shutdown_asr(
+        withdraw,
+        started.shutdown(),
+        Duration::from_secs_f64(grace_period_secs()),
+        graceful_shutdown_timeout(),
+    )
+    .await;
     adapter.close();
-    let stop = stop.unwrap_or_else(|_| {
-        tracing::warn!("ASR shutdown drain timed out; cancelling remaining sessions");
-        Ok(())
-    });
-    result.and(withdraw).and(detach).and(stop)
+    result.and(stop)
+}
+
+async fn shutdown_asr(
+    withdraw: impl Future<Output = anyhow::Result<()>>,
+    drain: impl Future<Output = anyhow::Result<()>>,
+    grace: Duration,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let shutdown = async {
+        let withdraw = withdraw.await;
+        tokio::time::sleep(grace).await;
+        let stop = drain.await;
+        withdraw.and(stop)
+    };
+    // Match Worker: discovery and drain share a budget, plus propagation grace.
+    tokio::time::timeout(timeout.saturating_add(grace), shutdown)
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!("ASR shutdown timed out; cancelling remaining sessions");
+            Ok(())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, future::pending};
+
+    #[tokio::test]
+    async fn asr_shutdown_bounds_discovery_withdrawal_and_drain() {
+        for is_discovery_stalled in [true, false] {
+            let has_started_drain = Cell::new(false);
+            let withdraw = async {
+                if is_discovery_stalled {
+                    pending::<()>().await;
+                }
+                Ok(())
+            };
+            let drain = async {
+                has_started_drain.set(true);
+                pending().await
+            };
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                shutdown_asr(
+                    withdraw,
+                    drain,
+                    Duration::from_millis(30),
+                    Duration::from_millis(20),
+                ),
+            )
+            .await
+            .expect("discovery and drain must both be bounded")
+            .unwrap();
+            assert_eq!(has_started_drain.get(), !is_discovery_stalled);
+        }
+    }
 }
