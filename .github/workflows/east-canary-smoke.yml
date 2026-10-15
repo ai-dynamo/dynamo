@@ -1,23 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-name: East GPU label rollout smoke
+name: West GPU label rollout smoke
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   smoke:
-    name: East ${{ matrix.gpus }} GPU smoke
+    name: West ${{ matrix.gpus }} GPU smoke
     strategy:
       fail-fast: false
       matrix:
         gpus: [1, 2, 4]
-    runs-on:
-      group: dynamo-ci-prod-east
-      labels: ["${{ format('gpu-{0}', matrix.gpus) }}", amd64, v2, us-east-1]
+    runs-on: ["${{ format('gpu-{0}', matrix.gpus) }}", amd64, v2, us-west-2]
     timeout-minutes: 20
     container:
-      image: 210086341041.dkr.ecr.us-east-1.amazonaws.com/ai-dynamo/dynamo@sha256:5ed1f2cd9d9bc26f7a3266bfbfec847ab69bc0803f95115556b6ca118bb18c66
+      image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo@sha256:5ed1f2cd9d9bc26f7a3266bfbfec847ab69bc0803f95115556b6ca118bb18c66
       env:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
@@ -31,6 +29,8 @@ jobs:
           test "$(uname -m)" = x86_64
           mkdir -p "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+          test "$AWS_REGION" = us-west-2
+          printenv AWS_REGION | tee smoke-region.txt
           hostname | tee smoke-hostname.txt
           nvidia-smi -L | tee smoke-gpus.txt
           python - <<'PY' | tee smoke-cuda.txt
@@ -48,13 +48,13 @@ jobs:
       - name: Upload smoke evidence
         uses: actions/upload-artifact@v4
         with:
-          name: east-gpu-${{ matrix.gpus }}-smoke
+          name: west-gpu-${{ matrix.gpus }}-smoke
           path: smoke-*.txt
           if-no-files-found: error
       - name: Verify artifact download
         uses: actions/download-artifact@v4
         with:
-          name: east-gpu-${{ matrix.gpus }}-smoke
+          name: west-gpu-${{ matrix.gpus }}-smoke
           path: downloaded-smoke
       - name: Verify artifact round trip
         shell: bash
