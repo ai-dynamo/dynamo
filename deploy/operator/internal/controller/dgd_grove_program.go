@@ -25,6 +25,8 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +45,11 @@ type groveProgram struct {
 	topology           *dgdGroveTopologyConditionReconciler
 	gate               features.Gate
 	lpx                *dgdLPXHandoff
+	// groveCompatibility is nil when no external Grove check is wired.
+	groveCompatibility *features.GroveCompatibilityProbe
+	// namespaceRestricted operators cannot read cluster-scoped CRDs, so an
+	// unverifiable Grove only warns there instead of blocking.
+	namespaceRestricted bool
 }
 
 // groveReconcileRequest keeps the complete DGD together with the component
@@ -106,10 +113,12 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.RuntimeConfig,
 			r.DockerSecretRetriever,
 		),
-		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
-		gate:            r.RuntimeConfig.Gate,
-		lpx:             &dgdLPXHandoff{client: r.Client},
+		scalingAdapters:     newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
+		topology:            newDGDGroveTopologyConditionReconciler(r.Client),
+		gate:                r.RuntimeConfig.Gate,
+		lpx:                 &dgdLPXHandoff{client: r.Client},
+		groveCompatibility:  r.RuntimeConfig.GroveCompatibility,
+		namespaceRestricted: r.Config != nil && r.Config.Namespace.Restricted != "",
 	}
 }
 
@@ -136,6 +145,11 @@ func (p *groveProgram) Reconcile(
 		)
 		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
 		return programResult, reconcile.TerminalError(err)
+	}
+
+	// Block multinode rank aliases before any write when Grove cannot expand them.
+	if blocked := p.checkGroveCompatibility(ctx, req.DGD, &programResult); blocked {
+		return programResult, nil
 	}
 	defer func() {
 		if retErr != nil {
@@ -248,4 +262,47 @@ func (p *groveProgram) Reconcile(
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
+}
+
+// groveCompatibilityRecheckInterval lets a blocked DGD recover after Grove is
+// upgraded without an operator restart or a DGD edit.
+const groveCompatibilityRecheckInterval = time.Minute
+
+// checkGroveCompatibility fails the DGD and reports true when its multinode
+// workers would reference GROVE_PCSG_POD_INDEX on a Grove that does not set it.
+// Single-node DGDs and DGDs created before the rank aliases are never blocked.
+func (p *groveProgram) checkGroveCompatibility(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	programResult *workloadProgramResult,
+) bool {
+	if !dgd.HasAnyMultinodeComponent() || !compatibility.MultinodeTopologyAliases.Enabled(dgd.Annotations) {
+		return false
+	}
+	result := p.groveCompatibility.Check(ctx)
+	if result.State == features.GroveCompatible {
+		return false
+	}
+
+	// A namespace-restricted operator can never read CRDs; warn once per generation.
+	if result.State == features.GroveUnverifiable && p.namespaceRestricted {
+		log.FromContext(ctx).Info("Grove compatibility unverifiable; continuing", "message", result.Message)
+		if dgd.Status.ObservedGeneration != dgd.Generation {
+			programResult.Eventf(corev1.EventTypeWarning, string(reasonUnverifiableGroveVersion), "%s", result.Message)
+		}
+		return false
+	}
+
+	// Fail without writing workloads and emit the event only on a new failure reason.
+	reason := reasonIncompatibleGroveVersion
+	if result.State == features.GroveUnverifiable {
+		reason = reasonUnverifiableGroveVersion
+	}
+	previous := meta.FindStatusCondition(programResult.Status.Conditions, "Ready")
+	programResult.Fail(dgd.Generation, reason, fmt.Errorf("%s", result.Message))
+	if previous == nil || previous.Reason != string(reason) {
+		programResult.Eventf(corev1.EventTypeWarning, string(reason), "%s", result.Message)
+	}
+	programResult.RequeueAfter = groveCompatibilityRecheckInterval
+	return true
 }

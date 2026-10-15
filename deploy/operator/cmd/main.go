@@ -393,6 +393,13 @@ func main() {
 		os.Exit(1)
 	}
 	runtimeConfig.Gate = gates
+	if gates.Grove {
+		// Read CRDs directly so the operator does not start a CRD informer.
+		runtimeConfig.GroveCompatibility = features.NewGroveCompatibilityProbe(mgr.GetAPIReader())
+		compatibility := runtimeConfig.GroveCompatibility.Check(mainCtx)
+		setupLog.Info("Grove compatibility probed",
+			"state", compatibility.State, "minimumVersion", features.GroveMinimumVersion, "message", compatibility.Message)
+	}
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated

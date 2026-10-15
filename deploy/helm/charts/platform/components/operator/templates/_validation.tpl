@@ -117,3 +117,34 @@ Validation for discoveryBackend configuration
   {{- fail (printf "VALIDATION ERROR: discoveryBackend must be 'kubernetes' (default) or 'etcd'. Got: '%s'" $discoveryBackend) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Validation for an externally managed Grove (global.grove.enabled=true, global.grove.install=false).
+Dynamo 1.6.0 multinode workers need Grove v0.1.0-alpha.14 or later. Grove releases carry no
+readable version label, so the check reads the PodCliqueSet CRD schema: the per-clique
+rollingUpdate field first appears in v0.1.0-alpha.14. lookup returns nothing under
+helm template, --dry-run, or without CRD read access; the operator repeats the check per DGD.
+*/}}
+{{- define "dynamo-operator.validateExternalGrove" -}}
+{{- $grove := dict -}}
+{{- if and .Values.global .Values.global.grove -}}
+  {{- $grove = .Values.global.grove -}}
+{{- end -}}
+{{- if and $grove.enabled (not $grove.install) -}}
+  {{- $crd := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "podcliquesets.grove.io" -}}
+  {{- if $crd -}}
+    {{- $hasMarker := false -}}
+    {{- range $version := (($crd.spec).versions | default list) -}}
+      {{- if and (eq $version.name "v1alpha1") $version.served -}}
+        {{- $cliqueProperties := dig "schema" "openAPIV3Schema" "properties" "spec" "properties" "template" "properties" "cliques" "items" "properties" dict $version -}}
+        {{- if hasKey $cliqueProperties "rollingUpdate" -}}
+          {{- $hasMarker = true -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+    {{- if not $hasMarker -}}
+      {{- fail "VALIDATION ERROR: Externally managed Grove is incompatible with this Dynamo release: the podcliquesets.grove.io CRD predates v0.1.0-alpha.14 (its v1alpha1 schema has no spec.template.cliques[].rollingUpdate field). Multinode workers would fail to start because Grove does not set GROVE_PCSG_POD_INDEX. Upgrade the external Grove controller and matching CRDs to v0.1.0-alpha.14 or later, then retry. Dynamo does not modify an externally managed Grove." -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
