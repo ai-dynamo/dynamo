@@ -40,7 +40,7 @@ spec:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
         nvidia.com/extra-resources-hash: f7e538558e0f1981519d2318a01e088c637412ce44f360e859c09b15ef0cca9f
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:dc63a4fb7d8b41d6258355fd6f7adc220181b365917c9588b5a132ab01577d92
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b88d8ba0fce46e6cf39e0bbdeaee94b581acfdfa17db0cad9672709117582370
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -122,7 +122,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
         nvidia.com/extra-resources-hash: f7e538558e0f1981519d2318a01e088c637412ce44f360e859c09b15ef0cca9f
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b88d8ba0fce46e6cf39e0bbdeaee94b581acfdfa17db0cad9672709117582370
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
@@ -207,7 +207,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b88d8ba0fce46e6cf39e0bbdeaee94b581acfdfa17db0cad9672709117582370
       cliqueNames:
       - cond
       - agt

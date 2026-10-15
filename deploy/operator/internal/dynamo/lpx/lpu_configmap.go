@@ -84,7 +84,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
 		"partition_node_offsets", "partition_paths"}
 
-	var columns [len(keys)]strings.Builder
+	var columns [len(keys)][]string
 
 	// Keep partitions grouped by model in canonical projection order.
 	for _, projection := range projections {
@@ -98,8 +98,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 
 			// Preserve compiler order across the parallel runtime columns.
 			for column := range row {
-				columns[column].WriteString(row[column])
-				columns[column].WriteByte('\n')
+				columns[column] = append(columns[column], row[column])
 			}
 			offset += endpointCount
 		}
@@ -112,7 +111,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 		if !includeModelColumns && (key == "partition_indices" || key == "partition_models") {
 			continue
 		}
-		data[key] = strings.TrimSuffix(columns[column].String(), "\n")
+		data[key] = strings.Join(columns[column], "\n")
 	}
 	return data
 }

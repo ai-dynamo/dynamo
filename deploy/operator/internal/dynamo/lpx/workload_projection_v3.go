@@ -19,7 +19,7 @@ const (
 	v3LPUDevice              = "lpu"
 )
 
-func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
+func projectV3Component(intent ModelProjectionInput, transcript digestTranscript) (ModelProjection, error) {
 	runtimeBuild := *intent.Build
 	manifestPartitions := runtimeBuild.partitions
 
@@ -27,10 +27,10 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 
 	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, runtimeBuild.selectedPropSyncChains, "selected V3 prop-sync chain")
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
 	if intent.Pipeline != PipelineHybrid && len(edgePositions) != len(manifestPartitions)-1 {
-		return nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
+		return ModelProjection{}, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 
 	partitions := manifestPartitions
@@ -40,9 +40,9 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	if len(partitions) < len(manifestPartitions) {
 		if intent.Pipeline == PipelineHybrid {
 			if intent.LocalPartitions != nil {
-				return nil, fmt.Errorf("%w: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload", ErrUnsupportedRuntime)
+				return ModelProjection{}, fmt.Errorf("%w: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload", ErrUnsupportedRuntime)
 			}
-			return nil, fmt.Errorf("packed HX prop-sync requires an LPU-only workload")
+			return ModelProjection{}, fmt.Errorf("packed HX prop-sync requires an LPU-only workload")
 		}
 		edgePositions = nil
 
@@ -56,7 +56,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		case nodes == 32:
 			partition.hxExtent = []int64{width, 8, 2, 2}
 		default:
-			return nil, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.numChips)
+			return ModelProjection{}, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.numChips)
 		}
 	}
 
@@ -65,7 +65,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	// match the manifest order.
 	remote, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, intent.Build, partitions)
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
 	if len(localPartitionIDs) > 0 {
 		edgePositions = retainedPropSyncEdges(partitions, remote, edgePositions)
@@ -77,55 +77,35 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	runtimeBuild.selectedPropSyncChains = nil
 	allocationMetadata, connectors, err := projectV3PropSync(partitions, edgePositions)
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
 
-	// Initialize independent model hashes after validating the shared component geometry.
-	transcripts := newModelProjectionTranscripts(intent, v3ProjectionVersion)
-	for index := range transcripts {
-		transcripts[index].field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
-	}
+	// Record identity fields after validating the shared component geometry.
+	transcript.field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
 	if len(localPartitionIDs) > 0 {
 		encoded, _ := json.Marshal(localPartitionIDs)
-		for index := range transcripts {
-			transcripts[index].field("local-partition-ids", encoded)
-		}
+		transcript.field("local-partition-ids", encoded)
 	}
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
 	agentReplicas := 0
 	for index, partition := range partitions {
 		agentReplicas += partition.effectiveNodeCount()
-		for modelIndex := range transcripts {
-			transcripts[modelIndex].intField("ordered-compiler-id-index", int64(index))
-			transcripts[modelIndex].uint32Field("ordered-compiler-id", uint32(partition.sourcePartitionID))
-		}
+		transcript.intField("ordered-compiler-id-index", int64(index))
+		transcript.uint32Field("ordered-compiler-id", uint32(partition.sourcePartitionID))
 	}
 
-	// Publish distinct logical identities backed by the component's immutable configuration.
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("allocation-metadata", allocationMetadata)
-		// Bind the Cyborg runtime contract into hybrid projection identity.
-		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-
-		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.Build.contentID,
-			contractFormat:         intent.Build.contractFormat,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        runtimeBuild,
-			allocationMetadata:     allocationMetadata,
-			partitions:             partitions,
-			connectors:             connectors,
-			propSyncEdges:          edgePositions,
-			agentReplicas:          agentReplicas,
-			localPartitionIDs:      localPartitionIDs,
-		})
-	}
-	return dst, nil
+	transcript.field("allocation-metadata", allocationMetadata)
+	bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
+	return ModelProjection{
+		configuredBuild:    runtimeBuild,
+		allocationMetadata: allocationMetadata,
+		partitions:         partitions,
+		connectors:         connectors,
+		propSyncEdges:      edgePositions,
+		agentReplicas:      agentReplicas,
+		localPartitionIDs:  localPartitionIDs,
+	}, nil
 }
 
 // retainedPropSyncEdges rebases selected edges from positions in partitions to
