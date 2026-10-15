@@ -486,6 +486,77 @@ def test_yaml_sources_render_through_the_deployment_customizer() -> None:
     assert 'from "./releases.data"' in data
 
 
+def test_deployment_customizer_keeps_secondary_options_collapsed() -> None:
+    customizer = (FERN / "components/DeploymentCustomizer.tsx").read_text()
+    # Secondary settings sit below the primary rows in a section that starts closed.
+    order = [
+        'label="Model"',
+        'label="Image"',
+        'label="Scale"',
+        'label="Deploy"',
+        "Additional options",
+        'label="Model cache"',
+        'label="HF token"',
+        'label="Env vars"',
+        'label="Output"',
+    ]
+    positions = [customizer.index(marker) for marker in order]
+    assert positions == sorted(positions)
+    assert 'isOpen("more", false)' in customizer
+    assert 'disclosure("env", false, envSummary)' in customizer
+    # Long scale tables start as their one-line GPU and pod summary.
+    assert "info.components.length <= OPEN_SCALE_ROWS" in customizer
+    for section in ("variables", "cache"):
+        assert f'disclosure("{section}", true,' in customizer, section
+    # A source link above the embed moves into the panel header.
+    assert "sourceLinkFor(child, nextYaml.title)" in customizer
+    assert 'className="dc-source"' in customizer
+    styles = (FERN / "components/DeploymentCustomizerStyles.tsx").read_text()
+    # Rows use display: grid, which would otherwise override the hidden attribute.
+    assert ".dc [hidden] { display: none !important; }" in styles
+
+
+SOURCE_LINKED_EMBED = re.compile(
+    r"\[Source: `(?P<label>[^`]+)`\]\((?P<url>https://github\.com/ai-dynamo/dynamo/blob/main/[^)\s]+)\)\n\n"
+    r'<Code src="(?P<src>[^"]+)" title="(?P<title>[^"]+)"'
+)
+
+
+def test_each_embed_sits_under_a_source_link_to_the_same_file() -> None:
+    # The deployment customizer moves this link into its header, so it must
+    # directly precede the embed and end with the embed's title.
+    for page in EXAMPLES.glob("*.mdx"):
+        if page.stem in LANDING_PAGES:
+            continue
+        text = page.read_text()
+        linked = list(SOURCE_LINKED_EMBED.finditer(text))
+        assert len(linked) == len(EMBED.findall(text)), page.name
+        for match in linked:
+            path = (page.parent / match["src"]).resolve().relative_to(ROOT).as_posix()
+            assert match["url"].endswith(f"/blob/main/{path}"), (page.name, path)
+            assert match["label"] == match["title"], (page.name, path)
+            assert f"/{path}".endswith(f"/{match['title']}"), (page.name, path)
+
+
+GENERIC_SETUP_PROSE = [
+    "Run local commands from the repository root",
+    "Run commands from the repository root",
+    "Review model and GPU requirements in the files",
+    "Review each script’s model, GPU, and environment requirements",
+    "Replace image, secret, storage, and hardware settings before applying",
+    "Keep supporting resources with their deployment",
+]
+
+
+def test_example_pages_skip_generic_setup_prose() -> None:
+    # Run commands and the deployment customizer cover these; prerequisites
+    # use a one-line **Prerequisites:** link instead.
+    for page in EXAMPLES.glob("*.mdx"):
+        text = page.read_text()
+        for sentence in GENERIC_SETUP_PROSE:
+            assert sentence not in text, (page.name, sentence)
+
+
 def test_multimodal_topology_mapping_uses_semantics_not_filenames() -> None:
     epd = embeds(EXAMPLES / "encode-prefill-decode.mdx")
     e_pd = embeds(EXAMPLES / "encode-pd.mdx")

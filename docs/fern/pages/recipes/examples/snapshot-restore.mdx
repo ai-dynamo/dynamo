@@ -12,8 +12,6 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 **Experimental.** Replace placeholder images, create the `model-cache` PersistentVolumeClaim, and verify the host checkpoint requirements before applying the manifest.
 </Warning>
 
-Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
-
 <ExampleSelector
   variants={[
     {"id": "kubernetes-trtllm-snapshot-restore-yaml", "target": "kubernetes:trtllm", "label": "snapshot-restore.yaml", "description": "Restore a TensorRT-LLM worker from a checkpoint"}
