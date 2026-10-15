@@ -3,35 +3,31 @@
 #
 # EXPERIMENTAL. Disaggregated TensorRT-LLM deployment using the Rust sidecar.
 #
-# Two prefill and two decode replicas run as separate worker pods. Each pod = two containers:
-#   - main: Dynamo worker (dynamo-trtllm-sidecar), no GPU; talks to its engine
-#     over gRPC on 127.0.0.1. Its --disaggregation-mode (prefill|decode) also
-#     picks the component it registers under. Must be named "main" (operator
-#     injects env + probes).
-#   - trtllm-engine: pinned KV-enabled TensorRT-LLM image, holds the GPU,
-#     runs the OpenEngine gRPC server as a native sidecar (see initContainers).
+# Two prefill and two decode replicas run as separate worker pods. Each pod has
+# a KV-enabled TensorRT-LLM engine named main and a Dynamo sidecar named runtime.
+# The runtime's --disaggregation-mode selects its prefill or decode role.
 #
 # The frontend routes to a prefill worker, gets back a `KvSessionRef` handoff,
 # then routes to a decode worker carrying it. The KV cache itself moves
 # engine-to-engine over the cache transceiver, never through the sidecars, so
-# all engines need `cache_transceiver_config` (the ConfigMaps below).
+# both engines need `cache_transceiver_config` (the ConfigMaps below).
 #
-# Each engine publishes native KVCM2 events. The sidecar discovers its ZMQ
-# source and the KV router selects the destination worker and attention-DP rank.
-# This example requires Dynamo frontend and sidecar built from PR #15087.
-# The private engine image requires ghcr-pull-secret in this namespace.
+# Each engine publishes KVCM2 events over ZMQ. The runtime from PR #15087
+# discovers its event source and reports load to the KV router.
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 # The cache transceiver binds a separate port on the pod IP, which is what the
 # peer engine dials.
 #
 # PREREQUISITES / CAVEATS:
-#   - This manifest does not enforce worker placement. NIXL over TCP/CUDA-IPC
-#     needs workers on a compatible fabric; configure placement and validate
-#     the prefill-to-decode transfer before using multiple nodes. On RDMA,
-#     add `rdma/ib: "1"` to each engine's limits and requests where supported.
-#   - Set the sidecar image to nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>,
-#     or build lib/sidecar/Dockerfile.
+#   - The prefill -> decode flow was validated with both engines on one node,
+#     using NIXL over TCP/CUDA-IPC without rdma/ib. This manifest does not
+#     enforce placement. Set placement rules for same-node serving, or validate
+#     the interconnect before running across nodes. On an RDMA fabric, add
+#     `rdma/ib: "1"` to each engine's resource limits and requests. Configure
+#     memory-lock limits and other capabilities as that deployment requires.
+#   - Build frontend and runtime images from PR #15087 and use an operator
+#     that supports the engine-primary native-sidecar layout.
 
 apiVersion: v1
 kind: ConfigMap
@@ -83,6 +79,7 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
+    runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
         containers:
@@ -98,8 +95,11 @@ spec:
   - name: TRTLLMPrefillWorker
     type: prefill
     replicas: 2
+    runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
+        # Temporary private image until the TensorRT-LLM nightly includes KV events.
+        # Create ghcr-pull-secret in the target namespace before applying.
         imagePullSecrets:
         - name: ghcr-pull-secret
         volumes:
@@ -111,30 +111,36 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        # trtllm-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after.
-        initContainers:
-        - name: trtllm-engine
+        containers:
+        - name: main
           image: ghcr.io/tanmayv25/tensorrt-llm-kv-events:20261007-4a599236-amd64@sha256:2b2991e1afec6029a26b3b9feaa1d75f381a283f680ba2e37de1030d83237424
-          restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
-          # startupProbe gates `main`; readinessProbe drops dead workers.
+          # The pinned engine ships OpenEngine bindings under tensorrt_llm,
+          # but importing them loads TensorRT-LLM for every exec probe.
+          # It does not yet serve grpc.health.v1.Health; use Control.Health.
+          # HealthResponse.state is protobuf field 1 (varint); READY is 2.
+          # Int32Value decodes that field and skips any other fields.
           startupProbe:
             exec:
-              command:
+              command: &engineReadyCommand
               - python3
               - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(Int32Value.FromString(r).value != 2)
+              - |
+                import grpc
+                from google.protobuf.wrappers_pb2 import Int32Value
+
+                channel = grpc.insecure_channel("127.0.0.1:50051")
+                response = channel.unary_unary("/openengine.v1.Control/Health")(
+                    b"", timeout=3
+                )
+                raise SystemExit(Int32Value.FromString(response).value != 2)
             periodSeconds: 5
             timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
-            failureThreshold: 60   # ~5 min for model load; raise for big models
+            failureThreshold: 360   # Up to 30 min for model load and warmup.
           readinessProbe:
             exec:
-              command:
-              - python3
-              - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(Int32Value.FromString(r).value != 2)
+              command: *engineReadyCommand
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
@@ -206,13 +212,11 @@ spec:
           - "4096"
           - --extra_llm_api_options
           - /config/config.yaml
-        containers:
-        # Sidecar worker. Use nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
-        # or build from lib/sidecar/Dockerfile; add
-        # imagePullSecrets if private. Must be named "main" (operator injects
-        # discovery env + probes by name).
-        - name: main
+        initContainers:
+        # Dynamo runtime starts first and receives discovery env and probes.
+        - name: runtime
           image: <your-registry>/dynamo-sidecar:<pr15087-build>
+          restartPolicy: Always
           command:
           - dynamo-trtllm-sidecar
           args:
@@ -232,8 +236,11 @@ spec:
   - name: TRTLLMDecodeWorker
     type: decode
     replicas: 2
+    runtimeVersionOverride: "1.6.0"
     podTemplate:
       spec:
+        # Temporary private image until the TensorRT-LLM nightly includes KV events.
+        # Create ghcr-pull-secret in the target namespace before applying.
         imagePullSecrets:
         - name: ghcr-pull-secret
         volumes:
@@ -244,25 +251,18 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        initContainers:
-        - name: trtllm-engine
+        containers:
+        - name: main
           image: ghcr.io/tanmayv25/tensorrt-llm-kv-events:20261007-4a599236-amd64@sha256:2b2991e1afec6029a26b3b9feaa1d75f381a283f680ba2e37de1030d83237424
-          restartPolicy: Always
           startupProbe:
             exec:
-              command:
-              - python3
-              - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(Int32Value.FromString(r).value != 2)
+              command: *engineReadyCommand
             periodSeconds: 5
             timeoutSeconds: 10
-            failureThreshold: 60
+            failureThreshold: 360
           readinessProbe:
             exec:
-              command:
-              - python3
-              - -c
-              - import grpc; from google.protobuf.wrappers_pb2 import Int32Value; r=grpc.insecure_channel('127.0.0.1:50051').unary_unary('/openengine.v1.Control/Health')(b'', timeout=3); exit(Int32Value.FromString(r).value != 2)
+              command: *engineReadyCommand
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
@@ -314,9 +314,10 @@ spec:
           - "4096"
           - --extra_llm_api_options
           - /config/config.yaml
-        containers:
-        - name: main
+        initContainers:
+        - name: runtime
           image: <your-registry>/dynamo-sidecar:<pr15087-build>
+          restartPolicy: Always
           command:
           - dynamo-trtllm-sidecar
           args:
@@ -331,3 +332,4 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+  backendFramework: trtllm
