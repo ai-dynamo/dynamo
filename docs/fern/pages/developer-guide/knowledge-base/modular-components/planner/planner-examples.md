@@ -10,6 +10,40 @@ integrations. For DGDR manifests, see
 [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx). For the full configuration
 reference, see the [Planner Guide](planner-guide.md).
 
+## Direct Deployments Without Profiling ConfigMaps
+
+The disaggregated [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_planner.yaml),
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/disagg_planner.yaml),
+and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/disagg_planner.yaml)
+manifests pass the Planner configuration inline through `--config` and enable
+worker scaling adapters. They use worker self-benchmark results when available
+and otherwise warm the performance model from live Forward Pass Metrics (FPM).
+They do not mount profiling arrays or a Planner configuration ConfigMap.
+SLA scaling can report `model_not_ready` during live warmup.
+
+Install the Dynamo operator, configure Prometheus, and provide the `hf-token-secret`
+in the deployment namespace as described in [Tune the Planner](../../../../kubernetes/auto-deployment/dynamo-planner.mdx).
+Set `FRONTEND_IMAGE`, `PLANNER_IMAGE`, and the selected backend's image variable
+to compatible images from the same Dynamo release. For vLLM, render and apply:
+
+```bash
+: "${FRONTEND_IMAGE:?Set the Dynamo frontend image}"
+: "${PLANNER_IMAGE:?Set the dedicated Dynamo planner image}"
+: "${VLLM_IMAGE:?Set the vLLM runtime image}"
+: "${NAMESPACE:?Set the deployment namespace}"
+export FRONTEND_IMAGE PLANNER_IMAGE VLLM_IMAGE
+envsubst '${FRONTEND_IMAGE} ${PLANNER_IMAGE} ${VLLM_IMAGE}' \
+  < examples/backends/vllm/deploy/disagg_planner.yaml \
+  | kubectl apply -n "${NAMESPACE}" -f -
+```
+
+For SGLang or TensorRT-LLM, select the corresponding manifest and substitute
+`SGLANG_IMAGE` or `TRTLLM_IMAGE` instead of `VLLM_IMAGE`. Set `ttft_ms`, `itl_ms`,
+and `max_gpu_budget` in the inline configuration for your workload and cluster.
+Check readiness with `kubectl get dgd -n "${NAMESPACE}"` and inspect the Planner
+logs while sending traffic. Read [Current Limitations](overview.md#current-limitations)
+for backend-specific FPM requirements.
+
 ## Compare Autoscaling Policies with Planner Gym
 
 **Experimental.** [Planner Gym](https://github.com/ai-dynamo/dynamo/tree/main/gyms/planner-gym)

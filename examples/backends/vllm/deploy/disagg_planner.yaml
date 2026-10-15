@@ -11,7 +11,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        - image: ${FRONTEND_IMAGE}
           name: main
     replicas: 1
     type: frontend
@@ -21,25 +21,25 @@ spec:
         containers:
         - args:
           - --config
-          - '{"environment": "kubernetes", "backend": "vllm", "optimization_target": "sla",
-            "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
-            "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
+          # Bootstrap from worker self-benchmarks or live FPM; no profile ConfigMap.
+          - >-
+            {"environment": "kubernetes", "backend": "vllm", "mode": "disagg",
+            "optimization_target": "sla", "ttft_ms": 500, "itl_ms": 50,
+            "enable_throughput_scaling": true, "enable_load_scaling": true,
+            "pre_deployment_sweeping_mode": "none", "min_endpoint": 1,
+            "max_gpu_budget": 8, "throughput_adjustment_interval_seconds": 60,
+            "load_adjustment_interval_seconds": 5}
           command:
           - python3
           - -m
           - dynamo.planner
-          # Planner image selection:
-          #   Dynamo >= 1.1.0: use the dedicated planner image
-          #     nvcr.io/nvidia/ai-dynamo/dynamo-planner:<version>
-          #     (backend runtime images no longer ship planner runtime deps
-          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
-          #   Dynamo <  1.1.0: use the backend runtime image
-          #     nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>.
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          image: ${PLANNER_IMAGE}
           name: main
     replicas: 1
     type: planner
   - name: decode
+    scalingAdapter:
+      enabled: true
     podTemplate:
       spec:
         containers:
@@ -57,7 +57,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: ${VLLM_IMAGE}
           name: main
           resources:
             limits:
@@ -66,6 +66,8 @@ spec:
     replicas: 1
     type: decode
   - name: prefill
+    scalingAdapter:
+      enabled: true
     podTemplate:
       spec:
         containers:
@@ -83,7 +85,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: ${VLLM_IMAGE}
           name: main
           resources:
             limits:
