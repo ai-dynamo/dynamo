@@ -19,17 +19,22 @@ targets:
     count: 4
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-h100-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 270 output tok/s/GPU, 102.2 user tok/s P50, TTFT P50 0.49 s at concurrency 16 (2 workers, TP2 per worker, SWE-bench Pro replay).
@@ -40,6 +45,7 @@ targets:
     count: 4
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -52,6 +58,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-h100-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 259 output tok/s/GPU, 106 user tok/s P50, TTFT P50 1.3 s at concurrency 16 (1P1D, TP2 per worker, SWE-bench Pro replay).
@@ -62,17 +71,22 @@ targets:
     count: 2
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-h200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 376 output tok/s/GPU, 61 user tok/s P50, TTFT P50 0.71 s at concurrency 16 (2 workers, SWE-bench Pro replay).
@@ -83,6 +97,7 @@ targets:
     count: 2
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -95,6 +110,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-h200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 361 output tok/s/GPU, 61.6 user tok/s P50, TTFT P50 1.87 s at concurrency 16 (1P1D, SWE-bench Pro replay).
@@ -105,17 +123,22 @@ targets:
     count: 4
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,378.9 raw output tok/s/GPU, 68.86 user tok/s P50, TTFT P50 0.396 s at concurrency 128 (4 workers, SWE-bench Pro replay).
@@ -126,6 +149,7 @@ targets:
     count: 5
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -138,6 +162,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,050.44 output tok/s/GPU, 60.84 user tok/s P50, TTFT P50 1.073 s at concurrency 128 (3P2D, SWE-bench Pro replay).
@@ -148,17 +175,22 @@ targets:
     count: 4
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-gb200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,503.57 raw output tok/s/GPU, 76.15 user tok/s P50, TTFT P50 0.403 s at concurrency 128 (4 workers, SWE-bench Pro replay).
@@ -169,6 +201,7 @@ targets:
     count: 5
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -181,6 +214,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-gb200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,269.93 raw output tok/s/GPU, 82.09 user tok/s P50, TTFT P50 0.836 s at concurrency 128 (5 GPUs, 3P2D MTP3, one-hour SWE-bench Pro replay, synthetic acceptance 3.2418; 0% request errors; runtime f27880e; recipe defaults to real acceptance).
@@ -191,17 +227,22 @@ targets:
     count: 4
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-b300-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,536 output tok/s/GPU, 78.5 user tok/s P50, TTFT P50 0.438 s at concurrency 128 (4 workers, SWE-bench Pro replay).
@@ -212,6 +253,7 @@ targets:
     count: 5
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -224,6 +266,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-b300-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,317 output tok/s/GPU, 68.1 user tok/s P50, TTFT P50 1.39 s at concurrency 160 (3P2D, SWE-bench Pro replay).
@@ -234,17 +279,22 @@ targets:
     count: 4
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-gb300-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,719.51 raw output tok/s/GPU, 67.9 user tok/s P50, TTFT P50 0.381 s at concurrency 160 (4 workers, SWE-bench Pro replay).
@@ -255,6 +305,7 @@ targets:
     count: 5
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -267,6 +318,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-gb300-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 1,356.51 raw output tok/s/GPU, 82.76 user tok/s P50, TTFT P50 0.649 s at concurrency 128 (5 GPUs, 3P2D MTP3, one-hour SWE-bench Pro replay, synthetic acceptance 3.2418; 0% request errors; runtime f27880e; recipe defaults to real acceptance).
@@ -277,17 +331,22 @@ targets:
     count: 11
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
   - session-affinity
   - mtp-speculative-decoding
   - fp8-kv-cache
+  - cpu-kv-offload
   workload:
     type: swe-bench-pro-trace
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/agg-vr200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 2,969 raw output tok/s/GPU, 96.6 user tok/s P50, TTFT P50 0.49 s at concurrency 616 (11 workers, swe-bench-pro-trace,
@@ -299,6 +358,7 @@ targets:
     count: 11
   runtime:
     framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
   topology: disaggregated
   techniques:
   - kv-aware-routing
@@ -311,6 +371,9 @@ targets:
     sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
   deploy:
     asset: recipes/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-vr200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
   expected_performance:
     available: true
     summary: 3,276 raw output tok/s/GPU, 155.9 user tok/s P50, TTFT P50 1.12 s at concurrency 528 (7P4D, swe-bench-pro-trace,
@@ -319,5 +382,4 @@ targets:
 maintainer: Alexandre Milesi
 gaps:
 - Image and video qualification pending.
-- Public release images pending; images require registry access.
 - Site-specific network devices and health behavior require deployment qualification.
