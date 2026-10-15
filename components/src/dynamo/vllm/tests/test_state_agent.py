@@ -10,7 +10,6 @@ import pytest
 
 pytest.importorskip("vllm.config")
 
-from dynamo.common.utils.topology import TopologyConfig  # noqa: E402
 from dynamo.vllm import state_agent  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
 
@@ -251,15 +250,6 @@ async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
             pass
 
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", FakeOwner)
-    monkeypatch.setattr(
-        state_agent,
-        "read_topology_config",
-        lambda: TopologyConfig(
-            topology_domains={"rdma-island": "island-1"},
-            kv_transfer_domain="rdma-island",
-            kv_transfer_enforcement="required",
-        ),
-    )
     config = _config({"0": _owner("a")})
     config.disaggregation_mode = state_agent.DisaggregationMode.PREFILL
     config.engine_args.kv_transfer_config.kv_connector_extra_config[
@@ -276,6 +266,7 @@ async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
         SimpleNamespace(connection_id=lambda: 17),
         _vllm_config(0, 1),
         image_token_id=None,
+        topology_domains={"rdma-island": "island-1"},
     )
 
     assert [

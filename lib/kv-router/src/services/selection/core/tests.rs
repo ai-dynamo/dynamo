@@ -3579,7 +3579,6 @@ fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
     config
 }
 
-/// The hint source endpoint for target worker 7.
 fn hint_endpoint(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     candidates: &KvTransferCandidates,
