@@ -102,8 +102,6 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
         ));
 
     match error.typed_error {
-        // Checked before the class, so a refusal caused by a migration-sensitive
-        // error keeps the withheld-cause wrapper.
         Some(typed)
             if !is_migration_sensitive(&typed) && typed.class() == ErrorClass::InvalidRequest =>
         {

@@ -124,8 +124,6 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
         ),
         "{error}"
     );
-    // A validation refusal is not a transport failure: no CannotConnect
-    // ancestor, and the worker stays routable with no wait for reconciliation.
     assert_eq!(
         error.class(),
         dynamo_backend_common::ErrorType::InvalidRequest,

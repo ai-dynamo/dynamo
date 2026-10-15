@@ -914,8 +914,6 @@ mod tests {
         assert_eq!(source.reason().as_str(), "capacity.worker_overloaded");
     }
 
-    // A validation refusal must not carry a CannotConnect ancestor, which would
-    // quarantine the worker and migrate the request to every other worker.
     #[test]
     fn pre_stream_validation_refusal_is_not_a_transport_failure() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
