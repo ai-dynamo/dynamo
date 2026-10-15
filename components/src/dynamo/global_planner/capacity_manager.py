@@ -17,10 +17,13 @@ The concrete Kubernetes backend is
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypeVar
 
 from dynamo.planner import TargetReplica
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -105,6 +108,10 @@ class CapacityManager:
     async def wait_for_ready(self, participant_id: str) -> None:
         """Wait until one participant has settled after an accepted scale."""
         raise NotImplementedError
+
+    async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
+        """Run a complete capacity transaction with backend conflict semantics."""
+        return await operation()
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         """Read back current replica counts as ``{sub_type: replicas}``."""

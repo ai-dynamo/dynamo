@@ -17,7 +17,8 @@ a generic ``worker`` — the role hinted by its Planner's
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from collections.abc import Awaitable, Callable
+from typing import Optional, TypeVar
 
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
@@ -35,6 +36,8 @@ from dynamo.planner.monitoring.dgd_services import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class KubernetesCapacityManager(CapacityManager):
@@ -112,6 +115,7 @@ class KubernetesCapacityManager(CapacityManager):
                         k8s_namespace=self.namespace,
                         parent_dgd_name=name,
                         raise_not_ready=True,
+                        retry_conflicts=False,
                     )
                     self.connectors[participant_id] = connector
                 discovered.append(name)
@@ -136,6 +140,7 @@ class KubernetesCapacityManager(CapacityManager):
                 k8s_namespace=namespace,
                 parent_dgd_name=deployment_name,
                 raise_not_ready=True,
+                retry_conflicts=False,
             )
             self.connectors[participant_id] = connector
             logger.debug(f"Created new connector for {participant_id}")
@@ -311,6 +316,12 @@ class KubernetesCapacityManager(CapacityManager):
         """Wait for one participant without repeating its accepted write."""
         connector = self.connectors[participant_id]
         await connector.wait_for_deployment_ready()
+
+    async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
+        """Re-run the complete budget transaction after a Kubernetes conflict."""
+        from kubernetes.aio.utils.retry import retry_on_conflict
+
+        return await retry_on_conflict(operation)
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         connector = self.connectors[participant_id]

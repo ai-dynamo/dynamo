@@ -60,7 +60,7 @@ async def test_handler_authorization_success(mock_runtime):
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
-        mock_connector.set_component_replicas = AsyncMock()
+        mock_connector.set_component_replicas = AsyncMock(return_value=True)
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=_dgd_spec(prefill_replicas=3, decode_replicas=5)
@@ -146,7 +146,7 @@ async def test_handler_multiple_dgds(mock_runtime):
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
-        mock_connector.set_component_replicas = AsyncMock()
+        mock_connector.set_component_replicas = AsyncMock(return_value=True)
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={"spec": {"components": []}}
@@ -303,7 +303,7 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
-        mock_connector.set_component_replicas = AsyncMock()
+        mock_connector.set_component_replicas = AsyncMock(return_value=True)
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={"spec": {"components": []}}
@@ -427,7 +427,7 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
     """Attach a mocked KubernetesConnector to the handler for one DGD."""
     connector = AsyncMock()
     connector._async_init = AsyncMock()
-    connector.set_component_replicas = AsyncMock()
+    connector.set_component_replicas = AsyncMock(return_value=True)
     connector.parent_dgd_name = parent_dgd_name
     connector.kube_api = MagicMock()
     connector.kube_api.get_graph_deployment = MagicMock(return_value=dgd_spec_dict)
@@ -442,6 +442,7 @@ def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my
             dynamo_namespace="test",
             parent_dgd_name=parent_dgd_name,
             raise_not_ready=True,
+            retry_conflicts=False,
         )
     connector.kube_api.get_graph_deployment.return_value = dgd_spec_dict
     connector.kube_api.is_deployment_ready.return_value = True
@@ -728,13 +729,10 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
 
 
 @pytest.mark.asyncio
-async def test_cross_dgd_pair_second_patch_not_ready_self_corrects(
-    mock_runtime, caplog
+async def test_cross_dgd_pair_second_patch_not_ready_reports_partial_error(
+    mock_runtime,
 ):
-    """If a later cross-DGD patch is skipped because the DGD is not ready,
-    the first patch stays applied and the request side still reports success."""
-    import logging as _logging
-
+    """A later rejected patch reports the already-applied plan as partial."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -762,18 +760,12 @@ async def test_cross_dgd_pair_second_patch_not_ready_self_corrects(
     )
 
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
-    with caplog.at_level(
-        _logging.WARNING, logger="dynamo.global_planner.scale_handler"
-    ):
-        results = await _run(handler, req)
+    results = await _run(handler, req)
 
     connector_a.set_component_replicas.assert_called_once()
     connector_b.set_component_replicas.assert_called_once()
-    assert results[0]["status"] == "success"
-    assert any(
-        "not ready" in rec.message and "will self-correct" in rec.message
-        for rec in caplog.records
-    )
+    assert results[0]["status"] == "error"
+    assert "after applying" in results[0]["message"]
 
 
 @pytest.mark.asyncio

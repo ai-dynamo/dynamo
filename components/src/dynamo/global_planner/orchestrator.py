@@ -256,17 +256,21 @@ class Orchestrator:
 
         The observe -> decide -> scale span is serialized under the scale lock
         (when enabled) so concurrent requests cannot both pass against the same
-        pre-scale state. Patch failures propagate to the caller (the API layer
-        maps them to REJECTED / ERROR).
+        pre-scale state. Backend conflict retries repeat this complete span so
+        every write is mediated against its fresh observation. Other patch
+        failures propagate to the caller (the API layer maps them to REJECTED /
+        ERROR).
         """
+
+        async def operation() -> ScaleOutcome:
+            return await self._observe_decide_apply(
+                participant_id, targets, blocking, deployment_name, caller_name
+            )
+
         if self._scale_lock is not None:
             async with self._scale_lock:
-                return await self._observe_decide_apply(
-                    participant_id, targets, blocking, deployment_name, caller_name
-                )
-        return await self._observe_decide_apply(
-            participant_id, targets, blocking, deployment_name, caller_name
-        )
+                return await self.capacity_manager.run_with_conflict_retry(operation)
+        return await self.capacity_manager.run_with_conflict_retry(operation)
 
     async def _observe_decide_apply(
         self,
@@ -412,7 +416,7 @@ class Orchestrator:
                     f"Multi-partner transfer: unknown participant {pid} "
                     f"after applying {applied}; stopping plan until the next tick"
                 )
-                break
+                return self._partial_plan_error(pid, applied, "participant is unknown")
             try:
                 accepted = await self.capacity_manager.scale(pid, tgts, blocking=False)
             except DynamoGraphDeploymentNotReadyError as patch_err:
@@ -426,7 +430,9 @@ class Orchestrator:
                     applied,
                     patch_err,
                 )
-                break
+                return self._partial_plan_error(
+                    pid, applied, f"participant is not ready: {patch_err}"
+                )
             except Exception as patch_err:
                 if i == 0:
                     # First patch failure: nothing applied, propagate to the
@@ -437,7 +443,7 @@ class Orchestrator:
                     f"failed after applying {applied}: "
                     f"{patch_err}; stopping plan until the next tick"
                 )
-                break
+                return self._partial_plan_error(pid, applied, str(patch_err))
             if not accepted:
                 logger.warning(
                     "Multi-partner transfer: participant %s did not accept its "
@@ -445,6 +451,10 @@ class Orchestrator:
                     pid,
                     applied,
                 )
+                if applied:
+                    return self._partial_plan_error(
+                        pid, applied, "participant did not accept its scale target"
+                    )
                 return (
                     ScaleOutcome(
                         status=ScaleStatus.REJECTED,
@@ -458,6 +468,23 @@ class Orchestrator:
                 await self.capacity_manager.wait_for_ready(pid)
 
         return None, applied
+
+    @staticmethod
+    def _partial_plan_error(
+        participant_id: str, applied: list[str], reason: str
+    ) -> tuple[ScaleOutcome, list[str]]:
+        """Report a stopped plan after at least one participant was changed."""
+        return (
+            ScaleOutcome(
+                status=ScaleStatus.ERROR,
+                message=(
+                    f"Scale plan stopped at {participant_id} after applying "
+                    f"{applied}: {reason}"
+                ),
+                current_replicas={},
+            ),
+            applied,
+        )
 
     # ------------------------------------------------------------------ #
     # Budget arbitration (decision)                                      #

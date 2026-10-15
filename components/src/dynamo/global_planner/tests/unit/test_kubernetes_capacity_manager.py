@@ -9,6 +9,7 @@ Pool state is read from the v1beta1 DGD component model (``spec.components[]``).
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kubernetes import client
 
 from dynamo.global_planner.capacity_manager import PoolSpec
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
@@ -150,7 +151,13 @@ def test_discover_explicit_mode():
         assert discovered == ["model-a"]
         assert "default/model-a" in cm.connectors
         assert "default/model-b" not in cm.connectors
-        assert mock_connector_cls.call_count == 1
+        mock_connector_cls.assert_called_once_with(
+            dynamo_namespace="discovered",
+            k8s_namespace="default",
+            parent_dgd_name="model-a",
+            raise_not_ready=True,
+            retry_conflicts=False,
+        )
 
 
 def test_discover_implicit_mode():
@@ -229,6 +236,22 @@ async def test_scale_calls_connector():
 
     assert accepted
     connector.set_component_replicas.assert_awaited_once_with(targets, blocking=True)
+
+
+@pytest.mark.asyncio
+async def test_run_with_conflict_retry_restarts_complete_operation():
+    cm = KubernetesCapacityManager("default")
+    attempts = 0
+
+    async def operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise client.ApiException(status=409)
+        return "applied"
+
+    assert await cm.run_with_conflict_retry(operation) == "applied"
+    assert attempts == 2
 
 
 @pytest.mark.asyncio

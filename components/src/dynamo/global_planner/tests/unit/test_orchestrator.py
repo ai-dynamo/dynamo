@@ -244,6 +244,47 @@ async def test_submit_approves_and_actuates(use_lock):
 
 
 @pytest.mark.asyncio
+async def test_conflict_retry_reobserves_before_reapplying_budget_decision():
+    class ConflictError(Exception):
+        pass
+
+    class RetryingCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.observe_calls = 0
+            self.scale_calls = 0
+
+        def observe(self, require_complete=False):
+            self.observe_calls += 1
+            return super().observe(require_complete)
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            if self.scale_calls == 1:
+                self.pools["default/a"]["decode"][0] = 9
+                raise ConflictError()
+            return await super().scale(participant_id, targets, blocking)
+
+        async def run_with_conflict_retry(self, operation):
+            try:
+                return await operation()
+            except ConflictError:
+                return await operation()
+
+    cm = RetryingCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=10)
+
+    result = await _submit(orch, "default/b", _targets(decode=3))
+
+    assert result.status == ScaleStatus.REJECTED
+    assert cm.observe_calls == 2
+    assert cm.scale_calls == 1
+    assert cm.pools["default/b"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
 async def test_submit_does_not_issue_post_write_readback():
     class NoReadbackCapacityManager(FakeCapacityManager):
         def current_replicas(self, participant_id):
