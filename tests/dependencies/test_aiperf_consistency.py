@@ -69,7 +69,7 @@ def test_benchmark_python_range_matches_aiperf(version: str) -> None:
     assert "Programming Language :: Python :: 3.10" not in project["classifiers"]
 
 
-@pytest.mark.parametrize("component", ["common", "test"])
+@pytest.mark.parametrize("component", ["common", "test", "vllm"])
 def test_zstandard_pin_accepts_aiperf_requirement(component: str) -> None:
     requirements = ROOT / f"container/deps/requirements.{component}.txt"
     pin = next(

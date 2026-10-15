@@ -23,6 +23,54 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
 		{
+			name: "explicit Coherent externally scaled LPX accepts native minimum and budget without a capacity warning",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+		{
+			name: "Coherent externally scaled LPX accepts a budget above its seed",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":3}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+		},
+		{
+			name: "LPX budget may exceed the immutable PCS template seed",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = k8sptr.To(int32(4))
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+		},
+		{
+			name: "explicit Coherent LPX native budget must cover the native viable unit",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWebhookErrs: []string{`spec.components[0].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+
+		{
+			name: "unannotated LPX native budget keeps RollingRecreate without a Coherent minimum floor",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+
+		{
 			name: "singleton LPX preserves omitted replicas with minimum availability above one",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
@@ -353,16 +401,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantSchemaErr: `spec.components[0].roles[1]: Duplicate value: map[string]interface {}{"name":"agent"}`,
 		},
 		{
-			name: "LPX reserves materialized agent container names",
+			name: "LPX allows role names in sidecars and init containers",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				role := &dgd.Spec.Components[0].Roles[0]
-				role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
-				role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "agent", Image: "setup"}}
+				for _, role := range dgd.Spec.Components[0].Roles {
+					role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
+					role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+				}
 			}),
-			wantWebhookErrs: []string{
-				`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-			},
 		},
 		{
 			name: "LPX rejects a missing conductor role on CREATE despite a conductor-named sidecar",
@@ -384,7 +429,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX defers explicit conductor name checks until build mode is known",
+			name: "LPX allows a conductor sidecar named conductor",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()
