@@ -218,7 +218,7 @@ impl SelectionServiceBuilder {
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
             let affinity_core = Arc::downgrade(&core);
-            Some(PeerManager::start_with_affinity(
+            Some(Arc::new(PeerManager::start_with_affinity(
                 self.replica_sync_peers,
                 cancel_token.child_token(),
                 move |event| {
@@ -233,7 +233,7 @@ impl SelectionServiceBuilder {
                         }
                     }
                 }),
-            )?)
+            )?))
         } else {
             None
         };
@@ -301,7 +301,7 @@ impl Drop for StartupGuard {
 
 pub struct SelectionService {
     core: Arc<SelectionCore>,
-    peer_manager: Option<PeerManager>,
+    peer_manager: Option<Arc<PeerManager>>,
     replica_runtime: Option<ReplicaSyncRuntime>,
     replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
@@ -477,8 +477,12 @@ impl SelectionService {
     pub fn list_replica_peers(&self) -> Vec<String> {
         self.peer_manager
             .as_ref()
-            .map(PeerManager::list_peers)
+            .map(|peer_manager| peer_manager.list_peers())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
+        self.peer_manager.clone()
     }
 
     pub async fn indexer_snapshot(&self) -> serde_json::Value {

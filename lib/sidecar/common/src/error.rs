@@ -80,6 +80,17 @@ pub fn connection_timeout(message: impl Into<String>) -> DynamoError {
     backend(BackendError::ConnectionTimeout, message)
 }
 
+fn typed(kind: ErrorType, message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(kind)
+        .message(message)
+        .build()
+}
+
+pub fn cancelled(message: impl Into<String>) -> DynamoError {
+    typed(ErrorType::Cancelled, message)
+}
+
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     status_to_dynamo_parts(rpc, status.message(), status.code())
 }
@@ -118,6 +129,21 @@ mod tests {
     fn maps_transport_statuses_to_backend_errors() {
         for (code, expected) in [
             (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
+            (tonic::Code::NotFound, BackendError::InvalidArgument),
+            (tonic::Code::OutOfRange, BackendError::InvalidArgument),
+            (
+                tonic::Code::FailedPrecondition,
+                BackendError::InvalidArgument,
+            ),
+            (tonic::Code::AlreadyExists, BackendError::InvalidArgument),
+            (tonic::Code::Unknown, BackendError::Unknown),
+            (tonic::Code::Unimplemented, BackendError::Unknown),
+            (tonic::Code::ResourceExhausted, BackendError::Unknown),
+            (tonic::Code::PermissionDenied, BackendError::Unknown),
+            (tonic::Code::Unauthenticated, BackendError::Unknown),
+            (tonic::Code::Aborted, BackendError::Unknown),
+            (tonic::Code::DataLoss, BackendError::Unknown),
+            (tonic::Code::Ok, BackendError::Unknown),
             (tonic::Code::Unavailable, BackendError::CannotConnect),
             (tonic::Code::Cancelled, BackendError::Cancelled),
             (
@@ -125,9 +151,26 @@ mod tests {
                 BackendError::ConnectionTimeout,
             ),
             (tonic::Code::Internal, BackendError::Unknown),
+            // Not WorkerOverloaded: that type is migratable, and a shared
+            // helper cannot tell an overloaded engine from a per-request
+            // rejection such as an oversized message, which every worker would
+            // reject identically. A backend that knows its server means
+            // backpressure maps this itself.
+            (tonic::Code::ResourceExhausted, BackendError::Unknown),
         ] {
             let error = status_to_dynamo("Test", tonic::Status::new(code, "failure"));
             assert_eq!(error.error_type(), ErrorType::Backend(expected));
+            assert!(error.to_string().contains("Test: failure"));
+            assert!(error.to_string().contains(&format!("{code:?}")));
+            #[cfg(feature = "tonic-v14")]
+            {
+                let v14 = crate::error::status_to_dynamo_v14(
+                    "Test",
+                    tonic_v14::Status::new(tonic_v14::Code::from_i32(code as i32), "failure"),
+                );
+                assert_eq!(v14.error_type(), error.error_type());
+                assert_eq!(v14.to_string(), error.to_string());
+            }
         }
     }
 }

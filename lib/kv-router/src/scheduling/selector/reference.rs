@@ -271,6 +271,7 @@ fn default_row(
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
+    input.track_kept_candidate(worker);
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
@@ -1009,6 +1010,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
+        assert_eq!(result.max_raw_cached_tokens, None);
     }
 
     #[test]

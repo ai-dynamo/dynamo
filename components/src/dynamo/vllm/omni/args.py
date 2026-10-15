@@ -48,7 +48,7 @@ class OmniDiffusionKwargs:
     """
 
     enable_layerwise_offload: Optional[bool] = None
-    layerwise_num_gpu_layers: int = 1
+    layerwise_num_gpu_layers: Optional[int] = None
     vae_use_slicing: Optional[bool] = None
     vae_use_tiling: Optional[bool] = None
     boundary_ratio: Optional[float] = None
@@ -113,6 +113,18 @@ class OmniArgGroup(ArgGroup):
             arg_type=int,
             help="Default frames per second for generated videos.",
         )
+        add_argument(
+            g,
+            flag_name="--image-png-compression-level",
+            env_var="DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL",
+            default=6,
+            arg_type=int,
+            help=(
+                "Lossless PNG compression level for generated images (0-9). "
+                "0 disables compression for faster encoding and larger responses; "
+                "6 preserves Pillow's default. Set on the router in disaggregated mode."
+            ),
+        )
 
         # OmniDiffusionKwargs fields
         add_negatable_bool_argument(
@@ -127,9 +139,12 @@ class OmniArgGroup(ArgGroup):
             g,
             flag_name="--layerwise-num-gpu-layers",
             env_var="DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS",
-            default=1,
+            default=None,
             arg_type=int,
-            help="Number of ready layers (blocks) to keep on GPU during generation.",
+            help=(
+                "Unsupported legacy option. Remove it and use "
+                "--enable-layerwise-offload without a layer-count override."
+            ),
         )
         add_negatable_bool_argument(
             g,
@@ -440,6 +455,7 @@ class OmniConfig(DynamoRuntimeConfig):
 
     stage_configs_path: Optional[str] = None
     default_video_fps: int = 16
+    image_png_compression_level: int = 6
 
     # Nested structs — each group of fields has a clear destination
     diffusion: OmniDiffusionKwargs = dataclasses.field(
@@ -490,8 +506,16 @@ class OmniConfig(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        if self.diffusion.layerwise_num_gpu_layers is not None:
+            raise ValueError(
+                "--layerwise-num-gpu-layers is no longer supported by vLLM-Omni. "
+                "Remove it or unset DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS; use "
+                "--enable-layerwise-offload without a layer-count override."
+            )
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
+        if not 0 <= self.image_png_compression_level <= 9:
+            raise ValueError("--image-png-compression-level must be between 0 and 9")
         if self.parallel.ulysses_degree <= 0:
             raise ValueError("--ulysses-degree must be > 0")
         if self.parallel.ring_degree <= 0:

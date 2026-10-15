@@ -18,6 +18,10 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
+from aisimulate.runner import (
+    EngineReplayRunnerFactory,
+    materialize_engine_launch_config,
+)
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -28,13 +32,12 @@ from aisimulate.sweeper.replay import (
 )
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay.api import (
     TelemetryOptions,
     run_synthetic_trace_replay,
     run_trace_replay,
 )
-from dynamo.replay.config import lower_upstream_engine_args
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -47,13 +50,6 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
-_SUPPORTED_BACKEND_TOPOLOGIES = (
-    ("vllm", "agg"),
-    ("vllm", "disagg"),
-    ("sglang", "agg"),
-    ("sglang", "disagg"),
-    ("trtllm", "agg"),
-)
 
 
 @dataclass(frozen=True)
@@ -66,13 +62,21 @@ class DynamoReplayRunnerFactory:
     def capabilities(self) -> RunnerCapabilities:
         """Advertise the backend/topology and Dynamo hook support."""
 
+        engine_capabilities = EngineReplayRunnerFactory().capabilities()
         return RunnerCapabilities(
             # Runner-owned constant: do not inherit the consumer package's default,
             # otherwise an old Dynamo wheel can self-certify against a newer spec.
             replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
-            supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
+            supported_backend_topologies=tuple(
+                (backend, topology)
+                for backend, topology in engine_capabilities.supported_backend_topologies
+                if backend in ("vllm", "sglang", "trtllm")
+                and topology in ("agg", "disagg")
+            ),
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
-            supports_disaggregated_attention_dp=False,
+            supports_disaggregated_attention_dp=(
+                engine_capabilities.supports_disaggregated_attention_dp
+            ),
             supported_execution_modes=("offline",),
             supported_trace_formats=(
                 "mooncake",
@@ -82,10 +86,24 @@ class DynamoReplayRunnerFactory:
                 "dynamo",
                 "weka",
             ),
-            supports_agentic_lanes=True,
+            supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
+            supports_agentic_host_offload=(
+                engine_capabilities.supports_agentic_host_offload
+            ),
+            # The composed mocker path preserves HBM-only MTP and decode-speedup
+            # support. The shared G2 gate and native guard reject that combination.
+            supports_agentic_speculative_decoding=True,
+            supports_agentic_snapshots=engine_capabilities.supports_agentic_snapshots,
+            supports_agentic_warmup=engine_capabilities.supports_agentic_warmup,
+            supports_agentic_profile=engine_capabilities.supports_agentic_profile,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
-            supported_agentic_topologies=("agg",),
+            supported_agentic_topologies=tuple(
+                topology
+                for topology in engine_capabilities.supported_agentic_topologies
+                if topology in ("agg", "disagg")
+            ),
+            supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
         )
 
@@ -160,8 +178,10 @@ class DynamoReplayRunner:
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
-        if trace_format in {"weka", "agentic_mooncake"} or (
-            trace_format == "dynamo" and agentic_lanes is not None
+        if (
+            "agentic_graph" in metadata
+            or trace_format in {"weka", "agentic_mooncake"}
+            or (trace_format == "dynamo" and agentic_lanes is not None)
         ):
             metadata.update(
                 agentic_qualification=self.capabilities.agentic_qualification,
@@ -302,9 +322,16 @@ class DynamoReplayRunner:
                 candidates += [config.get("model_path"), config.get("model")]
         if isinstance(raw_engine_args, Mapping):
             candidates.append(raw_engine_args.get("aic_model_path"))
-            ais_config = raw_engine_args.get("ais_perf_config")
-            if isinstance(ais_config, Mapping):
-                candidates.append(ais_config.get("model"))
+            rank = raw_engine_args.get("rank", raw_engine_args)
+            if isinstance(rank, Mapping):
+                ais_config = rank.get("ais_perf_config")
+                if isinstance(ais_config, Mapping):
+                    candidates.append(ais_config.get("model"))
+                timing = rank.get("timing_model")
+                if isinstance(timing, Mapping) and isinstance(
+                    timing.get("config"), Mapping
+                ):
+                    candidates.append(timing["config"].get("model"))
         for model in candidates:
             if isinstance(model, str) and model.strip():
                 return model.strip()
@@ -315,10 +342,22 @@ class DynamoReplayRunner:
         raise ValueError("agentic execution requires a configured target model")
 
     @staticmethod
-    def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
+    def _engine_args(deployment, role: str) -> dict[str, JSONValue]:
+        payload = getattr(
+            deployment,
+            "agg_engine_args" if role == "aggregated" else f"{role}_engine_args",
+        )
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
+        return normalize_mocker_config(
+            materialize_engine_launch_config(
+                deployment.backend,
+                deployment.backend_version,
+                deployment.parallel_config,
+                payload,
+                role,
+            )
+        )
 
     def _run_trace(
         self,
@@ -345,6 +384,11 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
+        agentic_options = {
+            name: spec.workload[name]
+            for name in ("agentic_snapshot", "agentic_warmup", "agentic_profile")
+            if name in spec.workload
+        }
         trace_block_size = spec.workload.get("trace_block_size")
         # Weka and Dynamo traces carry their source block size in the trace
         # metadata. Leave it unset so AISimulate can validate and use that
@@ -361,8 +405,9 @@ class DynamoReplayRunner:
                 trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
+                **agentic_options,
                 execution_model=execution_model,
-                extra_engine_args=self._engine_args(deployment.agg_engine_args),
+                extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
                 **common,
             )
@@ -375,9 +420,10 @@ class DynamoReplayRunner:
             trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
+            **agentic_options,
             execution_model=execution_model,
-            prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
-            decode_engine_args=self._engine_args(deployment.decode_engine_args),
+            prefill_engine_args=self._engine_args(deployment, "prefill"),
+            decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
             **common,
@@ -387,13 +433,13 @@ class DynamoReplayRunner:
         deployment = spec.backend_deployment
         if deployment.deployment_mode == "agg":
             return run_synthetic_trace_replay(
-                extra_engine_args=self._engine_args(deployment.agg_engine_args),
+                extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
                 **common,
             )
         return run_synthetic_trace_replay(
-            prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
-            decode_engine_args=self._engine_args(deployment.decode_engine_args),
+            prefill_engine_args=self._engine_args(deployment, "prefill"),
+            decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
             **common,
@@ -495,9 +541,15 @@ class DynamoReplayRunner:
         else:
             trace_report = dict(report)
 
-        for name in ("agentic_graph", "agentic_model_projection"):
+        for name in (
+            "agentic_graph",
+            "agentic_model_projection",
+            "agentic_snapshots",
+            "agentic_phases",
+            "agentic_profile",
+        ):
             value = trace_report.get(name)
-            if isinstance(value, dict):
+            if isinstance(value, (dict, list)):
                 metadata[name] = value
         resolved_weka_basis = trace_report.get("weka_nested_timestamp_basis")
         if isinstance(resolved_weka_basis, str):
@@ -572,16 +624,17 @@ def _kv_load_concurrency(spec: ReplaySpec) -> int:
         raise ValueError(f"kv_load_ratio must be finite and non-negative, got {ratio}")
     deployment = spec.backend_deployment
     if deployment.deployment_mode == "disagg":
-        payload = deployment.decode_engine_args
         replicas = deployment.num_decode_workers
         role = "decode"
     else:
-        payload = deployment.agg_engine_args
         replicas = deployment.num_workers
         role = "aggregated"
-    args = DynamoReplayRunner._engine_args(payload)
+    args = DynamoReplayRunner._engine_args(deployment, role)
     capacity_tokens = (
-        args.num_gpu_blocks * args.block_size * max(args.dp_size, 1) * max(replicas, 1)
+        args["engine"]["num_gpu_blocks"]
+        * args["engine"]["block_size"]
+        * max(args["dp_size"], 1)
+        * max(replicas, 1)
     )
     expected_tokens = _int_value(spec.workload["isl"], "isl") + (
         _int_value(spec.workload["osl"], "osl") // 2

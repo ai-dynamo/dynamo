@@ -152,6 +152,11 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    /// Greatest raw router-visible overlap among eligible workers, in tokens,
+    /// for tracked requests.
+    pub max_raw_cached_tokens: Option<usize>,
+    /// Raw prefix overlap for the selected worker and DP rank, in tokens.
+    pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
@@ -537,6 +542,18 @@ impl SchedulingRequest {
             .unwrap_or(0)
     }
 
+    pub(crate) fn raw_cached_tokens_for(&self, worker: WorkerWithDpRank, block_size: u32) -> usize {
+        let tiers = &self.overlap.tier_overlap_blocks;
+        let blocks = tiers
+            .device
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(tiers.host_pinned.get(&worker).copied().unwrap_or(0))
+            .saturating_add(tiers.disk.get(&worker).copied().unwrap_or(0));
+        blocks.saturating_mul(block_size as usize)
+    }
+
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
         self.overlap
             .effective_overlap_blocks
@@ -546,7 +563,16 @@ impl SchedulingRequest {
     }
 
     pub fn worker_load_for(&self, worker: WorkerWithDpRank) -> WorkerLoadProjection {
-        self.worker_loads.get(&worker).copied().unwrap_or_default()
+        self.worker_loads
+            .get(&worker)
+            .copied()
+            .unwrap_or_else(|| WorkerLoadProjection {
+                // A configured worker can precede its load projection. With no
+                // active-prefix evidence, count the full tracked request rather
+                // than treating its blocks as already present on that worker.
+                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+                ..Default::default()
+            })
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
@@ -659,6 +685,19 @@ mod tests {
                 request.potential_decode_blocks_after_admission(worker, 16),
                 expected,
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_worker_projection_counts_the_full_request() {
+        let projected_worker = WorkerWithDpRank::new(0, 0);
+        let new_worker = WorkerWithDpRank::new(1, 0);
+        for (isl, tracked_blocks, expected) in [(32, None, 2), (32, Some(2), 2), (33, Some(2), 3)] {
+            let request = request_with_decode_load(isl, tracked_blocks, 100, 0, projected_worker);
+            assert_eq!(
+                request.potential_decode_blocks_after_admission(new_worker, 16),
+                expected
             );
         }
     }

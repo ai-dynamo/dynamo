@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -45,6 +46,21 @@ async def test_load_audio_rejects_http_by_default():
 
     with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_audio("http://example.com/x.wav")
+
+
+@pytest.mark.asyncio
+async def test_load_audio_logs_rejected_data_url_bounded(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    oversized = "data:audio/wav;base64," + "A" * (1024 * 1024)
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UrlValidationError, match="exceeds"):
+            await loader.load_audio(oversized)
+
+    assert "URL rejected loading audio" in caplog.text
+    assert "payload elided" in caplog.text
+    assert max(len(record.getMessage()) for record in caplog.records) < 1024
 
 
 @pytest.mark.asyncio

@@ -30,7 +30,7 @@ use dynamo_backend_common::{
     PreprocessedRequest, SnapshotPublisher, TopLogprob, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockerConfig, OutputSignal,
 };
 use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::SchedulerHandle;
@@ -98,10 +98,9 @@ struct Args {
     #[arg(long, default_value = "")]
     model_path: String,
 
-    /// KV cache block size in tokens. 0 lets the mocker pick its default
-    /// (64 for vLLM).
-    #[arg(long, default_value_t = 0)]
-    block_size: usize,
+    /// KV cache block size in tokens. Omit to use the AISimulate backend default.
+    #[arg(long)]
+    block_size: Option<usize>,
 
     /// Total KV cache blocks the mocker can allocate.
     #[arg(long, default_value_t = 16384)]
@@ -127,20 +126,21 @@ struct Args {
     context_length: u32,
 }
 
-fn build_engine_args(args: &Args) -> Result<MockEngineArgs, DynamoError> {
-    let built = MockEngineArgs::builder()
-        .engine_type(EngineType::Vllm)
-        .block_size(args.block_size)
-        .num_gpu_blocks(args.num_gpu_blocks)
-        .max_num_seqs(Some(args.max_num_seqs))
-        .max_num_batched_tokens(Some(args.max_num_batched_tokens))
-        .speedup_ratio(args.speedup_ratio)
-        .dp_size(1)
-        .build()
-        .map_err(|e| invalid_arg(format!("mocker args: {e}")))?;
-    built
-        .normalized()
-        .map_err(|e| invalid_arg(format!("mocker args: {e}")))
+fn build_engine_args(args: &Args) -> Result<MockerConfig, DynamoError> {
+    let mut config = serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": EngineType::Vllm,
+            "num_gpu_blocks": args.num_gpu_blocks,
+            "max_num_seqs": args.max_num_seqs,
+            "max_num_batched_tokens": args.max_num_batched_tokens,
+            "speedup_ratio": args.speedup_ratio,
+        },
+    });
+    if let Some(block_size) = args.block_size {
+        config["engine"]["block_size"] = block_size.into();
+    }
+    MockerConfig::from_value(config).map_err(|e| invalid_arg(format!("mocker args: {e}")))
 }
 
 /// Per-request state held by the engine for as long as the request is
@@ -206,7 +206,7 @@ fn spawn_mocker_snapshot_loop(
 pub struct MockerBackend {
     model_name: String,
     context_length: u32,
-    engine_args: MockEngineArgs,
+    engine_args: MockerConfig,
     /// Disaggregation role, observed in `generate()` to switch between the
     /// aggregated path and the simulated prefill / decode handshake.
     disaggregation_mode: DisaggregationMode,
@@ -228,7 +228,7 @@ impl MockerBackend {
     fn new(
         model_name: String,
         context_length: u32,
-        engine_args: MockEngineArgs,
+        engine_args: MockerConfig,
         disaggregation_mode: DisaggregationMode,
     ) -> Self {
         MockerBackend {
@@ -268,6 +268,7 @@ impl MockerBackend {
             disaggregation_mode,
         );
         let config = WorkerConfig {
+            runtime: args.common.runtime,
             namespace: args.common.namespace,
             component: args.common.component,
             endpoint: args.common.endpoint,
@@ -361,8 +362,10 @@ impl LLMEngine for MockerBackend {
                 context_length: Some(self.context_length),
                 kv_cache_block_size: Some(self.engine_args.block_size as u32),
                 total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
-                max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
-                max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+                max_num_seqs: (self.engine_args.max_num_seqs != usize::MAX)
+                    .then_some(self.engine_args.max_num_seqs as u64),
+                max_num_batched_tokens: (self.engine_args.max_num_batched_tokens != usize::MAX)
+                    .then_some(self.engine_args.max_num_batched_tokens as u64),
                 max_gpu_lora_count: None,
                 data_parallel_size: None,
                 data_parallel_start_rank: None,
@@ -706,21 +709,32 @@ mod tests {
         let engine_args = build_engine_args(&args).unwrap();
         // vLLM's default block size after normalization is 64.
         assert_eq!(engine_args.block_size, 64);
+
+        let args = Args::try_parse_from(["bin", "--block-size", "32"]).unwrap();
+        assert_eq!(build_engine_args(&args).unwrap().block_size, 32);
+
+        let args = Args::try_parse_from(["bin", "--block-size", "0"]).unwrap();
+        assert!(build_engine_args(&args).is_err());
     }
 
     #[tokio::test]
     async fn start_returns_advertised_metadata() {
-        let engine = test_engine();
-        let cfg = engine.start(0).await.unwrap();
-        assert_eq!(cfg.model, "mocker-model");
-        let llm = cfg
-            .llm
-            .expect("LLM engine advertises registration metadata");
-        assert_eq!(llm.kv_cache_block_size, Some(64));
-        assert_eq!(llm.total_kv_blocks, Some(16384));
-        assert_eq!(llm.max_num_seqs, Some(256));
-        assert_eq!(llm.context_length, Some(8192));
-        engine.cleanup().await.unwrap();
+        for (limit, advertised_limit) in [(256, Some(256)), (usize::MAX, None)] {
+            let mut engine = test_engine();
+            engine.engine_args.max_num_seqs = limit;
+            engine.engine_args.max_num_batched_tokens = limit;
+            let cfg = engine.start(0).await.unwrap();
+            assert_eq!(cfg.model, "mocker-model");
+            let llm = cfg
+                .llm
+                .expect("LLM engine advertises registration metadata");
+            assert_eq!(llm.kv_cache_block_size, Some(64));
+            assert_eq!(llm.total_kv_blocks, Some(16384));
+            assert_eq!(llm.max_num_seqs, advertised_limit);
+            assert_eq!(llm.max_num_batched_tokens, advertised_limit);
+            assert_eq!(llm.context_length, Some(8192));
+            engine.cleanup().await.unwrap();
+        }
     }
 
     #[tokio::test]

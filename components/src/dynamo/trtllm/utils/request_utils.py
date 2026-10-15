@@ -56,18 +56,22 @@ def stored_event_cache_salt(data: Mapping[str, Any]) -> Optional[str]:
 
 
 def apply_stop_conditions_to_sampling_params(
-    sampling_params: Any, stop_conditions: Mapping[str, Any]
+    sampling_params: Any,
+    stop_conditions: Mapping[str, Any],
+    *,
+    no_stop_trim: bool = False,
 ) -> None:
     """Apply Dynamo stop conditions using TRT-LLM stopping semantics.
 
     TRT-LLM cannot return a token that it consumes as an engine-side stop. If
-    Dynamo marks a stop token as visible, disable TRT-LLM stopping and let the
-    Dynamo decoder return the token and terminate the request. TRT-LLM maps
+    Dynamo marks a stop token as visible or requests ``no_stop_trim``, disable
+    TRT-LLM stopping and let the Dynamo decoder return the token and terminate
+    the request. TRT-LLM maps
     ``ignore_eos=True`` to both ``end_id=-1`` and an empty stop-word list when
     it builds the executor request.
     """
     visible_stop_token_ids = set(stop_conditions.get("stop_token_ids_visible") or [])
-    if stop_conditions.get("ignore_eos") or visible_stop_token_ids:
+    if no_stop_trim or stop_conditions.get("ignore_eos") or visible_stop_token_ids:
         sampling_params.ignore_eos = True
 
     min_tokens = stop_conditions.get("min_tokens")
