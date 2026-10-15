@@ -67,6 +67,21 @@ global:
 
 # Dynamo operator configuration
 dynamo-operator:
+  grovePreflight:
+    # -- Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate.
+    enabled: true
+    # -- Image containing Python 3 (standard library only). Override for an internal registry.
+    image: docker.io/library/python:3.12-slim
+    # -- Existing pull secrets for the Grove preflight image.
+    imagePullSecrets: []
+    # -- Maximum Job duration in seconds, including retries.
+    activeDeadlineSeconds: 120
+    # -- Namespace of external Grove. Empty discovers across all namespaces.
+    namespace: ""
+    # -- External Grove Deployment name. Requires namespace; empty discovers by container name.
+    deploymentName: ""
+    # -- Container holding the external Grove controller image.
+    containerName: grove-operator
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 

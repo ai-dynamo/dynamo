@@ -1,0 +1,20 @@
+{
+  "minimumVersion": "v0.1.0-alpha.15",
+  "crdSchemaDigests": {
+    "clustertopologybindings.grove.io": [
+      "8dfa9057af29f65c5be4a20c019a09e6d4332971ca4201d25da1d07f3d8ed4c1"
+    ],
+    "podcliques.grove.io": [
+      "f80ef4367510caeeabdc0bf23e57c2ba316b947eefea11a6345541659719bd16"
+    ],
+    "podcliquescalinggroups.grove.io": [
+      "f7cbf8c6bc49bc9d3080c7d9aea4503eb3a1428a628782201a41685d719395ed"
+    ],
+    "podcliquesets.grove.io": [
+      "88f2c273b2bac470e52bf5b48e1b940e8628eacae125a1e73e24bfbe1aee4412"
+    ],
+    "podgangmaps.grove.io": [
+      "480944af08f24835d10ace345091ef99e3f897b71a6642cdd971486345fbff75"
+    ]
+  }
+}

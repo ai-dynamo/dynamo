@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: external Grove preflight
+templates:
+  - charts/dynamo-operator/templates/grove-preflight.yaml
+tests:
+  - it: omits the preflight when Grove integration is disabled
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: omits the preflight for bundled Grove
+    set:
+      global.grove.install: true
+      global.grove.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: permits an explicit separate compatibility gate
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: creates a blocking Job with bounded retries for external Grove
+    set:
+      global.grove.enabled: true
+    documentSelector:
+      path: kind
+      value: Job
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation,hook-succeeded
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 120
+      - equal:
+          path: spec.backoffLimit
+          value: 2
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: [python3, -B, /preflight/check.py]
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+
+  - it: prepares read-only permissions before the Job without deleting them early
+    set:
+      global.grove.enabled: true
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-30"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+      - equal:
+          path: rules[0].verbs
+          value: [get]
+      - equal:
+          path: rules[1]
+          value:
+            apiGroups: [apps]
+            resources: [deployments]
+            verbs: [list]
+      - lengthEqual:
+          path: rules[0].resourceNames
+          count: 5
+
+  - it: scopes explicit controller access to a single Deployment
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.namespace: grove-system
+      dynamo-operator.grovePreflight.deploymentName: grove-operator
+    documentSelector:
+      path: kind
+      value: Role
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: grove-system
+      - equal:
+          path: rules[0]
+          value:
+            apiGroups: [apps]
+            resources: [deployments]
+            resourceNames: [grove-operator]
+            verbs: [get]
+
+  - it: removes cluster-wide deployment discovery when a namespace is specified
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.namespace: grove-system
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - lengthEqual:
+          path: rules
+          count: 1
+
+  - it: rejects a Deployment name without its namespace
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.deploymentName: grove-operator
+    asserts:
+      - failedTemplate:
+          errorMessage: grovePreflight.namespace is required when grovePreflight.deploymentName is set
+
+  - it: renders image and scheduling overrides
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.image: mirror.example/python:3.12
+      dynamo-operator.grovePreflight.activeDeadlineSeconds: 60
+      dynamo-operator.grovePreflight.imagePullSecrets:
+        - name: preflight-pull-secret
+      dynamo-operator.controllerManager.tolerations:
+        - key: dedicated
+          operator: Exists
+    documentSelector:
+      path: kind
+      value: Job
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mirror.example/python:3.12
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 60
+      - equal:
+          path: spec.template.spec.imagePullSecrets
+          value: [{name: preflight-pull-secret}]
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{key: dedicated, operator: Exists}]
+
+  - it: packages the script and compatibility contract before the Job
+    set:
+      global.grove.enabled: true
+    documentSelector:
+      path: kind
+      value: ConfigMap
+    asserts:
+      - matchRegex:
+          path: data["check.py"]
+          pattern: 'def check\('
+      - matchRegex:
+          path: data["compatibility.json"]
+          pattern: '"minimumVersion": "v0.1.0-alpha.15"'
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-30"

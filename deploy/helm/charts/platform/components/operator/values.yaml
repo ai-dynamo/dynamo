@@ -22,6 +22,20 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# External Grove validation runs before Helm install/upgrade and Argo CD sync.
+grovePreflight:
+  # Disable only when compatibility is checked by a separate deployment gate.
+  enabled: true
+  # Python standard library only; override with an internal mirror for restricted clusters.
+  image: docker.io/library/python:3.12-slim
+  imagePullSecrets: []
+  activeDeadlineSeconds: 120
+  # Empty namespace discovers the controller across all namespaces.
+  namespace: ""
+  # Requires namespace; empty discovers Deployments containing containerName.
+  deploymentName: ""
+  containerName: grove-operator
+
 # The LPX scheduler and its CRDs must be installed separately.
 lpx:
   # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the
