@@ -610,18 +610,14 @@ These results cover the first 500 trace requests and establish functional operat
 
 <div data-engine="trtllm">
 
-These results cover the first 500 trace requests. The GB300 result is functional validation, not a full-trace benchmark.
-
-<Note>
-The GB200 TensorRT-LLM result is preliminary and uses an earlier image. Retesting with the current image is pending.
-</Note>
+These results cover the first 500 trace requests and are functional validation, not a full-trace benchmark.
 
 <div className="dynamo-variant-table-wrap">
 <table className="dynamo-variant-table">
 <thead><tr><th>Recipe</th><th>GPUs</th><th>Workload</th><th>Concurrency</th><th>Requests</th><th>Passing</th><th>Failing</th><th>Output throughput (tok/s)</th><th>Output throughput/GPU (tok/s/GPU)</th><th>Output throughput/user p50 (tok/s/user)</th><th>TTFT p50 (ms)</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="agg"><td>trtllm/agg-gb200-agentic</td><td>4</td><td>trace (first 500; preliminary)</td><td>24</td><td>500</td><td>496</td><td>4</td><td>75.99</td><td>19.00</td><td>4.99</td><td>26,218.26</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="agg"><td>trtllm/agg-gb300-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>582.10</td><td>145.53</td><td>31.25</td><td>601.70</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="agg"><td>trtllm/agg-gb200-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>384.58</td><td>96.15</td><td>30.82</td><td>11,533.66</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="agg"><td>trtllm/agg-gb300-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>583.23</td><td>145.81</td><td>31.37</td><td>600.34</td></tr>
 </tbody>
 </table>
 </div>
