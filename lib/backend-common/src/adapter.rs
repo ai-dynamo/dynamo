@@ -32,7 +32,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
-use crate::lifecycle::RequestTracker;
+use crate::lifecycle::{RequestGuard, RequestTracker};
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -128,7 +128,8 @@ fn record_itl_distribution(span: &tracing::Span, samples: &mut [f64]) {
 /// Holds a dropped engine stream until abort completes or its deadline expires.
 struct CancelMonitorGuard<T> {
     stream: Option<BoxStream<'static, T>>,
-    drop_tx: Option<oneshot::Sender<BoxStream<'static, T>>>,
+    drop_tx: Option<oneshot::Sender<(BoxStream<'static, T>, RequestGuard)>>,
+    request_guard: Option<RequestGuard>,
 }
 
 impl<T> Stream for CancelMonitorGuard<T> {
@@ -144,8 +145,13 @@ impl<T> Stream for CancelMonitorGuard<T> {
 
 impl<T> Drop for CancelMonitorGuard<T> {
     fn drop(&mut self) {
-        if let (Some(drop_tx), Some(stream)) = (self.drop_tx.take(), self.stream.take()) {
-            let _ = drop_tx.send(stream);
+        if let (Some(drop_tx), Some(stream), Some(request_guard)) = (
+            self.drop_tx.take(),
+            self.stream.take(),
+            self.request_guard.take(),
+        ) {
+            // Keep shutdown draining until abort has released the engine stream.
+            let _ = drop_tx.send((stream, request_guard));
         }
     }
 }
@@ -454,6 +460,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let guard = CancelMonitorGuard {
             stream: Some(chunks),
             drop_tx: Some(drop_tx),
+            request_guard: Some(request_guard),
         };
 
         let stream_ctx = ctx.clone();
@@ -466,7 +473,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_handoff_terminal_mode = self.mode.is_prefill() || self.mode.is_encode();
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
-            let _request_guard = request_guard;
             let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = guard;
             let mut chunk_count: usize = 0;
@@ -689,12 +695,12 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         let guard = CancelMonitorGuard {
             stream: Some(chunks),
             drop_tx: Some(drop_tx),
+            request_guard: Some(request_guard),
         };
 
         let stream_ctx = ctx.clone();
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
-            let _request_guard = request_guard;
             let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = guard;
             let mut chunk_count: usize = 0;
@@ -925,6 +931,7 @@ mod tests {
         assert_eq!(tracker.inflight(), 1);
 
         drop(stream);
+        tokio::task::yield_now().await;
         assert_eq!(tracker.inflight(), 0);
     }
 
@@ -972,7 +979,12 @@ mod tests {
             let started = Arc::new(Notify::new());
             Arc::get_mut(&mut engine).unwrap().pending_abort = Some(started.clone());
             let abort_calls_at_drop = engine.abort_calls_at_stream_drop.clone();
-            let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+            let tracker = RequestTracker::new();
+            let adapter = EngineAdapter::with_request_tracker(
+                engine,
+                DisaggregationMode::Aggregated,
+                tracker.clone(),
+            );
             let input = Context::new(make_request(vec![1]));
             let ctrl = input.context();
             let mut stream = adapter.generate(input).await.unwrap();
@@ -987,10 +999,12 @@ mod tests {
                 started.notified().await;
             }
             tokio::time::advance(ABORT_TIMEOUT - Duration::from_millis(1)).await;
+            assert_eq!(tracker.inflight(), 1, "abort still owns the engine stream");
             assert_eq!(abort_calls_at_drop.load(Ordering::SeqCst), usize::MAX);
 
             tokio::time::advance(Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
+            assert_eq!(tracker.inflight(), 0);
             assert_eq!(
                 abort_calls_at_drop.load(Ordering::SeqCst),
                 0,
