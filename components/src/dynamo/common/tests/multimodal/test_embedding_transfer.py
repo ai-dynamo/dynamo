@@ -175,8 +175,10 @@ class TestNixlWriteUnclaimedReclaim:
     @pytest.mark.parametrize("timeout", ["30", "60", "inf", "nan"])
     async def test_rejects_timeout_not_above_receiver_wait(self, monkeypatch, timeout):
         monkeypatch.setenv("DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S", timeout)
+        tasks_before = asyncio.all_tasks()
         with pytest.raises(ValueError, match="DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S"):
             NixlWriteEmbeddingSender()
+        assert asyncio.all_tasks() == tasks_before
 
 
 @pytest.mark.asyncio

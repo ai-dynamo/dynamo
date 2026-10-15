@@ -403,6 +403,25 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
     """
 
     def __init__(self):
+        # Seconds a prepared tensor may wait for its receiver's handshake before it is
+        # reclaimed. A receiver that gave up (buffer wait timeout, cancelled or failed
+        # request, dead worker) never claims it, so without this the tensor and its
+        # NIXL registration are held forever. A receiver may wait up to its buffer
+        # wait before handshaking, so a shorter timeout would drop live transfers.
+        # Validated before any NIXL agent or background task exists.
+        self.unclaimed_timeout = float(
+            os.getenv("DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S", "120")
+        )
+        if not (
+            math.isfinite(self.unclaimed_timeout)
+            and self.unclaimed_timeout > NIXL_WRITE_RECEIVE_TIMEOUT_S
+        ):
+            raise ValueError(
+                "DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S must be a finite number of "
+                f"seconds above the receiver's {NIXL_WRITE_RECEIVE_TIMEOUT_S}s "
+                f"buffer wait, got {self.unclaimed_timeout}"
+            )
+
         # NIXL agent setup
         nixl_agent, nixl_agent_config = _load_nixl_api()
         self.sender_id = f"sender_{str(uuid.uuid4())}"
@@ -430,23 +449,6 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         self.transfer_queue: asyncio.Queue[str] = asyncio.Queue()
         self._state_update_task = asyncio.create_task(self._state_update())
         self.transfer_timeout = 60  # seconds, can be tuned based on expected transfer time and network condition
-        # Seconds a prepared tensor may wait for its receiver's handshake before it is
-        # reclaimed. A receiver that gave up (buffer wait timeout, cancelled or failed
-        # request, dead worker) never claims it, so without this the tensor and its
-        # NIXL registration are held forever. A receiver may wait up to its buffer
-        # wait before handshaking, so a shorter timeout would drop live transfers.
-        self.unclaimed_timeout = float(
-            os.getenv("DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S", "120")
-        )
-        if not (
-            math.isfinite(self.unclaimed_timeout)
-            and self.unclaimed_timeout > NIXL_WRITE_RECEIVE_TIMEOUT_S
-        ):
-            raise ValueError(
-                "DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S must be a finite number of "
-                f"seconds above the receiver's {NIXL_WRITE_RECEIVE_TIMEOUT_S}s "
-                f"buffer wait, got {self.unclaimed_timeout}"
-            )
 
     def __del__(self):
         state_update_task = getattr(self, "_state_update_task", None)
@@ -617,7 +619,6 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         return write_requests
 
     def _expired_unclaimed(self, now_time, inflight_transfers) -> list[int]:
-        """Tracked tensors with no handshake for longer than ``unclaimed_timeout``."""
         return [
             tensor_id
             for tensor_id, (_, _, _, send_time) in self.transfer_tracker.items()
