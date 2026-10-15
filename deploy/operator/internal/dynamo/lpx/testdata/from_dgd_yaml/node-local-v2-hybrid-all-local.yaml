@@ -17,14 +17,13 @@ data:
   partition_ids: ""
   partition_node_offsets: ""
   partition_paths: ""
-  topologies: ""
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-all-local-4f40-lpu-e0d4757d73c8e8a8
+  name: node-local-v2-hybrid-all-local-4f40-lpu-88cdafee07541757
   namespace: test
 ---
 metadata:
