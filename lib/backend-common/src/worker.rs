@@ -259,8 +259,8 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
-            // Native sidecars retain their conservative default; Python workers
-            // publish the deployment-facing On/Always policy explicitly.
+            // Deployed workers publish the On/Always policy explicitly from
+            // `--dyn-structural-tag`; library callers opt in.
             structural_tag: None,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,

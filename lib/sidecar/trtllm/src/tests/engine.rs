@@ -509,6 +509,9 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         !aggregated.enable_kv_routing,
         "the sidecar has no KV events"
     );
+    assert!(aggregated.structural_tag.is_some());
+    let (_, untagged) = parse(&["--dyn-structural-tag", "false"]).expect("opt-out parses");
+    assert!(untagged.structural_tag.is_none());
 
     for (mode, expected) in [
         (DisaggregationMode::Prefill, "prefill"),

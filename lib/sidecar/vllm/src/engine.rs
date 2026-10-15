@@ -225,6 +225,7 @@ impl VllmSidecarEngine {
             served_model_name: Some(model.served_name.clone()),
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag: args.sidecar.common.dyn_structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -1546,6 +1547,20 @@ mod tests {
         let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
         assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
         assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn worker_publishes_structural_tag_policy() {
+        let base = ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"];
+        for (extra, enabled) in [
+            (&[][..], true),
+            (&["--dyn-structural-tag", "false"][..], false),
+        ] {
+            let args = Args::try_parse_from(base.iter().chain(extra)).unwrap();
+            let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+            let (_, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
+            assert_eq!(config.structural_tag.is_some(), enabled);
+        }
     }
 
     #[test]

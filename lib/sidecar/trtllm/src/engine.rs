@@ -154,6 +154,7 @@ impl TrtllmSidecarEngine {
             served_model_name: None,
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag: args.sidecar.common.dyn_structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common

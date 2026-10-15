@@ -194,6 +194,7 @@ impl SglangSidecarEngine {
             tool_call_parser: common
                 .dyn_tool_call_parser
                 .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+            structural_tag: common.dyn_structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
             enable_rl: common.enable_rl,
@@ -1293,6 +1294,18 @@ mod tests {
             assert!(config.reasoning_parser.is_none());
             assert!(config.tool_call_parser.is_none());
         }
+    }
+
+    #[test]
+    fn worker_publishes_structural_tag_policy() {
+        let (_, config) =
+            SglangSidecarEngine::from_discovered(args(), discovery(json!({}))).unwrap();
+        assert!(config.structural_tag.is_some());
+
+        let mut args = args();
+        args.sidecar.common.dyn_structural_tag = None;
+        let (_, config) = SglangSidecarEngine::from_discovered(args, discovery(json!({}))).unwrap();
+        assert!(config.structural_tag.is_none());
     }
 
     #[test]
