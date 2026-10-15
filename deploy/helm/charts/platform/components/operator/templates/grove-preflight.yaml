@@ -54,6 +54,7 @@ metadata:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-failed
 spec:
   activeDeadlineSeconds: {{ $config.activeDeadlineSeconds }}
   backoffLimit: 2

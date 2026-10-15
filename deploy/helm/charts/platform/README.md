@@ -170,8 +170,10 @@ Helm and Flux execute these hooks; Argo CD maps them to PreSync. Offline renderi
 run the check. Disabled hooks, selective sync, and raw `kubectl apply` bypass the gate;
 independent Grove releases must be upgraded first. Set `grovePreflight.enabled=false` only
 with a separate compatibility gate. Override `image`/`imagePullSecrets` for restricted registries.
-The Job has a 120-second deadline and two retries. Failed Jobs retain diagnostic logs;
-successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
+The Job has a 120-second deadline and two retries. Failed Jobs retain diagnostic logs.
+Helm 3.18+ also prints them via `helm.sh/hook-output-log-policy: hook-failed`, using the
+installer's Pod/log read permissions. With older Helm, read them with `kubectl logs`.
+Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
 persist until the next attempt and require manual removal when retiring the release.
 
 **Existing deployments:** The operator origin version gates alias injection. An operator-only
