@@ -4,9 +4,10 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
 //! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Scope: aggregated and disaggregated (prefill/decode) generation. Multimodal,
-//! LoRA, beam search, and `n > 1` are rejected before dispatch — the sidecar
-//! streams a single sequence.
+//! Scope: aggregated and disaggregated (prefill/decode) generation, including
+//! image inputs when the loaded model advertises them. Video, audio, LoRA,
+//! beam search, and `n > 1` are rejected before dispatch — the sidecar streams
+//! a single sequence.
 //!
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
@@ -17,7 +18,7 @@ use std::collections::BTreeSet;
 
 use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
-    PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
+    MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
 use crate::client::{self, ModelLimits};
@@ -36,6 +37,7 @@ pub(crate) fn build_generate_request(
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request, mode)?;
+    let media = image_media(request, limits)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -50,7 +52,7 @@ pub(crate) fn build_generate_request(
     // reject requests a wider decode window would serve. Releasing the handoff
     // when decode does reject is the sound fix and belongs on that side.
     let max_tokens = if mode.is_prefill() {
-        1
+        Some(1)
     } else {
         max_tokens(request, limits)?
     };
@@ -92,7 +94,7 @@ pub(crate) fn build_generate_request(
             num_sequences: Some(1),
         }),
         stopping: Some(pb::StoppingOptions {
-            max_tokens: Some(max_tokens),
+            max_tokens,
             // Forwarded on a context-only request too. The minimum only masks
             // EOS until the sequence reaches it, so it cannot extend a context
             // phase that `max_tokens` already caps at one token. Dropping it
@@ -123,8 +125,7 @@ pub(crate) fn build_generate_request(
             prompt_logprob_start: None,
         }),
         guided: guided_decoding(request)?,
-        // Text generation only: no multimodal media or LoRA selection.
-        media: Vec::new(),
+        media,
         lora_name: String::new(),
         kv,
         extra: Some(disagg::request_extra(
@@ -139,13 +140,14 @@ pub(crate) fn build_generate_request(
 }
 
 // Temporary workaround: the OpenEngine contract makes `stopping.max_tokens`
-// optional, but an omitted value falls through to TensorRT-LLM's small
-// `SamplingParams` default rather than filling the context. The Dynamo frontend
-// forwards an omitted `max_tokens` as `None` expecting the backend to default,
-// so we mirror the in-process backend's text-only default,
+// optional. The Dynamo frontend forwards an omitted `max_tokens` as `None`
+// expecting the backend to default. For text requests we mirror the in-process
+// backend's default,
 // `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm
-// `_default_max_tokens`); the sidecar rejects multimodal before dispatch, so
-// `token_ids.len()` is the true prompt length. `context_length` is resolved in
+// `_default_max_tokens`). For image requests, only TensorRT-LLM knows the true
+// prompt length after expanding image markers, so leave the field unset and let
+// the OpenEngine request mapper derive the budget from the expanded prompt.
+// `context_length` is resolved in
 // `engine::start`, where `--context-length` wins over the `GetModelInfo` report.
 // Only `/v1/chat/completions` and `/v1/responses` reach this fallback: they set
 // `PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY`, which stops the frontend supplying
@@ -161,9 +163,12 @@ pub(crate) fn build_generate_request(
 fn max_tokens(
     request: &PreprocessedRequest,
     limits: Option<ModelLimits>,
-) -> Result<u32, DynamoError> {
+) -> Result<Option<u32>, DynamoError> {
     if let Some(max_tokens) = request.stop_conditions.max_tokens {
-        return Ok(max_tokens);
+        return Ok(Some(max_tokens));
+    }
+    if has_media(request) {
+        return Ok(None);
     }
     let context_length = limits
         .and_then(|limits| limits.context_length)
@@ -185,7 +190,198 @@ fn max_tokens(
         None => remaining,
     };
     reject_impossible_minimum(request, derived, context_length, prompt_len)?;
-    Ok(derived)
+    Ok(Some(derived))
+}
+
+const IMAGE_KEY: &str = "image_url";
+const MM_HASHES_KEY: &str = "mm_hashes";
+
+/// Convert Dynamo's image-only execution payload into the ordered OpenEngine
+/// media list. The frontend groups content parts by modality, so ordering is
+/// retained within the image vector but not across different modalities. This
+/// PR therefore accepts images only and fails explicitly on every other
+/// non-empty modality instead of inventing a cross-modality order.
+fn image_media(
+    request: &PreprocessedRequest,
+    limits: Option<ModelLimits>,
+) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
+    reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
+
+    let media_map = request.multi_modal_data.as_ref();
+    if let Some(media_map) = media_map {
+        for (modality, items) in media_map {
+            if modality != IMAGE_KEY && !items.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "multimodal modality `{modality}` is not supported by the TensorRT-LLM sidecar; this image-only implementation accepts `{IMAGE_KEY}`"
+                )));
+            }
+        }
+    }
+
+    let images = media_map
+        .and_then(|media| media.get(IMAGE_KEY))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    let user_image_uuids = if let Some(uuid_map) = request.multi_modal_uuids.as_ref() {
+        for (modality, uuids) in uuid_map {
+            if modality != IMAGE_KEY && !uuids.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "multimodal UUIDs for `{modality}` cannot be forwarded by the image-only TensorRT-LLM sidecar"
+                )));
+            }
+        }
+        uuid_map.get(IMAGE_KEY).map(Vec::as_slice)
+    } else {
+        None
+    };
+
+    if let Some(uuids) = user_image_uuids
+        && uuids.len() != images.len()
+    {
+        return Err(client::invalid_argument(format!(
+            "`{IMAGE_KEY}` UUID count ({}) must match its media item count ({})",
+            uuids.len(),
+            images.len()
+        )));
+    }
+
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !limits.is_some_and(|limits| limits.supports_image) {
+        return Err(client::invalid_argument(
+            "the loaded TensorRT-LLM model does not advertise image support through Control.GetModelInfo",
+        ));
+    }
+
+    // Explicit caller UUIDs remain authoritative. Otherwise carry the exact
+    // hashes generated by Dynamo's MM-aware preprocessor to the backend. This
+    // is request-side preparation for KV-aware routing; the router-owned
+    // `mm_routing_info` itself never crosses the worker boundary.
+    let has_user_uuid = user_image_uuids.is_some_and(|uuids| {
+        uuids
+            .iter()
+            .any(|uuid| uuid.as_deref().is_some_and(|uuid| !uuid.is_empty()))
+    });
+    let routing_hashes = if has_user_uuid {
+        None
+    } else {
+        routing_hashes(request, images.len())?
+    };
+
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let source = match image {
+                MultimodalData::Url(url) => media_source(url.as_str(), index)?,
+                MultimodalData::RawUrl(url) => media_source(url, index)?,
+                MultimodalData::Decoded(_) => {
+                    return Err(client::invalid_argument(format!(
+                        "`{IMAGE_KEY}` item {index} is pre-decoded; OpenEngine requires a URL or data URI so TensorRT-LLM can own image decoding"
+                    )));
+                }
+                MultimodalData::UuidOnly(_) => {
+                    return Err(client::invalid_argument(format!(
+                        "`{IMAGE_KEY}` item {index} contains only a cache UUID; OpenEngine requires an image source"
+                    )));
+                }
+            };
+            Ok(pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(source),
+                mime_type: String::new(),
+                uuid: if has_user_uuid {
+                    user_image_uuids
+                        .and_then(|uuids| uuids[index].as_deref())
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    routing_hashes
+                        .as_ref()
+                        .map(|hashes| hashes[index].clone())
+                        .unwrap_or_default()
+                },
+            })
+        })
+        .collect()
+}
+
+fn routing_hashes(
+    request: &PreprocessedRequest,
+    image_count: usize,
+) -> Result<Option<Vec<String>>, DynamoError> {
+    let hashes = match request.extra_args.as_ref() {
+        Some(serde_json::Value::Object(extra)) => extra.get(MM_HASHES_KEY),
+        _ => None,
+    };
+    let Some(hashes) = hashes else {
+        return Ok(None);
+    };
+    let hashes = hashes.as_array().ok_or_else(|| {
+        client::invalid_argument("extra_args.mm_hashes must be an array of strings")
+    })?;
+    if hashes.is_empty() {
+        return Ok(None);
+    }
+    if hashes.len() != image_count {
+        return Err(client::invalid_argument(format!(
+            "extra_args.mm_hashes count ({}) must match the image media item count ({image_count})",
+            hashes.len()
+        )));
+    }
+    hashes
+        .iter()
+        .enumerate()
+        .map(|(index, hash)| {
+            hash.as_str()
+                .filter(|hash| !hash.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    client::invalid_argument(format!(
+                        "extra_args.mm_hashes[{index}] must be a non-empty string"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn media_source(value: &str, index: usize) -> Result<pb::media_item::Source, DynamoError> {
+    let scheme = value
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("http") | Some("https") => Ok(pb::media_item::Source::Url(value.to_string())),
+        Some("data") => Ok(pb::media_item::Source::DataUri(value.to_string())),
+        _ => Err(client::invalid_argument(format!(
+            "`{IMAGE_KEY}` item {index} must use an http, https, or data URI"
+        ))),
+    }
+}
+
+fn reject_media_override(name: &str, value: Option<&serde_json::Value>) -> Result<(), DynamoError> {
+    let is_empty = match value {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(fields)) => fields.is_empty(),
+        Some(_) => false,
+    };
+    if is_empty {
+        Ok(())
+    } else {
+        Err(client::invalid_argument(format!(
+            "{name} is not supported by the TensorRT-LLM OpenEngine sidecar"
+        )))
+    }
+}
+
+fn has_media(request: &PreprocessedRequest) -> bool {
+    request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
 }
 
 /// Both the output cap and the `.max(1)` floor can land under an explicit
@@ -341,14 +537,14 @@ fn validate_request(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.multi_modal_data.is_some()
-        || request.mm_routing_info.is_some()
-        || request.encoder_result.is_some()
-    {
+    if request.encoder_result.is_some() {
         return Err(client::invalid_argument(
-            "multimodal requests are not supported by the TensorRT-LLM sidecar",
+            "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
+    // `mm_routing_info` is deliberately not forwarded: it is framework-owned
+    // metadata that the Dynamo router consumes before selecting this worker.
+    // The execution payload remains `multi_modal_data`, mapped by `image_media`.
     // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
     // means the frontend routed a decode request to the wrong worker role.
     if request.prefill_result.is_some() && !mode.is_decode() {
