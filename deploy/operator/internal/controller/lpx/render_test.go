@@ -184,7 +184,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 	}{
 		{name: "discovery disabled", pipeline: lpx.PipelineSingle},
 		{name: "operator enables Kubernetes discovery", pipeline: lpx.PipelineSingle, backend: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true},
-		{name: "DGD enables hybrid discovery", pipeline: lpx.PipelineLPX, override: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true},
+		{name: "DGD enables hybrid discovery", pipeline: lpx.PipelineHybrid, override: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true},
 		{name: "DGD disables Kubernetes discovery", pipeline: lpx.PipelineSingle, backend: configv1alpha1.DiscoveryBackendKubernetes, override: configv1alpha1.DiscoveryBackendEtcd},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -523,7 +523,7 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	}))
 	registry, err := lpx.NewModelRegistry(root, nil)
 	require.NoError(t, err)
-	dgd := loadTestDGD(t, lpx.PipelineLPX, buildID)
+	dgd := loadTestDGD(t, lpx.PipelineHybrid, buildID)
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = nil
 	child := newLPXTestDeployment(t, dgd)
 	r := newLPXTestReconciler(t, registry, child, dgd)
@@ -1154,7 +1154,7 @@ func singleGroupComponents(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) []s
 
 func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 	t.Log("Resolve a hybrid workload with KAI integration enabled")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
@@ -1327,7 +1327,7 @@ func TestClientIdentityMountsOnlyAgentMainContainer(t *testing.T) {
 
 func TestOnlyLPXAgentsPublishACertificate(t *testing.T) {
 	ctx := t.Context()
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 
 	t.Log("A hybrid DGD authors a certificate on its GPU worker")
 	const forged = "Zm9yZ2Vk"
