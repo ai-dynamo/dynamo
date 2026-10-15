@@ -1422,7 +1422,6 @@ class KubernetesConnector(PlannerConnector):
             prefill_component_name=None,
             decode_component_name=component_name,
         )
-        self._batch_writer_id = writer_id
 
     def _acquire_batch_writer_fence_sync(self, writer_id: str) -> str:
         """Perform the synchronous Kubernetes fencing transaction."""
@@ -1507,6 +1506,7 @@ class KubernetesConnector(PlannerConnector):
             raise RuntimeError("batch writer fence annotation was not retained")
         if component_name is None:
             raise RuntimeError("batch writer fence component was not resolved")
+        self._batch_writer_id = writer_id
         return component_name
 
     def _preflight_replica_updates(

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Helpers for safely dispatching synchronous work from asyncio."""
+"""Cancellation-safe helpers for offloaded and admitted work."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, TypeVar
 
@@ -34,4 +34,21 @@ async def run_sync_in_thread(
                 continue
         if not worker.cancelled():
             worker.exception()
+        raise
+
+
+async def run_async_to_completion(awaitable: Awaitable[T]) -> T:
+    """Finish an admitted async operation before propagating cancellation."""
+
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.wait({task})
+            except asyncio.CancelledError:
+                continue
+        if not task.cancelled():
+            task.exception()
         raise

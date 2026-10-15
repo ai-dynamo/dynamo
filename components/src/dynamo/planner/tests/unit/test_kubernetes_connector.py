@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import os
 import shlex
 from copy import deepcopy
 from datetime import datetime, timezone
+from threading import Event
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
@@ -1258,6 +1260,49 @@ async def test_batch_writer_fence_retries_conflict_then_refreshes_authority(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_batch_writer_fence_retains_verified_local_owner(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "worker", replicas=1),
+    )
+    initial_adapter = _scaling_adapter("worker", replicas=0)
+    fenced_adapter = deepcopy(initial_adapter)
+    fenced_adapter["metadata"]["resourceVersion"] = "102"
+    fenced_adapter["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/planner-writer-fence": "writer-new"
+    }
+    started = Event()
+    release = Event()
+
+    def patch_fence(*_args, **_kwargs):
+        started.set()
+        release.wait()
+
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        fenced_adapter,
+    ]
+    mock_kube_api.patch_scaling_adapter_writer_fence.side_effect = patch_fence
+    acquire = asyncio.create_task(
+        kubernetes_connector.acquire_batch_writer_fence("writer-new")
+    )
+
+    assert await asyncio.to_thread(started.wait, 1)
+    acquire.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await acquire
+
+    assert kubernetes_connector._batch_writer_id == "writer-new"
+    assert (
+        kubernetes_connector._batch_writer_annotation_rejection(fenced_adapter) is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_set_component_replicas_component_already_at_desired_replicas(
     kubernetes_connector, mock_kube_api
 ):
@@ -1664,25 +1709,25 @@ async def test_startup_latches_include_writes_from_conflicted_attempt(
     )
     mock_kube_api.update_scaling_adapter_replicas.side_effect = update_adapter
 
-    await kubernetes_connector.set_component_replicas(
-        [
-            TargetReplica(
-                sub_component_type=SubComponentType.PREFILL,
-                component_name="prefill",
-                desired_replicas=1,
-            ),
-            TargetReplica(
-                sub_component_type=SubComponentType.DECODE,
-                component_name="decode",
-                desired_replicas=1,
-            ),
-        ],
-        blocking=False,
-    )
+    with pytest.raises(RuntimeError, match="partial application"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name="prefill",
+                    desired_replicas=1,
+                ),
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="decode",
+                    desired_replicas=1,
+                ),
+            ],
+            blocking=False,
+        )
 
     assert mock_kube_api.update_scaling_adapter_replicas.call_args_list == [
         call("test-graph", "prefill", 1, resource_version="101"),
-        call("test-graph", "decode", 1, resource_version="101"),
         call("test-graph", "decode", 1, resource_version="101"),
     ]
     assert kubernetes_connector._startup_scale_down_targets == {

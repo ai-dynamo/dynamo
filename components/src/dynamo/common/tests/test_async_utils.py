@@ -6,7 +6,7 @@ from threading import Event
 
 import pytest
 
-from dynamo.common.async_utils import run_sync_in_thread
+from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -38,6 +38,29 @@ async def test_run_sync_in_thread_joins_worker_before_propagating_cancellation()
     finally:
         release.set()
 
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_async_to_completion_joins_task_before_propagating_cancellation():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def operation() -> None:
+        started.set()
+        await release.wait()
+        finished.set()
+
+    task = asyncio.create_task(run_async_to_completion(operation()))
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert finished.is_set()

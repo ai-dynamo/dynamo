@@ -29,6 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
 
+from dynamo.common.async_utils import run_async_to_completion
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -253,26 +254,36 @@ class Orchestrator:
     ) -> ScaleOutcome:
         """Arbitrate and execute one scale request.
 
-        The observe -> decide -> scale span is serialized under the scale lock
+        The observe -> decide -> scale -> readback span is serialized under the scale lock
         (when enabled) so concurrent requests can't both pass against the same
-        pre-scale state. The post-scale replica read-back runs outside the lock,
-        matching the original behavior. Patch failures propagate to the caller
-        (the API layer maps them to REJECTED / ERROR).
+        pre-scale state or report a later request's result. Patch failures
+        propagate to the caller (the API layer maps them to REJECTED / ERROR).
         """
         if self._scale_lock is not None:
             async with self._scale_lock:
-                terminal = await self._observe_decide_apply(
+                return await self._submit_and_readback(
                     participant_id, targets, blocking, deployment_name, caller_name
                 )
-        else:
-            terminal = await self._observe_decide_apply(
-                participant_id, targets, blocking, deployment_name, caller_name
-            )
+        return await self._submit_and_readback(
+            participant_id, targets, blocking, deployment_name, caller_name
+        )
+
+    async def _submit_and_readback(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
+        deployment_name: str,
+        caller_name: str,
+    ) -> ScaleOutcome:
+        """Apply one serialized request and capture its resulting state."""
+        terminal = await self._observe_decide_apply(
+            participant_id, targets, blocking, deployment_name, caller_name
+        )
 
         if terminal is not None:
             return terminal
 
-        # Read back current replica counts (outside the lock).
         current_replicas = await asyncio.to_thread(
             self.capacity_manager.current_replicas, participant_id
         )
@@ -368,10 +379,23 @@ class Orchestrator:
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
 
-        # TODO(global-planner): Give multi-participant apply transaction or
-        # reconciliation semantics: on failure or cancellation, stop subsequent
-        # patches, report a non-success outcome, and persist enough state to
-        # repair or roll back the partially applied transfer.
+        return await run_async_to_completion(
+            self._apply_approved_targets(
+                grouped_targets, ordered_participants, blocking=blocking
+            )
+        )
+
+    async def _apply_approved_targets(
+        self,
+        grouped_targets: dict[str, list[TargetReplica]],
+        ordered_participants: list[str],
+        *,
+        blocking: bool,
+    ) -> Optional[ScaleOutcome]:
+        """Apply an admitted plan completely before honoring cancellation."""
+
+        # TODO(global-planner): Persist enough state to repair or roll back a
+        # plan that still becomes partial because a later participant fails.
         applied: list[str] = []
         for i, pid in enumerate(ordered_participants):
             tgts = grouped_targets[pid]

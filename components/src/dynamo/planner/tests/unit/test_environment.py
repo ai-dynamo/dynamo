@@ -141,32 +141,49 @@ async def test_refresh_deployment_state_offloads_synchronous_reads():
 
 
 @pytest.mark.asyncio
-async def test_refresh_deployment_state_cancellation_does_not_wait_for_blocked_read():
+async def test_cancelled_refresh_cannot_overwrite_newer_state():
     started = Event()
     release = Event()
+    finished = Event()
     controller = _controller()
+    calls = 0
 
     def worker_info(sub_component_type, backend):
-        started.set()
-        release.wait()
-        return build_worker_info_from_defaults(backend, sub_component_type)
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait()
+            finished.set()
+            return WorkerInfo(k8s_name="stale", max_num_batched_tokens=1)
+        return WorkerInfo(k8s_name="fresh", max_num_batched_tokens=2)
 
     controller.get_worker_info.side_effect = worker_info
     environment = PlannerEnvironmentImpl(
         config=_config(),
         controller=controller,
         require_prefill=True,
-        require_decode=True,
+        require_decode=False,
     )
-    refresh = asyncio.create_task(environment._refresh_deployment_state())
+    stale_refresh = asyncio.create_task(environment._refresh_deployment_state())
 
     assert await asyncio.to_thread(started.wait, 1)
-    refresh.cancel()
+    stale_refresh.cancel()
     try:
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(refresh, timeout=0.2)
+            await asyncio.wait_for(stale_refresh, timeout=0.2)
+
+        await environment._refresh_deployment_state()
+        fresh_info = environment.deployment_state().prefill.info
+        assert fresh_info is not None
+        assert fresh_info.k8s_name == "fresh"
     finally:
         release.set()
+
+    assert await asyncio.to_thread(finished.wait, 1)
+    current_info = environment.deployment_state().prefill.info
+    assert current_info is not None
+    assert current_info.k8s_name == "fresh"
 
 
 @pytest.mark.asyncio

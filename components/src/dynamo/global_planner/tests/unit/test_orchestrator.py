@@ -244,6 +244,74 @@ async def test_submit_approves_and_actuates(use_lock):
 
 
 @pytest.mark.asyncio
+async def test_submit_readback_stays_ordered_under_scale_lock():
+    class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.readback_started = Event()
+            self.release_readback = Event()
+            self.readback_calls = 0
+
+        def current_replicas(self, participant_id):
+            self.readback_calls += 1
+            if self.readback_calls == 1:
+                self.readback_started.set()
+                self.release_readback.wait()
+            return super().current_replicas(participant_id)
+
+    cm = BlockingFirstReadbackCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm)
+    first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
+    assert await asyncio.to_thread(cm.readback_started.wait, 1)
+    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
+
+    await asyncio.sleep(0)
+    assert cm.pools["default/a"]["prefill"][0] == 2
+    assert not second.done()
+    cm.release_readback.set()
+
+    first_result, second_result = await asyncio.gather(first, second)
+    assert first_result.current_replicas["prefill"] == 2
+    assert second_result.current_replicas["prefill"] == 3
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cross_participant_transfer_finishes_admitted_plan():
+    class BlockingFirstScaleCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.first_scale_started = asyncio.Event()
+            self.release_first_scale = asyncio.Event()
+
+        async def scale(self, participant_id, targets, blocking):
+            if participant_id == "default/a":
+                self.first_scale_started.set()
+                await self.release_first_scale.wait()
+            await super().scale(participant_id, targets, blocking)
+
+    cm = BlockingFirstScaleCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    transfer = asyncio.create_task(_submit(orch, "default/b", _targets(decode=3)))
+    await cm.first_scale_started.wait()
+    transfer.cancel()
+    await asyncio.sleep(0)
+    assert not transfer.done()
+
+    cm.release_first_scale.set()
+    with pytest.raises(asyncio.CancelledError):
+        await transfer
+    assert cm.pools["default/a"]["decode"][0] == 1
+    assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
 async def test_cancelled_observation_releases_scale_lock():
     class BlockingFirstObserveCapacityManager(FakeCapacityManager):
         def __init__(self):
