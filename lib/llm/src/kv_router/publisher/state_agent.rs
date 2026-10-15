@@ -49,13 +49,14 @@ use dynamo_runtime::{
     discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::EventPublisher,
+    transports::event_plane::{EventPublisher, SharedZmqPublisherSocket},
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    direct_zmq_sub_pool::{DirectZmqSubPool, DirectZmqSubRegistration, RawZmqFrames},
     discovery::kv_state_agent::{
         KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
         KvStateAttachmentAdvertisement, KvStateIngressProtocol, KvStateSourceAdvertisement,
@@ -65,7 +66,7 @@ use crate::{
         WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
         metrics::kv_publisher_metrics,
     },
-    utils::zmq::{SubSocket, connect_sub_socket, multipart_message},
+    utils::zmq::{MultipartMessage, SubSocket, connect_sub_socket, multipart_message},
 };
 
 use super::{
@@ -77,6 +78,9 @@ use super::{
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 16;
+/// Raw batches queued for one slot's coordinator. A full queue drops the batch,
+/// which the coordinator then observes as a raw cursor gap.
+const INGRESS_QUEUE_CAPACITY: usize = 1_024;
 const MAX_INGRESS_EVENTS: usize = 128;
 const MAX_INGRESS_BLOCKS: usize = 8_192;
 const MAX_ZMQ_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -125,6 +129,17 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
+    pub(crate) sockets: KvStateAgentSockets,
+}
+
+/// Host-wide sockets a slot can share with its siblings.
+#[derive(Clone, Default)]
+pub(crate) struct KvStateAgentSockets {
+    /// Output PUB shared with other slots; `None` binds one for this slot.
+    pub(crate) event_socket: Option<SharedZmqPublisherSocket>,
+    /// Pooled raw-input SUBs; `None`, or a source without a topic, connects a
+    /// dedicated SUB.
+    pub(crate) raw_pool: Option<DirectZmqSubPool>,
 }
 
 #[derive(Debug, Clone)]
@@ -236,7 +251,7 @@ struct Coordinator<P> {
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
-    ingress_rx: mpsc::UnboundedReceiver<IngressBatch>,
+    ingress_rx: mpsc::Receiver<IngressBatch>,
     attachment: Option<Attachment>,
     ingress_generation: Option<u64>,
     next_outbound_id: u64,
@@ -803,7 +818,8 @@ pub struct KvStateAgent {
     recovery_target: dynamo_runtime::component::Instance,
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
-    ingress_tx: mpsc::UnboundedSender<IngressBatch>,
+    ingress_tx: mpsc::Sender<IngressBatch>,
+    raw_pool: Option<DirectZmqSubPool>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
     coordinator: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -833,12 +849,24 @@ impl KvStateAgent {
         if config.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
             anyhow::bail!("external state-agent slots require vllm_residency_v1 ingress");
         }
-        let event_publisher = EventPublisher::for_endpoint_id(
-            config.endpoint.drt(),
-            &config.kv_state_endpoint,
-            KV_STATE_EVENT_TOPIC_V2,
-        )
-        .await
+        let event_publisher = match &config.sockets.event_socket {
+            Some(socket) => {
+                EventPublisher::for_endpoint_id_on_shared_socket(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    socket,
+                )
+                .await
+            }
+            None => {
+                EventPublisher::for_endpoint_id(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    KV_STATE_EVENT_TOPIC_V2,
+                )
+                .await
+            }
+        }
         .context("failed to create state-agent event publisher")?;
         let publisher_id = event_publisher.publisher_id();
         let identity = KvStateAgentIdentity {
@@ -913,7 +941,7 @@ impl KvStateAgent {
                 ));
 
         let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let coordinator_cancel = cancel.child_token();
         let coordinator = component.drt().runtime().secondary().spawn(
             Coordinator {
@@ -948,6 +976,7 @@ impl KvStateAgent {
             identity,
             control_tx,
             ingress_tx,
+            raw_pool: config.sockets.raw_pool,
             status,
             cancel,
             coordinator: StdMutex::new(Some(coordinator)),
@@ -1050,6 +1079,8 @@ impl KvStateAgent {
             worker,
             attachment.generation,
             self.kv_block_size,
+            self.raw_pool.as_ref(),
+            self.identity.publisher_id,
             self.ingress_tx.clone(),
             self.control_tx.clone(),
             self.status.clone(),
@@ -1508,12 +1539,24 @@ async fn start_vllm_listener(
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
-    ingress_tx: mpsc::UnboundedSender<IngressBatch>,
+    raw_pool: Option<&DirectZmqSubPool>,
+    route_id: u64,
+    ingress_tx: mpsc::Sender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
 ) -> Result<VllmListener> {
-    let socket = connect_sub_socket(&source.endpoint, Some(&source.topic)).await?;
+    let socket = match raw_pool.filter(|_| !source.topic.is_empty()) {
+        Some(pool) => RawSubscription::Pooled(
+            pool.register_raw(route_id, &source.endpoint, &source.topic, generation)
+                .await?,
+        ),
+        // Sources without a topic (vLLM workers that predate per-worker topics)
+        // keep today's SUB with its own context.
+        None => RawSubscription::Dedicated(
+            connect_sub_socket(&source.endpoint, Some(&source.topic)).await?,
+        ),
+    };
     let listener_cancel = cancel.child_token();
     let task_cancel = listener_cancel.clone();
     let handle = component.drt().runtime().secondary().spawn(async move {
@@ -1562,10 +1605,36 @@ struct VllmListenerTask<'a> {
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
-    ingress_tx: mpsc::UnboundedSender<IngressBatch>,
-    socket: SubSocket,
+    ingress_tx: mpsc::Sender<IngressBatch>,
+    socket: RawSubscription,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
+}
+
+/// One attachment's raw KV stream: its own SUB, or a route on the host's pooled
+/// SUBs keyed by the source's topic.
+enum RawSubscription {
+    Dedicated(SubSocket),
+    Pooled(DirectZmqSubRegistration<RawZmqFrames>),
+}
+
+impl RawSubscription {
+    async fn next(&mut self) -> Option<Result<MultipartMessage>> {
+        match self {
+            Self::Dedicated(socket) => Some(
+                socket
+                    .next()
+                    .await?
+                    .map(multipart_message)
+                    .map_err(Into::into),
+            ),
+            Self::Pooled(route) => tokio::select! {
+                biased;
+                frames = route.receiver.recv() => frames.map(Ok),
+                _ = route.disconnected.cancelled() => None,
+            },
+        }
+    }
 }
 
 async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
@@ -1600,7 +1669,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             frames = socket.next() => frames,
         };
         let frames = match frames {
-            Some(Ok(frames)) => multipart_message(frames),
+            Some(Ok(frames)) => frames,
             Some(Err(error)) => return Err(error).context("ZMQ receive failed"),
             None => anyhow::bail!("ZMQ stream ended"),
         };
@@ -1656,13 +1725,16 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
     }
 }
 
-fn admit_ingress(
-    ingress_tx: &mpsc::UnboundedSender<IngressBatch>,
-    envelope: IngressBatch,
-) -> Result<()> {
-    ingress_tx
-        .send(envelope)
-        .context("state-agent ingress coordinator is closed")
+/// Queue a raw batch without waiting on the coordinator. A full queue drops it;
+/// the coordinator records the gap when the next batch arrives.
+fn admit_ingress(ingress_tx: &mpsc::Sender<IngressBatch>, envelope: IngressBatch) -> Result<()> {
+    match ingress_tx.try_send(envelope) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            anyhow::bail!("state-agent ingress coordinator is closed")
+        }
+    }
 }
 
 struct NormalizedRawBatch {
@@ -2161,7 +2233,7 @@ mod tests {
             32,
         ));
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let mut coordinator = Coordinator {
             publisher: RecordingSink::default(),
             local_indexer: local_indexer.clone(),
@@ -2259,12 +2331,12 @@ mod tests {
     }
 
     fn send_ingress(
-        tx: &mpsc::UnboundedSender<IngressBatch>,
+        tx: &mpsc::Sender<IngressBatch>,
         generation: u64,
         source_cursor: u64,
         events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        tx.send(IngressBatch {
+        tx.try_send(IngressBatch {
             generation,
             source_cursor,
             chunk_index: 0,
@@ -2277,9 +2349,9 @@ mod tests {
     }
 
     #[test]
-    fn listener_admission_does_not_wait_for_coordinator_progress() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        for source_cursor in 1..=1_024 {
+    fn listener_admission_drops_instead_of_waiting_for_coordinator_progress() {
+        let (tx, mut rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        for source_cursor in 1..=INGRESS_QUEUE_CAPACITY as u64 + 1 {
             admit_ingress(
                 &tx,
                 IngressBatch {
@@ -2296,7 +2368,7 @@ mod tests {
         }
 
         assert_eq!(rx.try_recv().unwrap().source_cursor, 1);
-        assert_eq!(rx.len(), 1_023);
+        assert_eq!(rx.len(), INGRESS_QUEUE_CAPACITY - 1);
     }
 
     async fn detach(control: &mpsc::Sender<ControlCommand>, generation: u64) -> Result<u64> {
@@ -2365,7 +2437,7 @@ mod tests {
         let publications = sink.publications.clone();
         let sink_observer = sink.clone();
         let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let task = tokio::spawn(
             Coordinator {
                 publisher: sink,
@@ -2520,7 +2592,7 @@ mod tests {
         let sink = RecordingSink::default();
         let output = sink.events.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let mut coordinator = Coordinator {
             publisher: sink,
             local_indexer: local_indexer.clone(),
@@ -2645,7 +2717,7 @@ mod tests {
         let sink = RecordingSink::default();
         let fail_publication = sink.fail.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let mut coordinator = Coordinator {
             publisher: sink,
             local_indexer: local_indexer.clone(),

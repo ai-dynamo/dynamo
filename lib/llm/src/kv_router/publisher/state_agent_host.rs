@@ -22,28 +22,92 @@ use dynamo_runtime::{
     },
     stream,
     traits::DistributedRuntimeProvider,
+    transports::event_plane::{SharedZmqPublisherSocket, uses_direct_zmq},
 };
 use futures::StreamExt;
 use prometheus::{IntCounter, IntGaugeVec};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::direct_zmq_sub_pool::{DirectZmqSubPool, KV_ZMQ_RCVHWM};
 use crate::discovery::kv_state_agent::{
-    KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2, KvStateAttachmentIntent,
-    KvStateHostAdvertisement, KvStateHostControlRequest, KvStateHostStatus, KvStateIngressProtocol,
+    KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2,
+    KvStateAttachmentIntent, KvStateHostAdvertisement, KvStateHostControlRequest,
+    KvStateHostStatus, KvStateIngressProtocol,
 };
 
 use super::state_agent::{
     KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
-    KvStateAgentVllmSource,
+    KvStateAgentSockets, KvStateAgentVllmSource,
 };
 
 pub const DEFAULT_KV_STATE_AGENT_MAX_SLOTS: usize = 8;
+pub const DEFAULT_KV_STATE_AGENT_SLOTS_PER_SOCKET: usize = 1;
 
 #[derive(Clone)]
 pub struct KvStateAgentHostConfig {
     pub endpoint: Endpoint,
     pub max_slots: usize,
+    /// Slots that share one output PUB socket and one raw-input SUB socket.
+    ///
+    /// Above one, routers older than shared-endpoint support open one connection
+    /// per slot to each shared PUB and receive every co-located slot's traffic.
+    pub slots_per_socket: usize,
+}
+
+/// Sockets the host's slots share, `slots_per_socket` to each.
+struct HostSockets {
+    slots_per_socket: usize,
+    /// Brokered and NATS transports have no per-publisher socket to share.
+    share_publishers: bool,
+    publishers: Vec<(SharedZmqPublisherSocket, usize)>,
+    raw_pool: Option<DirectZmqSubPool>,
+}
+
+impl HostSockets {
+    fn new(
+        component: &Component,
+        slots_per_socket: usize,
+        cancel: CancellationToken,
+    ) -> Result<Self> {
+        let pooled = slots_per_socket > 1;
+        Ok(Self {
+            slots_per_socket,
+            share_publishers: pooled
+                && uses_direct_zmq(component.drt().default_event_transport_kind()),
+            publishers: Vec::new(),
+            raw_pool: pooled
+                .then(|| DirectZmqSubPool::new_raw(slots_per_socket, KV_ZMQ_RCVHWM, cancel))
+                .transpose()?,
+        })
+    }
+
+    fn for_new_slot(&mut self) -> Result<KvStateAgentSockets> {
+        let event_socket = if self.share_publishers {
+            let index = match self
+                .publishers
+                .iter()
+                .position(|(_, slots)| *slots < self.slots_per_socket)
+            {
+                Some(index) => index,
+                None => {
+                    let socket = SharedZmqPublisherSocket::bind(KV_STATE_EVENT_TOPIC_V2)
+                        .context("failed to bind a shared state-agent event socket")?;
+                    self.publishers.push((socket, 0));
+                    self.publishers.len() - 1
+                }
+            };
+            let (socket, slots) = &mut self.publishers[index];
+            *slots += 1;
+            Some(socket.clone())
+        } else {
+            None
+        };
+        Ok(KvStateAgentSockets {
+            event_socket,
+            raw_pool: self.raw_pool.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +223,9 @@ impl KvStateAgentHost {
         if config.max_slots == 0 {
             anyhow::bail!("max_slots must be greater than zero");
         }
+        if config.slots_per_socket == 0 {
+            anyhow::bail!("slots_per_socket must be greater than zero");
+        }
 
         let component = config.endpoint.component().clone();
         let slots = Arc::new(Mutex::new(HashMap::new()));
@@ -242,6 +309,7 @@ impl KvStateAgentHost {
         };
         let host_advertisement = Arc::new(Mutex::new(Some(host_advertisement)));
         let cancel = CancellationToken::new();
+        let sockets = HostSockets::new(&component, config.slots_per_socket, cancel.child_token())?;
         let terminated = CancellationToken::new();
         let supervisor_cancel = cancel.clone();
         let supervisor_component = component.clone();
@@ -254,6 +322,7 @@ impl KvStateAgentHost {
                 supervisor_component,
                 control_target,
                 config.max_slots,
+                sockets,
                 stream,
                 supervisor_slots,
                 supervisor_status,
@@ -321,6 +390,7 @@ async fn run_host_supervisor(
     component: Component,
     host_instance: dynamo_runtime::component::Instance,
     max_slots: usize,
+    mut sockets: HostSockets,
     mut stream: dynamo_runtime::discovery::DiscoveryStream,
     slots: Arc<Mutex<HashMap<CacheOwnerId, HostedSlot>>>,
     status: Arc<ArcSwap<KvStateHostStatus>>,
@@ -362,6 +432,7 @@ async fn run_host_supervisor(
             &intents,
             &mut slots_guard,
             max_slots,
+            &mut sockets,
             &mut capacity_rejected_total,
             &metrics,
         )
@@ -388,6 +459,9 @@ async fn run_host_supervisor(
         }
     }
     drop(slots);
+    if let Some(raw_pool) = &sockets.raw_pool {
+        raw_pool.shutdown().await;
+    }
     if watch_ended {
         let current = host_advertisement.lock().await.clone();
         if let Some(current) = current {
@@ -527,6 +601,7 @@ async fn reconcile_owner(
     intents: &HashMap<CacheOwnerId, HashMap<u64, KvStateAttachmentIntent>>,
     slots: &mut HashMap<CacheOwnerId, HostedSlot>,
     max_slots: usize,
+    sockets: &mut HostSockets,
     capacity_rejected_total: &mut u64,
     metrics: &HostMetrics,
 ) -> Result<()> {
@@ -588,6 +663,7 @@ async fn reconcile_owner(
             },
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            sockets: sockets.for_new_slot()?,
         })
         .await
         {

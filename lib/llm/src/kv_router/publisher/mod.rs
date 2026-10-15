@@ -55,7 +55,8 @@ pub use state_agent::{
     KvStateAgentVllmSource, resolve_stable_dp_slot_id,
 };
 pub use state_agent_host::{
-    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, DEFAULT_KV_STATE_AGENT_SLOTS_PER_SOCKET, KvStateAgentHost,
+    KvStateAgentHostConfig,
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
