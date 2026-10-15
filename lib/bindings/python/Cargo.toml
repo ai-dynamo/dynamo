@@ -140,4 +140,4 @@ strip = false
 
 # Post-codefreeze AISimulate source pin for release/1.6.0.
 [patch.crates-io]
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "50d5fc6aefd00c6ec63490cd2f92a615843a0233" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "221b8163825c2526a9d050a0813d03a538c32e8e" }
