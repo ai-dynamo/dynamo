@@ -21,9 +21,6 @@ each default, and leaves the webhook handler as a narrow request boundary.
   from the client's original `requestKind` alone.
 - Preserve explicit user values. Fill only absence defined by the API and never
   silently rewrite an explicit value to make it valid.
-- Keep request-wide immutable dependencies on the admission receiver. Do not put
-  the current API node, traversal path, derived scratch values, accumulated
-  mutations, or accumulated errors in a generic context bag.
 
 ## Migration status
 
@@ -86,9 +83,10 @@ function and nested API types are handled by their exact-type functions.
   extend a parent options struct, and do not introduce a generic context bag.
 - Pass the admission operation only to the smallest function whose documented
   semantics actually differ between CREATE and UPDATE.
-- Keep request-wide clients, readers, feature configuration, operator version,
-  and caller identity on the root defaulter receiver. Prefer standalone functions
-  for pure nested defaults and explicit resolver interfaces for external reads.
+- Request-wide clients, readers, feature configuration, operator version, and
+  caller identity may live on the root defaulter receiver or in a small typed
+  request context. Prefer standalone functions for pure nested defaults and explicit
+  resolver interfaces for external reads.
 - Mutation is part of the structural function contract, but helper reads and
   resolvers must not mutate their inputs.
 - Use standard `k8s.io/utils/ptr` helpers for pointer defaults and equality. Do not
