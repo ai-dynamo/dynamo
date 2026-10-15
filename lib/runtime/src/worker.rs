@@ -147,9 +147,7 @@ fn remaining_shutdown_budget() -> std::time::Duration {
 // wait as well, including lease revocation. The runtime owns its teardown task,
 // so cancelling this waiter does not cancel teardown.
 async fn shutdown_runtime(runtime: &Runtime, remaining: std::time::Duration) -> anyhow::Result<()> {
-    tokio::time::timeout(remaining, runtime.shutdown_and_wait(Some(remaining)))
-        .await
-        .map_err(|_| anyhow::anyhow!("runtime teardown exceeded the worker shutdown deadline"))?
+    runtime.shutdown_with_budget(remaining).await
 }
 
 #[derive(Debug, Clone)]
@@ -402,6 +400,34 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_budget_reserves_lease_revoke_after_stuck_drain() {
+        for already_started in [false, true] {
+            let runtime = Runtime::from_current().unwrap();
+            let _stuck = runtime.graceful_shutdown_tracker().register_task();
+            let token = runtime.primary_token();
+            let guard = runtime.teardown_guard().unwrap();
+            let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let finished = revoked.clone();
+            tokio::spawn(async move {
+                let _guard = guard;
+                token.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                finished.store(true, Ordering::SeqCst);
+            });
+            if already_started {
+                runtime.shutdown();
+                tokio::task::yield_now().await;
+            }
+            let start = tokio::time::Instant::now();
+            shutdown_runtime(&runtime, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert!(revoked.load(Ordering::SeqCst));
+            assert!(start.elapsed() < Duration::from_secs(5));
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_budget_includes_post_cancellation_teardown() {
