@@ -189,7 +189,7 @@ def test_discover_explicit_mode():
         )
 
 
-def test_discover_explicit_mode_skips_absent_allowlisted_deployment():
+def test_discover_explicit_mode_tracks_absent_allowlisted_deployment():
     cm = KubernetesCapacityManager("default")
     with patch(
         "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
@@ -203,7 +203,9 @@ def test_discover_explicit_mode_skips_absent_allowlisted_deployment():
 
         assert cm.discover({"default-model-a"}) == []
 
-    assert cm.connectors == {}
+    assert cm.connectors == {"default/model-a": connector}
+    assert cm._missing_participants == {"default/model-a"}
+    assert not cm.participant_exists("default/model-a")
 
 
 def test_discover_explicit_mode_retains_missing_deployment_with_live_pods():
@@ -590,8 +592,8 @@ def test_observe_tolerates_read_failure():
     snapshot = cm.observe()
     assert snapshot["default/good"]["prefill"].current_replicas == 1
     assert snapshot["default/bad"] == {}  # tolerated, empty
-    good.kube_api.list_graph_deployments.assert_called_once_with()
-    good.kube_api.get_graph_deployment.assert_not_called()
+    good.kube_api.get_graph_deployment.assert_called_once_with("good")
+    good.kube_api.list_graph_deployments.assert_not_called()
 
 
 def test_observe_require_complete_raises_on_read_failure():
@@ -615,7 +617,9 @@ def test_observe_managed_deployment_not_found_evicts_without_failing():
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
     )
-    missing._test_deployment = None
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
 
     assert cm.observe(require_complete=True) == {}
     assert not cm.participant_exists("default/missing")
@@ -623,7 +627,9 @@ def test_observe_managed_deployment_not_found_evicts_without_failing():
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
     )
-    missing._test_deployment = None
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
     assert cm.observe() == {}
     assert not cm.participant_exists("default/missing")
 
@@ -633,7 +639,9 @@ def test_observe_missing_deployment_waits_for_labeled_pods_to_drain():
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
     )
-    missing._test_deployment = None
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
     missing.kube_api.list_pods_for_graph.side_effect = [[_pod("Running")], []]
 
     with pytest.raises(RuntimeError, match="nonterminal labeled Pods remain"):
@@ -649,7 +657,9 @@ def test_observe_missing_deployment_ignores_terminal_labeled_pods():
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
     )
-    missing._test_deployment = None
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
     missing.kube_api.list_pods_for_graph.return_value = [
         _pod("Succeeded"),
         _pod("Failed"),
@@ -664,7 +674,9 @@ def test_observe_missing_deployment_fails_closed_when_drain_read_fails():
     missing = _install_connector(
         cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
     )
-    missing._test_deployment = None
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
     missing.kube_api.list_pods_for_graph.side_effect = RuntimeError("timeout")
 
     with pytest.raises(RuntimeError, match="Pod drain could not be verified"):
@@ -677,27 +689,26 @@ def test_observe_explicit_mode_rediscovers_recreated_deployment():
     cm._configured_deployment_names = {"model"}
     deployment = _dgd_spec(1, 1)
     old = _install_connector(cm, "default/model", deployment, parent_dgd_name="model")
-    recreated = deepcopy(deployment)
-    recreated.setdefault("metadata", {})["name"] = "model"
-    old.kube_api.list_graph_deployments.side_effect = [[], [recreated]]
+    old.kube_api.get_graph_deployment.side_effect = [
+        DynamoGraphDeploymentNotFoundError("model", "default"),
+        deployment,
+    ]
 
     assert cm.observe(require_complete=True) == {}
+    assert "default/model" in cm.connectors
     assert not cm.participant_exists("default/model")
+    assert cm._missing_participants == {"default/model"}
 
-    with patch(
-        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
-    ) as mock_connector_cls:
-        new = MagicMock()
-        new.parent_dgd_name = "model"
-        mock_connector_cls.return_value = new
-
-        snapshot = cm.observe(require_complete=True)
+    snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
-    assert cm.connectors["default/model"] is new
+    assert cm.connectors["default/model"] is old
+    assert cm._missing_participants == set()
+    assert cm.participant_exists("default/model")
+    old.kube_api.list_pods_for_graph.assert_called_once_with("model")
 
 
-def test_observe_explicit_mode_does_not_reprobe_absent_configured_names():
+def test_observe_explicit_mode_does_not_repeat_drain_for_absent_configured_names():
     cm = KubernetesCapacityManager("default")
     cm._configured_deployment_names = {"first", "second"}
     first = _install_connector(
@@ -706,16 +717,37 @@ def test_observe_explicit_mode_does_not_reprobe_absent_configured_names():
     second = _install_connector(
         cm, "default/second", _dgd_spec(1, 1), parent_dgd_name="second"
     )
-    first.kube_api.list_graph_deployments.return_value = []
-    first._test_deployment = None
-    second._test_deployment = None
+    first.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("first", "default")
+    )
+    second.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("second", "default")
+    )
 
     assert cm.observe(require_complete=True) == {}
     assert cm.observe(require_complete=True) == {}
 
-    assert first.kube_api.list_graph_deployments.call_count == 2
+    assert first.kube_api.get_graph_deployment.call_count == 2
+    assert second.kube_api.get_graph_deployment.call_count == 2
     first.kube_api.list_pods_for_graph.assert_called_once_with("first")
     second.kube_api.list_pods_for_graph.assert_called_once_with("second")
+    first.kube_api.list_graph_deployments.assert_not_called()
+
+
+def test_observe_explicit_mode_does_not_require_list_permission():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(
+        cm, "default/model", _dgd_spec(1, 1), parent_dgd_name="model"
+    )
+    connector.kube_api.list_graph_deployments.side_effect = PermissionError(
+        "list forbidden"
+    )
+
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
+    connector.kube_api.get_graph_deployment.assert_called_once_with("model")
+    connector.kube_api.list_graph_deployments.assert_not_called()
 
 
 def test_observe_implicit_mode_lists_once_per_namespace():
@@ -737,6 +769,26 @@ def test_observe_implicit_mode_lists_once_per_namespace():
     second.kube_api.list_graph_deployments.assert_not_called()
     first.kube_api.get_graph_deployment.assert_not_called()
     second.kube_api.get_graph_deployment.assert_not_called()
+
+
+def test_observe_implicit_mode_preserves_cross_namespace_identity():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    local = _install_connector(
+        cm, "default/model", _dgd_spec(1, 1), parent_dgd_name="model"
+    )
+    remote = _install_connector(
+        cm, "tenant/model", _dgd_spec(3, 2), parent_dgd_name="model"
+    )
+    cm._inventory_api = local.kube_api
+
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
+    assert snapshot["tenant/model"]["prefill"].current_replicas == 3
+    local.kube_api.list_graph_deployments.assert_called_once_with()
+    local.kube_api.get_graph_deployment.assert_not_called()
+    remote.kube_api.get_graph_deployment.assert_called_once_with("model")
 
 
 def test_observe_implicit_mode_rediscovers_recreated_deployment():

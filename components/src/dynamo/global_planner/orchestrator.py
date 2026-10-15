@@ -263,11 +263,9 @@ class Orchestrator:
         """
 
         admitted = asyncio.Event()
-        cancel_requested = asyncio.Event()
         committed_participants: list[str] = []
 
         def complete_after_cancel() -> bool:
-            cancel_requested.set()
             return admitted.is_set()
 
         async def operation() -> Optional[ScaleOutcome]:
@@ -278,7 +276,6 @@ class Orchestrator:
                 deployment_name,
                 caller_name,
                 admitted,
-                cancel_requested,
                 committed_participants,
             )
 
@@ -326,7 +323,6 @@ class Orchestrator:
         deployment_name: str,
         caller_name: str,
         admitted: asyncio.Event,
-        cancel_requested: asyncio.Event,
         committed_participants: list[str],
     ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
@@ -412,7 +408,6 @@ class Orchestrator:
             grouped_targets,
             ordered_participants,
             blocking=blocking,
-            cancel_requested=cancel_requested,
             committed_participants=committed_participants,
         )
         if terminal is not None:
@@ -425,7 +420,6 @@ class Orchestrator:
         ordered_participants: list[str],
         *,
         blocking: bool,
-        cancel_requested: asyncio.Event,
         committed_participants: list[str],
     ) -> tuple[Optional[ScaleOutcome], list[str]]:
         """Apply an admitted plan, settling each blocking step before the next."""
@@ -513,15 +507,9 @@ class Orchestrator:
             completed.append(pid)
             if result.applied and pid not in committed_participants:
                 committed_participants.append(pid)
-            if (
-                blocking
-                and cancel_requested.is_set()
-                and (result.applied or pid == ordered_participants[-1])
-            ):
-                raise asyncio.CancelledError
             if blocking:
                 try:
-                    await self._wait_for_ready_or_cancel(pid, cancel_requested)
+                    await self.capacity_manager.wait_for_ready(pid)
                 except Exception as readiness_error:
                     if not committed_participants:
                         raise
@@ -539,29 +527,6 @@ class Orchestrator:
                     )
 
         return None, completed
-
-    async def _wait_for_ready_or_cancel(
-        self,
-        participant_id: str,
-        cancel_requested: asyncio.Event,
-    ) -> None:
-        """Keep readiness polling cancellable after a write has completed."""
-        readiness = asyncio.create_task(
-            self.capacity_manager.wait_for_ready(participant_id)
-        )
-        cancellation = asyncio.create_task(cancel_requested.wait())
-        try:
-            await asyncio.wait(
-                {readiness, cancellation}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if cancel_requested.is_set():
-                raise asyncio.CancelledError
-            await readiness
-        finally:
-            for task in (readiness, cancellation):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(readiness, cancellation, return_exceptions=True)
 
     @staticmethod
     def _partial_plan_error(

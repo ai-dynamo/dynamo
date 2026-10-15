@@ -12,7 +12,6 @@ backend into the same orchestrator, including the ``use_lock`` toggle.
 
 import asyncio
 from threading import Event
-from unittest.mock import patch
 
 import pytest
 from kubernetes import client
@@ -509,7 +508,15 @@ async def test_cancelled_cross_participant_transfer_finishes_admitted_plan():
     rejected = await _submit(orch, "default/a", _targets(decode=1))
     assert rejected.status == ScaleStatus.REJECTED
 
-    transfer = asyncio.create_task(_submit(orch, "default/b", _targets(decode=3)))
+    transfer = asyncio.create_task(
+        orch.submit(
+            "default/b",
+            _targets(decode=3),
+            blocking=True,
+            deployment_name="default/b",
+            caller_name="default/b",
+        )
+    )
     await cm.first_scale_started.wait()
     transfer.cancel()
     await asyncio.sleep(0)
@@ -741,7 +748,7 @@ async def test_skipped_downscale_stops_dependent_upscale():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_readiness_wait_releases_scale_lock():
+async def test_cancelled_admitted_readiness_wait_keeps_scale_lock_until_settled():
     class BlockingReadyCapacityManager(FakeCapacityManager):
         def __init__(self):
             super().__init__()
@@ -768,34 +775,17 @@ async def test_cancelled_readiness_wait_releases_scale_lock():
     assert cm.pools["default/a"]["prefill"][0] == 2
 
     first.cancel()
+    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
+    await asyncio.sleep(0)
+    assert not first.done()
+    assert not second.done()
+
+    cm.release_ready_wait.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(first, 1)
-
-    second = await asyncio.wait_for(_submit(orch, "default/a", _targets(prefill=3)), 1)
-    assert second.status == ScaleStatus.SUCCESS
+    result = await asyncio.wait_for(second, 1)
+    assert result.status == ScaleStatus.SUCCESS
     assert cm.pools["default/a"]["prefill"][0] == 3
-
-
-@pytest.mark.asyncio
-async def test_readiness_wait_observes_cancel_before_waiter_task_runs():
-    cm = FakeCapacityManager()
-    cm.add("default/a", prefill=1)
-    orch = _orch(cm)
-    cancel_requested = asyncio.Event()
-
-    async def readiness_wins_before_cancel_waiter(tasks, return_when):
-        assert return_when == asyncio.FIRST_COMPLETED
-        await asyncio.sleep(0)
-        readiness = next(task for task in tasks if task.done())
-        cancel_requested.set()
-        return {readiness}, tasks - {readiness}
-
-    with patch(
-        "dynamo.global_planner.orchestrator.asyncio.wait",
-        side_effect=readiness_wins_before_cancel_waiter,
-    ):
-        with pytest.raises(asyncio.CancelledError):
-            await orch._wait_for_ready_or_cancel("default/a", cancel_requested)
 
 
 @pytest.mark.asyncio
