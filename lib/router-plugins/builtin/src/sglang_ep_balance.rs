@@ -4,13 +4,13 @@
 //! SGLang EP-group worker selection.
 //!
 //! SGLang registers every data-parallel rank in one engine under the same worker ID. This policy
-//! treats that worker ID as one expert-parallel group and prefers the admission that leaves the
-//! group's DP ranks with the smallest request-count and active-token spreads. A smaller secondary
-//! term keeps whole EP groups from diverging when the within-group costs are similar.
+//! treats that worker ID as one expert-parallel group: MoE time follows the group's total batch,
+//! and attention time follows each rank's own context, so the group waits for its rank with the
+//! most context. The policy keeps request counts even across groups and context even across the
+//! ranks of a group.
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerSelectionContext,
     WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
@@ -19,68 +19,46 @@ use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::protocols::WorkerAffinityTarget;
+use dynamo_kv_router::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
+use dynamo_kv_router::{KvRouterConfig, ScoredWorkerCandidate};
 
 pub const POLICY_TYPE: &str = "dynamo-sglang-ep-balance";
 
-const DEFAULT_REQUEST_IMBALANCE_WEIGHT: f64 = 0.0;
-const DEFAULT_TOKEN_IMBALANCE_WEIGHT: f64 = 1.0;
-const DEFAULT_GROUP_REQUEST_WEIGHT: f64 = 1.0;
-const DEFAULT_GROUP_TOKEN_WEIGHT: f64 = 0.0;
-const DEFAULT_GROUP_LOAD_TOLERANCE: f64 = 0.1;
-const DEFAULT_INCOMPLETE_GROUP_WEIGHT: f64 = 1.0;
-const DEFAULT_CACHE_AFFINITY_MIN_FRACTION: f64 = 0.5;
-const DEFAULT_AFFINITY_MIN_IMBALANCE_REDUCTION: f64 = 0.5;
-const DEFAULT_SAME_HOST_MOVE_COST: f64 = 50.0 / 225.0;
+/// Group-load penalty per DP rank of a group that is missing from the candidates (filtered out),
+/// in units of the global mean requests per rank.
+const MISSING_RANK_PENALTY: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
-    /// Within-group terms: spread of requests / KV blocks across the chosen group's DP ranks.
-    /// Requests default to 0: MoE time is per group, attention time per rank follows context.
-    request_imbalance_weight: f64,
-    token_imbalance_weight: f64,
-    /// Group terms: mean requests / KV blocks per rank of an EP group (SGLang worker).
-    group_request_weight: f64,
-    group_token_weight: f64,
-    /// Groups within this relative distance of the least-loaded group are all candidates;
-    /// the within-group terms decide among them.
+    /// Groups whose mean requests per rank is within this relative distance of the least-loaded
+    /// group are all candidates; per-rank context decides among them.
     group_load_tolerance: f64,
-    incomplete_group_weight: f64,
-    /// Ranks holding at least this fraction of the prompt in device cache keep the request
-    /// (sticky sessions); balancing only decides among them. Values above 1.0 disable the gate.
+    /// Ranks holding at least this fraction of the prompt in device cache keep the request;
+    /// balancing only decides among them. Values above 1.0 disable the gate.
     cache_affinity_min_fraction: f64,
-    /// A session bound to a rank (the host's advisory affinity target) moves only to the rank
-    /// that most lowers the attention-barrier wait, and only if that lowers the slowest rank's
-    /// context by more than this fraction of the request's own context (see [`barrier_increase`]).
-    /// The saving lasts as long as the request and the re-transfer grows with its context, so
-    /// the ratio is benefit over cost; 1.0 means the move removes the whole request from the max.
-    /// Sticking saves the KV re-transfer a decode rank with a radix cache would otherwise need;
-    /// moving evens the barrier. Use a large value (e.g. 1e9) for hard stickiness, 0 to move
-    /// whenever any other rank gives a lower wait.
+    /// A session bound to a rank (the host's advisory affinity target) moves only if that lowers
+    /// the group's slowest-rank context by more than this many times the request's own context
+    /// times the move cost (see [`affinity_row`]). 0 moves whenever another rank is better; a
+    /// large value (e.g. 1e9) gives hard stickiness.
     affinity_min_imbalance_reduction: f64,
     /// DP ranks per physical host, numbered contiguously within a worker (ranks
     /// `[k * n, (k + 1) * n)` share host `k`). 0 means unknown: every move costs a full transfer.
     dp_ranks_per_host: u32,
-    /// Cost of a move between ranks on the bound rank's host, relative to a cross-host move:
-    /// same-host ranks reload the session from the shared host (G2) tier, e.g. Mooncake, over
-    /// the chip-host link instead of the network (GB200: 50 / 225 GB/s).
+    /// Cost of a move to a rank on the bound rank's host, relative to a cross-host move. Such a
+    /// rank reloads the session from the host's shared KV tier (e.g. Mooncake) over the chip-host
+    /// link instead of the network (GB200: 50 / 225 GB/s).
     same_host_move_cost: f64,
 }
 
 impl Default for Parameters {
     fn default() -> Self {
         Self {
-            request_imbalance_weight: DEFAULT_REQUEST_IMBALANCE_WEIGHT,
-            token_imbalance_weight: DEFAULT_TOKEN_IMBALANCE_WEIGHT,
-            group_request_weight: DEFAULT_GROUP_REQUEST_WEIGHT,
-            group_token_weight: DEFAULT_GROUP_TOKEN_WEIGHT,
-            group_load_tolerance: DEFAULT_GROUP_LOAD_TOLERANCE,
-            incomplete_group_weight: DEFAULT_INCOMPLETE_GROUP_WEIGHT,
-            cache_affinity_min_fraction: DEFAULT_CACHE_AFFINITY_MIN_FRACTION,
-            affinity_min_imbalance_reduction: DEFAULT_AFFINITY_MIN_IMBALANCE_REDUCTION,
+            group_load_tolerance: 0.1,
+            cache_affinity_min_fraction: 0.5,
+            affinity_min_imbalance_reduction: 0.5,
             dp_ranks_per_host: 0,
-            same_host_move_cost: DEFAULT_SAME_HOST_MOVE_COST,
+            same_host_move_cost: 50.0 / 225.0,
         }
     }
 }
@@ -88,12 +66,7 @@ impl Default for Parameters {
 impl Parameters {
     fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
         for (name, value) in [
-            ("request_imbalance_weight", self.request_imbalance_weight),
-            ("token_imbalance_weight", self.token_imbalance_weight),
-            ("group_request_weight", self.group_request_weight),
-            ("group_token_weight", self.group_token_weight),
             ("group_load_tolerance", self.group_load_tolerance),
-            ("incomplete_group_weight", self.incomplete_group_weight),
             (
                 "cache_affinity_min_fraction",
                 self.cache_affinity_min_fraction,
@@ -110,180 +83,151 @@ impl Parameters {
                 )));
             }
         }
-        if self.request_imbalance_weight == 0.0 && self.token_imbalance_weight == 0.0 {
-            return Err(WorkerSelectionPolicyProviderError::new(
-                "at least one within-group imbalance weight must be positive",
-            ));
-        }
-        if self.group_request_weight == 0.0 && self.group_token_weight == 0.0 {
-            return Err(WorkerSelectionPolicyProviderError::new(
-                "at least one group load weight must be positive",
-            ));
-        }
         Ok(())
     }
 }
 
+/// One EP group (SGLang worker) among the candidates.
 #[derive(Clone, Copy)]
-struct GroupStats {
+struct Group {
     worker_id: u64,
-    size: usize,
-    sum_requests: usize,
-    sum_blocks: usize,
+    ranks: usize,
+    requests: usize,
+    max_blocks: usize,
     has_allowed_row: bool,
 }
 
-/// Projected per-rank (requests, context blocks) after admitting the request on
-/// `selected_row`. Context blocks are the per-request sequence blocks the attention kernels
-/// read, so the incoming request adds its whole prompt regardless of cache hits. A rank the
-/// host reports as unavailable has no tracked sequences and counts as idle.
-fn projected_load(
-    load: &WorkerLoadInput,
-    row: usize,
-    selected_row: usize,
-    request_blocks: usize,
-) -> (usize, usize) {
-    let selected = row == selected_row;
-    if !load.is_available() {
-        return (
-            usize::from(selected),
-            if selected { request_blocks } else { 0 },
-        );
+/// A rank's active (requests, context blocks). Context blocks are the per-request sequence
+/// blocks the attention kernels read. A rank the host reports as unavailable counts as idle.
+fn rank_load(load: &WorkerLoadInput) -> (usize, usize) {
+    if load.is_available() {
+        (load.active_requests(), load.active_sequence_blocks())
+    } else {
+        (0, 0)
     }
-    (
-        load.active_requests() + usize::from(selected),
-        load.active_sequence_blocks() + if selected { request_blocks } else { 0 },
-    )
 }
 
-/// The selected rank's own load after admitting the request, scaled by the global means so
-/// request and block terms are unitless. Picking the minimum is "least-loaded rank in the
-/// group"; unlike a max−min spread it is never flat, so 16 ranks do not tie onto one of them.
-fn within_group_cost(
-    parameters: &Parameters,
-    load: &[WorkerLoadInput],
-    selected_row: usize,
-    request_blocks: usize,
-    global_mean_requests: f64,
-    global_mean_blocks: f64,
-) -> f64 {
-    let (requests, blocks) = projected_load(
-        &load[selected_row],
-        selected_row,
-        selected_row,
-        request_blocks,
-    );
-    parameters.request_imbalance_weight * requests as f64 / (global_mean_requests + 1.0)
-        + parameters.token_imbalance_weight * blocks as f64 / (global_mean_blocks + 1.0)
+/// Selection state shared by the bound-session and the free-placement paths.
+struct Candidates<'a> {
+    workers: Vec<WorkerWithDpRank>,
+    blocks: Vec<usize>,
+    /// Index into `groups` for each candidate row.
+    group_of: Vec<usize>,
+    groups: Vec<Group>,
+    total_requests: usize,
+    parameters: &'a Parameters,
 }
 
-/// Rise in Σ_groups size·max-rank-context when the request lands on `row`. With attention time
-/// linear in context, a group's barrier wait Σ_r(max − att_r) is size·max − Σ_r att_r, and the
-/// sum does not depend on placement, so this is the change in total wait.
-fn barrier_increase(
-    candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
-    blocks: &[usize],
-    groups: &[(u64, usize, usize)],
-    row: usize,
-    request_blocks: usize,
-) -> f64 {
-    let worker_id = candidates[row].worker().worker_id;
-    let Some(&(_, size, max_blocks)) = groups.iter().find(|(id, _, _)| *id == worker_id) else {
-        return f64::INFINITY;
-    };
-    size as f64 * (blocks[row] + request_blocks).saturating_sub(max_blocks) as f64
-}
-
-/// For a session bound to `bound_row`: the bound row, or the row with the lowest barrier wait if
-/// moving there saves more than the threshold. A huge request makes any destination the new
-/// straggler, so it saves little and stays.
-fn affinity_row(
-    parameters: &Parameters,
-    candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
-    load: &[WorkerLoadInput],
-    bound_row: usize,
-    request_blocks: usize,
-) -> usize {
-    let blocks: Vec<usize> = (0..load.len())
-        .map(|row| projected_load(&load[row], row, usize::MAX, 0).1)
-        .collect();
-    let mut groups: Vec<(u64, usize, usize)> = Vec::new();
-    for (row, candidate) in candidates.iter().enumerate() {
-        let worker_id = candidate.worker().worker_id;
-        match groups.iter_mut().find(|(id, _, _)| *id == worker_id) {
-            Some(group) => {
-                group.1 += 1;
-                group.2 = group.2.max(blocks[row]);
-            }
-            None => groups.push((worker_id, 1, blocks[row])),
+impl<'a> Candidates<'a> {
+    fn new(
+        parameters: &'a Parameters,
+        candidates: &[ScoredWorkerCandidate],
+        load: &[WorkerLoadInput],
+        allowed: impl Fn(usize) -> bool,
+    ) -> Self {
+        let mut this = Self {
+            workers: Vec::with_capacity(candidates.len()),
+            blocks: Vec::with_capacity(candidates.len()),
+            group_of: Vec::with_capacity(candidates.len()),
+            groups: Vec::new(),
+            total_requests: 0,
+            parameters,
+        };
+        for (row, (candidate, load)) in candidates.iter().zip(load).enumerate() {
+            let worker = candidate.worker();
+            let (requests, blocks) = rank_load(load);
+            let index = match this
+                .groups
+                .iter()
+                .position(|g| g.worker_id == worker.worker_id)
+            {
+                Some(index) => index,
+                None => {
+                    this.groups.push(Group {
+                        worker_id: worker.worker_id,
+                        ranks: 0,
+                        requests: 0,
+                        max_blocks: 0,
+                        has_allowed_row: false,
+                    });
+                    this.groups.len() - 1
+                }
+            };
+            let group = &mut this.groups[index];
+            group.ranks += 1;
+            group.requests += requests;
+            group.max_blocks = group.max_blocks.max(blocks);
+            group.has_allowed_row |= allowed(row);
+            this.total_requests += requests;
+            this.workers.push(worker);
+            this.blocks.push(blocks);
+            this.group_of.push(index);
         }
+        this
     }
-    let increase = |row| barrier_increase(candidates, &blocks, &groups, row, request_blocks);
-    let bound = candidates[bound_row].worker();
-    let bound_size = groups
-        .iter()
-        .find(|(id, _, _)| *id == bound.worker_id)
-        .map_or(1, |(_, size, _)| *size);
-    let ranks_per_host = parameters.dp_ranks_per_host;
-    let move_cost = |row: usize| {
-        let worker = candidates[row].worker();
-        let same_host = ranks_per_host > 0
-            && worker.worker_id == bound.worker_id
-            && worker.dp_rank / ranks_per_host == bound.dp_rank / ranks_per_host;
-        if same_host {
-            parameters.same_host_move_cost
-        } else {
-            1.0
-        }
-    };
-    let stay = increase(bound_row);
-    let scale = bound_size as f64 * request_blocks.max(1) as f64;
-    // Net benefit of moving: slowest-rank context saved (as a fraction of the request) minus
-    // the threshold times the move's transfer cost.
-    let best = (0..candidates.len())
-        .filter(|row| *row != bound_row)
-        .map(|row| {
-            let saved = (stay - increase(row)) / scale;
-            let cost = move_cost(row);
+
+    /// Rise in the group's ranks × slowest-rank context when the request lands on `row`. With
+    /// attention time linear in context, a group's barrier wait Σ_r(max − att_r) is
+    /// ranks·max − Σ_r att_r, and the sum does not depend on placement, so this is the change in
+    /// total wait.
+    fn barrier_increase(&self, row: usize, request_blocks: usize) -> f64 {
+        let group = &self.groups[self.group_of[row]];
+        group.ranks as f64
+            * (self.blocks[row] + request_blocks).saturating_sub(group.max_blocks) as f64
+    }
+
+    /// The bound row, or the row whose saving (slowest-rank context saved, as a fraction of the
+    /// request) beats the threshold times its move cost by the most. A huge request makes any
+    /// destination the new straggler, so it saves little and stays.
+    fn affinity_row(&self, bound_row: usize, request_blocks: usize) -> usize {
+        let parameters = self.parameters;
+        let bound = self.workers[bound_row];
+        let host = |worker: WorkerWithDpRank| {
             (
-                row,
-                saved,
-                saved - parameters.affinity_min_imbalance_reduction * cost,
-                cost,
+                worker.worker_id,
+                worker.dp_rank / parameters.dp_ranks_per_host,
             )
-        })
-        .max_by(|(lr, _, ln, lc), (rr, _, rn, rc)| {
-            ln.total_cmp(rn)
-                .then_with(|| rc.total_cmp(lc))
-                .then_with(|| blocks[*rr].cmp(&blocks[*lr]))
-        });
-    match best {
-        Some((row, saved, net, _)) if saved > 0.0 && net > 0.0 => row,
-        _ => bound_row,
+        };
+        let move_cost = |row: usize| {
+            if parameters.dp_ranks_per_host > 0 && host(self.workers[row]) == host(bound) {
+                parameters.same_host_move_cost
+            } else {
+                1.0
+            }
+        };
+        let stay = self.barrier_increase(bound_row, request_blocks);
+        let scale =
+            self.groups[self.group_of[bound_row]].ranks as f64 * request_blocks.max(1) as f64;
+        (0..self.workers.len())
+            .filter(|row| *row != bound_row)
+            .map(|row| {
+                let saved = (stay - self.barrier_increase(row, request_blocks)) / scale;
+                let net = saved - parameters.affinity_min_imbalance_reduction * move_cost(row);
+                (row, saved, net, move_cost(row))
+            })
+            .filter(|(_, saved, net, _)| *saved > 0.0 && *net > 0.0)
+            .max_by(|(lr, _, ln, lc), (rr, _, rn, rc)| {
+                ln.total_cmp(rn)
+                    .then_with(|| rc.total_cmp(lc))
+                    .then_with(|| self.blocks[*rr].cmp(&self.blocks[*lr]))
+            })
+            .map_or(bound_row, |(row, ..)| row)
+    }
+
+    /// Mean requests per rank, scaled by the global mean, plus a penalty per missing rank.
+    fn group_load(&self, group: &Group, max_ranks: usize) -> f64 {
+        let global_mean = self.total_requests as f64 / self.workers.len() as f64;
+        (group.requests as f64 / group.ranks as f64) / (global_mean + 1.0)
+            + MISSING_RANK_PENALTY * max_ranks.saturating_sub(group.ranks) as f64
     }
 }
 
-fn group_load(
-    parameters: &Parameters,
-    group: &GroupStats,
-    max_group_size: usize,
-    global_mean_requests: f64,
-    global_mean_blocks: f64,
-) -> f64 {
-    let size = group.size as f64;
-    parameters.group_request_weight * (group.sum_requests as f64 / size)
-        / (global_mean_requests + 1.0)
-        + parameters.group_token_weight * (group.sum_blocks as f64 / size)
-            / (global_mean_blocks + 1.0)
-        + parameters.incomplete_group_weight * max_group_size.saturating_sub(group.size) as f64
-}
-
-/// Bound session rank unless moving lowers the attention barrier enough, then sticky cached
-/// prefixes, then the least-loaded EP group (within tolerance), then the rank that leaves that
-/// group's DP ranks most even.
+/// Bound session rank unless moving lowers the attention barrier enough; otherwise sticky cached
+/// prefixes, then the least-loaded EP groups (within tolerance), then the rank with the least
+/// context after admission.
 fn pick_row(
     parameters: &Parameters,
-    candidates: &[dynamo_kv_router::ScoredWorkerCandidate],
+    candidates: &[ScoredWorkerCandidate],
     load: &[WorkerLoadInput],
     overlap_blocks: &[f64],
     request_blocks: u64,
@@ -295,6 +239,7 @@ fn pick_row(
     {
         return None;
     }
+    let request_blocks_usize = request_blocks as usize;
 
     let affinity_threshold = parameters.cache_affinity_min_fraction * request_blocks as f64;
     let is_affine = |row: usize| {
@@ -302,102 +247,50 @@ fn pick_row(
     };
     let has_affine_row = (0..candidates.len()).any(is_affine);
     let allowed = |row: usize| !has_affine_row || is_affine(row);
+    let state = Candidates::new(parameters, candidates, load, allowed);
 
-    let mut groups: Vec<GroupStats> = Vec::new();
-    let (mut sum_requests, mut sum_blocks) = (0usize, 0usize);
-    for (row, (candidate, load)) in candidates.iter().zip(load).enumerate() {
-        let worker_id = candidate.worker().worker_id;
-        let (requests, blocks) = projected_load(load, row, usize::MAX, 0);
-        sum_requests += requests;
-        sum_blocks += blocks;
-        let group = match groups.iter_mut().find(|g| g.worker_id == worker_id) {
-            Some(group) => group,
-            None => {
-                groups.push(GroupStats {
-                    worker_id,
-                    size: 0,
-                    sum_requests: 0,
-                    sum_blocks: 0,
-                    has_allowed_row: false,
-                });
-                groups.last_mut().expect("just pushed")
-            }
-        };
-        group.size += 1;
-        group.sum_requests += requests;
-        group.sum_blocks += blocks;
-        group.has_allowed_row |= allowed(row);
-    }
     if let Some(target) = affinity_target
-        && let Some(bound_row) = candidates.iter().position(|candidate| {
-            let worker = candidate.worker();
+        && let Some(bound_row) = state.workers.iter().position(|worker| {
             worker.worker_id == target.worker_id
                 && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank)
         })
     {
-        return Some(affinity_row(
-            parameters,
-            candidates,
-            load,
-            bound_row,
-            request_blocks as usize,
-        ));
+        return Some(state.affinity_row(bound_row, request_blocks_usize));
     }
 
-    let global_mean_requests = sum_requests as f64 / candidates.len() as f64;
-    let global_mean_blocks = sum_blocks as f64 / candidates.len() as f64;
-    let max_group_size = groups.iter().map(|g| g.size).max()?;
-    let loads: Vec<(u64, f64)> = groups
+    let max_ranks = state.groups.iter().map(|g| g.ranks).max()?;
+    let group_loads: Vec<f64> = state
+        .groups
         .iter()
-        .filter(|g| g.has_allowed_row)
-        .map(|g| {
-            (
-                g.worker_id,
-                group_load(
-                    parameters,
-                    g,
-                    max_group_size,
-                    global_mean_requests,
-                    global_mean_blocks,
-                ),
-            )
-        })
+        .map(|g| state.group_load(g, max_ranks))
         .collect();
-    let min_load = loads.iter().map(|(_, l)| *l).fold(f64::INFINITY, f64::min);
-    let load_cutoff = min_load * (1.0 + parameters.group_load_tolerance);
-    let load_of = |worker_id: u64| {
-        loads
-            .iter()
-            .find(|(id, _)| *id == worker_id)
-            .map(|(_, l)| *l)
-    };
-
-    candidates
+    let min_load = state
+        .groups
         .iter()
-        .enumerate()
-        .filter(|(row, _)| allowed(*row))
-        .filter_map(|(row, candidate)| {
-            let group_load = load_of(candidate.worker().worker_id)?;
-            (group_load <= load_cutoff).then_some((row, group_load, candidate.worker()))
+        .zip(&group_loads)
+        .filter(|(g, _)| g.has_allowed_row)
+        .map(|(_, l)| *l)
+        .fold(f64::INFINITY, f64::min);
+    let load_cutoff = min_load * (1.0 + parameters.group_load_tolerance);
+
+    (0..candidates.len())
+        .filter(|row| allowed(*row) && group_loads[state.group_of[*row]] <= load_cutoff)
+        .min_by(|l, r| {
+            let key = |row: usize| {
+                (
+                    state.blocks[row] + request_blocks_usize,
+                    group_loads[state.group_of[row]],
+                    overlap_blocks[row],
+                    state.workers[row],
+                )
+            };
+            let (lb, ll, lo, lw) = key(*l);
+            let (rb, rl, ro, rw) = key(*r);
+            lb.cmp(&rb)
+                .then_with(|| ll.total_cmp(&rl))
+                .then_with(|| ro.total_cmp(&lo))
+                .then_with(|| lw.cmp(&rw))
         })
-        .map(|(row, group_load, worker)| {
-            let cost = within_group_cost(
-                parameters,
-                load,
-                row,
-                request_blocks as usize,
-                global_mean_requests,
-                global_mean_blocks,
-            );
-            (row, cost, group_load, overlap_blocks[row], worker)
-        })
-        .min_by(|(_, lc, ll, lo, lw), (_, rc, rl, ro, rw)| {
-            lc.total_cmp(rc)
-                .then_with(|| ll.total_cmp(rl))
-                .then_with(|| ro.total_cmp(lo))
-                .then_with(|| lw.cmp(rw))
-        })
-        .map(|(row, _, _, _, _)| row)
 }
 
 struct SglangEpBalancePicker {
@@ -705,28 +598,17 @@ mod tests {
 
     #[test]
     fn rejects_invalid_parameters() {
-        let invalid = Parameters {
-            request_imbalance_weight: 0.0,
-            token_imbalance_weight: 0.0,
-            ..Default::default()
-        };
-        assert!(invalid.validate().is_err());
-        assert!(
+        for invalid in [
             Parameters {
-                group_request_weight: f64::NAN,
+                group_load_tolerance: f64::NAN,
                 ..Default::default()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
+            },
             Parameters {
-                group_request_weight: 0.0,
-                group_token_weight: 0.0,
+                same_host_move_cost: -1.0,
                 ..Default::default()
-            }
-            .validate()
-            .is_err()
-        );
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
     }
 }

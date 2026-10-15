@@ -188,7 +188,7 @@ pub(crate) fn kv_event_lag_ms() -> f64 {
 
 /// Which replay worker roles bind each session to the worker/DP rank that served its previous
 /// turn (the production router's session affinity). All roles default to `true`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ReplaySessionAffinity {
     pub aggregated: bool,
     pub prefill: bool,

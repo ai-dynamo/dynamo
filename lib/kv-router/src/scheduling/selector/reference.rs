@@ -329,7 +329,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
-        let decode_cost_blocks = load.decode_cost_blocks();
+        let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
             kv_router_config.decode_active_request_weight * load.active_requests as f64;
 
