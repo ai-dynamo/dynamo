@@ -39,12 +39,13 @@ RUN pip install --no-cache-dir --no-deps \
 # ai-dynamo's declared core dependencies, plus the Rust _core extension wheel
 # (`ai-dynamo-runtime`) that the Python package imports natively. `kubernetes`,
 # `pydantic`, and `pydantic-settings` are explicitly pinned because the latest
-# unpinned versions can exceed ai-dynamo's declared compatibility ranges.
+# unpinned versions (kubernetes 35.x, pydantic 2.13.x) violate ai-dynamo's
+# declared compatibility ranges.
 RUN pip install --no-cache-dir \
       --extra-index-url https://pypi.nvidia.com \
       ai-dynamo-runtime==${DYNAMO_VERSION} \
-      "kubernetes<38.0.0,>=37.0.1" \
-      "pydantic==2.13.5" "pydantic-settings<2.13.0" \
+      "kubernetes<33.0.0,>=32.0.1" \
+      "pydantic<2.13" "pydantic-settings<2.13.0" \
       msgpack msgspec prometheus-client pyzmq transformers
 
 # ai-dynamo[vllm] extras minus nixl + ray (handled above), plus the

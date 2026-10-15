@@ -25,6 +25,7 @@ from typing import Optional
 
 from kubernetes.client import ApiException
 
+from dynamo.common.async_utils import run_sync_in_thread
 from dynamo.common.kubernetes import retry_kubernetes_write
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
@@ -86,33 +87,16 @@ class _ReplicaUpdatePlan:
 
 @dataclass
 class _StartupReductionTracker:
-    """Carry applied startup reductions across conflict retries."""
+    """Carry dispatched startup reductions across conflict retries."""
 
     attempted: dict[str, int] = field(default_factory=dict)
-    applied: dict[str, int] = field(default_factory=dict)
-
-    def observe(self, plans: list[_ReplicaUpdatePlan]) -> None:
-        for plan in plans:
-            target = plan.target.desired_replicas
-            if (
-                self.attempted.get(plan.service.name) == target
-                and plan.current_replicas == target
-            ):
-                self.applied[plan.service.name] = target
 
     def record_attempts(self, plans: list[_ReplicaUpdatePlan]) -> None:
         for plan in plans:
             self.attempted[plan.service.name] = plan.target.desired_replicas
 
-    def record_successes(self, plans: list[_ReplicaUpdatePlan]) -> None:
-        for plan in plans:
-            target = plan.target.desired_replicas
-            if self.attempted.get(plan.service.name) == target:
-                self.applied[plan.service.name] = target
-
     def clear(self) -> None:
         self.attempted.clear()
-        self.applied.clear()
 
 
 class KubernetesConnector(PlannerConnector):
@@ -231,7 +215,7 @@ class KubernetesConnector(PlannerConnector):
         self, sub_component_type: SubComponentType, blocking: bool = True
     ):
         """Add a component by increasing its replica count by 1"""
-        changed = await asyncio.to_thread(
+        changed = await run_sync_in_thread(
             self._change_component_replicas, sub_component_type, 1
         )
         if changed and blocking:
@@ -243,7 +227,7 @@ class KubernetesConnector(PlannerConnector):
         self, sub_component_type: SubComponentType, blocking: bool = True
     ):
         """Remove a component by decreasing its replica count by 1"""
-        changed = await asyncio.to_thread(
+        changed = await run_sync_in_thread(
             self._change_component_replicas, sub_component_type, -1
         )
         if changed and blocking:
@@ -1112,9 +1096,9 @@ class KubernetesConnector(PlannerConnector):
             )
 
         try:
-            should_wait = await asyncio.to_thread(retry_kubernetes_write, update)
+            should_wait = await run_sync_in_thread(retry_kubernetes_write, update)
         finally:
-            self._record_startup_scale_down_targets(startup_reductions.applied)
+            self._record_startup_scale_down_targets(startup_reductions.attempted)
         if should_wait and blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
@@ -1150,8 +1134,6 @@ class KubernetesConnector(PlannerConnector):
                 )
                 return False
             raise
-        startup_reductions.observe(plans)
-
         mutations = [
             plan
             for plan in plans
@@ -1283,15 +1265,11 @@ class KubernetesConnector(PlannerConnector):
                 for plan in plans
                 if plan.current_replicas != plan.target.desired_replicas
             ]
-            startup_reductions.observe(plans)
             if len(mutations) > 1:
                 self._reject_not_ready_scaling(
                     "unready recovery requires exactly one replica mutation"
                 )
                 return False
-
-        if startup_reduction:
-            startup_reductions.record_attempts(mutations)
 
         for plan in mutations:
             logger.info(
@@ -1302,32 +1280,46 @@ class KubernetesConnector(PlannerConnector):
                 plan.target.desired_replicas,
             )
 
-        # Adapter writes do not advance the parent DGD generation. Apply them
-        # before the one direct-DGD CAS so a later retry can safely skip any
-        # adapter target that was already committed.
+        # Apply reductions before increases across the separate DGD and DGDSA
+        # authorities. A failed partial plan can then reduce capacity, but it
+        # cannot exceed the capacity accepted by the Global Planner.
         adapter_mutations = [
             plan for plan in mutations if plan.scaling_adapter is not None
         ]
-        for plan in adapter_mutations:
+        adapter_reductions = [
+            plan
+            for plan in adapter_mutations
+            if plan.target.desired_replicas < plan.current_replicas
+        ]
+        adapter_increases = [
+            plan
+            for plan in adapter_mutations
+            if plan.target.desired_replicas > plan.current_replicas
+        ]
+        for plan in adapter_reductions:
+            if startup_reduction:
+                startup_reductions.record_attempts([plan])
             self._write_preflighted_replica_target(
                 plan.deployment,
                 plan.service,
                 plan.target.desired_replicas,
                 plan.scaling_adapter,
             )
-            startup_reductions.record_successes([plan])
 
         dgd_mutations = [plan for plan in mutations if plan.scaling_adapter is None]
         if len(dgd_mutations) == 1:
             plan = dgd_mutations[0]
+            if startup_reduction:
+                startup_reductions.record_attempts(dgd_mutations)
             self._write_preflighted_replica_target(
                 plan.deployment,
                 plan.service,
                 plan.target.desired_replicas,
                 None,
             )
-            startup_reductions.record_successes(dgd_mutations)
         elif dgd_mutations:
+            if startup_reduction:
+                startup_reductions.record_attempts(dgd_mutations)
             self.kube_api.update_dgd_replica_targets(
                 self.graph_deployment_name,
                 {
@@ -1336,7 +1328,14 @@ class KubernetesConnector(PlannerConnector):
                 },
                 deployment=deployment,
             )
-            startup_reductions.record_successes(dgd_mutations)
+
+        for plan in adapter_increases:
+            self._write_preflighted_replica_target(
+                plan.deployment,
+                plan.service,
+                plan.target.desired_replicas,
+                plan.scaling_adapter,
+            )
 
         for plan in plans:
             if plan.current_replicas == plan.target.desired_replicas:
@@ -1363,7 +1362,7 @@ class KubernetesConnector(PlannerConnector):
         fetched by that old process: it either commits before the fence (and is
         visible to the refresh below) or conflicts afterward.
         """
-        component_name = await asyncio.to_thread(
+        component_name = await run_sync_in_thread(
             self._acquire_batch_writer_fence_sync, writer_id
         )
 
@@ -1534,9 +1533,11 @@ class KubernetesConnector(PlannerConnector):
         """Apply one relative replica change against fresh state on conflicts."""
         unset_uid = object()
         expected_uid: object = unset_uid
+        attempted_component: str | None = None
+        attempted_replicas: int | None = None
 
         def write() -> bool:
-            nonlocal expected_uid
+            nonlocal attempted_component, attempted_replicas, expected_uid
             current_deployment = self.kube_api.get_graph_deployment(
                 self.graph_deployment_name
             )
@@ -1548,12 +1549,26 @@ class KubernetesConnector(PlannerConnector):
             current_service = get_component_from_type_or_name(
                 current_deployment, sub_component_type
             )
+            if (
+                attempted_component is not None
+                and current_service.name != attempted_component
+            ):
+                raise RuntimeError(
+                    "component identity changed during replica update retry"
+                )
             current_replicas, current_adapter = self._authoritative_replica_state(
                 current_deployment, current_service
             )
+            if (
+                attempted_replicas is not None
+                and current_replicas == attempted_replicas
+            ):
+                return True
             replicas = current_replicas + delta
             if replicas < 0:
                 return False
+            attempted_component = current_service.name
+            attempted_replicas = replicas
             self._write_preflighted_replica_target(
                 current_deployment,
                 current_service,

@@ -9,6 +9,7 @@ from typing import Protocol
 from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
+from dynamo.common.async_utils import run_sync_in_thread
 from dynamo.planner.errors import PlannerError
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,8 @@ class RuntimeNamespaceBinding:
 
     async def refresh_runtime_namespace(self) -> bool:
         try:
-            runtime_namespace = self.resolver.get_worker_runtime_namespace(
-                self.namespace
+            runtime_namespace = await run_sync_in_thread(
+                self.resolver.get_worker_runtime_namespace, self.namespace
             )
         except (ApiException, ConfigException, PlannerError) as exc:
             logger.warning(

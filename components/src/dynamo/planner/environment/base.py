@@ -7,6 +7,7 @@ import inspect
 import logging
 from typing import Optional
 
+from dynamo.common.async_utils import run_sync_in_thread
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -184,10 +185,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def _refresh_deployment_state(
         self, deployment: Optional[dict] = None
     ) -> None:
-        self._refresh_worker_info()
-        self._refresh_gpu_counts(deployment=deployment)
+        await run_sync_in_thread(self._refresh_worker_info)
+        await run_sync_in_thread(self._refresh_gpu_counts, deployment=deployment)
         await self._refresh_replica_counts()
-        self._refresh_model_name()
+        await run_sync_in_thread(self._refresh_model_name)
 
     def _shared_dgd_deployment(self) -> Optional[dict]:
         """One DGD GET for GPU + power reads when power awareness is on.

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from threading import get_ident
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -102,6 +103,40 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     assert order.index("ready") < order.index("namespace") < order.index("gpu")
     assert order.index("gpu") < order.index("fpm:base-ns-workerhash")
     fpm_provider.async_init.assert_awaited_once_with("base-ns-workerhash")
+
+
+@pytest.mark.asyncio
+async def test_refresh_deployment_state_offloads_synchronous_reads():
+    event_loop_thread = get_ident()
+    read_threads = []
+    controller = _controller()
+
+    def worker_info(sub_component_type, backend):
+        read_threads.append(get_ident())
+        return build_worker_info_from_defaults(backend, sub_component_type)
+
+    def gpu_shapes(**_kwargs):
+        read_threads.append(get_ident())
+        return ComponentGPUShape(2, 2), ComponentGPUShape(4, 4)
+
+    def model_name(*_args, **_kwargs):
+        read_threads.append(get_ident())
+        return "test-model"
+
+    controller.get_worker_info.side_effect = worker_info
+    controller.get_gpu_shapes.side_effect = gpu_shapes
+    controller.get_model_name.side_effect = model_name
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+
+    await environment._refresh_deployment_state()
+
+    assert len(read_threads) == 4
+    assert all(thread_id != event_loop_thread for thread_id in read_threads)
 
 
 @pytest.mark.asyncio

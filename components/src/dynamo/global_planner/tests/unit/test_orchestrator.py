@@ -10,6 +10,8 @@ Kubernetes, no runtime — which previews how offline replay plugs a non-K8s
 backend into the same orchestrator, including the ``use_lock`` toggle.
 """
 
+from threading import get_ident
+
 import pytest
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
@@ -173,6 +175,7 @@ class FakeCapacityManager(CapacityManager):
     def __init__(self):
         # participant_id -> {sub_type: [current_replicas, gpu_per_replica]}
         self.pools: dict[str, dict[str, list]] = {}
+        self.current_replicas_thread_id = None
 
     def add(self, key, prefill=None, decode=None, gpu=1):
         entry = {}
@@ -203,6 +206,7 @@ class FakeCapacityManager(CapacityManager):
                 self.pools[participant_id][st][0] = t.desired_replicas
 
     def current_replicas(self, participant_id):
+        self.current_replicas_thread_id = get_ident()
         return {st: r for st, (r, _g) in self.pools[participant_id].items()}
 
 
@@ -225,6 +229,7 @@ async def _submit(orch, key, targets):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_lock", [True, False])
 async def test_submit_approves_and_actuates(use_lock):
+    event_loop_thread = get_ident()
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
     orch = _orch(cm, use_lock=use_lock)
@@ -234,6 +239,7 @@ async def test_submit_approves_and_actuates(use_lock):
     assert out.status == ScaleStatus.SUCCESS
     assert cm.pools["default/a"]["prefill"][0] == 3  # actuated
     assert out.current_replicas == {"prefill": 3, "decode": 1}
+    assert cm.current_replicas_thread_id != event_loop_thread
 
 
 @pytest.mark.asyncio

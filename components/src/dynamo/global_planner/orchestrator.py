@@ -29,6 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
 
+from dynamo.common.async_utils import run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -273,7 +274,9 @@ class Orchestrator:
             return terminal
 
         # Read back current replica counts (outside the lock).
-        current_replicas = self.capacity_manager.current_replicas(participant_id)
+        current_replicas = await run_sync_in_thread(
+            self.capacity_manager.current_replicas, participant_id
+        )
         logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
         return ScaleOutcome(
             status=ScaleStatus.SUCCESS,
@@ -300,17 +303,16 @@ class Orchestrator:
         # correctly (e.g. component-name role hints for generic workers).
         self.capacity_manager.remember_roles(participant_id, targets)
 
-        # TODO(global-planner): Make the request path scale: avoid full-cluster
-        # observation when budget enforcement is disabled, move synchronous
-        # Kubernetes readback and PATCH work off the event loop, and do not hold
-        # the budget lock through blocking readiness waits.
+        # TODO(global-planner): Avoid full-cluster observation when budget
+        # enforcement is disabled, and do not hold the budget lock through
+        # blocking readiness waits.
         # Read ALL known participants' current state once. Cross-participant
         # partner search needs every pool's current replicas and gpu_per_replica;
         # cross-participant budget math also consumes this. Run the synchronous
         # backend reads off-thread so the event loop isn't blocked for the N
         # round-trips. When budget is enforced, require a complete snapshot so a
         # partial read can't under-count cluster usage.
-        all_pools = await asyncio.to_thread(
+        all_pools = await run_sync_in_thread(
             self.capacity_manager.observe, self.budget_enforcement_enabled()
         )
 
