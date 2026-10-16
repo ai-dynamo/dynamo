@@ -29,10 +29,10 @@ If no row matches your cluster, use the manual steps in [Install Dynamo](install
 
 ## Prerequisites
 
-- A Kubernetes 1.34 or later cluster, which the Dynamo recipes need for Dynamic Resource Allocation (DRA), with GPU nodes that match the recipe. To create an EKS cluster, see [Amazon EKS](managed-kubernetes/eks/eks-setup.mdx).
+- A Kubernetes 1.34 or later cluster, which the Dynamo recipes need for Dynamic Resource Allocation (DRA), with GPU nodes that match the recipe. For this guide, that means EKS GPU node groups running Ubuntu. The [Amazon EKS](managed-kubernetes/eks/eks-setup.mdx) guide creates an EKS Auto Mode cluster, which does not use Ubuntu nodes and does not match this recipe.
 - `kubectl` and Helm access with cluster-admin permissions.
 - Image pull access from the GPU nodes to the registries the bundle and your Dynamo runtime images use.
-- A cluster without existing installs of components the recipe manages. Run `helm list -A` and remove or plan around an existing GPU Operator, cert-manager, kube-prometheus-stack, or `dynamo-platform` release, because the bundle installs its own.
+- A cluster without existing installs of components the recipe manages. Run `helm list -A` and remove or plan around an existing GPU Operator, cert-manager, kube-prometheus-stack, or `dynamo-platform` release, because the bundle installs its own. On EKS, if the Amazon EBS CSI driver is installed as an EKS add-on, add `--set awsebscsidriver:enabled=false` to `aicr bundle`.
 
 ## Install the CLI
 
@@ -53,7 +53,7 @@ Verify the installation:
 aicr --version
 ```
 
-The output should show v1.0.0. The install script always installs the latest release, so if your version is newer, check the [AICR release notes](https://github.com/NVIDIA/aicr/releases) for changed commands.
+The output should show v1.0.0. Homebrew and the install script install the latest release, and the recipes are built into the CLI, so a newer CLI can resolve different component versions. To match this guide exactly, download the archive for your platform from the [v1.0.0 release](https://github.com/NVIDIA/aicr/releases/tag/v1.0.0) and check it against `aicr_checksums.txt`.
 
 ## Generate the Recipe
 
@@ -136,15 +136,17 @@ Disaggregated deployments also transfer KV cache between prefill and decode work
 
 ## Next Steps
 
-Your cluster is ready. Follow the [Model Deployment guide](../model-deployment/introduction.mdx) to deploy a model with a DynamoGraphDeployment. The bundle owns the platform: change platform settings by regenerating it with `aicr bundle --set`, and put model and serving settings in your DynamoGraphDeployment.
+Your cluster is ready. Follow the [Model Deployment guide](../model-deployment/introduction.mdx) to deploy a model with a DynamoGraphDeployment. Use runtime images (vLLM, SGLang, or TensorRT-LLM) that match the installed platform version, which is 1.4.2 for AICR v1.0.0. The bundle owns the platform: change platform settings by regenerating it with `aicr bundle --set`, and put model and serving settings in your DynamoGraphDeployment.
 
-To upgrade a deployed stack, run `aicr upgrade-check` and follow [Upgrading a Deployed Stack](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/upgrading.md). After an upgrade that changes the platform version, update each DynamoGraphDeployment's runtime image (vLLM, SGLang, or TensorRT-LLM) to the matching Dynamo version. AICR v1.0.0 does not document an uninstall path for the Helm deployer. To remove the Dynamo CRDs, see **Clean uninstall?** in [Install Dynamo troubleshooting](install-dynamo.md#troubleshooting).
+To upgrade a deployed stack, run `aicr upgrade-check` and follow [Upgrading a Deployed Stack](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/upgrading.md). After an upgrade that changes the platform version, update each DynamoGraphDeployment's runtime image to match.
+
+To uninstall, run `helm uninstall` for each component in the reverse order listed under **Uninstall** in the bundle's `README.md`. See [Bundle Uninstall](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/cli-reference.md#bundle-uninstall). Helm does not delete CRDs. To remove the Dynamo CRDs, see **Clean uninstall?** in [Install Dynamo troubleshooting](install-dynamo.md#troubleshooting).
 
 ## Troubleshooting
 
 **`aicr recipe` fails with `requires additional criteria`.** Run `aicr recipe list --intent inference --platform dynamo` and use values from a listed row. A partial query such as `--os ubuntu --accelerator h100` can be ambiguous, so also set `--service`.
 
-**`aicr validate` exits with code 2 before running any phase.** The readiness pre-flight failed. The output names the failed constraint; this recipe requires Kubernetes 1.34 or later.
+**`aicr validate` exits with code 2 before running any phase.** The readiness pre-flight failed. The output names the failed constraint.
 
 **AICR jobs stay `Pending`.** The snapshot agent and the inner validation workloads target GPU nodes. If your GPU nodes carry non-standard labels or taints, pass `--node-selector` and `--toleration` to `aicr validate`. These flags do not affect the validator orchestrator Job.
 
