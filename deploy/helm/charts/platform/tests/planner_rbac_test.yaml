@@ -31,6 +31,40 @@ tests:
               - get
               - patch
         documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - apps
+            resources:
+              - deployments
+              - replicasets
+            verbs:
+              - list
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamocomponentdeployments
+              - lpxgraphdeployments
+            verbs:
+              - list
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - grove.io
+            resources:
+              - podcliquesets
+              - podcliquescalinggroups
+              - podcliques
+            verbs:
+              - list
+        documentIndex: 0
 
   - it: includes pods/list in ClusterRole when powerAwareness is enabled
     set:
@@ -85,6 +119,40 @@ tests:
             verbs:
               - get
               - patch
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - apps
+            resources:
+              - deployments
+              - replicasets
+            verbs:
+              - list
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamocomponentdeployments
+              - lpxgraphdeployments
+            verbs:
+              - list
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - grove.io
+            resources:
+              - podcliquesets
+              - podcliquescalinggroups
+              - podcliques
+            verbs:
+              - list
         documentIndex: 1
 
   - it: includes pods/list in Role when powerAwareness is enabled in namespace-restricted mode

@@ -17,7 +17,11 @@ import pytest
 from kubernetes import client
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
-from dynamo.global_planner.orchestrator import Orchestrator, _ParticipantMutationBusy
+from dynamo.global_planner.orchestrator import (
+    Orchestrator,
+    PoolIntent,
+    _ParticipantMutationBusy,
+)
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleStatus
@@ -246,6 +250,32 @@ async def test_submit_approves_and_actuates(use_lock):
     assert out.status == ScaleStatus.SUCCESS
     assert cm.pools["default/a"]["prefill"][0] == 3  # actuated
     assert out.current_replicas == {"prefill": 3, "decode": 1}
+
+
+@pytest.mark.asyncio
+async def test_submit_discards_intents_from_invalidated_participant_generation():
+    class InvalidatingCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.invalidated = {"default/a"}
+
+        def consume_invalidated_participants(self):
+            invalidated = set(self.invalidated)
+            self.invalidated.clear()
+            return invalidated
+
+    cm = InvalidatingCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    cm.add("default/b", prefill=1, decode=1)
+    orch = _orch(cm, max_gpus=10)
+    orch._intent_cache["default/a/decode"] = PoolIntent(0, 1.0)
+    orch._intent_cache["default/b/decode"] = PoolIntent(0, 1.0)
+
+    await _submit(orch, "default/a", _targets(prefill=2))
+
+    assert "default/a/decode" not in orch._intent_cache
+    assert "default/a/prefill" in orch._intent_cache
+    assert "default/b/decode" in orch._intent_cache
 
 
 @pytest.mark.asyncio

@@ -95,6 +95,15 @@ class CapacityManager:
         """
         raise NotImplementedError
 
+    def consume_invalidated_participants(self) -> set[str]:
+        """Return identities whose backend generation changed since observation.
+
+        The orchestrator uses this to prevent cached intents from crossing an
+        opaque participant identity boundary. Backends without generations keep
+        the default empty result.
+        """
+        return set()
+
     async def scale(
         self,
         participant_id: str,

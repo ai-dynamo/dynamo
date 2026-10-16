@@ -16,7 +16,8 @@
 import asyncio
 import copy
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Optional
 
 from kubernetes import client, config
@@ -68,6 +69,54 @@ PARTIAL_OBJECT_METADATA_ACCEPT = (
     "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io"
 )
 
+# Replica-owning resources that can survive their DGD while background garbage
+# collection is still converging. Optional extension APIs return 404 when their
+# CRD is not installed and are skipped by list_capacity_descendants().
+CAPACITY_CONTROLLER_CUSTOM_RESOURCES = (
+    (
+        NVIDIA_API_GROUP,
+        DYNAMO_API_VERSION,
+        "dynamocomponentdeployments",
+        "DynamoComponentDeployment",
+        True,
+    ),
+    (
+        NVIDIA_API_GROUP,
+        "v1alpha1",
+        "lpxgraphdeployments",
+        "LPXGraphDeployment",
+        False,
+    ),
+    ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets", "LeaderWorkerSet", True),
+    (
+        "disaggregatedset.x-k8s.io",
+        "v1",
+        "disaggregatedsets",
+        "DisaggregatedSet",
+        True,
+    ),
+    ("grove.io", "v1alpha1", "podcliquesets", "PodCliqueSet", True),
+    (
+        "grove.io",
+        "v1alpha1",
+        "podcliquescalinggroups",
+        "PodCliqueScalingGroup",
+        True,
+    ),
+    ("grove.io", "v1alpha1", "podcliques", "PodClique", True),
+)
+
+
+@dataclass(frozen=True)
+class CapacityObjectMetadata:
+    """Identity and controller ownership for one DGD-associated capacity object."""
+
+    kind: str
+    name: str
+    uid: str
+    dgd_name: str
+    controller_owner_uids: tuple[str, ...]
+
 
 def _as_custom_object(value: object, resource: str) -> dict:
     """Validate the generated CustomObjectsApi's untyped response boundary."""
@@ -103,6 +152,7 @@ class KubernetesAPI:
         api_client = client_go_api_client()
         self.custom_api = client.CustomObjectsApi(api_client)
         self.core_api = client.CoreV1Api(api_client)
+        self.apps_api = client.AppsV1Api(api_client)
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _read_graph_deployment_once(self, graph_deployment_name: str) -> dict:
@@ -879,6 +929,33 @@ class KubernetesAPI:
                 unsettled.append(component_name)
         return not unsettled, unsettled
 
+    @staticmethod
+    def adapter_targets_projected(
+        deployment: dict,
+        expected_targets: Mapping[str, int],
+        expected_authorities: Mapping[str, tuple[bool, str | None]],
+    ) -> tuple[bool, list[str]]:
+        """Check that accepted DGDSA targets reached the raw DGD spec."""
+        components = get_components_by_name(deployment)
+        pending: list[str] = []
+        for component_name, expected in expected_targets.items():
+            authority = expected_authorities.get(component_name)
+            if authority is None:
+                raise RuntimeError(
+                    f"component {component_name!r} has no expected replica authority"
+                )
+            if not authority[0]:
+                continue
+            component = components.get(component_name)
+            if component is None:
+                raise RuntimeError(
+                    f"component {component_name!r} disappeared during replica settlement"
+                )
+            actual = Service(name=component_name, service=component).number_replicas()
+            if actual != expected:
+                pending.append(component_name)
+        return not pending, pending
+
     def scaling_adapter_identity_rejection(
         self,
         deployment: dict,
@@ -1016,6 +1093,241 @@ class KubernetesAPI:
             field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
             metadata_only=True,
         )
+
+    def list_capacity_descendants(self) -> list[CapacityObjectMetadata]:
+        """List DGD-labeled objects that can directly or indirectly create Pods.
+
+        This is a deletion/recreation safety path, not a normal observation path.
+        Every list is namespaced, paginated, and metadata-only. Lists are
+        label-filtered except LPXGraphDeployment, whose private API uses the DGD
+        name and owner reference instead of carrying the stable DGD label. Direct
+        DGD children are read before their descendants, and Pods are read last,
+        so a controller observed during concurrent garbage collection cannot be
+        hidden by an older Pod snapshot.
+        """
+        descendants: list[CapacityObjectMetadata] = []
+        for (
+            group,
+            version,
+            plural,
+            kind,
+            label_scoped,
+        ) in CAPACITY_CONTROLLER_CUSTOM_RESOURCES:
+            descendants.extend(
+                self._list_custom_capacity_metadata(
+                    group,
+                    version,
+                    plural,
+                    kind,
+                    label_scoped=label_scoped,
+                )
+            )
+        for kind, request in (
+            ("Deployment", self.apps_api.list_namespaced_deployment),
+            ("ReplicaSet", self.apps_api.list_namespaced_replica_set),
+        ):
+            descendants.extend(self._list_typed_capacity_metadata(kind, request))
+        descendants.extend(
+            self._capacity_metadata_from_items(self.list_graph_pods(), "Pod")
+        )
+        return descendants
+
+    def _list_typed_capacity_metadata(
+        self,
+        kind: str,
+        request: Callable[..., object],
+    ) -> list[CapacityObjectMetadata]:
+        return on_error(
+            DEFAULT_BACKOFF,
+            _is_resource_expired,
+            lambda: self._list_typed_capacity_metadata_once(kind, request),
+        )
+
+    def _list_typed_capacity_metadata_once(
+        self,
+        kind: str,
+        request: Callable[..., object],
+    ) -> list[CapacityObjectMetadata]:
+        items: list = []
+        continue_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            page = request(
+                namespace=self.current_namespace,
+                label_selector=DYNAMO_DGD_NAME_LABEL,
+                limit=KUBERNETES_LIST_PAGE_SIZE,
+                _continue=continue_token,
+                _headers={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
+            )
+            page_items = getattr(page, "items", None)
+            if not isinstance(page_items, list):
+                raise TypeError(
+                    f"Kubernetes API returned a malformed {kind} list: items is not a list"
+                )
+            items.extend(page_items)
+            metadata = getattr(page, "metadata", None)
+            raw_token = getattr(metadata, "_continue", None)
+            if raw_token in (None, ""):
+                return self._capacity_metadata_from_items(items, kind)
+            if not isinstance(raw_token, str):
+                raise TypeError(
+                    f"Kubernetes API returned a malformed {kind} list: continue is not a string"
+                )
+            if raw_token in seen_tokens:
+                raise RuntimeError(
+                    f"Kubernetes API repeated a {kind} list continue token"
+                )
+            seen_tokens.add(raw_token)
+            continue_token = raw_token
+
+    def _list_custom_capacity_metadata(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        kind: str,
+        *,
+        label_scoped: bool,
+    ) -> list[CapacityObjectMetadata]:
+        try:
+            return on_error(
+                DEFAULT_BACKOFF,
+                _is_resource_expired,
+                lambda: self._list_custom_capacity_metadata_once(
+                    group,
+                    version,
+                    plural,
+                    kind,
+                    label_scoped=label_scoped,
+                ),
+            )
+        except client.ApiException as error:
+            if error.status == 404:
+                return []
+            raise
+
+    def _list_custom_capacity_metadata_once(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        kind: str,
+        *,
+        label_scoped: bool,
+    ) -> list[CapacityObjectMetadata]:
+        items: list[dict] = []
+        continue_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            result = _as_custom_object(
+                self.custom_api.list_namespaced_custom_object(
+                    group=group,
+                    version=version,
+                    namespace=self.current_namespace,
+                    plural=plural,
+                    label_selector=(DYNAMO_DGD_NAME_LABEL if label_scoped else None),
+                    limit=KUBERNETES_LIST_PAGE_SIZE,
+                    _continue=continue_token,
+                    _headers={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
+                ),
+                f"{kind} list",
+            )
+            page_items = result.get("items")
+            if not isinstance(page_items, list):
+                raise TypeError(
+                    f"Kubernetes API returned a malformed {kind} list: items is not a list"
+                )
+            items.extend(page_items)
+            metadata = result.get("metadata") or {}
+            if not isinstance(metadata, Mapping):
+                raise TypeError(
+                    f"Kubernetes API returned a malformed {kind} list: metadata is not an object"
+                )
+            raw_token = metadata.get("continue")
+            if raw_token in (None, ""):
+                return self._capacity_metadata_from_items(
+                    items,
+                    kind,
+                    dgd_name_from_object_name=not label_scoped,
+                )
+            if not isinstance(raw_token, str):
+                raise TypeError(
+                    f"Kubernetes API returned a malformed {kind} list: continue is not a string"
+                )
+            if raw_token in seen_tokens:
+                raise RuntimeError(
+                    f"Kubernetes API repeated a {kind} list continue token"
+                )
+            seen_tokens.add(raw_token)
+            continue_token = raw_token
+
+    @staticmethod
+    def _capacity_metadata_from_items(
+        items: list,
+        kind: str,
+        *,
+        dgd_name_from_object_name: bool = False,
+    ) -> list[CapacityObjectMetadata]:
+        metadata_items: list[CapacityObjectMetadata] = []
+        for index, item in enumerate(items):
+            if isinstance(item, Mapping):
+                metadata = item.get("metadata")
+                if not isinstance(metadata, Mapping):
+                    raise TypeError(f"{kind} item {index} metadata is not an object")
+                name = metadata.get("name")
+                uid = metadata.get("uid")
+                labels = metadata.get("labels") or {}
+                owner_references = metadata.get("ownerReferences") or []
+                if not isinstance(owner_references, list):
+                    raise TypeError(f"{kind} {name!r} ownerReferences is not a list")
+                owner_uids = tuple(
+                    owner.get("uid")
+                    for owner in owner_references
+                    if isinstance(owner, Mapping) and owner.get("controller") is True
+                )
+            else:
+                metadata = getattr(item, "metadata", None)
+                if metadata is None:
+                    raise TypeError(f"{kind} item {index} has no metadata")
+                name = getattr(metadata, "name", None)
+                uid = getattr(metadata, "uid", None)
+                labels = getattr(metadata, "labels", None) or {}
+                owner_references = getattr(metadata, "owner_references", None) or []
+                if not isinstance(owner_references, list):
+                    raise TypeError(f"{kind} {name!r} ownerReferences is not a list")
+                owner_uids = tuple(
+                    getattr(owner, "uid", None)
+                    for owner in owner_references
+                    if getattr(owner, "controller", None) is True
+                )
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{kind} item {index} has no usable name")
+            if not isinstance(uid, str) or not uid:
+                raise ValueError(f"{kind} {name!r} has no usable UID")
+            if not isinstance(labels, Mapping):
+                raise TypeError(f"{kind} {name!r} labels are not an object")
+            dgd_name = (
+                name if dgd_name_from_object_name else labels.get(DYNAMO_DGD_NAME_LABEL)
+            )
+            if not isinstance(dgd_name, str) or not dgd_name:
+                raise ValueError(f"{kind} {name!r} has no usable DGD label")
+            if any(
+                not isinstance(owner_uid, str) or not owner_uid
+                for owner_uid in owner_uids
+            ):
+                raise ValueError(
+                    f"{kind} {name!r} has an unusable controller owner UID"
+                )
+            metadata_items.append(
+                CapacityObjectMetadata(
+                    kind=kind,
+                    name=name,
+                    uid=uid,
+                    dgd_name=dgd_name,
+                    controller_owner_uids=owner_uids,
+                )
+            )
+        return metadata_items
 
     def _list_graph_pods(
         self,
@@ -1241,18 +1553,29 @@ class KubernetesAPI:
                 targets_stable, unsettled = self.replica_targets_stable(
                     settlement_deployment, expected_replica_targets
                 )
+                targets_projected, unprojected = self.adapter_targets_projected(
+                    graph_deployment,
+                    expected_replica_targets,
+                    expected_replica_authorities,
+                )
                 generation_observed = self.is_spec_generation_observed(graph_deployment)
                 (
                     blocking_rollout,
                     rollout_reason,
                 ) = self.is_rolling_update_blocking_settlement(graph_deployment)
-                if not targets_stable or not generation_observed or blocking_rollout:
+                if (
+                    not targets_stable
+                    or not targets_projected
+                    or not generation_observed
+                    or blocking_rollout
+                ):
                     logger.info(
                         "[Attempt %d/%d] Waiting for accepted replica targets: "
-                        "unsettled=%s, observed=%s, rollout=%s",
+                        "unsettled=%s, unprojected=%s, observed=%s, rollout=%s",
                         attempt + 1,
                         max_attempts,
                         unsettled,
+                        unprojected,
                         generation_observed,
                         rollout_reason or "settled",
                     )

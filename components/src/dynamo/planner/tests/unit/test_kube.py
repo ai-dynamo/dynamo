@@ -139,12 +139,20 @@ def mock_core_api():
 
 
 @pytest.fixture
-def k8s_api(mock_custom_api, mock_core_api, mock_config, mock_namespace):
+def mock_apps_api():
+    with patch(
+        "dynamo.planner.connectors.clients.kubernetes_api.client.AppsV1Api"
+    ) as mock:
+        yield mock.return_value
+
+
+@pytest.fixture
+def k8s_api(mock_custom_api, mock_core_api, mock_apps_api, mock_config, mock_namespace):
     return KubernetesAPI()
 
 
 @pytest.fixture
-def k8s_api_with_namespace(mock_custom_api, mock_config):
+def k8s_api_with_namespace(mock_custom_api, mock_apps_api, mock_config):
     return KubernetesAPI(k8s_namespace="test-namespace")
 
 
@@ -163,6 +171,49 @@ def test_list_graph_deployments_rejects_non_object_item(k8s_api, mock_custom_api
 
     with pytest.raises(TypeError, match=r"items\[0\] is not an object"):
         k8s_api.list_graph_deployments()
+
+
+def test_list_capacity_descendants_reads_metadata_and_skips_absent_optional_crd(
+    k8s_api, mock_custom_api, mock_apps_api, mock_core_api
+):
+    empty_page = SimpleNamespace(items=[], metadata=SimpleNamespace(_continue=None))
+    mock_apps_api.list_namespaced_deployment.return_value = empty_page
+    mock_apps_api.list_namespaced_replica_set.return_value = empty_page
+
+    def list_custom_objects(*, plural, **_kwargs):
+        if plural == "dynamocomponentdeployments":
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "model-worker",
+                            "uid": "dcd-uid",
+                            "labels": {
+                                "nvidia.com/dynamo-graph-deployment-name": "model"
+                            },
+                            "ownerReferences": [{"uid": "dgd-uid", "controller": True}],
+                        }
+                    }
+                ],
+                "metadata": {},
+            }
+        if plural == "lpxgraphdeployments":
+            raise client.ApiException(status=404)
+        return {"items": [], "metadata": {}}
+
+    mock_custom_api.list_namespaced_custom_object.side_effect = list_custom_objects
+
+    _mock_pod_list(mock_core_api, [])
+
+    descendants = k8s_api.list_capacity_descendants()
+
+    assert [
+        (item.kind, item.name, item.controller_owner_uids) for item in descendants
+    ] == [("DynamoComponentDeployment", "model-worker", ("dgd-uid",))]
+    request = mock_apps_api.list_namespaced_deployment.call_args.kwargs
+    assert request["namespace"] == "default"
+    assert request["label_selector"] == "nvidia.com/dynamo-graph-deployment-name"
+    assert request["_headers"]["Accept"] == PARTIAL_OBJECT_METADATA_ACCEPT
 
 
 def test_list_graph_deployments_follows_continue_tokens(k8s_api, mock_custom_api):
@@ -1357,6 +1408,52 @@ async def test_wait_for_replica_targets_ignores_stale_ready_condition(
 
     assert got is settled
     assert get_dgd.call_count == 2
+    mock_core_api.list_namespaced_pod.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_waits_for_adapter_projection(
+    k8s_api, mock_core_api
+):
+    stale = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale_component = stale["spec"]["components"][0]
+    stale_component["scalingAdapter"] = {}
+    stale_status = stale["status"]["components"]["decode"]
+    stale_status.update(
+        {
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        }
+    )
+    settled = deepcopy(stale)
+    settled["metadata"]["generation"] = 3
+    settled["status"]["observedGeneration"] = 3
+    settled["spec"]["components"][0]["replicas"] = 1
+    adapter = _owned_scaling_adapter("decode", replicas=1)
+    _mock_pod_list(mock_core_api, [_make_pod("decode-0")])
+
+    with (
+        patch.object(
+            k8s_api, "get_graph_deployment", side_effect=[stale, settled]
+        ) as get_dgd,
+        patch.object(
+            k8s_api, "get_service_scaling_adapter", return_value=adapter
+        ) as get_adapter,
+    ):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 1},
+            expected_replica_authorities={"decode": (True, "adapter-uid")},
+            max_attempts=2,
+            delay_seconds=0,
+        )
+
+    assert got is settled
+    assert get_dgd.call_count == 2
+    assert get_adapter.call_count == 2
     mock_core_api.list_namespaced_pod.assert_called_once()
 
 

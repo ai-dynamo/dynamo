@@ -282,6 +282,17 @@ class Orchestrator:
         supports = getattr(self.capacity_manager, "supports_split_readiness", None)
         return bool(supports()) if supports is not None else False
 
+    def _discard_invalidated_intents(self) -> None:
+        consume = getattr(
+            self.capacity_manager, "consume_invalidated_participants", None
+        )
+        if consume is None:
+            return
+        for participant_id in consume():
+            prefix = f"{participant_id}/"
+            for key in [key for key in self._intent_cache if key.startswith(prefix)]:
+                del self._intent_cache[key]
+
     async def _scale_with_result(
         self,
         participant_id: str,
@@ -457,6 +468,7 @@ class Orchestrator:
         # performs a targeted post-write readback for the response.
         if self.budget_enforcement_enabled():
             all_pools = await run_sync_in_thread(self.capacity_manager.observe, True)
+            self._discard_invalidated_intents()
         else:
             all_pools = {}
 
