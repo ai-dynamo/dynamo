@@ -1101,15 +1101,10 @@ fn build_engine_config(
     let deployment_dp_size = model_dp_size.checked_mul(attn_dp_size).ok_or_else(|| {
         client::invalid_arg("SGLang deployment DP size exceeds the supported range")
     })?;
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if enable_dp_attention && deployment_dp_size > 1 {
-                value / u64::from(deployment_dp_size)
+            if attn_dp_size > 1 {
+                value / u64::from(attn_dp_size)
             } else {
                 value
             }
@@ -1849,8 +1844,7 @@ mod tests {
     fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
         let config = build_engine_config(
             &discovery(json!({
-                "dp_size": 4,
-                "enable_dp_attention": true,
+                "attn_dp_size": 4,
                 "max_running_requests": 256,
             })),
             DisaggregationMode::Decode,
@@ -1866,9 +1860,8 @@ mod tests {
     fn split_attention_dp_fields_register_the_deployment_rank_count() {
         let config = build_engine_config(
             &discovery(json!({
-                "dp_size": 1,
+                "dp_size": 2,
                 "attn_dp_size": 4,
-                "enable_dp_attention": true,
                 "max_running_requests": 256,
             })),
             DisaggregationMode::Decode,
@@ -1878,7 +1871,7 @@ mod tests {
         .unwrap();
 
         let registration = config.llm.unwrap();
-        assert_eq!(registration.data_parallel_size, Some(4));
+        assert_eq!(registration.data_parallel_size, Some(8));
         assert_eq!(registration.max_num_seqs, Some(64));
     }
 
