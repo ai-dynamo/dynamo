@@ -2011,6 +2011,11 @@ class KubernetesConnector(PlannerConnector):
             )
             return
 
+        _, _, expected_adapter_uid = self._replica_authority_identity(
+            service, scaling_adapter
+        )
+        assert expected_adapter_uid is not None
+
         try:
             self.kube_api.update_scaling_adapter_replicas(
                 self.graph_deployment_name,
@@ -2033,20 +2038,27 @@ class KubernetesConnector(PlannerConnector):
                 raise
             raise _ReplicaAuthorityChanged(status=409, reason=rejection) from error
 
-        # DGDSA and DGD are separate objects. Verify that the parent snapshot
-        # still assigns authority to the adapter after the Scale PATCH.
+        # DGDSA and DGD are separate objects. Verify both identities and the
+        # authoritative target after the Scale PATCH.
         try:
             refreshed = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             rejection = self._dgdsa_authority_rejection(
                 deployment, refreshed, service.name
             )
+            if rejection is not None:
+                raise ValueError(rejection)
+            self.kube_api.verify_scaling_adapter_replica_target(
+                refreshed,
+                service.name,
+                expected_uid=expected_adapter_uid,
+                expected_replicas=replicas,
+                writer_id=self._batch_writer_id,
+            )
         except Exception as error:
             raise _ReplicaTargetCommittedConflict(
                 status=409,
-                reason="DGD authority could not be verified after DGDSA Scale PATCH committed",
+                reason="DGDSA authority or target could not be verified after its Scale PATCH committed",
             ) from error
-        if rejection is not None:
-            raise _ReplicaTargetCommittedConflict(status=409, reason=rejection)
 
     @staticmethod
     def _dgdsa_authority_rejection(

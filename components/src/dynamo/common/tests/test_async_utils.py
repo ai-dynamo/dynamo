@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from contextvars import ContextVar
 from threading import Event
 
 import pytest
@@ -9,6 +10,16 @@ import pytest
 from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_in_thread_copies_contextvars() -> None:
+    request_id = ContextVar("request_id", default="unset")
+    token = request_id.set("request-1")
+    try:
+        assert await run_sync_in_thread(request_id.get) == "request-1"
+    finally:
+        request_id.reset(token)
 
 
 @pytest.mark.asyncio

@@ -39,16 +39,18 @@ RUN pip install --no-cache-dir --no-deps \
 # ai-dynamo's declared core dependencies, plus the Rust _core extension wheel
 # (`ai-dynamo-runtime`) that the Python package imports natively. Read the
 # Kubernetes constraint from the selected wheel so DYNAMO_VERSION overrides
-# cannot silently install an incompatible client. Read the selected client's
-# Pydantic constraint for the same reason; older clients retain the recipe pin.
+# cannot silently install an incompatible client. Intersect the selected Dynamo
+# and Kubernetes Pydantic constraints; older metadata retains the recipe pin.
 RUN KUBERNETES_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next(r for r in requires("ai-dynamo") or () if re.match(r"^kubernetes(?:\[|\s|[<>=!~])", r, re.IGNORECASE)))')" \
     && pip install --no-cache-dir --no-deps "${KUBERNETES_REQUIREMENT}" \
-    && PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("kubernetes") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic<2.13"))')" \
+    && DYNAMO_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("ai-dynamo") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic<2.13"))')" \
+    && KUBERNETES_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("kubernetes") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic"))')" \
     && pip install --no-cache-dir \
       --extra-index-url https://pypi.nvidia.com \
       ai-dynamo-runtime==${DYNAMO_VERSION} \
       "${KUBERNETES_REQUIREMENT}" \
-      "${PYDANTIC_REQUIREMENT}" "pydantic-settings<2.13.0" \
+      "${DYNAMO_PYDANTIC_REQUIREMENT}" "${KUBERNETES_PYDANTIC_REQUIREMENT}" \
+      "pydantic-settings<2.13.0" \
       msgpack msgspec prometheus-client pyzmq transformers
 
 # ai-dynamo[vllm] extras minus nixl + ray (handled above), plus the

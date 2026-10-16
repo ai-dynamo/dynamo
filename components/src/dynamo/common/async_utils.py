@@ -5,6 +5,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextvars import copy_context
 from functools import partial
 from typing import Any, TypeVar
 
@@ -32,9 +33,9 @@ async def run_sync_in_thread(
     mutating operation has stopped while it can still commit in the background.
     """
 
-    worker = asyncio.get_running_loop().run_in_executor(
-        None, partial(function, *args, **kwargs)
-    )
+    context = copy_context()
+    call = partial(function, *args, **kwargs)
+    worker = asyncio.get_running_loop().run_in_executor(None, context.run, call)
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:

@@ -86,6 +86,7 @@ def mock_kube_api():
     mock_api.get_scaling_adapter_desired_replicas = Mock(
         side_effect=KubernetesAPI.get_scaling_adapter_desired_replicas
     )
+    mock_api.verify_scaling_adapter_replica_target = Mock()
     mock_api.update_scaling_adapter_replicas = Mock()
     mock_api.patch_scaling_adapter_writer_fence = Mock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
@@ -845,6 +846,35 @@ async def test_add_component_does_not_repeat_committed_dgdsa_write_after_check_f
 
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
         "test-graph", "worker", 1, resource_version="101"
+    )
+
+
+@pytest.mark.asyncio
+async def test_add_component_rejects_replaced_adapter_after_committed_patch(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    adapter = _scaling_adapter("worker", replicas=0)
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+    mock_kube_api.verify_scaling_adapter_replica_target.side_effect = ValueError(
+        "DGDSA identity changed after its Scale PATCH"
+    )
+
+    with pytest.raises(RuntimeError, match="may already have been applied"):
+        await kubernetes_connector.add_component(
+            SubComponentType.DECODE, blocking=False
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+    mock_kube_api.verify_scaling_adapter_replica_target.assert_called_once_with(
+        deployment,
+        "worker",
+        expected_uid="adapter-uid",
+        expected_replicas=1,
+        writer_id=None,
     )
 
 

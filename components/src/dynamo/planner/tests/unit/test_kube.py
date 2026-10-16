@@ -27,6 +27,7 @@ from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
 from dynamo.planner.connectors.clients.kubernetes_api import (
     KUBERNETES_LIST_PAGE_SIZE,
     NONTERMINAL_POD_FIELD_SELECTOR,
+    PARTIAL_OBJECT_METADATA_ACCEPT,
     KubernetesAPI,
 )
 from dynamo.planner.errors import (
@@ -782,6 +783,42 @@ def test_scaling_adapter_identity_requires_resource_version_only_for_mutation(
             require_resource_version=True,
         )
     )
+
+
+def test_verify_scaling_adapter_replica_target_rejects_replacement(
+    k8s_api, mock_custom_api
+):
+    deployment = {"metadata": {"name": "graph", "uid": "dgd-uid"}}
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "uid": "replacement-uid",
+            "annotations": {"dynamo.nvidia.com/planner-writer-fence": "writer-1"},
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 2,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+    mock_custom_api.get_namespaced_custom_object.return_value = adapter
+
+    with pytest.raises(ValueError, match="identity changed"):
+        k8s_api.verify_scaling_adapter_replica_target(
+            deployment,
+            "worker",
+            expected_uid="original-uid",
+            expected_replicas=2,
+            writer_id="writer-1",
+        )
 
 
 def test_patch_scaling_adapter_writer_fence_uses_resource_version_merge_patch(
@@ -1915,6 +1952,7 @@ def test_list_graph_pods_uses_label_existence_selector(k8s_api, mock_core_api):
         field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
         limit=KUBERNETES_LIST_PAGE_SIZE,
         _continue=None,
+        _headers={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
     )
 
 

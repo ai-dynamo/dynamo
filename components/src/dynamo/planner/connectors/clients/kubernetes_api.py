@@ -63,6 +63,9 @@ GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
 KUBERNETES_LIST_PAGE_SIZE = 500
 NONTERMINAL_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
+PARTIAL_OBJECT_METADATA_ACCEPT = (
+    "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io"
+)
 
 
 def _as_custom_object(value: object, resource: str) -> dict:
@@ -875,6 +878,39 @@ class KubernetesAPI:
             return f"DGDSA {expected_name!r} has a mismatched component label"
         return None
 
+    def verify_scaling_adapter_replica_target(
+        self,
+        deployment: dict,
+        component_name: str,
+        *,
+        expected_uid: str,
+        expected_replicas: int,
+        writer_id: str | None,
+    ) -> None:
+        """Verify that a completed Scale PATCH still owns its replica target."""
+        adapter = self.get_service_scaling_adapter(
+            deployment["metadata"]["name"], component_name
+        )
+        rejection = self.scaling_adapter_identity_rejection(
+            deployment, component_name, adapter
+        )
+        if rejection is not None:
+            raise ValueError(rejection)
+
+        metadata = adapter.get("metadata", {}) or {}
+        if metadata.get("uid") != expected_uid:
+            raise ValueError("DGDSA identity changed after its Scale PATCH")
+        annotations = metadata.get("annotations") or {}
+        if not isinstance(annotations, Mapping):
+            raise ValueError("DGDSA annotations are malformed")
+        if (
+            writer_id is not None
+            and annotations.get(PLANNER_WRITER_FENCE_ANNOTATION) != writer_id
+        ):
+            raise ValueError("DGDSA Planner writer fence changed after its Scale PATCH")
+        if self.get_scaling_adapter_desired_replicas(adapter) != expected_replicas:
+            raise ValueError("DGDSA replica target changed after its Scale PATCH")
+
     @staticmethod
     def is_rolling_update_blocking_settlement(deployment: dict) -> tuple[bool, str]:
         """True while an operator-managed worker rollout is not yet cut over."""
@@ -902,22 +938,30 @@ class KubernetesAPI:
         return self._list_graph_pods(
             DYNAMO_DGD_NAME_LABEL,
             field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+            metadata_only=True,
         )
 
     def _list_graph_pods(
-        self, label_selector: str, field_selector: str | None = None
+        self,
+        label_selector: str,
+        field_selector: str | None = None,
+        *,
+        metadata_only: bool = False,
     ) -> list:
         pods: list = []
         continue_token: str | None = None
         seen_tokens: set[str] = set()
         while True:
-            page = self.core_api.list_namespaced_pod(
-                namespace=self.current_namespace,
-                label_selector=label_selector,
-                field_selector=field_selector,
-                limit=KUBERNETES_LIST_PAGE_SIZE,
-                _continue=continue_token,
-            )
+            request_options = {
+                "namespace": self.current_namespace,
+                "label_selector": label_selector,
+                "field_selector": field_selector,
+                "limit": KUBERNETES_LIST_PAGE_SIZE,
+                "_continue": continue_token,
+            }
+            if metadata_only:
+                request_options["_headers"] = {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
+            page = self.core_api.list_namespaced_pod(**request_options)
             pods.extend(page.items or [])
             metadata = getattr(page, "metadata", None)
             raw_token = getattr(metadata, "_continue", None)

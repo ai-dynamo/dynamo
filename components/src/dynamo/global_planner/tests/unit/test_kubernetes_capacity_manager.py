@@ -90,6 +90,12 @@ def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
     return _with_operator_gpu_status([_component(name, replicas, gpu=gpu, ctype=ctype)])
 
 
+def _listed_dgd(spec, name):
+    item = deepcopy(spec)
+    item.setdefault("metadata", {})["name"] = name
+    return item
+
+
 def _pod(phase, dgd_name="missing"):
     return SimpleNamespace(
         metadata=SimpleNamespace(
@@ -325,7 +331,6 @@ async def test_scale_with_result_calls_connector():
         return ReplicaUpdateResult(accepted=True, applied=True)
 
     connector.set_component_replicas_with_result.side_effect = scale_with_identity
-    cm._inventory_cache = (0.0, [], {})
     targets = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3)
     ]
@@ -337,7 +342,6 @@ async def test_scale_with_result_calls_connector():
     assert connector.set_component_replicas_with_result.await_args.args == (targets,)
     assert connector.set_component_replicas_with_result.await_args.kwargs["blocking"]
     assert cm._replica_uids["default/my-dgd"] == "dgd-uid"
-    assert cm._inventory_cache is None
 
 
 @pytest.mark.asyncio
@@ -385,7 +389,6 @@ async def test_scale_preserves_public_none_return():
 @pytest.mark.asyncio
 async def test_run_with_conflict_retry_restarts_complete_operation():
     cm = KubernetesCapacityManager("default")
-    cm._inventory_cache = (0.0, [], {})
     attempts = 0
 
     async def operation():
@@ -397,7 +400,6 @@ async def test_run_with_conflict_retry_restarts_complete_operation():
 
     assert await cm.run_with_conflict_retry(operation) == "applied"
     assert attempts == 2
-    assert cm._inventory_cache is None
 
 
 @pytest.mark.asyncio
@@ -824,7 +826,7 @@ def test_observe_explicit_mode_does_not_require_list_permission():
     connector.kube_api.list_graph_deployments.assert_not_called()
 
 
-def test_observe_implicit_mode_lists_once_per_namespace():
+def test_observe_implicit_mode_refreshes_complete_inventory():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
     first = _install_connector(
@@ -834,19 +836,26 @@ def test_observe_implicit_mode_lists_once_per_namespace():
         cm, "default/second", _dgd_spec(2, 2), parent_dgd_name="second"
     )
     cm._inventory_api = first.kube_api
+    first_scaled = _dgd_spec(3, 1)
+    first.kube_api.list_graph_deployments.side_effect = [
+        [
+            _listed_dgd(_dgd_spec(1, 1), "first"),
+            _listed_dgd(_dgd_spec(2, 2), "second"),
+        ],
+        [
+            _listed_dgd(first_scaled, "first"),
+            _listed_dgd(_dgd_spec(2, 2), "second"),
+        ],
+    ]
 
-    with patch(
-        "dynamo.global_planner.kubernetes_capacity_manager.time.monotonic",
-        return_value=1.0,
-    ):
-        snapshot = cm.observe(require_complete=True)
-        cached_snapshot = cm.observe(require_complete=True)
+    snapshot = cm.observe(require_complete=True)
+    refreshed_snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/first"]["prefill"].current_replicas == 1
     assert snapshot["default/second"]["prefill"].current_replicas == 2
-    assert cached_snapshot == snapshot
-    first.kube_api.list_graph_deployments.assert_called_once_with()
-    first.kube_api.list_graph_pods.assert_called_once_with()
+    assert refreshed_snapshot["default/first"]["prefill"].current_replicas == 3
+    assert first.kube_api.list_graph_deployments.call_count == 2
+    assert first.kube_api.list_graph_pods.call_count == 2
     second.kube_api.list_graph_deployments.assert_not_called()
     first.kube_api.get_graph_deployment.assert_not_called()
     second.kube_api.get_graph_deployment.assert_not_called()

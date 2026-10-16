@@ -17,7 +17,6 @@ a generic ``worker`` — the role hinted by its Planner's
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import replace
@@ -51,7 +50,6 @@ from dynamo.planner.monitoring.dgd_services import (
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-INVENTORY_CACHE_TTL_SECONDS = 0.1
 
 
 class KubernetesCapacityManager(CapacityManager):
@@ -72,7 +70,6 @@ class KubernetesCapacityManager(CapacityManager):
         self._observe_all_deployments = False
         self._configured_deployment_names: set[str] | None = set()
         self._inventory_api: KubernetesAPI | None = None
-        self._inventory_cache: tuple[float, list[dict], dict[str, int]] | None = None
         # DGDs whose exact GET returned 404. Explicit-mode and cross-namespace
         # tombstones remain recreation probes and are checked for Pods each pass.
         self._missing_participants: set[str] = set()
@@ -210,25 +207,6 @@ class KubernetesCapacityManager(CapacityManager):
             self._inventory_api = KubernetesAPI(self.namespace)
         return self._inventory_api
 
-    def _invalidate_inventory_cache(self) -> None:
-        self._inventory_cache = None
-
-    def _namespace_inventory(self) -> tuple[list[dict], dict[str, int]]:
-        now = time.monotonic()
-        cached = self._inventory_cache
-        if (
-            cached is not None
-            and not self._missing_participants
-            and now - cached[0] <= INVENTORY_CACHE_TTL_SECONDS
-        ):
-            return cached[1], cached[2]
-
-        inventory_api = self._get_inventory_api()
-        deployments = inventory_api.list_graph_deployments()
-        pod_counts = self._active_graph_pod_counts(inventory_api)
-        self._inventory_cache = (now, deployments, pod_counts)
-        return deployments, pod_counts
-
     def _record_observed_pools(
         self, participant_id: str, pools: dict[str, PoolSpec]
     ) -> dict[str, PoolSpec]:
@@ -342,9 +320,6 @@ class KubernetesCapacityManager(CapacityManager):
                 else:
                     self._discard_connector(key, connector)
 
-        if missing:
-            self._invalidate_inventory_cache()
-
     def ensure_participant(
         self,
         participant_id: str,
@@ -417,7 +392,9 @@ class KubernetesCapacityManager(CapacityManager):
         # Implicit mode manages every DGD in the planner namespace, so one
         # namespace LIST is both the intended scope and cheaper than per-DGD GETs.
         try:
-            deployments, local_pod_counts = self._namespace_inventory()
+            inventory_api = self._get_inventory_api()
+            deployments = inventory_api.list_graph_deployments()
+            local_pod_counts = self._active_graph_pod_counts(inventory_api)
             deployments_by_key: dict[str, dict] = {}
             for index, deployment in enumerate(deployments):
                 metadata = deployment.get("metadata")
@@ -667,14 +644,11 @@ class KubernetesCapacityManager(CapacityManager):
             retry_state = retry_states.setdefault(
                 participant_id, ReplicaUpdateRetryState()
             )
-        try:
-            result = await connector.set_component_replicas_with_result(
-                targets,
-                blocking=blocking,
-                retry_state=retry_state,
-            )
-        finally:
-            self._invalidate_inventory_cache()
+        result = await connector.set_component_replicas_with_result(
+            targets,
+            blocking=blocking,
+            retry_state=retry_state,
+        )
         if retry_state.dgd_uid is not None:
             self._replica_uids[participant_id] = retry_state.dgd_uid
         if result.accepted:
@@ -714,17 +688,9 @@ class KubernetesCapacityManager(CapacityManager):
     async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Re-run the complete budget transaction after a Kubernetes conflict."""
 
-        async def observed_operation() -> T:
-            try:
-                return await operation()
-            except Exception as error:
-                if self.is_conflict(error):
-                    self._invalidate_inventory_cache()
-                raise
-
         token = self._replica_retry_states.set({})
         try:
-            return await retry_on_conflict(observed_operation)
+            return await retry_on_conflict(operation)
         finally:
             self._replica_retry_states.reset(token)
 
