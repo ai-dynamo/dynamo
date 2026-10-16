@@ -687,6 +687,23 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name:         "v1beta2 native-only hardware survives a metadata-only update after discovery recovers",
+			oldRequest:   v1beta2NativeHardwareDGDR(nil),
+			request:      v1beta2NativeHardwareDGDR(map[string]any{"updated": "true"}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("no GPUs found"),
+			beforeUpdate: func(*testing.T) { admissionHardware.set(discoveredH200, nil) },
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if result.GetGeneration() != 1 {
+					t.Fatalf("generation = %d, want 1", result.GetGeneration())
+				}
+				v1beta2Absent(t, result, "spec", "hardware")
+				if got := v1beta2String(t, result, "spec", "aisimulate", "parameters", "search_space", "hardware_sku"); got != "h100_sxm" {
+					t.Fatalf("parameters.search_space.hardware_sku = %q, want h100_sxm", got)
+				}
+			},
+		},
+		{
 			name:       "v1beta2 spec change is accepted and bumps the generation",
 			oldRequest: v1beta2DGDRForAdmission(nil, nil),
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
@@ -802,6 +819,18 @@ func alphaDGDRForAdmission(
 }
 
 const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
+
+// v1beta2NativeHardwareDGDR supplies hardware only through native AISimulate parameters.
+func v1beta2NativeHardwareDGDR(labels map[string]any) *unstructured.Unstructured {
+	return v1beta2DGDRForAdmission(func(spec map[string]any) {
+		spec["aisimulate"] = map[string]any{
+			"image": admissionAISimulateImage,
+			"parameters": map[string]any{
+				"search_space": map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(8)},
+			},
+		}
+	}, labels)
+}
 
 // v1beta2DGDRForAdmission builds a v1beta2 Request as a client sends it, before the CRD
 // defaults. It is unstructured on purpose: an omitted field,
