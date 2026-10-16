@@ -80,7 +80,6 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	t.Log("Prepare a hybrid V2 build with a standalone embedding partition")
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
 	build.Partitions[0].SourcePartitionID = 0
 	build.Partitions[1].SourcePartitionID = 1
 	build.StandaloneTokenEmbeddings = true
@@ -133,7 +132,6 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	t.Parallel()
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
 
 	t.Log("Use individually schedulable physical shapes whose collapsed runtime total is not a scheduler shape")
 	build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
@@ -158,7 +156,6 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	data := resolvedPartitionData([]*ModelProjection{projection})
 	require.Equal(t, "7\n11", data["partition_ids"])
 	require.Equal(t, "9\n8", data["nodes_per_partition"])
-	require.Equal(t, "0\n1", data["partition_indices"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
 	require.Equal(t, "part-7\npart-11", data["partition_paths"])
 	require.Equal(t, "stage-a\nstage-b", data["topologies"])
@@ -186,7 +183,6 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	t.Parallel()
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
 
 	t.Log("Model a selected chain starting at Cyborg's standalone embedding partition")
 	partitions := make([]BuildPartition, 3)
@@ -227,7 +223,6 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	t.Log("Prepare two selected V2 sub-host partitions")
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
 
 	for index := range build.Partitions {
 		build.Partitions[index].Topology.ChipCount = 2

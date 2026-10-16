@@ -52,6 +52,7 @@ networkx
 # Shared test and benchmark data processing; accept the runtime's compatible NumPy.
 numpy>=1.26,<3
 openai==2.32.0  # for Fault Tolerance migration tests
+opendal==0.47.10
 # Protobuf definitions the OTLP parity receiver decodes; see grpcio above.
 # Version-matched to the opentelemetry-* pins in requirements.common.txt.
 opentelemetry-proto<=1.38.0
