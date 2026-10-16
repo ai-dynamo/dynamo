@@ -470,6 +470,11 @@ class Orchestrator:
             all_pools = await run_sync_in_thread(self.capacity_manager.observe, True)
             self._discard_invalidated_intents()
         else:
+            refresh_participant = getattr(
+                self.capacity_manager, "refresh_participant", None
+            )
+            if refresh_participant is not None:
+                await run_sync_in_thread(refresh_participant, participant_id)
             all_pools = {}
 
         result = self.mediate(
@@ -494,8 +499,6 @@ class Orchestrator:
                 message=result.reject_message or "",
                 current_replicas={},
             )
-        admitted.set()
-
         # TODO(global-planner): Make an approved plan equivalent to execution:
         # apply same-DGD targets atomically and confirm downscale capacity is
         # released before dependent upscales (especially with blocking=False),
@@ -532,6 +535,14 @@ class Orchestrator:
         ordered_participants = sorted(
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
+
+        # Cancellation remains safe until every participant selected by this
+        # observation is reserved. Once the locks are held, completion must be
+        # shielded because the first Kubernetes write can commit immediately.
+        await self._reserve_participant_mutations(
+            ordered_participants, held_participant_locks
+        )
+        admitted.set()
 
         terminal, _ = await self._apply_approved_targets(
             grouped_targets,

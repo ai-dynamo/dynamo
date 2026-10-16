@@ -95,6 +95,15 @@ class CapacityManager:
         """
         raise NotImplementedError
 
+    def refresh_participant(self, participant_id: str) -> None:
+        """Refresh one participant's backend identity without a global snapshot.
+
+        Backends without identity generations keep the default no-op. This lets
+        unbounded orchestration repair lifecycle state without paying for global
+        budget observation.
+        """
+        return None
+
     def consume_invalidated_participants(self) -> set[str]:
         """Return identities whose backend generation changed since observation.
 

@@ -28,6 +28,7 @@ from dynamo.planner.connectors.clients.kubernetes_api import (
     KUBERNETES_LIST_PAGE_SIZE,
     NONTERMINAL_POD_FIELD_SELECTOR,
     PARTIAL_OBJECT_METADATA_ACCEPT,
+    CapacityObjectMetadata,
     KubernetesAPI,
 )
 from dynamo.planner.errors import (
@@ -139,20 +140,12 @@ def mock_core_api():
 
 
 @pytest.fixture
-def mock_apps_api():
-    with patch(
-        "dynamo.planner.connectors.clients.kubernetes_api.client.AppsV1Api"
-    ) as mock:
-        yield mock.return_value
-
-
-@pytest.fixture
-def k8s_api(mock_custom_api, mock_core_api, mock_apps_api, mock_config, mock_namespace):
+def k8s_api(mock_custom_api, mock_core_api, mock_config, mock_namespace):
     return KubernetesAPI()
 
 
 @pytest.fixture
-def k8s_api_with_namespace(mock_custom_api, mock_apps_api, mock_config):
+def k8s_api_with_namespace(mock_custom_api, mock_config):
     return KubernetesAPI(k8s_namespace="test-namespace")
 
 
@@ -174,13 +167,11 @@ def test_list_graph_deployments_rejects_non_object_item(k8s_api, mock_custom_api
 
 
 def test_list_capacity_descendants_reads_metadata_and_skips_absent_optional_crd(
-    k8s_api, mock_custom_api, mock_apps_api, mock_core_api
+    k8s_api, mock_custom_api
 ):
-    empty_page = SimpleNamespace(items=[], metadata=SimpleNamespace(_continue=None))
-    mock_apps_api.list_namespaced_deployment.return_value = empty_page
-    mock_apps_api.list_namespaced_replica_set.return_value = empty_page
-
-    def list_custom_objects(*, plural, **_kwargs):
+    def list_custom_objects(*, group, plural, **_kwargs):
+        if plural == "snapshotjobs":
+            raise client.ApiException(status=404)
         if plural == "dynamocomponentdeployments":
             return {
                 "items": [
@@ -199,21 +190,149 @@ def test_list_capacity_descendants_reads_metadata_and_skips_absent_optional_crd(
             }
         if plural == "lpxgraphdeployments":
             raise client.ApiException(status=404)
+        if group == "batch" and plural == "jobs":
+            return {"items": [], "metadata": {}}
         return {"items": [], "metadata": {}}
 
     mock_custom_api.list_namespaced_custom_object.side_effect = list_custom_objects
 
-    _mock_pod_list(mock_core_api, [])
-
-    descendants = k8s_api.list_capacity_descendants()
+    with patch.object(k8s_api, "list_graph_pods", return_value=[]):
+        descendants = k8s_api.list_capacity_descendants()
 
     assert [
         (item.kind, item.name, item.controller_owner_uids) for item in descendants
     ] == [("DynamoComponentDeployment", "model-worker", ("dgd-uid",))]
-    request = mock_apps_api.list_namespaced_deployment.call_args.kwargs
+    request = next(
+        call.kwargs
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+        if call.kwargs["plural"] == "deployments"
+    )
     assert request["namespace"] == "default"
     assert request["label_selector"] == "nvidia.com/dynamo-graph-deployment-name"
     assert request["_headers"]["Accept"] == PARTIAL_OBJECT_METADATA_ACCEPT
+
+
+def test_list_capacity_descendants_includes_active_snapshot_job_and_source_job(
+    k8s_api, mock_custom_api
+):
+    snapshot_job = {
+        "metadata": {
+            "name": "checkpoint-model",
+            "uid": "snapshot-job-uid",
+            "labels": {"nvidia.com/dynamo-graph-deployment-name": "model"},
+            "annotations": {
+                "nvidia.com/dynamo-auto-checkpoint": "true",
+                "nvidia.com/dynamo-checkpoint-owner-uid": "dgd-uid",
+            },
+        },
+        "status": {"conditions": []},
+    }
+    source_job = {
+        "metadata": {
+            "name": "checkpoint-model",
+            "uid": "source-job-uid",
+            "labels": {"nvidia.com/snapshot-job-uid": "snapshot-job-uid"},
+            "ownerReferences": [{"uid": "snapshot-job-uid", "controller": True}],
+        },
+        "spec": {
+            "template": {
+                "metadata": {
+                    "labels": {"nvidia.com/dynamo-graph-deployment-name": "model"}
+                }
+            }
+        },
+        "status": {"conditions": []},
+    }
+
+    def list_objects(*, group, plural, **_kwargs):
+        if plural == "snapshotjobs":
+            return {"items": [snapshot_job], "metadata": {}}
+        if group == "batch" and plural == "jobs":
+            return {"items": [source_job], "metadata": {}}
+        return {"items": [], "metadata": {}}
+
+    mock_custom_api.list_namespaced_custom_object.side_effect = list_objects
+    with patch.object(k8s_api, "list_graph_pods", return_value=[]):
+        descendants = k8s_api.list_capacity_descendants()
+
+    assert [
+        (item.kind, item.uid, item.dgd_name, item.controller_owner_uids)
+        for item in descendants
+    ] == [
+        ("SnapshotJob", "snapshot-job-uid", "model", ("dgd-uid",)),
+        ("Job", "source-job-uid", "model", ("dgd-uid",)),
+    ]
+
+
+def test_list_capacity_descendants_ignores_terminal_snapshot_artifacts(
+    k8s_api, mock_custom_api
+):
+    snapshot_job = {
+        "metadata": {
+            "name": "checkpoint-model",
+            "uid": "snapshot-job-uid",
+            "labels": {"nvidia.com/dynamo-graph-deployment-name": "model"},
+            "annotations": {
+                "nvidia.com/dynamo-auto-checkpoint": "true",
+                "nvidia.com/dynamo-checkpoint-owner-uid": "dgd-uid",
+            },
+        },
+        "status": {
+            "conditions": [
+                {"type": "Completed", "status": "True"},
+            ]
+        },
+    }
+    source_job = {
+        "metadata": {
+            "name": "checkpoint-model",
+            "uid": "source-job-uid",
+            "labels": {"nvidia.com/snapshot-job-uid": "snapshot-job-uid"},
+        },
+        "status": {
+            "conditions": [
+                {"type": "Complete", "status": "True"},
+            ]
+        },
+    }
+
+    def list_objects(*, group, plural, **_kwargs):
+        if plural == "snapshotjobs":
+            return {"items": [snapshot_job], "metadata": {}}
+        if group == "batch" and plural == "jobs":
+            return {"items": [source_job], "metadata": {}}
+        return {"items": [], "metadata": {}}
+
+    mock_custom_api.list_namespaced_custom_object.side_effect = list_objects
+    with patch.object(k8s_api, "list_graph_pods", return_value=[]):
+        assert k8s_api.list_capacity_descendants() == []
+
+
+def test_capacity_metadata_reads_dgd_identity_from_annotation():
+    metadata = KubernetesAPI._capacity_metadata_from_items(
+        [
+            {
+                "metadata": {
+                    "name": "model-worker",
+                    "uid": "pcsg-uid",
+                    "annotations": {"nvidia.com/dynamo-graph-deployment-name": "model"},
+                    "ownerReferences": [{"uid": "pcs-uid", "controller": True}],
+                }
+            }
+        ],
+        "PodCliqueScalingGroup",
+        dgd_name_source="annotation",
+    )
+
+    assert metadata == [
+        CapacityObjectMetadata(
+            kind="PodCliqueScalingGroup",
+            name="model-worker",
+            uid="pcsg-uid",
+            dgd_name="model",
+            controller_owner_uids=("pcs-uid",),
+        )
+    ]
 
 
 def test_list_graph_deployments_follows_continue_tokens(k8s_api, mock_custom_api):
@@ -2147,58 +2266,88 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
     }
 
 
-def test_list_graph_pods_uses_label_existence_selector(k8s_api, mock_core_api):
-    pod = _make_pod("prefill-0", component="prefill")
-    result = MagicMock()
-    result.items = [pod]
-    mock_core_api.list_namespaced_pod.return_value = result
-
-    assert k8s_api.list_graph_pods() == [pod]
-    mock_core_api.list_namespaced_pod.assert_called_once_with(
-        namespace="default",
+def test_list_graph_pods_uses_untyped_metadata_request(k8s_api):
+    pod = {"metadata": {"name": "prefill-0"}}
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [pod], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_graph_pods() == [pod]
+    read_page.assert_called_once_with(
         label_selector="nvidia.com/dynamo-graph-deployment-name",
         field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
-        limit=KUBERNETES_LIST_PAGE_SIZE,
-        _continue=None,
-        _headers={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
+        continue_token=None,
     )
 
 
-def test_list_graph_pods_follows_continue_tokens(k8s_api, mock_core_api):
-    first = _make_pod("prefill-0", component="prefill")
-    second = _make_pod("decode-0", component="decode")
-    mock_core_api.list_namespaced_pod.side_effect = [
-        SimpleNamespace(items=[first], metadata=SimpleNamespace(_continue="next-page")),
-        SimpleNamespace(items=[second], metadata=SimpleNamespace(_continue=None)),
+def test_read_core_pod_metadata_page_uses_public_untyped_api_client(k8s_api):
+    response = MagicMock()
+    payload = {"items": [{"metadata": {"name": "prefill-0"}}], "metadata": {}}
+    k8s_api.api_client.param_serialize.return_value = ("serialized", "request")
+    k8s_api.api_client.call_api.return_value = response
+    k8s_api.api_client.response_deserialize.return_value = SimpleNamespace(data=payload)
+
+    result = k8s_api._read_core_pod_metadata_page(
+        label_selector="nvidia.com/dynamo-graph-deployment-name",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token="next-page",
+    )
+
+    assert result == payload
+    request = k8s_api.api_client.param_serialize.call_args.kwargs
+    assert request["method"] == "GET"
+    assert request["resource_path"] == "/api/v1/namespaces/{namespace}/pods"
+    assert request["path_params"] == {"namespace": "default"}
+    assert request["header_params"] == {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
+    assert ("continue", "next-page") in request["query_params"]
+    k8s_api.api_client.call_api.assert_called_once_with("serialized", "request")
+    response.read.assert_called_once_with()
+    k8s_api.api_client.response_deserialize.assert_called_once_with(
+        response,
+        {"200": "object"},
+    )
+
+
+def test_list_graph_pods_follows_continue_tokens(k8s_api):
+    first = {"metadata": {"name": "prefill-0"}}
+    second = {"metadata": {"name": "decode-0"}}
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        side_effect=[
+            {"items": [first], "metadata": {"continue": "next-page"}},
+            {"items": [second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_pods() == [first, second]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "next-page",
     ]
 
-    assert k8s_api.list_graph_pods() == [first, second]
-    assert [
-        call.kwargs["_continue"]
-        for call in mock_core_api.list_namespaced_pod.call_args_list
-    ] == [None, "next-page"]
 
-
-def test_list_graph_pods_restarts_expired_pagination(k8s_api, mock_core_api):
-    stale = _make_pod("stale", component="prefill")
-    fresh_first = _make_pod("fresh-first", component="prefill")
-    fresh_second = _make_pod("fresh-second", component="decode")
-    mock_core_api.list_namespaced_pod.side_effect = [
-        SimpleNamespace(
-            items=[stale], metadata=SimpleNamespace(_continue="expired-page")
-        ),
-        client.ApiException(status=410, reason="ResourceExpired"),
-        SimpleNamespace(
-            items=[fresh_first], metadata=SimpleNamespace(_continue="fresh-page")
-        ),
-        SimpleNamespace(items=[fresh_second], metadata=SimpleNamespace(_continue=None)),
+def test_list_graph_pods_restarts_expired_pagination(k8s_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh_first = {"metadata": {"name": "fresh-first"}}
+    fresh_second = {"metadata": {"name": "fresh-second"}}
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        side_effect=[
+            {"items": [stale], "metadata": {"continue": "expired-page"}},
+            client.ApiException(status=410, reason="ResourceExpired"),
+            {"items": [fresh_first], "metadata": {"continue": "fresh-page"}},
+            {"items": [fresh_second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_pods() == [fresh_first, fresh_second]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "expired-page",
+        None,
+        "fresh-page",
     ]
-
-    assert k8s_api.list_graph_pods() == [fresh_first, fresh_second]
-    assert [
-        call.kwargs["_continue"]
-        for call in mock_core_api.list_namespaced_pod.call_args_list
-    ] == [None, "expired-page", None, "fresh-page"]
 
 
 def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(

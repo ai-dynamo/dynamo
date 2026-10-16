@@ -16,7 +16,7 @@
 import asyncio
 import copy
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
 
@@ -68,42 +68,53 @@ NONTERMINAL_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
 PARTIAL_OBJECT_METADATA_ACCEPT = (
     "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io"
 )
+CHECKPOINT_AUTO_ANNOTATION = "nvidia.com/dynamo-auto-checkpoint"
+CHECKPOINT_OWNER_UID_ANNOTATION = "nvidia.com/dynamo-checkpoint-owner-uid"
+SNAPSHOT_JOB_UID_LABEL = "nvidia.com/snapshot-job-uid"
+SNAPSHOT_JOB_TERMINAL_CONDITIONS = frozenset({"Completed", "Failed"})
 
 # Replica-owning resources that can survive their DGD while background garbage
-# collection is still converging. Optional extension APIs return 404 when their
-# CRD is not installed and are skipped by list_capacity_descendants().
+# collection is still converging. The final field names the metadata source for
+# the durable DGD identity. Optional extension APIs return 404 when their CRD is
+# not installed and are skipped by list_capacity_descendants().
 CAPACITY_CONTROLLER_CUSTOM_RESOURCES = (
     (
         NVIDIA_API_GROUP,
         DYNAMO_API_VERSION,
         "dynamocomponentdeployments",
         "DynamoComponentDeployment",
-        True,
+        "label",
     ),
     (
         NVIDIA_API_GROUP,
         "v1alpha1",
         "lpxgraphdeployments",
         "LPXGraphDeployment",
-        False,
+        "name",
     ),
-    ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets", "LeaderWorkerSet", True),
     (
         "disaggregatedset.x-k8s.io",
         "v1",
         "disaggregatedsets",
         "DisaggregatedSet",
-        True,
+        "label",
     ),
-    ("grove.io", "v1alpha1", "podcliquesets", "PodCliqueSet", True),
+    (
+        "leaderworkerset.x-k8s.io",
+        "v1",
+        "leaderworkersets",
+        "LeaderWorkerSet",
+        "label",
+    ),
+    ("grove.io", "v1alpha1", "podcliquesets", "PodCliqueSet", "label"),
     (
         "grove.io",
         "v1alpha1",
         "podcliquescalinggroups",
         "PodCliqueScalingGroup",
-        True,
+        "annotation",
     ),
-    ("grove.io", "v1alpha1", "podcliques", "PodClique", True),
+    ("grove.io", "v1alpha1", "podcliques", "PodClique", "label"),
 )
 
 
@@ -150,9 +161,9 @@ class KubernetesAPI:
             config.load_kube_config()  # for out-of-cluster deployment
 
         api_client = client_go_api_client()
+        self.api_client = api_client
         self.custom_api = client.CustomObjectsApi(api_client)
         self.core_api = client.CoreV1Api(api_client)
-        self.apps_api = client.AppsV1Api(api_client)
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _read_graph_deployment_once(self, graph_deployment_name: str) -> dict:
@@ -1098,20 +1109,22 @@ class KubernetesAPI:
         """List DGD-labeled objects that can directly or indirectly create Pods.
 
         This is a deletion/recreation safety path, not a normal observation path.
-        Every list is namespaced, paginated, and metadata-only. Lists are
-        label-filtered except LPXGraphDeployment, whose private API uses the DGD
-        name and owner reference instead of carrying the stable DGD label. Direct
-        DGD children are read before their descendants, and Pods are read last,
-        so a controller observed during concurrent garbage collection cannot be
-        hidden by an older Pod snapshot.
+        Every list is namespaced and paginated. Controller lists are metadata-only
+        except SnapshotJobs and their source Jobs, whose terminal status must be
+        inspected so retained completed captures do not fence a DGD forever.
+        Direct DGD children are read before their descendants, and Pods are read
+        last, so a controller observed during concurrent garbage collection
+        cannot be hidden by an older Pod snapshot.
         """
         descendants: list[CapacityObjectMetadata] = []
+        snapshot_jobs, snapshot_owners = self._list_snapshot_job_capacity()
+        descendants.extend(snapshot_jobs)
         for (
             group,
             version,
             plural,
             kind,
-            label_scoped,
+            dgd_name_source,
         ) in CAPACITY_CONTROLLER_CUSTOM_RESOURCES:
             descendants.extend(
                 self._list_custom_capacity_metadata(
@@ -1119,66 +1132,164 @@ class KubernetesAPI:
                     version,
                     plural,
                     kind,
-                    label_scoped=label_scoped,
+                    dgd_name_source=dgd_name_source,
                 )
             )
-        for kind, request in (
-            ("Deployment", self.apps_api.list_namespaced_deployment),
-            ("ReplicaSet", self.apps_api.list_namespaced_replica_set),
+        for plural, kind in (
+            ("deployments", "Deployment"),
+            ("replicasets", "ReplicaSet"),
+            ("statefulsets", "StatefulSet"),
         ):
-            descendants.extend(self._list_typed_capacity_metadata(kind, request))
+            descendants.extend(
+                self._list_custom_capacity_metadata(
+                    "apps",
+                    "v1",
+                    plural,
+                    kind,
+                    dgd_name_source="label",
+                )
+            )
+        descendants.extend(self._list_snapshot_source_job_capacity(snapshot_owners))
         descendants.extend(
             self._capacity_metadata_from_items(self.list_graph_pods(), "Pod")
         )
         return descendants
 
-    def _list_typed_capacity_metadata(
+    def _list_snapshot_job_capacity(
         self,
-        kind: str,
-        request: Callable[..., object],
-    ) -> list[CapacityObjectMetadata]:
-        return on_error(
-            DEFAULT_BACKOFF,
-            _is_resource_expired,
-            lambda: self._list_typed_capacity_metadata_once(kind, request),
+    ) -> tuple[list[CapacityObjectMetadata], dict[str, tuple[str, str]],]:
+        """List active automatic SnapshotJobs and all owner-generation links."""
+        jobs = self._list_custom_objects(
+            NVIDIA_API_GROUP,
+            "v1alpha1",
+            "snapshotjobs",
+            "SnapshotJob",
+            label_selector=DYNAMO_DGD_NAME_LABEL,
+            metadata_only=False,
+            optional=True,
         )
-
-    def _list_typed_capacity_metadata_once(
-        self,
-        kind: str,
-        request: Callable[..., object],
-    ) -> list[CapacityObjectMetadata]:
-        items: list = []
-        continue_token: str | None = None
-        seen_tokens: set[str] = set()
-        while True:
-            page = request(
-                namespace=self.current_namespace,
-                label_selector=DYNAMO_DGD_NAME_LABEL,
-                limit=KUBERNETES_LIST_PAGE_SIZE,
-                _continue=continue_token,
-                _headers={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
+        active: list[CapacityObjectMetadata] = []
+        owners: dict[str, tuple[str, str]] = {}
+        for index, job in enumerate(jobs):
+            metadata = job.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise TypeError(f"SnapshotJob item {index} metadata is not an object")
+            labels = metadata.get("labels") or {}
+            annotations = metadata.get("annotations") or {}
+            if not isinstance(labels, Mapping) or not isinstance(annotations, Mapping):
+                raise TypeError(f"SnapshotJob item {index} metadata is malformed")
+            if annotations.get(CHECKPOINT_AUTO_ANNOTATION) != "true":
+                continue
+            name = metadata.get("name")
+            uid = metadata.get("uid")
+            dgd_name = labels.get(DYNAMO_DGD_NAME_LABEL)
+            dgd_uid = annotations.get(CHECKPOINT_OWNER_UID_ANNOTATION)
+            for field_name, value in (
+                ("name", name),
+                ("uid", uid),
+                ("DGD label", dgd_name),
+                ("DGD owner UID annotation", dgd_uid),
+            ):
+                if not isinstance(value, str) or not value:
+                    raise ValueError(
+                        f"SnapshotJob item {index} has no usable {field_name}"
+                    )
+            owners[uid] = (dgd_name, dgd_uid)
+            if metadata.get("deletionTimestamp") is not None:
+                continue
+            if self._has_terminal_condition(job, SNAPSHOT_JOB_TERMINAL_CONDITIONS):
+                continue
+            active.append(
+                CapacityObjectMetadata(
+                    kind="SnapshotJob",
+                    name=name,
+                    uid=uid,
+                    dgd_name=dgd_name,
+                    controller_owner_uids=(dgd_uid,),
+                )
             )
-            page_items = getattr(page, "items", None)
-            if not isinstance(page_items, list):
-                raise TypeError(
-                    f"Kubernetes API returned a malformed {kind} list: items is not a list"
+        return active, owners
+
+    def _list_snapshot_source_job_capacity(
+        self,
+        snapshot_owners: Mapping[str, tuple[str, str]],
+    ) -> list[CapacityObjectMetadata]:
+        """List active source Jobs that can still create SnapshotJob Pods."""
+        jobs = self._list_custom_objects(
+            "batch",
+            "v1",
+            "jobs",
+            "Job",
+            label_selector=SNAPSHOT_JOB_UID_LABEL,
+            metadata_only=False,
+            optional=False,
+        )
+        active: list[CapacityObjectMetadata] = []
+        for index, job in enumerate(jobs):
+            metadata = job.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise TypeError(f"Job item {index} metadata is not an object")
+            if metadata.get("deletionTimestamp") is not None:
+                continue
+            if self._has_terminal_condition(job, frozenset({"Complete", "Failed"})):
+                continue
+            labels = metadata.get("labels") or {}
+            if not isinstance(labels, Mapping):
+                raise TypeError(f"Job item {index} labels are not an object")
+            snapshot_uid = labels.get(SNAPSHOT_JOB_UID_LABEL)
+            if not isinstance(snapshot_uid, str) or not snapshot_uid:
+                raise ValueError(f"Job item {index} has no usable SnapshotJob UID")
+            snapshot_owner = snapshot_owners.get(snapshot_uid)
+            template = job.get("spec", {}).get("template", {})
+            template_metadata = template.get("metadata", {})
+            template_labels = template_metadata.get("labels", {})
+            if not isinstance(template_labels, Mapping):
+                raise TypeError(f"Job item {index} pod-template labels are malformed")
+            dgd_name = (
+                snapshot_owner[0]
+                if snapshot_owner is not None
+                else template_labels.get(DYNAMO_DGD_NAME_LABEL)
+            )
+            if not isinstance(dgd_name, str) or not dgd_name:
+                raise ValueError(f"Job item {index} has no usable DGD identity")
+            owner_uids = (
+                (snapshot_owner[1],)
+                if snapshot_owner is not None
+                else self._controller_owner_uids(metadata, "Job", index)
+            )
+            name = metadata.get("name")
+            uid = metadata.get("uid")
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"Job item {index} has no usable name")
+            if not isinstance(uid, str) or not uid:
+                raise ValueError(f"Job {name!r} has no usable UID")
+            active.append(
+                CapacityObjectMetadata(
+                    kind="Job",
+                    name=name,
+                    uid=uid,
+                    dgd_name=dgd_name,
+                    controller_owner_uids=owner_uids,
                 )
-            items.extend(page_items)
-            metadata = getattr(page, "metadata", None)
-            raw_token = getattr(metadata, "_continue", None)
-            if raw_token in (None, ""):
-                return self._capacity_metadata_from_items(items, kind)
-            if not isinstance(raw_token, str):
-                raise TypeError(
-                    f"Kubernetes API returned a malformed {kind} list: continue is not a string"
-                )
-            if raw_token in seen_tokens:
-                raise RuntimeError(
-                    f"Kubernetes API repeated a {kind} list continue token"
-                )
-            seen_tokens.add(raw_token)
-            continue_token = raw_token
+            )
+        return active
+
+    @staticmethod
+    def _has_terminal_condition(
+        resource: Mapping, terminal_types: frozenset[str]
+    ) -> bool:
+        status = resource.get("status") or {}
+        if not isinstance(status, Mapping):
+            raise TypeError("Kubernetes resource status is not an object")
+        conditions = status.get("conditions") or []
+        if not isinstance(conditions, list):
+            raise TypeError("Kubernetes resource conditions are not a list")
+        return any(
+            isinstance(condition, Mapping)
+            and condition.get("type") in terminal_types
+            and condition.get("status") == "True"
+            for condition in conditions
+        )
 
     def _list_custom_capacity_metadata(
         self,
@@ -1187,49 +1298,81 @@ class KubernetesAPI:
         plural: str,
         kind: str,
         *,
-        label_scoped: bool,
+        dgd_name_source: str,
     ) -> list[CapacityObjectMetadata]:
-        try:
-            return on_error(
-                DEFAULT_BACKOFF,
-                _is_resource_expired,
-                lambda: self._list_custom_capacity_metadata_once(
-                    group,
-                    version,
-                    plural,
-                    kind,
-                    label_scoped=label_scoped,
-                ),
-            )
-        except client.ApiException as error:
-            if error.status == 404:
-                return []
-            raise
+        items = self._list_custom_objects(
+            group,
+            version,
+            plural,
+            kind,
+            label_selector=(
+                DYNAMO_DGD_NAME_LABEL if dgd_name_source == "label" else None
+            ),
+            metadata_only=True,
+            optional=group not in {"apps", "batch"},
+        )
+        return self._capacity_metadata_from_items(
+            items,
+            kind,
+            dgd_name_source=dgd_name_source,
+        )
 
-    def _list_custom_capacity_metadata_once(
+    def _list_custom_objects(
         self,
         group: str,
         version: str,
         plural: str,
         kind: str,
         *,
-        label_scoped: bool,
-    ) -> list[CapacityObjectMetadata]:
+        label_selector: str | None,
+        metadata_only: bool,
+        optional: bool,
+    ) -> list[dict]:
+        try:
+            return on_error(
+                DEFAULT_BACKOFF,
+                _is_resource_expired,
+                lambda: self._list_custom_objects_once(
+                    group,
+                    version,
+                    plural,
+                    kind,
+                    label_selector=label_selector,
+                    metadata_only=metadata_only,
+                ),
+            )
+        except client.ApiException as error:
+            if optional and error.status == 404:
+                return []
+            raise
+
+    def _list_custom_objects_once(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        kind: str,
+        *,
+        label_selector: str | None,
+        metadata_only: bool,
+    ) -> list[dict]:
         items: list[dict] = []
         continue_token: str | None = None
         seen_tokens: set[str] = set()
         while True:
+            request_options = {
+                "group": group,
+                "version": version,
+                "namespace": self.current_namespace,
+                "plural": plural,
+                "label_selector": label_selector,
+                "limit": KUBERNETES_LIST_PAGE_SIZE,
+                "_continue": continue_token,
+            }
+            if metadata_only:
+                request_options["_headers"] = {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
             result = _as_custom_object(
-                self.custom_api.list_namespaced_custom_object(
-                    group=group,
-                    version=version,
-                    namespace=self.current_namespace,
-                    plural=plural,
-                    label_selector=(DYNAMO_DGD_NAME_LABEL if label_scoped else None),
-                    limit=KUBERNETES_LIST_PAGE_SIZE,
-                    _continue=continue_token,
-                    _headers={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
-                ),
+                self.custom_api.list_namespaced_custom_object(**request_options),
                 f"{kind} list",
             )
             page_items = result.get("items")
@@ -1245,11 +1388,7 @@ class KubernetesAPI:
                 )
             raw_token = metadata.get("continue")
             if raw_token in (None, ""):
-                return self._capacity_metadata_from_items(
-                    items,
-                    kind,
-                    dgd_name_from_object_name=not label_scoped,
-                )
+                return items
             if not isinstance(raw_token, str):
                 raise TypeError(
                     f"Kubernetes API returned a malformed {kind} list: continue is not a string"
@@ -1266,7 +1405,7 @@ class KubernetesAPI:
         items: list,
         kind: str,
         *,
-        dgd_name_from_object_name: bool = False,
+        dgd_name_source: str = "label",
     ) -> list[CapacityObjectMetadata]:
         metadata_items: list[CapacityObjectMetadata] = []
         for index, item in enumerate(items):
@@ -1277,14 +1416,8 @@ class KubernetesAPI:
                 name = metadata.get("name")
                 uid = metadata.get("uid")
                 labels = metadata.get("labels") or {}
-                owner_references = metadata.get("ownerReferences") or []
-                if not isinstance(owner_references, list):
-                    raise TypeError(f"{kind} {name!r} ownerReferences is not a list")
-                owner_uids = tuple(
-                    owner.get("uid")
-                    for owner in owner_references
-                    if isinstance(owner, Mapping) and owner.get("controller") is True
-                )
+                annotations = metadata.get("annotations") or {}
+                owner_uids = KubernetesAPI._controller_owner_uids(metadata, kind, index)
             else:
                 metadata = getattr(item, "metadata", None)
                 if metadata is None:
@@ -1292,6 +1425,7 @@ class KubernetesAPI:
                 name = getattr(metadata, "name", None)
                 uid = getattr(metadata, "uid", None)
                 labels = getattr(metadata, "labels", None) or {}
+                annotations = getattr(metadata, "annotations", None) or {}
                 owner_references = getattr(metadata, "owner_references", None) or []
                 if not isinstance(owner_references, list):
                     raise TypeError(f"{kind} {name!r} ownerReferences is not a list")
@@ -1306,11 +1440,18 @@ class KubernetesAPI:
                 raise ValueError(f"{kind} {name!r} has no usable UID")
             if not isinstance(labels, Mapping):
                 raise TypeError(f"{kind} {name!r} labels are not an object")
-            dgd_name = (
-                name if dgd_name_from_object_name else labels.get(DYNAMO_DGD_NAME_LABEL)
-            )
+            if not isinstance(annotations, Mapping):
+                raise TypeError(f"{kind} {name!r} annotations are not an object")
+            if dgd_name_source == "name":
+                dgd_name = name
+            elif dgd_name_source == "annotation":
+                dgd_name = annotations.get(DYNAMO_DGD_NAME_LABEL)
+            elif dgd_name_source == "label":
+                dgd_name = labels.get(DYNAMO_DGD_NAME_LABEL)
+            else:
+                raise ValueError(f"unknown DGD name source {dgd_name_source!r}")
             if not isinstance(dgd_name, str) or not dgd_name:
-                raise ValueError(f"{kind} {name!r} has no usable DGD label")
+                raise ValueError(f"{kind} {name!r} has no usable DGD identity")
             if any(
                 not isinstance(owner_uid, str) or not owner_uid
                 for owner_uid in owner_uids
@@ -1328,6 +1469,28 @@ class KubernetesAPI:
                 )
             )
         return metadata_items
+
+    @staticmethod
+    def _controller_owner_uids(
+        metadata: Mapping,
+        kind: str,
+        index: int,
+    ) -> tuple[str, ...]:
+        owner_references = metadata.get("ownerReferences") or []
+        if not isinstance(owner_references, list):
+            raise TypeError(f"{kind} item {index} ownerReferences is not a list")
+        owner_uids = tuple(
+            owner.get("uid")
+            for owner in owner_references
+            if isinstance(owner, Mapping) and owner.get("controller") is True
+        )
+        if any(
+            not isinstance(owner_uid, str) or not owner_uid for owner_uid in owner_uids
+        ):
+            raise ValueError(
+                f"{kind} item {index} has an unusable controller owner UID"
+            )
+        return owner_uids
 
     def _list_graph_pods(
         self,
@@ -1358,25 +1521,87 @@ class KubernetesAPI:
         continue_token: str | None = None
         seen_tokens: set[str] = set()
         while True:
-            request_options = {
-                "namespace": self.current_namespace,
-                "label_selector": label_selector,
-                "field_selector": field_selector,
-                "limit": KUBERNETES_LIST_PAGE_SIZE,
-                "_continue": continue_token,
-            }
             if metadata_only:
-                request_options["_headers"] = {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
-            page = self.core_api.list_namespaced_pod(**request_options)
-            pods.extend(page.items or [])
-            metadata = getattr(page, "metadata", None)
-            raw_token = getattr(metadata, "_continue", None)
-            if not isinstance(raw_token, str) or not raw_token:
+                result = self._read_core_pod_metadata_page(
+                    label_selector=label_selector,
+                    field_selector=field_selector,
+                    continue_token=continue_token,
+                )
+                page_items = result.get("items")
+                metadata = result.get("metadata") or {}
+                if not isinstance(page_items, list):
+                    raise TypeError(
+                        "Kubernetes API returned a malformed Pod list: "
+                        "items is not a list"
+                    )
+                if not isinstance(metadata, Mapping):
+                    raise TypeError(
+                        "Kubernetes API returned a malformed Pod list: "
+                        "metadata is not an object"
+                    )
+                pods.extend(page_items)
+                raw_token = metadata.get("continue")
+            else:
+                page = self.core_api.list_namespaced_pod(
+                    namespace=self.current_namespace,
+                    label_selector=label_selector,
+                    field_selector=field_selector,
+                    limit=KUBERNETES_LIST_PAGE_SIZE,
+                    _continue=continue_token,
+                )
+                pods.extend(page.items or [])
+                metadata = getattr(page, "metadata", None)
+                raw_token = getattr(metadata, "_continue", None)
+            if raw_token in (None, ""):
                 return pods
+            if not isinstance(raw_token, str):
+                raise TypeError(
+                    "Kubernetes API returned a malformed Pod list: "
+                    "continue is not a string"
+                )
             if raw_token in seen_tokens:
                 raise RuntimeError("Kubernetes API repeated a Pod list continue token")
             seen_tokens.add(raw_token)
             continue_token = raw_token
+
+    def _read_core_pod_metadata_page(
+        self,
+        *,
+        label_selector: str,
+        field_selector: str | None,
+        continue_token: str | None,
+    ) -> dict:
+        """Read one untyped PartialObjectMetadata Pod page.
+
+        Generated CoreV1Api methods always deserialize list items as V1Pod,
+        whose required spec rejects PartialObjectMetadata. The public ApiClient
+        request/response primitives preserve the lightweight payload without
+        depending on generated private serializers.
+        """
+        query_params = [
+            ("labelSelector", label_selector),
+            ("limit", KUBERNETES_LIST_PAGE_SIZE),
+        ]
+        if field_selector is not None:
+            query_params.append(("fieldSelector", field_selector))
+        if continue_token is not None:
+            query_params.append(("continue", continue_token))
+        request = self.api_client.param_serialize(
+            method="GET",
+            resource_path="/api/v1/namespaces/{namespace}/pods",
+            path_params={"namespace": self.current_namespace},
+            query_params=query_params,
+            header_params={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
+            auth_settings=["BearerToken"],
+            collection_formats={},
+        )
+        response = self.api_client.call_api(*request)
+        response.read()
+        result = self.api_client.response_deserialize(
+            response,
+            {"200": "object"},
+        ).data
+        return _as_custom_object(result, "Pod list")
 
     @staticmethod
     def partition_pods_by_component(pods: list) -> dict[str, list]:

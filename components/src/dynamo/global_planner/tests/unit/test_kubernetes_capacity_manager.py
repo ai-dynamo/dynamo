@@ -14,7 +14,11 @@ import pytest
 from kubernetes import client
 
 from dynamo.global_planner.capacity_manager import PoolSpec
-from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
+from dynamo.global_planner.kubernetes_capacity_manager import (
+    DRAIN_CONFIRMATION_SECONDS,
+    ORPHAN_POD_AUDIT_INTERVAL_SECONDS,
+    KubernetesCapacityManager,
+)
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import CapacityObjectMetadata
@@ -125,7 +129,14 @@ def _capacity_object(
     )
 
 
-def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
+def _install_connector(
+    cm,
+    key,
+    spec,
+    parent_dgd_name="my-dgd",
+    *,
+    seed_identity=True,
+):
     connector = MagicMock()
     connector.parent_dgd_name = parent_dgd_name
     connector.set_component_replicas = AsyncMock(return_value=None)
@@ -173,9 +184,22 @@ def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
 
     connector.kube_api.list_graph_deployments = MagicMock(side_effect=list_deployments)
     cm.connectors[key] = connector
+    if seed_identity:
+        uid = spec.get("metadata", {}).get("uid")
+        if isinstance(uid, str) and uid:
+            cm._observed_uids[key] = uid
     if cm._inventory_api is None:
         cm._inventory_api = connector.kube_api
     return connector
+
+
+def _age_pending_drain(cm, key):
+    old_uid, new_uid, started = cm._pending_generation_drains[key]
+    cm._pending_generation_drains[key] = (
+        old_uid,
+        new_uid,
+        started - DRAIN_CONFIRMATION_SECONDS,
+    )
 
 
 # ---------------------------------------------------------------------------- #
@@ -252,7 +276,7 @@ def test_discover_explicit_mode_tracks_absent_allowlisted_deployment():
         connector.kube_api.get_graph_deployment.side_effect = (
             DynamoGraphDeploymentNotFoundError("model-a", "default")
         )
-        connector.kube_api.list_pods_for_graph.return_value = []
+        connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector_cls.return_value = connector
 
         assert cm.discover({"default-model-a"}) == []
@@ -272,7 +296,14 @@ def test_discover_explicit_mode_retains_missing_deployment_with_live_pods():
         connector.kube_api.get_graph_deployment.side_effect = (
             DynamoGraphDeploymentNotFoundError("model-a", "default")
         )
-        connector.kube_api.list_pods_for_graph.return_value = [_pod("Running")]
+        connector.kube_api.list_capacity_descendants.return_value = [
+            _capacity_object(
+                "Pod",
+                "model-a-pod",
+                "model-a-pod-uid",
+                dgd_name="model-a",
+            )
+        ]
         mock_connector_cls.return_value = connector
 
         assert cm.discover({"default-model-a"}) == ["model-a"]
@@ -717,7 +748,11 @@ def test_observe_require_complete_raises_on_read_failure():
 def test_observe_never_seen_managed_deployment_is_zero_capacity_probe():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
-        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+        cm,
+        "default/missing",
+        _dgd_spec(1, 1),
+        parent_dgd_name="missing",
+        seed_identity=False,
     )
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
@@ -727,7 +762,11 @@ def test_observe_never_seen_managed_deployment_is_zero_capacity_probe():
     assert not cm.participant_exists("default/missing")
 
     missing = _install_connector(
-        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+        cm,
+        "default/missing",
+        _dgd_spec(1, 1),
+        parent_dgd_name="missing",
+        seed_identity=False,
     )
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
@@ -739,7 +778,11 @@ def test_observe_never_seen_managed_deployment_is_zero_capacity_probe():
 def test_observe_missing_deployment_blocks_for_descendants_then_becomes_zero_probe():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
-        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+        cm,
+        "default/missing",
+        _dgd_spec(1, 1),
+        parent_dgd_name="missing",
+        seed_identity=False,
     )
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
@@ -757,7 +800,11 @@ def test_observe_missing_deployment_blocks_for_descendants_then_becomes_zero_pro
 def test_observe_never_seen_deployment_ignores_terminal_pods():
     cm = KubernetesCapacityManager("default")
     missing = _install_connector(
-        cm, "default/missing", _dgd_spec(1, 1), parent_dgd_name="missing"
+        cm,
+        "default/missing",
+        _dgd_spec(1, 1),
+        parent_dgd_name="missing",
+        seed_identity=False,
     )
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
@@ -780,9 +827,13 @@ def test_observe_deleted_deployment_retires_identity_after_descendants_drain():
     connector.kube_api.get_graph_deployment.side_effect = [
         deployment,
         DynamoGraphDeploymentNotFoundError("model", "default"),
+        DynamoGraphDeploymentNotFoundError("model", "default"),
     ]
 
     initial = cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    _age_pending_drain(cm, "default/model")
     drained = cm.observe(require_complete=True)
 
     assert initial["default/model"]["prefill"].current_replicas == 2
@@ -802,6 +853,8 @@ def test_observe_delete_drain_recreate_clears_uid_bound_state():
     connector.kube_api.get_graph_deployment.side_effect = [
         deployment,
         DynamoGraphDeploymentNotFoundError("model", "default"),
+        DynamoGraphDeploymentNotFoundError("model", "default"),
+        replacement,
         replacement,
     ]
 
@@ -809,11 +862,17 @@ def test_observe_delete_drain_recreate_clears_uid_bound_state():
     cm._replica_uids["default/model"] = "dgd-uid"
     cm._replica_settlements["default/model"] = MagicMock()
 
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    _age_pending_drain(cm, "default/model")
     assert cm.observe(require_complete=True) == {"default/model": {}}
     assert cm._last_observed_pools.get("default/model") is None
     assert cm._replica_uids.get("default/model") is None
     assert cm._replica_settlements.get("default/model") is None
 
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    _age_pending_drain(cm, "default/model")
     snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 2
@@ -831,6 +890,7 @@ def test_observe_same_name_replacement_waits_for_old_owner_chain():
     )
     connector.kube_api.get_graph_deployment.side_effect = [
         deployment,
+        replacement,
         replacement,
         replacement,
     ]
@@ -857,18 +917,97 @@ def test_observe_same_name_replacement_waits_for_old_owner_chain():
                 owner_uids=("new-dcd-uid",),
             ),
         ],
+        [
+            _capacity_object(
+                "DynamoComponentDeployment",
+                "new-worker",
+                "new-dcd-uid",
+                owner_uids=("replacement-uid",),
+            ),
+            _capacity_object(
+                "Deployment",
+                "new-worker",
+                "new-deployment-uid",
+                owner_uids=("new-dcd-uid",),
+            ),
+        ],
     ]
     cm.observe(require_complete=True)
 
     with pytest.raises(RuntimeError, match="old or unclassified descendants remain"):
         cm.observe(require_complete=True)
 
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    _age_pending_drain(cm, "default/model")
     snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
     assert cm._observed_uids["default/model"] == "replacement-uid"
     assert cm.consume_invalidated_participants() == {"default/model"}
     assert cm.participant_exists("default/model")
+
+
+def test_observe_first_seen_identity_rejects_unclassified_old_owner_chain():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+        seed_identity=False,
+    )
+    connector.kube_api.list_capacity_descendants.return_value = [
+        _capacity_object(
+            "Deployment",
+            "old-worker",
+            "old-deployment-uid",
+            owner_uids=("deleted-dgd-uid",),
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="old or unclassified descendants remain"):
+        cm.observe(require_complete=True)
+
+    assert "default/model" not in cm._observed_uids
+
+
+def test_observe_replacement_requires_stable_clean_drain_interval():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    replacement = deepcopy(deployment)
+    replacement["metadata"]["uid"] = "replacement-uid"
+    connector = _install_connector(
+        cm, "default/model", deployment, parent_dgd_name="model"
+    )
+    connector.kube_api.get_graph_deployment.return_value = replacement
+    connector.kube_api.list_capacity_descendants.side_effect = [
+        [],
+        [
+            _capacity_object(
+                "Deployment",
+                "late-old-worker",
+                "late-old-deployment-uid",
+                owner_uids=("dgd-uid",),
+            )
+        ],
+        [],
+        [],
+    ]
+
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="old or unclassified descendants remain"):
+        cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    _age_pending_drain(cm, "default/model")
+
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
+    assert cm._observed_uids["default/model"] == "replacement-uid"
 
 
 def test_observe_missing_deployment_fails_closed_when_drain_read_fails():
@@ -894,30 +1033,43 @@ def test_observe_explicit_mode_rediscovers_recreated_deployment():
     old.kube_api.get_graph_deployment.side_effect = [
         DynamoGraphDeploymentNotFoundError("model", "default"),
         deployment,
+        deployment,
     ]
+    cm._observed_uids.pop("default/model")
 
     assert cm.observe(require_complete=True) == {"default/model": {}}
     assert "default/model" in cm.connectors
     assert not cm.participant_exists("default/model")
     assert cm._missing_participants == {"default/model"}
 
+    with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+        cm.observe(require_complete=True)
+    _age_pending_drain(cm, "default/model")
     snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
     assert cm.connectors["default/model"] is old
     assert cm._missing_participants == set()
     assert cm.participant_exists("default/model")
-    assert old.kube_api.list_graph_pods.call_count == 1
+    assert old.kube_api.list_graph_pods.call_count == 3
 
 
 def test_observe_explicit_mode_rechecks_missing_names_with_one_list_per_pass():
     cm = KubernetesCapacityManager("default")
     cm._configured_deployment_names = {"first", "second"}
     first = _install_connector(
-        cm, "default/first", _dgd_spec(1, 1), parent_dgd_name="first"
+        cm,
+        "default/first",
+        _dgd_spec(1, 1),
+        parent_dgd_name="first",
+        seed_identity=False,
     )
     second = _install_connector(
-        cm, "default/second", _dgd_spec(1, 1), parent_dgd_name="second"
+        cm,
+        "default/second",
+        _dgd_spec(1, 1),
+        parent_dgd_name="second",
+        seed_identity=False,
     )
     first.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("first", "default")
@@ -946,7 +1098,11 @@ def test_observe_explicit_mode_detects_pods_appearing_after_tombstone():
     cm = KubernetesCapacityManager("default")
     cm._configured_deployment_names = {"model"}
     connector = _install_connector(
-        cm, "default/model", _dgd_spec(1, 1), parent_dgd_name="model"
+        cm,
+        "default/model",
+        _dgd_spec(1, 1),
+        parent_dgd_name="model",
+        seed_identity=False,
     )
     connector.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("model", "default")
@@ -1008,10 +1164,32 @@ def test_observe_implicit_mode_refreshes_complete_inventory():
     assert snapshot["default/second"]["prefill"].current_replicas == 2
     assert refreshed_snapshot["default/first"]["prefill"].current_replicas == 3
     assert first.kube_api.list_graph_deployments.call_count == 2
-    assert first.kube_api.list_graph_pods.call_count == 2
+    assert first.kube_api.list_graph_pods.call_count == 1
     second.kube_api.list_graph_deployments.assert_not_called()
     first.kube_api.get_graph_deployment.assert_not_called()
     second.kube_api.get_graph_deployment.assert_not_called()
+
+
+def test_periodic_graph_pod_audit_is_bounded_independently_of_requests():
+    cm = KubernetesCapacityManager("default")
+    kube_api = MagicMock()
+    first = [{"metadata": {"name": "first"}}]
+    second = [{"metadata": {"name": "second"}}]
+    kube_api.list_graph_pods.side_effect = [first, second]
+
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.monotonic",
+        side_effect=[
+            0.0,
+            ORPHAN_POD_AUDIT_INTERVAL_SECONDS - 0.1,
+            ORPHAN_POD_AUDIT_INTERVAL_SECONDS,
+        ],
+    ):
+        assert cm._periodic_graph_pods(kube_api) is first
+        assert cm._periodic_graph_pods(kube_api) is first
+        assert cm._periodic_graph_pods(kube_api) is second
+
+    assert kube_api.list_graph_pods.call_count == 2
 
 
 def test_observe_implicit_mode_preserves_cross_namespace_identity():
@@ -1038,7 +1216,11 @@ def test_observe_implicit_mode_fails_closed_for_orphan_active_pods():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
     connector = _install_connector(
-        cm, "default/model", _dgd_spec(1, 1), parent_dgd_name="model"
+        cm,
+        "default/model",
+        _dgd_spec(1, 1),
+        parent_dgd_name="model",
+        seed_identity=False,
     )
     connector.kube_api.list_graph_deployments.side_effect = lambda: []
     connector.kube_api.list_graph_pods.return_value = [_pod("Running", "model")]
@@ -1054,7 +1236,11 @@ def test_observe_implicit_mode_discards_never_seen_terminal_orphan():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
     connector = _install_connector(
-        cm, "default/model", _dgd_spec(1, 1), parent_dgd_name="model"
+        cm,
+        "default/model",
+        _dgd_spec(1, 1),
+        parent_dgd_name="model",
+        seed_identity=False,
     )
     connector.kube_api.list_graph_deployments.side_effect = lambda: []
     connector.kube_api.list_graph_pods.return_value = [
@@ -1089,10 +1275,18 @@ def test_observe_implicit_mode_groups_missing_remote_pods_by_namespace():
         cm, "default/local", _dgd_spec(1, 1), parent_dgd_name="local"
     )
     first = _install_connector(
-        cm, "tenant/first", _dgd_spec(1, 1), parent_dgd_name="first"
+        cm,
+        "tenant/first",
+        _dgd_spec(1, 1),
+        parent_dgd_name="first",
+        seed_identity=False,
     )
     second = _install_connector(
-        cm, "tenant/second", _dgd_spec(1, 1), parent_dgd_name="second"
+        cm,
+        "tenant/second",
+        _dgd_spec(1, 1),
+        parent_dgd_name="second",
+        seed_identity=False,
     )
     cm._inventory_api = local.kube_api
     first.kube_api.get_graph_deployment.side_effect = (
@@ -1117,10 +1311,20 @@ def test_observe_implicit_mode_rediscovers_recreated_deployment():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
     deployment = _dgd_spec(1, 1)
-    old = _install_connector(cm, "default/model", deployment, parent_dgd_name="model")
+    old = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+        seed_identity=False,
+    )
     recreated = deepcopy(deployment)
     recreated.setdefault("metadata", {})["name"] = "model"
-    old.kube_api.list_graph_deployments.side_effect = [[], [recreated]]
+    old.kube_api.list_graph_deployments.side_effect = [
+        [],
+        [recreated],
+        [recreated],
+    ]
     cm._inventory_api = old.kube_api
 
     assert cm.observe() == {}
@@ -1133,6 +1337,9 @@ def test_observe_implicit_mode_rediscovers_recreated_deployment():
         new.parent_dgd_name = "model"
         mock_connector_cls.return_value = new
 
+        with pytest.raises(RuntimeError, match="awaiting drain confirmation"):
+            cm.observe(require_complete=True)
+        _age_pending_drain(cm, "default/model")
         snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1

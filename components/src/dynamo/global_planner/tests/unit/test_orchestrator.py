@@ -182,6 +182,7 @@ class FakeCapacityManager(CapacityManager):
     def __init__(self):
         # participant_id -> {sub_type: [current_replicas, gpu_per_replica]}
         self.pools: dict[str, dict[str, list]] = {}
+        self.refresh_calls: list[str] = []
 
     def add(self, key, prefill=None, decode=None, gpu=1):
         entry = {}
@@ -204,6 +205,9 @@ class FakeCapacityManager(CapacityManager):
             key: {st: PoolSpec(st, r, g) for st, (r, g) in pools.items()}
             for key, pools in self.pools.items()
         }
+
+    def refresh_participant(self, participant_id):
+        self.refresh_calls.append(participant_id)
 
     async def scale(self, participant_id, targets, blocking):
         for t in targets:
@@ -250,6 +254,36 @@ async def test_submit_approves_and_actuates(use_lock):
     assert out.status == ScaleStatus.SUCCESS
     assert cm.pools["default/a"]["prefill"][0] == 3  # actuated
     assert out.current_replicas == {"prefill": 3, "decode": 1}
+    assert cm.refresh_calls == ["default/a"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_waiting_for_participant_reservation_never_scales():
+    cm = FakeCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm)
+    reservation = orch._participant_mutation_locks.setdefault(
+        "default/a", asyncio.Lock()
+    )
+    await reservation.acquire()
+
+    scaling = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
+    try:
+        intent = None
+        for _ in range(100):
+            intent = orch._intent_cache.get("default/a/prefill")
+            if intent is not None:
+                break
+            await asyncio.sleep(0)
+        assert intent is not None
+
+        scaling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(scaling, 1)
+    finally:
+        reservation.release()
+
+    assert cm.pools["default/a"]["prefill"][0] == 1
 
 
 @pytest.mark.asyncio

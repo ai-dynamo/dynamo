@@ -46,12 +46,15 @@ rules:
   resources: ["dynamographdeploymentscalingadapters/scale"]
   # Read the authoritative target to detect superseded asynchronous requests.
   verbs: ["get", "patch"]
-# List replica-owning descendants only while a DGD is missing or replaced.
+# List replica-owning descendants while a DGD identity is first seen, missing, or replaced.
 - apiGroups: ["nvidia.com"]
-  resources: ["dynamocomponentdeployments", "lpxgraphdeployments"]
+  resources: ["dynamocomponentdeployments", "lpxgraphdeployments", "snapshotjobs"]
   verbs: ["list"]
 - apiGroups: ["apps"]
-  resources: ["deployments", "replicasets"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["list"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
   verbs: ["list"]
 - apiGroups: ["leaderworkerset.x-k8s.io"]
   resources: ["leaderworkersets"]
@@ -112,12 +115,15 @@ rules:
   resources: ["dynamographdeploymentscalingadapters/scale"]
   # Read the authoritative target to detect superseded asynchronous requests.
   verbs: ["get", "patch"]
-# List replica-owning descendants only while a DGD is missing or replaced.
+# List replica-owning descendants while a DGD identity is first seen, missing, or replaced.
 - apiGroups: ["nvidia.com"]
-  resources: ["dynamocomponentdeployments", "lpxgraphdeployments"]
+  resources: ["dynamocomponentdeployments", "lpxgraphdeployments", "snapshotjobs"]
   verbs: ["list"]
 - apiGroups: ["apps"]
-  resources: ["deployments", "replicasets"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["list"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
   verbs: ["list"]
 - apiGroups: ["leaderworkerset.x-k8s.io"]
   resources: ["leaderworkersets"]

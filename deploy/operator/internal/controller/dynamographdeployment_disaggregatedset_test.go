@@ -583,6 +583,9 @@ func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
 		checkpointInfo,
 	)
 	require.NoError(t, err)
+	dsRoleMetadata := dsRole["metadata"].(map[string]any)
+	dsRoleLabels := dsRoleMetadata["labels"].(map[string]any)
+	require.Equal(t, dgd.Name, dsRoleLabels[consts.KubeLabelDynamoGraphDeploymentName])
 	dsRoleSpec := &leaderworkersetv1.LeaderWorkerSetSpec{}
 	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(dsRole["spec"].(map[string]any), dsRoleSpec))
 	require.Equal(t, int32(1), *dsRoleSpec.Replicas, "this role has one replica group")

@@ -39,6 +39,7 @@ tests:
             resources:
               - deployments
               - replicasets
+              - statefulsets
             verbs:
               - list
         documentIndex: 0
@@ -50,6 +51,17 @@ tests:
             resources:
               - dynamocomponentdeployments
               - lpxgraphdeployments
+              - snapshotjobs
+            verbs:
+              - list
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - batch
+            resources:
+              - jobs
             verbs:
               - list
         documentIndex: 0
@@ -128,6 +140,7 @@ tests:
             resources:
               - deployments
               - replicasets
+              - statefulsets
             verbs:
               - list
         documentIndex: 1
@@ -139,6 +152,17 @@ tests:
             resources:
               - dynamocomponentdeployments
               - lpxgraphdeployments
+              - snapshotjobs
+            verbs:
+              - list
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - batch
+            resources:
+              - jobs
             verbs:
               - list
         documentIndex: 1
