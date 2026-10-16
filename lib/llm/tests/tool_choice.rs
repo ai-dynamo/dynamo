@@ -995,6 +995,26 @@ async fn test_qwen3_coder_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
+const QWEN3_DOTTED: &str = "<tool_call>\n<function=my-tool.v2>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
 #[tokio::test]
 async fn test_qwen3_coder_tool_choice_named_wrong_tool_filtered() {
     let responses =
