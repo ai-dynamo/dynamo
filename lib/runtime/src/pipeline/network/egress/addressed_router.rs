@@ -12,7 +12,7 @@ use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
-use crate::error::{DynamoError, ErrorType};
+use crate::error::{DynamoError, ErrorClass, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -79,10 +79,16 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 
 /// Build the error returned when the worker fails before any response bytes.
 ///
-/// The outer type stays [`ErrorType::CannotConnect`], so retry classification
-/// of the outer error is unchanged. A typed error from the worker's prologue is
-/// attached as the cause, which consumers reach with
-/// the semantic migration classifier.
+/// A typed [`ErrorClass::InvalidRequest`] refusal from the worker's prologue is
+/// returned as the worker's own error. The worker is reachable and refused the
+/// request itself, so a [`ErrorType::CannotConnect`] ancestor would make fault
+/// detection quarantine a healthy worker and make migration resend the request
+/// to every other worker, which would refuse it too.
+///
+/// Every other failure keeps the outer [`ErrorType::CannotConnect`], so retry
+/// classification of the outer error is unchanged. A typed error from the
+/// worker's prologue is attached as the cause, which consumers reach with the
+/// semantic migration classifier.
 ///
 /// Because that walk covers the whole chain, an attached cause is as visible as
 /// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
@@ -96,6 +102,11 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
         ));
 
     match error.typed_error {
+        Some(typed)
+            if !is_migration_sensitive(&typed) && typed.class() == ErrorClass::InvalidRequest =>
+        {
+            typed
+        }
         Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
         _ => builder.build(),
     }
