@@ -41,6 +41,7 @@ from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import (
     RouterNvextExpectation,
+    parse_sse_json_chunks,
     require_router_worker_id,
     validate_router_nvext,
 )
@@ -483,6 +484,277 @@ class KvTransferPayload(DisaggregatedChatPayload):
         self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
         self.decode_metrics.wait_for_scheduler()
         self.prefill_metrics.wait_for_scheduler()
+
+
+_KV_ROUTING_PROMPTS = (
+    "Amber rabbits explore quiet meadows. " * 96,
+    "Violet submarines navigate distant oceans. " * 96,
+)
+
+
+@dataclass
+class _KvRoutingPayload(ChatPayload):
+    """Warm two routing targets, then require their cached prefixes to route back."""
+
+    routed_workers: tuple[int, ...] = field(kw_only=True)
+    _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _targets: list[tuple[int, int]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._env = env
+
+    def _generate_instances(self, counts: dict[str, int]) -> dict[str, list[int]]:
+        """Return frontend-discovered generate instance IDs once each component has its count."""
+        deadline = time.monotonic() + 60
+        instances: dict[str, list[int]] = {component: [] for component in counts}
+        while time.monotonic() < deadline:
+            try:
+                response = requests.get(
+                    f"http://{self.host}:{self.port}/health", timeout=5
+                )
+                if response.status_code == 200:
+                    health = response.json()
+                    instances = {
+                        component: sorted(
+                            {
+                                instance["instance_id"]
+                                for instance in health["instances"]
+                                if instance["namespace"] == self._env["DYN_NAMESPACE"]
+                                and instance["endpoint"] == "generate"
+                                and instance["component"] == component
+                            }
+                        )
+                        for component in counts
+                    }
+                    if all(
+                        len(instances[component]) >= count
+                        for component, count in counts.items()
+                    ):
+                        break
+            except requests.RequestException:
+                pass
+            time.sleep(0.25)
+        for component, count in counts.items():
+            assert len(instances[component]) == count, instances
+        return instances
+
+    def _stored_event_counts(self) -> dict[int, tuple[float, float]]:
+        """Read each routed worker's received and accepted Stored-event counters."""
+        metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+        )
+        counts = {}
+        for worker in self.routed_workers:
+            port = self._env[f"DYN_SYSTEM_PORT{worker}"]
+            response = requests.get(f"http://{self.host}:{port}/metrics", timeout=5)
+            response.raise_for_status()
+            received, accepted = (
+                sum_metric_samples(
+                    response.text, metric_name, {"stage": stage, "event_type": "stored"}
+                )
+                for stage in ("received", "accepted")
+            )
+            counts[worker] = (received, accepted)
+        return counts
+
+    def _send_routed(
+        self,
+        prompt: str,
+        *,
+        headers: dict[str, str] | None = None,
+        is_query_only: bool = False,
+    ) -> tuple[Any, dict[str, Any], bool]:
+        """Send one streamed request and return its router selection, nvext and text flag."""
+        response = requests.post(
+            self.url(),
+            json={
+                "model": self.body["model"],
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 8,
+                "temperature": 0,
+                "stream": True,
+                "nvext": {
+                    "extra_fields": ["worker_id", "timing"],
+                    "annotations": ["query_instance_id:"] if is_query_only else [],
+                },
+            },
+            headers=headers,
+            timeout=30,
+        )
+        assert response.status_code == 200, response.text
+        assert "data: [DONE]" in response.text, response.text
+        nvext: dict[str, Any] = {}
+        has_generated_text = False
+        for chunk in parse_sse_json_chunks(response.text):
+            assert "error" not in chunk, chunk
+            nvext.update(chunk.get("nvext") or {})
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta") or {}
+                has_generated_text |= any(
+                    delta.get(name)
+                    for name in ("content", "reasoning_content", "reasoning")
+                )
+        return require_router_worker_id({"nvext": nvext}), nvext, has_generated_text
+
+    @staticmethod
+    def _hit_rate(nvext: dict[str, Any], has_generated_text: bool) -> float:
+        assert has_generated_text, "Request completed without generating text"
+        hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
+        assert isinstance(hit_rate, (int, float)), nvext
+        assert 0 <= hit_rate <= 1, nvext
+        return hit_rate
+
+    def _send(self, prompt: str, target: tuple[int, int] | None = None):
+        raise NotImplementedError
+
+    def _warm_and_wait_for_kv_events(self) -> None:
+        """Warm each target with its prompt until its Stored events reach the router."""
+        targets = self._targets
+        baselines = self._stored_event_counts()
+        for prompt, target in zip(_KV_ROUTING_PROMPTS, targets):
+            selected, _ = self._send(prompt, target)
+            assert selected == target, (selected, target)
+        deadline = time.monotonic() + 60
+        observed: list[tuple[tuple[int, int], float]] = []
+        counts: dict[int, tuple[float, float]] = {}
+        while time.monotonic() < deadline:
+            # Pinned completions expose timing without warming the other target.
+            observed = [
+                self._send(prompt, target)
+                for prompt, target in zip(_KV_ROUTING_PROMPTS, targets)
+            ]
+            counts = self._stored_event_counts()
+            if all(
+                selected == expected and hit_rate >= 0.5
+                for (selected, hit_rate), expected in zip(observed, targets)
+            ) and all(
+                all(
+                    current > baseline
+                    for current, baseline in zip(counts[worker], baselines[worker])
+                )
+                for worker in self.routed_workers
+            ):
+                return
+            time.sleep(0.1)
+        raise AssertionError(
+            f"KV events did not converge: expected targets={targets}, "
+            f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+        )
+
+    def _assert_prefixes_route_to_cache(self) -> None:
+        for prompt_index in (0, 0, 1, 0, 1, 1):
+            selected, hit_rate = self._send(_KV_ROUTING_PROMPTS[prompt_index])
+            expected = self._targets[prompt_index]
+            assert selected == expected, (prompt_index, selected, self._targets)
+            assert hit_rate >= 0.5, (prompt_index, selected, hit_rate)
+
+
+@dataclass
+class KvRoutingPayload(_KvRoutingPayload):
+    """Require engine KV events to route repeated prefixes to the cached worker or DP rank."""
+
+    block_size: int = field(kw_only=True)
+    dp_ranks: tuple[int, ...] = field(default=(0,), kw_only=True)
+
+    def _send(
+        self,
+        prompt: str,
+        target: tuple[int, int] | None = None,
+        *,
+        is_query_only: bool = False,
+    ) -> tuple[tuple[int, int], float | None]:
+        headers = None
+        if target is not None:
+            headers = {
+                "x-dynamo-worker-instance-id": str(target[0]),
+                "x-dynamo-dp-rank": str(target[1]),
+            }
+        selected, nvext, has_generated_text = self._send_routed(
+            prompt, headers=headers, is_query_only=is_query_only
+        )
+        selected_target = (selected["prefill_worker_id"], selected["prefill_dp_rank"])
+        assert selected_target in self._targets, selected
+        assert (
+            selected["decode_worker_id"],
+            selected["decode_dp_rank"],
+        ) == selected_target, selected
+        if is_query_only:
+            assert not has_generated_text, nvext
+            assert len(nvext.get("token_ids", [])) >= self.block_size * 4, nvext
+            return selected_target, None
+        return selected_target, self._hit_rate(nvext, has_generated_text)
+
+    def final_validation(self) -> None:
+        assert len(self.routed_workers) * len(self.dp_ranks) == 2
+        workers = self._generate_instances({"backend": len(self.routed_workers)})
+        self._targets = [
+            (worker_id, rank)
+            for worker_id in workers["backend"]
+            for rank in self.dp_ranks
+        ]
+        for prompt in _KV_ROUTING_PROMPTS:
+            self._send(prompt, is_query_only=True)
+        self._warm_and_wait_for_kv_events()
+        for prompt, target in zip(_KV_ROUTING_PROMPTS, self._targets):
+            selected, _ = self._send(prompt, is_query_only=True)
+            assert selected == target, (selected, target)
+        self._assert_prefixes_route_to_cache()
+
+
+@dataclass
+class DisaggregatedKvRoutingPayload(_KvRoutingPayload):
+    """Require routing to the cached prefill worker and a fresh KV transfer to decode."""
+
+    # vLLM counts KV transfers on decode engines and SGLang on prefill engines.
+    transfer_metrics: tuple[EngineMetrics, ...] = field(kw_only=True)
+    _decode_ids: list[int] = field(default_factory=list, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        super().bind_environment(env)
+        for metrics in self.transfer_metrics:
+            metrics.bind_environment(env)
+
+    def _transfer_total(self) -> float:
+        return sum(metrics.transfer_progress() for metrics in self.transfer_metrics)
+
+    def _send(
+        self, prompt: str, target: tuple[int, int] | None = None
+    ) -> tuple[tuple[int, int], float]:
+        # Keep the cached prefix while forcing at least one fresh KV block.
+        prompt += f"\nRequest {uuid.uuid4()}. " + "Continue counting. " * 32
+        headers = None
+        if target is not None:
+            headers = {
+                "x-dynamo-prefill-instance-id": str(target[0]),
+                "x-dynamo-prefill-dp-rank": str(target[1]),
+            }
+        # Pinned requests warm both prefill engines; routed requests must transfer.
+        before = None if target is not None else self._transfer_total()
+        selected, nvext, has_generated_text = self._send_routed(prompt, headers=headers)
+        selected_target = (selected["prefill_worker_id"], selected["prefill_dp_rank"])
+        assert selected_target in self._targets, selected
+        assert selected["decode_worker_id"] in self._decode_ids, selected
+        if before is not None:
+            deadline = time.monotonic() + 10
+            while self._transfer_total() <= before:
+                assert time.monotonic() < deadline, (
+                    "No completed KV transfer for routed request",
+                    selected,
+                )
+                time.sleep(0.05)
+        return selected_target, self._hit_rate(nvext, has_generated_text)
+
+    def final_validation(self) -> None:
+        assert len(self.routed_workers) == 2
+        workers = self._generate_instances({"prefill": 2, "backend": 2})
+        self._decode_ids = workers["backend"]
+        assert set(workers["prefill"]).isdisjoint(self._decode_ids), workers
+        self._targets = [(worker_id, 0) for worker_id in workers["prefill"]]
+        self._warm_and_wait_for_kv_events()
+        self._assert_prefixes_route_to_cache()
 
 
 class OmittedMaxTokensChatPayload(ChatPayload):
