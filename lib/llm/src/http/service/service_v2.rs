@@ -724,7 +724,6 @@ impl State {
         self.frontend_api_config.reasoning_field()
     }
 
-    /// Media refusal for text-only models (`--reject-media`).
     pub fn media_rejection(&self) -> MediaRejectionConfig {
         self.frontend_api_config.media_rejection()
     }

@@ -3642,17 +3642,12 @@ mod zero_top_logprobs {
     }
 }
 
-/// `--reject-media`: a streaming chat request whose history carries an image is
-/// refused with the configured status before routing. The client gets that
-/// status instead of a 200 stream, and the engine never sees the request.
 #[tokio::test]
 async fn test_reject_media_refuses_streaming_request_before_routing() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
-        .media_rejection(dynamo_llm::frontend_config::MediaRejectionConfig::new(
-            true, 429,
-        ))
+        .media_rejection(dynamo_llm::frontend_config::MediaRejectionConfig::new(true, 429).unwrap())
         .port(port)
         .build()
         .unwrap();
@@ -3699,7 +3694,6 @@ async fn test_reject_media_refuses_streaming_request_before_routing() {
         "refused request must not reach the engine"
     );
 
-    // A text-only request on the same frontend is served.
     let response = client
         .post(&url)
         .json(&serde_json::json!({
@@ -3711,6 +3705,39 @@ async fn test_reject_media_refuses_streaming_request_before_routing() {
         .unwrap();
     assert!(response.status().is_success(), "{}", response.status());
     assert!(engine.nvext.lock().unwrap().is_some());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_reject_media_anthropic_refuses_before_model_lookup() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_anthropic_endpoints(true)
+        .media_rejection(dynamo_llm::frontend_config::MediaRejectionConfig::new(true, 429).unwrap())
+        .port(port)
+        .build()
+        .unwrap();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // No model is registered, so a lookup first would answer 404.
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/messages"))
+        .json(&serde_json::json!({
+            "model": "unregistered",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+            ]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

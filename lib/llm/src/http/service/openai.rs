@@ -390,8 +390,6 @@ pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorCla
     }
 }
 
-/// A media refusal from a frontend serving text-only models: the configured
-/// status and the client-facing message.
 pub(super) struct MediaRefusal {
     pub(super) status: StatusCode,
     pub(super) message: String,
@@ -3596,7 +3594,6 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // A text-only frontend refuses media before routing (`--reject-media`).
     if let Err(err_response) = reject_media_if_configured(&state, &request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -6788,10 +6785,9 @@ mod tests {
 
     fn media_rejection_state(enabled: bool, status_code: u16) -> Arc<service_v2::State> {
         service_v2::HttpService::builder()
-            .media_rejection(crate::frontend_config::MediaRejectionConfig::new(
-                enabled,
-                status_code,
-            ))
+            .media_rejection(
+                crate::frontend_config::MediaRejectionConfig::new(enabled, status_code).unwrap(),
+            )
             .build()
             .unwrap()
             .state_clone()

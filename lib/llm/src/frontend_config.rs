@@ -125,11 +125,15 @@ pub struct MediaRejectionConfig {
 }
 
 impl MediaRejectionConfig {
-    pub fn new(enabled: bool, status_code: u16) -> Self {
-        Self {
+    /// Fails unless `status_code` is 4xx or 5xx.
+    pub fn new(enabled: bool, status_code: u16) -> anyhow::Result<Self> {
+        if !(400..=599).contains(&status_code) {
+            anyhow::bail!("reject_media status code must be 4xx or 5xx, got {status_code}");
+        }
+        Ok(Self {
             enabled,
             status_code,
-        }
+        })
     }
 
     pub fn enabled(&self) -> bool {
@@ -350,6 +354,16 @@ mod tests {
         let config = FrontendApiConfig::from_optional_flags(None, None, None, None, None);
 
         assert_eq!(config, None);
+    }
+
+    #[test]
+    fn media_rejection_new_requires_error_status() {
+        assert!(MediaRejectionConfig::new(true, 200).is_err());
+        assert!(MediaRejectionConfig::new(true, 600).is_err());
+        assert_eq!(
+            MediaRejectionConfig::new(true, 429).unwrap().status_code(),
+            429
+        );
     }
 
     #[test]

@@ -589,13 +589,6 @@ impl EntrypointArgs {
         }
         runtime_config.validate_config()?;
 
-        if let Some(code) = reject_media_status_code
-            && !(400..=599).contains(&code)
-        {
-            return Err(PyValueError::new_err(format!(
-                "reject_media_status_code must be a 4xx or 5xx status, got {code}"
-            )));
-        }
         let mut frontend_api_config = FrontendApiConfig::from_optional_flags(
             enable_anthropic_api,
             strip_anthropic_preamble,
@@ -606,10 +599,13 @@ impl EntrypointArgs {
         if reject_media.is_some() || reject_media_status_code.is_some() {
             let config = frontend_api_config.get_or_insert_with(FrontendApiConfig::default);
             let defaults = config.media_rejection();
-            config.set_media_rejection(MediaRejectionConfig::new(
-                reject_media.unwrap_or_else(|| defaults.enabled()),
-                reject_media_status_code.unwrap_or_else(|| defaults.status_code()),
-            ));
+            config.set_media_rejection(
+                MediaRejectionConfig::new(
+                    reject_media.unwrap_or_else(|| defaults.enabled()),
+                    reject_media_status_code.unwrap_or_else(|| defaults.status_code()),
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            );
         }
 
         Ok(EntrypointArgs {
