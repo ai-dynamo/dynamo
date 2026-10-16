@@ -71,6 +71,7 @@ endpoint:
 | --- | --- | --- | --- |
 | `continue_final_message` | vLLM OpenAI-compatible extension | Dynamo-handled | Dynamo uses the value while preparing the chat template. The original field does not need to reach the engine after preprocessing. |
 | `temperature` | OpenAI Chat Completions API | Backend-handled | Backend sampling behavior can use a typed frontend representation. Typed storage does not make the sampling semantics frontend-owned. |
+| `echo` | OpenAI Completions API | Jointly handled | The backend scores the prompt positions (its prompt logprobs); Dynamo rebuilds the echoed prompt text and per-token `logprobs` entries ahead of the completion from the tokens it sent. Unary responses prepend the prompt; a stream carries it in the chunk that delivers the engine's prompt logprobs. |
 | `prompt_logprobs` | vLLM OpenAI-compatible extension | Jointly handled | The backend computes the values while Dynamo carries, aggregates, and exposes the response payload. Document the streaming and non-streaming projections separately. |
 | `bad_words_token_ids` | Dynamo token-level extension | Backend-handled | On supported vLLM paths, Dynamo validates and transports the token sequences while vLLM applies the sampling constraint. |
 | `nvext.extra_fields` | Dynamo `nvext` extension | Dynamo-handled | This Dynamo-owned option selects response metadata. It is not a catch-all request map. |
