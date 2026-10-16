@@ -179,6 +179,13 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
+/// Worker-advertised support for applying an EBNF grammar to the complete
+/// assistant response, including native reasoning and tool-call markup.
+///
+/// Absence keeps a conservative ordinary-grammar path for older workers and
+/// other inference backends.
+pub const SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY: &str = "sglang_ebnf_full_assistant";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
