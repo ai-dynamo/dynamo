@@ -108,6 +108,36 @@ port `9090`. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components;
 multinode deployments are not yet supported.
 
+## Metrics
+
+The sidecar serves Dynamo's worker metrics on `DYN_SYSTEM_PORT` at `/metrics`,
+as the in-process backends do. The engine's own Prometheus families stay with
+the engine process, so the sidecar re-exports them: on every scrape of its
+`/metrics`, it fetches the engine's `/metrics`, keeps the engine's families,
+injects the Dynamo identity labels (`dynamo_namespace`, `dynamo_component`,
+`dynamo_endpoint`, `worker_id`, `model`, `model_name`, with the engine's own
+labels taking precedence), and appends them to the response. Nothing is polled
+or cached between scrapes; the scraper sets the cadence, and the same families
+are available to the OTLP exporter when it is configured.
+
+| Engine | Engine endpoint | Requirement |
+|---|---|---|
+| vLLM | `vllm-rs serve` HTTP server, port `8000` by default | None. Set `--vllm-http-endpoint` on the sidecar when vLLM's `--port` differs. |
+| SGLang | SGLang HTTP server on `--port` | Start SGLang with `--enable-metrics`. The sidecar reads the port from `GetServerInfo`. |
+| TensorRT-LLM | Not available | `trtllm-serve --grpc` does not serve an HTTP metrics endpoint. |
+
+The fetch is bounded to 3 seconds and 8 MiB. When it fails, the engine families
+are absent from that scrape and Dynamo's own families are served as usual;
+`dynamo_component_engine_metrics_scrape_success` reads `0` and
+`dynamo_component_engine_metrics_scrape_duration_seconds` records the attempt.
+The sidecar logs once when the engine becomes unreachable and once when it is
+back.
+
+To scrape the engine directly with your own PodMonitor instead, turn the
+re-export off so the families are not collected twice. Set
+`DYN_SIDECAR_ENGINE_METRICS_REEXPORT=false` on the `runtime` container, or pass
+`--engine-metrics-reexport false`.
+
 ## Topologies
 
 Each engine page shows its single-node TP, multi-node TP, and multi-node DP

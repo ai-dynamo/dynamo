@@ -76,6 +76,22 @@ impl HttpEndpoint {
         endpoint
     }
 
+    /// Return `segment` appended under this endpoint's path, so a configured
+    /// prefix such as `/admin/v1` is kept rather than replaced.
+    pub fn join(&self, segment: &str) -> Result<url::Url, DynamoError> {
+        let mut base = self.endpoint.clone();
+        if !base.path().ends_with('/') {
+            let path = format!("{}/", base.path());
+            base.set_path(&path);
+        }
+        base.join(segment.trim_start_matches('/')).map_err(|error| {
+            invalid_argument(format!(
+                "could not append `{segment}` to `{}`: {error}",
+                self.endpoint
+            ))
+        })
+    }
+
     pub fn as_str(&self) -> &str {
         self.endpoint.as_str()
     }
@@ -229,6 +245,26 @@ mod tests {
         let http = HttpEndpoint::from_grpc(&grpc, 30000).unwrap();
         assert_eq!(http.as_str(), "http://[2001:db8::1]:30000/");
         assert!(HttpEndpoint::from_grpc(&grpc, 0).is_err());
+    }
+
+    #[test]
+    fn join_keeps_a_configured_path_prefix() {
+        let plain = HttpEndpoint::parse("http://worker:8000", "--http-endpoint").unwrap();
+        assert_eq!(
+            plain.join("metrics").unwrap().as_str(),
+            "http://worker:8000/metrics"
+        );
+        let prefixed =
+            HttpEndpoint::parse("https://worker.example.com/admin/v1", "--http-endpoint").unwrap();
+        assert_eq!(
+            prefixed.join("/metrics").unwrap().as_str(),
+            "https://worker.example.com/admin/v1/metrics"
+        );
+        let trailing = HttpEndpoint::parse("http://worker:8000/admin/", "--http-endpoint").unwrap();
+        assert_eq!(
+            trailing.join("metrics").unwrap().as_str(),
+            "http://worker:8000/admin/metrics"
+        );
     }
 
     #[test]

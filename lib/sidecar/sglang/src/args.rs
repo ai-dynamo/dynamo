@@ -5,7 +5,7 @@
 
 use std::num::NonZeroUsize;
 
-use dynamo_sidecar_common::SidecarArgs;
+use dynamo_sidecar_common::{EngineMetricsArgs, SidecarArgs};
 
 pub(crate) const DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES: NonZeroUsize =
     NonZeroUsize::new(512 * 1024 * 1024).unwrap();
@@ -36,4 +36,7 @@ pub struct Args {
         default_value_t = DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES
     )]
     pub native_http_max_event_bytes: NonZeroUsize,
+
+    #[command(flatten)]
+    pub engine_metrics: EngineMetricsArgs,
 }

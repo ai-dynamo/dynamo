@@ -88,6 +88,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   **Operator preset:** `8000` on frontend pods.
 </ParamField>
 
+<ParamField path="DYN_SIDECAR_ENGINE_METRICS_REEXPORT" type="boolean" default="true">
+  Whether a vLLM or SGLang sidecar re-exports the engine's own Prometheus families (`vllm:*`, `lmcache:*`, `sglang:*`) on its `/metrics` endpoint, fetched from the engine on every scrape and labelled with the worker's identity. Set to `false` when Prometheus scrapes the engine directly, so the families are not collected twice. OTLP export of the same families follows `OTEL_METRICS_EXPORTER` instead. Also configurable via the `--engine-metrics-reexport` flag.
+</ParamField>
+
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
