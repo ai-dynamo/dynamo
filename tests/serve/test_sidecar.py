@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import pathlib
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -118,6 +119,91 @@ def _disaggregated_payloads(
             transfer_metrics=transfer_metrics,
         ),
     ]
+
+
+KV_ROUTING_BLOCK_SIZE = 64
+KV_ROUTING_ENV = {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONHASHSEED": "0",
+    "DYN_COMPONENT": "backend",
+    "DYN_ENDPOINT": "generate",
+    "DYN_ROUTER_USE_KV_EVENTS": "true",
+    "DYN_ROUTER_MODE": "kv",
+    "DYN_ROUTER_TEMPERATURE": "0",
+    "DYN_ROUTER_MIN_INITIAL_WORKERS": "2",
+    "DYN_REQUEST_PLANE": "tcp",
+    "MAX_MODEL_LEN": "2048",
+    "VLLM_BLOCK_SIZE": str(KV_ROUTING_BLOCK_SIZE),
+    "SGLANG_PAGE_SIZE": str(KV_ROUTING_BLOCK_SIZE),
+}
+SGLANG_KV_ROUTING_ARGS = [
+    "--disable-cuda-graph",
+    "--cuda-graph-backend-prefill",
+    "disabled",
+]
+
+
+@dataclass
+class KvRoutingPayload(ChatPayload):
+    """Require engine KV events to route repeated prefixes to the cached worker or rank."""
+
+    routed_workers: tuple[int, ...] = field(kw_only=True)
+    dp_ranks: tuple[int, ...] = field(default=(0,), kw_only=True)
+    # vLLM counts KV transfers on decode engines and SGLang on prefill engines.
+    transfer_metrics: tuple[EngineMetrics, ...] = field(default=(), kw_only=True)
+    _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._env = env
+        for metrics in self.transfer_metrics:
+            metrics.bind_environment(env)
+
+    def _transfer_total(self) -> float:
+        return sum(metrics.transfer_progress() for metrics in self.transfer_metrics)
+
+    def final_validation(self) -> None:
+        _test_frontend_kv_routing(
+            frontend_port=self.port,
+            system_ports=[
+                int(self._env[f"DYN_SYSTEM_PORT{worker}"])
+                for worker in self.routed_workers
+            ],
+            namespace=self._env["DYN_NAMESPACE"],
+            model_name=self.body["model"],
+            block_size=KV_ROUTING_BLOCK_SIZE,
+            dp_ranks=self.dp_ranks,
+            is_disaggregated=bool(self.transfer_metrics),
+            transfer_total=self._transfer_total if self.transfer_metrics else None,
+        )
+
+
+def _kv_routing_payload(
+    routed_workers: tuple[int, ...],
+    *,
+    dp_ranks: tuple[int, ...] = (0,),
+    transfer_metrics: tuple[EngineMetrics, ...] = (),
+) -> KvRoutingPayload:
+    return KvRoutingPayload(
+        body={
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 1,
+            "temperature": 0,
+        },
+        expected_response=[],
+        expected_log=[],
+        routed_workers=routed_workers,
+        dp_ranks=dp_ranks,
+        transfer_metrics=transfer_metrics,
+    )
+
+
+def _engine_metrics(
+    checker: type[EngineMetrics], count: int
+) -> tuple[EngineMetrics, ...]:
+    return tuple(
+        checker(port_env=f"DYN_ENGINE_HTTP_PORT{index}")
+        for index in range(1, count + 1)
+    )
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -311,6 +397,97 @@ sidecar_configs = {
             transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
         ),
     ),
+    "vllm_kv_router": EngineConfig(
+        name="vllm_kv_router",
+        directory=vllm_sidecar_dir,
+        script_name="agg_kv_router.sh",
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        health_check_workers=True,
+        health_check_worker_count=2,
+        env=KV_ROUTING_ENV,
+        request_payloads=[_kv_routing_payload((1, 2))],
+    ),
+    "sglang_kv_router": EngineConfig(
+        name="sglang_kv_router",
+        directory=sglang_sidecar_dir,
+        script_name="agg_kv_router.sh",
+        script_args=[*SGLANG_KV_ROUTING_ARGS],
+        marks=[
+            pytest.mark.sglang,
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_sglang_kv_tokens(2048),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        health_check_workers=True,
+        health_check_worker_count=2,
+        env=KV_ROUTING_ENV,
+        request_payloads=[_kv_routing_payload((1, 2))],
+    ),
+    "vllm_disaggregated_kv_router": EngineConfig(
+        name="vllm_disaggregated_kv_router",
+        directory=vllm_sidecar_dir,
+        script_name="disagg_kv_router.sh",
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        health_check_workers=True,
+        health_check_worker_count=4,
+        env=KV_ROUTING_ENV,
+        # disagg_kv_router.sh launches decode as workers 1-2 and prefill as workers 3-4.
+        request_payloads=[
+            _kv_routing_payload(
+                (3, 4), transfer_metrics=_engine_metrics(VllmMetricsChecker, 4)
+            )
+        ],
+    ),
+    "sglang_disaggregated_kv_router": EngineConfig(
+        name="sglang_disaggregated_kv_router",
+        directory=sglang_sidecar_dir,
+        script_name="disagg_kv_router.sh",
+        script_args=[*SGLANG_KV_ROUTING_ARGS, "--enable-metrics"],
+        marks=[
+            pytest.mark.sglang,
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_sglang_kv_tokens(2048),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        health_check_workers=True,
+        health_check_worker_count=4,
+        env=KV_ROUTING_ENV,
+        # disagg_kv_router.sh launches prefill as workers 1-2 and decode as workers 3-4.
+        request_payloads=[
+            _kv_routing_payload(
+                (1, 2), transfer_metrics=_engine_metrics(SGLangMetricsChecker, 4)
+            )
+        ],
+    ),
+}
+
+
+_GPU_ROLES = {
+    "disaggregated": ("PREFILL", "DECODE"),
+    "kv_router": ("WORKER1", "WORKER2"),
+    "disaggregated_kv_router": ("PREFILL1", "PREFILL2", "DECODE1", "DECODE2"),
 }
 
 
@@ -321,12 +498,22 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
     backend, layout = config.name.split("_", 1)
-    if layout == "disaggregated":
+    if layout in _GPU_ROLES:
         device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
         assert device != "-1", "One visible GPU is required"
-        for role in ("PREFILL", "DECODE"):
+        for role in _GPU_ROLES[layout]:
             monkeypatch.setenv(f"{backend.upper()}_{role}_GPU", device)
+    if backend == "sglang" and layout == "disaggregated_kv_router":
+        # Each prefill engine hosts its own KV-transfer bootstrap server.
+        bootstrap_ports = allocate_ports(2, DynamoPortRange.BOOTSTRAP.value)
+        request.addfinalizer(lambda: deallocate_ports(bootstrap_ports))
+        for index, port in enumerate(bootstrap_ports, start=1):
+            monkeypatch.setenv(
+                f"SGLANG_DISAGGREGATION_BOOTSTRAP_PORT{index}", str(port)
+            )
     return config
 
 
@@ -334,7 +521,7 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_serve_deployment(
     sidecar_config_test,
     request,
@@ -354,94 +541,16 @@ def test_serve_deployment(
     )
 
 
-def _kv_routing_config(
-    backend: str,
-    *,
-    name: str,
-    script_name: str,
-    model_name: str,
-    namespace: str,
-    block_size: int,
-    worker_count: int,
-    router_worker_count: int,
-) -> EngineConfig:
-    return EngineConfig(
-        name=name,
-        directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
-        script_name=script_name,
-        script_args=(
-            [
-                "--disable-cuda-graph",
-                "--cuda-graph-backend-prefill",
-                "disabled",
-            ]
-            if backend == "sglang"
-            else []
-        ),
-        marks=[],
-        model=model_name,
-        health_check_workers=True,
-        health_check_worker_count=worker_count,
-        request_payloads=[
-            ChatPayload(
-                body={
-                    "messages": [{"role": "user", "content": "Say hello."}],
-                    "max_tokens": 1,
-                    "temperature": 0,
-                },
-                expected_response=[],
-                expected_log=[],
-            )
-        ],
-        env={
-            "PYTHONUNBUFFERED": "1",
-            "PYTHONHASHSEED": "0",
-            "MODEL": model_name,
-            "DYN_NAMESPACE": namespace,
-            "DYN_COMPONENT": "backend",
-            "DYN_ENDPOINT": "generate",
-            "DYN_ROUTER_USE_KV_EVENTS": "true",
-            "DYN_ROUTER_MODE": "kv",
-            "DYN_ROUTER_TEMPERATURE": "0",
-            "DYN_ROUTER_MIN_INITIAL_WORKERS": str(router_worker_count),
-            "DYN_REQUEST_PLANE": "tcp",
-            "MAX_MODEL_LEN": "2048",
-            "VLLM_BLOCK_SIZE": str(block_size),
-            "SGLANG_PAGE_SIZE": str(block_size),
-        },
-    )
-
-
 @pytest.mark.router
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports
 @pytest.mark.post_merge
+@pytest.mark.gpu_2
+@pytest.mark.model("silence09/DeepSeek-R1-Small-2layers")
 @pytest.mark.timeout(1200)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "dep,num_system_ports,model_name",
-    [
-        pytest.param(
-            False,
-            2,
-            "Qwen/Qwen3-0.6B",
-            id="replicas",
-            marks=[pytest.mark.gpu_1, pytest.mark.model("Qwen/Qwen3-0.6B")],
-        ),
-        pytest.param(
-            True,
-            1,
-            "silence09/DeepSeek-R1-Small-2layers",
-            id="dep",
-            marks=[
-                pytest.mark.gpu_2,
-                pytest.mark.model("silence09/DeepSeek-R1-Small-2layers"),
-            ],
-        ),
-    ],
-    indirect=["num_system_ports"],
-)
+@pytest.mark.parametrize("num_system_ports", [1], indirect=True)
 @pytest.mark.parametrize(
     "backend",
     [
@@ -458,214 +567,99 @@ def _kv_routing_config(
         ),
     ],
 )
-def test_sidecar_kv_routing(
+def test_sidecar_dep_kv_routing(
     backend,
-    dep,
-    model_name,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
     monkeypatch,
 ):
-    """Verify native sidecar KV events route requests to the cached worker or rank."""
+    """Verify native sidecar KV events route requests to the cached DEP rank."""
     monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
-    namespace = f"sidecar-kv-{generate_random_suffix()}"
-    block_size = 64
-    worker_count = 1 if dep else 2
-    config = _kv_routing_config(
-        backend,
-        name=f"{backend}_{'dep' if dep else 'kv'}_routing",
-        script_name="agg.sh" if dep else "agg_kv_router.sh",
-        model_name=model_name,
-        namespace=namespace,
-        block_size=block_size,
-        worker_count=worker_count,
-        router_worker_count=worker_count,
+    model_name = "silence09/DeepSeek-R1-Small-2layers"
+    config = EngineConfig(
+        name=f"{backend}_dep_routing",
+        directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
+        script_name="agg.sh",
+        script_args=[*SGLANG_KV_ROUTING_ARGS] if backend == "sglang" else [],
+        marks=[],
+        model=model_name,
+        health_check_workers=True,
+        health_check_worker_count=1,
+        request_payloads=[_kv_routing_payload((1,), dp_ranks=(0, 1))],
+        env={
+            **KV_ROUTING_ENV,
+            "MODEL": model_name,
+            "DYN_NAMESPACE": f"sidecar-kv-{generate_random_suffix()}",
+            "DYN_ROUTER_MIN_INITIAL_WORKERS": "1",
+        },
     )
-    if dep:
-        devices = map_cuda_visible_devices(
-            [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
-        ).split(",")
-        assert (
-            len(set(devices)) == 2 and "-1" not in devices
-        ), "DEP requires two distinct GPUs"
-        engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
-        # KV publishers offset by rank; SGLang also derives communication ports.
-        dep_ports = allocate_contiguous_ports(
-            1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
-        )
-        request.addfinalizer(lambda: deallocate_ports(dep_ports))
+    devices = map_cuda_visible_devices(
+        [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
+    ).split(",")
+    assert (
+        len(set(devices)) == 2 and "-1" not in devices
+    ), "DEP requires two distinct GPUs"
+    engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
+    # KV publishers offset by rank; SGLang also derives communication ports.
+    dep_ports = allocate_contiguous_ports(
+        1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
+    )
+    request.addfinalizer(lambda: deallocate_ports(dep_ports))
+    config.script_args += [
+        "--kv-events-config",
+        json.dumps(
+            {
+                "publisher": "zmq",
+                "topic": "kv-events",
+                "endpoint": f"tcp://*:{dep_ports[0]}",
+                **({"enable_kv_cache_events": True} if backend == "vllm" else {}),
+            }
+        ),
+    ]
+    if backend == "vllm":
+        engine_env.update(VLLM_DATA_PARALLEL_SIZE="2")
         config.script_args += [
-            "--kv-events-config",
-            json.dumps(
-                {
-                    "publisher": "zmq",
-                    "topic": "kv-events",
-                    "endpoint": f"tcp://*:{dep_ports[0]}",
-                    **({"enable_kv_cache_events": True} if backend == "vllm" else {}),
-                }
-            ),
+            "--tensor-parallel-size",
+            "1",
+            "--enable-expert-parallel",
+            "--block-size",
+            str(KV_ROUTING_BLOCK_SIZE),
+            "--attention-backend",
+            "TRITON_MLA",
         ]
-        if backend == "vllm":
-            engine_env.update(VLLM_DATA_PARALLEL_SIZE="2")
-            config.script_args += [
-                "--tensor-parallel-size",
-                "1",
-                "--enable-expert-parallel",
-                "--block-size",
-                str(block_size),
-                "--attention-backend",
-                "TRITON_MLA",
-            ]
-        else:
-            engine_env.update(
-                # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
-                SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
-            )
-            config.script_args += [
-                "--tp-size",
-                "2",
-                "--dp-size",
-                "2",
-                "--ep-size",
-                "2",
-                "--enable-dp-attention",
-                "--page-size",
-                str(block_size),
-                "--attention-backend",
-                "triton",
-                "--moe-runner-backend",
-                "triton",
-                "--moe-a2a-backend",
-                "none",
-                "--dist-init-addr",
-                f"127.0.0.1:{dep_ports[2]}",
-                "--nccl-port",
-                str(dep_ports[-1]),
-            ]
     else:
-        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
-        assert device != "-1", "One visible GPU is required"
-        engine_env = {
-            f"{backend.upper()}_WORKER{worker}_GPU": device for worker in (1, 2)
-        }
+        engine_env.update(
+            # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
+            SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
+        )
+        config.script_args += [
+            "--tp-size",
+            "2",
+            "--dp-size",
+            "2",
+            "--ep-size",
+            "2",
+            "--enable-dp-attention",
+            "--page-size",
+            str(KV_ROUTING_BLOCK_SIZE),
+            "--attention-backend",
+            "triton",
+            "--moe-runner-backend",
+            "triton",
+            "--moe-a2a-backend",
+            "none",
+            "--dist-init-addr",
+            f"127.0.0.1:{dep_ports[2]}",
+            "--nccl-port",
+            str(dep_ports[-1]),
+        ]
     run_serve_deployment(
         config,
         request,
         ports=dynamo_dynamic_ports,
         extra_env=engine_env,
-        post_validation=lambda: _test_frontend_kv_routing(
-            frontend_port=dynamo_dynamic_ports.frontend_port,
-            system_ports=dynamo_dynamic_ports.system_ports,
-            namespace=namespace,
-            model_name=config.model,
-            block_size=block_size,
-            dp_ranks=(0, 1) if dep else (0,),
-        ),
-    )
-
-
-@pytest.mark.router
-@pytest.mark.sidecar
-@pytest.mark.e2e
-@pytest.mark.engine_ports
-@pytest.mark.post_merge
-@pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.timeout(1200)
-@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize("num_system_ports", [4], indirect=True)
-@pytest.mark.parametrize(
-    "backend,prefill_workers",
-    [
-        # Managed worker indices of the prefill sidecars in each disagg_kv_router.sh.
-        pytest.param(
-            "vllm",
-            (3, 4),
-            id="vllm",
-            marks=[
-                pytest.mark.vllm,
-                pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
-            ],
-        ),
-        pytest.param(
-            "sglang",
-            (1, 2),
-            id="sglang",
-            marks=[pytest.mark.sglang, pytest.mark.requested_sglang_kv_tokens(2048)],
-        ),
-    ],
-)
-def test_sidecar_disagg_kv_routing(
-    backend,
-    prefill_workers,
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_models,
-    monkeypatch,
-):
-    """Verify KV events route disaggregated requests to the warmed prefill worker."""
-    monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
-    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
-    monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
-    namespace = f"sidecar-kv-{generate_random_suffix()}"
-    block_size = 64
-    system_ports = dynamo_dynamic_ports.system_ports
-    config = _kv_routing_config(
-        backend,
-        name=f"{backend}_disagg_kv_routing",
-        script_name="disagg_kv_router.sh",
-        model_name="Qwen/Qwen3-0.6B",
-        namespace=namespace,
-        block_size=block_size,
-        worker_count=len(system_ports),
-        router_worker_count=len(prefill_workers),
-    )
-    device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
-    assert device != "-1", "One visible GPU is required"
-    engine_env = {
-        f"{backend.upper()}_{role}{index}_GPU": device
-        for role in ("PREFILL", "DECODE")
-        for index in (1, 2)
-    }
-    if backend == "sglang":
-        bootstrap_ports = allocate_ports(2, DynamoPortRange.BOOTSTRAP.value)
-        request.addfinalizer(lambda: deallocate_ports(bootstrap_ports))
-        for index, port in enumerate(bootstrap_ports, start=1):
-            engine_env[f"SGLANG_DISAGGREGATION_BOOTSTRAP_PORT{index}"] = str(port)
-        config.script_args += ["--enable-metrics"]
-
-    engine_ports = {
-        f"DYN_ENGINE_HTTP_PORT{index}": str(port)
-        for index, port in enumerate(dynamo_dynamic_ports.engine_http_ports, 1)
-    }
-    checker = VllmMetricsChecker if backend == "vllm" else SGLangMetricsChecker
-    # vLLM counts transfers on decode engines and SGLang on prefill engines.
-    transfer_metrics = []
-    for port_env in engine_ports:
-        metrics = checker(port_env=port_env)
-        metrics.bind_environment(engine_ports)
-        transfer_metrics.append(metrics)
-
-    def transfer_total() -> float:
-        return sum(metrics.transfer_progress() for metrics in transfer_metrics)
-
-    run_serve_deployment(
-        config,
-        request,
-        ports=dynamo_dynamic_ports,
-        extra_env=engine_env,
-        post_validation=lambda: _test_frontend_kv_routing(
-            frontend_port=dynamo_dynamic_ports.frontend_port,
-            system_ports=[system_ports[index - 1] for index in prefill_workers],
-            namespace=namespace,
-            model_name=config.model,
-            block_size=block_size,
-            is_disaggregated=True,
-            transfer_total=transfer_total,
-        ),
     )

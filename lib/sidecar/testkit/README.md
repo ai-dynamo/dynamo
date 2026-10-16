@@ -189,7 +189,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
 | `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing; `test_sidecar_disagg_kv_routing` warms two prefill caches and requires cache-based selection plus a completed transfer to decode | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing; the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
