@@ -221,9 +221,8 @@ func applyCheckpointStartupPolicy(
 		component.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
-	// Artifact identity is independent of startup policy. Automatic SnapshotJobs
-	// and explicit references both hand their compatibility hash, and any Ready
-	// candidate pin, to the DCD even while WaitForCheckpoint keeps replicas gated.
+	// Artifact identity is independent of startup policy: stamp the compatibility
+	// hash and any Ready candidate pin even while WaitForCheckpoint gates replicas.
 	if err := applyRestoreCandidateMetadataToComponent(component, checkpointInfo); err != nil {
 		return err
 	}
