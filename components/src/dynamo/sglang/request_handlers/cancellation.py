@@ -22,8 +22,17 @@ _CANCELLATION_REGISTRATION_WAIT_TIMEOUT_S = 30.0
 _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S = 0.25
 
 
+# Returned at stream end instead of raising in the helper task: a stored
+# StopAsyncIteration's traceback closes a cycle that keeps the finished request,
+# prompt included, alive until a full GC.
+_STREAM_END = object()
+
+
 async def _next_stream_item(iterator: AsyncIterator[Any]) -> Any:
-    return await anext(iterator)
+    try:
+        return await anext(iterator)
+    except StopAsyncIteration:
+        return _STREAM_END
 
 
 def _consume_detached_task(task: asyncio.Task[Any]) -> None:
@@ -126,10 +135,10 @@ class CancellationMixin:
                             + _CANCELLATION_DRAIN_TIMEOUT_S
                         )
                     if next_item in done:
-                        try:
-                            yield next_item.result()
-                        except StopAsyncIteration:
+                        item = next_item.result()
+                        if item is _STREAM_END:
                             return
+                        yield item
                         continue
 
                 assert drain_deadline is not None
@@ -145,10 +154,10 @@ class CancellationMixin:
                         "Timed out draining SGLang stream after cancellation"
                     )
                     return
-                try:
-                    yield next_item.result()
-                except StopAsyncIteration:
+                item = next_item.result()
+                if item is _STREAM_END:
                     return
+                yield item
             finally:
                 if not next_item.done():
                     _cancel_and_detach(next_item)
