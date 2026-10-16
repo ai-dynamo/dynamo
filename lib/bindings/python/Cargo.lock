@@ -2349,9 +2349,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.2"
+version = "10.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1564d5bbb66372f478df3f9158df8071b45c523ca4e07b4f82a4ac257038c962"
+checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2373,9 +2373,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.21"
+version = "0.7.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f43e47b6a68353cc04d4dfe19c69414a5884c9963b72c68937d019998c5ef72e"
+checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
 dependencies = [
  "anyhow",
  "openai-harmony",
