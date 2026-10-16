@@ -66,6 +66,7 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     shutdown_started: CancellationToken,
+    endpoint_registration: Arc<tokio::sync::RwLock<()>>,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     /// Earliest drain deadline requested by any caller. Later callers may
     /// shorten it, but can never extend a shutdown already in progress.
@@ -119,6 +120,7 @@ impl Runtime {
             cancellation_token,
             endpoint_shutdown_token,
             shutdown_started,
+            endpoint_registration: Arc::new(tokio::sync::RwLock::new(())),
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             drain_deadline: tokio::sync::watch::channel(None).0,
             teardown_tasks: Arc::new(std::sync::Mutex::new(Some(Vec::new()))),
@@ -396,6 +398,21 @@ impl Runtime {
         self.shutdown_started.is_cancelled()
     }
 
+    pub(crate) async fn endpoint_registration_guard(
+        &self,
+    ) -> anyhow::Result<tokio::sync::RwLockReadGuard<'_, ()>> {
+        let guard = self.endpoint_registration.read().await;
+        anyhow::ensure!(!self.is_shutting_down(), "runtime is shutting down");
+        Ok(guard)
+    }
+
+    /// Fence startup and resume registrations before discovery withdrawal.
+    /// Existing request handlers and transports remain available for draining.
+    pub async fn close_endpoint_registration(&self) {
+        self.mark_shutting_down();
+        let _guard = self.endpoint_registration.write().await;
+    }
+
     /// Observe shutdown from its start, rather than waiting for transport teardown.
     pub fn shutdown_started_token(&self) -> CancellationToken {
         self.shutdown_started.child_token()
@@ -626,6 +643,22 @@ impl Drop for RuntimeType {
 mod tests {
     use super::*;
     use crate::config::environment_names::runtime as env_runtime;
+
+    #[tokio::test]
+    async fn shutdown_fences_registration_before_withdrawal() {
+        let runtime = Runtime::from_current().unwrap();
+        let registration = runtime.endpoint_registration_guard().await.unwrap();
+        let close = runtime.close_endpoint_registration();
+        tokio::pin!(close);
+        // An admitted registration must finish before withdrawal can start.
+        assert!(futures::poll!(&mut close).is_pending());
+        assert!(runtime.is_shutting_down());
+        drop(registration);
+        close.await;
+        assert!(runtime.endpoint_registration_guard().await.is_err());
+        // Fencing discovery must not interrupt admitted inference.
+        assert!(!runtime.child_token().is_cancelled());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_cancels_main_token_after_graceful_timeout() {
