@@ -321,6 +321,16 @@ class PrometheusAPIClient:
                 if request_result:
                     router_request_count = float(request_result[0]["value"][1])
                     if math.isfinite(router_request_count):
+                        if router_request_count == 0:
+                            # A completed-only series can hide requests still in flight.
+                            completed_only = self.prom.custom_query(
+                                query=(
+                                    f"increase({router_requests_total}{{{ns_filter}}}[{interval}]) "
+                                    "unless ignoring(__name__) "
+                                    f"increase({router_requests_started}{{{ns_filter}}}[{interval}])"
+                                )
+                            )
+                            return None if completed_only else 0.0
                         return router_request_count
             except (
                 PrometheusApiClientException,
@@ -360,6 +370,7 @@ class PrometheusAPIClient:
                 return (
                     router_completed_count
                     if math.isfinite(router_completed_count)
+                    and router_completed_count > 0
                     else None
                 )
             except (
@@ -409,7 +420,11 @@ class PrometheusAPIClient:
                     self.dynamo_namespace,
                 )
                 return None
-            return completed_count
+            return (
+                completed_count
+                if math.isfinite(completed_count) and completed_count > 0
+                else None
+            )
         except Exception:
             # Never propagate: the tick loop catches only GPUShapeUnavailableError
             # (core/base.py:1042), so anything else here shuts the planner down.

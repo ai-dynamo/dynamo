@@ -460,6 +460,24 @@ def test_get_avg_request_count_returns_none_when_no_data():
     assert result is None
 
 
+def test_frontend_completed_zero_does_not_prove_zero_demand():
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+    zero = [
+        {
+            "metric": {
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0, "0"],
+        }
+    ]
+    with patch.object(client.prom, "custom_query", side_effect=[[], zero]):
+        assert client.get_avg_request_count("30s", "target_model") is None
+    with patch.object(client.prom, "custom_query", return_value=zero) as query:
+        assert client.get_avg_request_count("30s", "target_model") == 0
+        assert query.call_count == 1
+
+
 def test_get_avg_request_count_returns_none_when_prometheus_is_unreachable():
     client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
 
@@ -856,12 +874,37 @@ class TestPrometheusAPIClientRouterSource:
         assert router_client.prom.custom_query.call_count == 1
 
     def test_router_request_count_preserves_valid_zero(self, router_client):
-        router_client.prom.custom_query.return_value = [{"value": [0, "0.0"]}]
+        router_client.prom.custom_query.side_effect = [
+            [{"value": [0, "0.0"]}],
+            [],
+        ]
 
         result = router_client.get_avg_request_count("60s", "mymodel")
 
         assert result == 0.0
-        assert router_client.prom.custom_query.call_count == 1
+        assert router_client.prom.custom_query.call_count == 2
+
+    @pytest.mark.parametrize("coalesced", [[], [{"value": [0, "0.0"]}]])
+    def test_router_completed_zero_does_not_prove_zero_demand(
+        self, router_client, coalesced
+    ):
+        router_client.prom.custom_query.side_effect = [
+            coalesced,
+            [{"metric": {"instance": "legacy"}, "value": [0, "0.0"]}],
+        ]
+        assert router_client.get_avg_request_count("60s", "mymodel") is None
+        if coalesced:
+            query = router_client.prom.custom_query.call_args.kwargs["query"]
+            assert "unless ignoring(__name__)" in query
+            assert query.count('dynamo_namespace="test_fe_namespace"') == 2
+
+    def test_router_zero_is_unknown_when_legacy_series_check_fails(self, router_client):
+        router_client.prom.custom_query.side_effect = [
+            [{"value": [0, "0.0"]}],
+            PrometheusApiClientException("legacy-series check failed"),
+            [{"value": [0, "0.0"]}],
+        ]
+        assert router_client.get_avg_request_count("60s", "mymodel") is None
 
     def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
         """Router histogram query must filter by dynamo_namespace so each pool planner
