@@ -280,5 +280,101 @@ fn shared_cache(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache);
+/// A KVCR-style worker: hint capable, a source, and in an island of eight.
+struct HintWorker {
+    topology: std::collections::HashMap<String, String>,
+}
+impl dynamo_kv_router::protocols::WorkerConfigLike for HintWorker {
+    fn data_parallel_start_rank(&self) -> u32 {
+        0
+    }
+    fn data_parallel_size(&self) -> u32 {
+        2
+    }
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        None
+    }
+    fn total_kv_blocks(&self) -> Option<u64> {
+        Some(16384)
+    }
+    fn kv_hint_transfer_metadata_for_dp_rank(
+        &self,
+        _dp_rank: u32,
+    ) -> Option<dynamo_kv_router::protocols::KvHintTransferWorkerMetadata<'_>> {
+        Some(dynamo_kv_router::protocols::KvHintTransferWorkerMetadata {
+            worker_type: "prefill",
+            source_control_endpoint: Some("tcp://worker:23280"),
+        })
+    }
+    fn topology_domains(&self) -> Option<&std::collections::HashMap<String, String>> {
+        Some(&self.topology)
+    }
+    fn kv_transfer_domain(&self) -> Option<&str> {
+        Some("rdma-island")
+    }
+}
+
+// Every worker rank is a fetch source (S = 2W), so each selection builds the
+// full source summary. `none` carries no transfer candidates (no KVCR).
+fn kv_transfer(c: &mut Criterion) {
+    for (name, credit, candidates) in [
+        ("none", 0.5, false),
+        ("credit0", 0.0, true),
+        ("credit0.5", 0.5, true),
+    ] {
+        let mut group = c.benchmark_group(format!("kv_transfer/{name}"));
+        group
+            .warm_up_time(Duration::from_millis(200))
+            .measurement_time(Duration::from_millis(500))
+            .sample_size(30)
+            .nresamples(1_000);
+        for count in [256, 1024, 4096] {
+            let (_, mut request) = support::fixture(count, 2048);
+            let workers: std::collections::HashMap<u64, HintWorker> = (0..count as u64)
+                .map(|id| {
+                    let island = format!("island-{}", id / 8);
+                    let topology = [("rdma-island".to_string(), island)].into();
+                    (id, HintWorker { topology })
+                })
+                .collect();
+            if candidates {
+                let mut sources: Vec<_> = request
+                    .overlap
+                    .tier_overlap_blocks
+                    .device
+                    .iter()
+                    .map(|(&worker, &blocks)| (worker.into(), blocks + 2))
+                    .collect();
+                sources.sort_unstable();
+                request.kv_transfer_candidates =
+                    Some(dynamo_kv_router::kv_hints::KvTransferCandidates {
+                        block_hashes: (0..128)
+                            .map(dynamo_kv_router::protocols::ExternalSequenceBlockHash)
+                            .collect(),
+                        owner_prefix_blocks: sources,
+                        routing_snapshot: None,
+                    });
+            }
+            let policy = default_policy(
+                KvRouterConfig {
+                    shared_cache_multiplier: Some(credit),
+                    overlap_score_credit_decay: 0.6,
+                    ..Default::default()
+                },
+                "prefill",
+            );
+            let mut select = || {
+                black_box(
+                    policy
+                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .unwrap(),
+                );
+            };
+            group.bench_function(BenchmarkId::new("plugin", count), |b| b.iter(&mut select));
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(benches, bench, stacked, shared_cache, kv_transfer);
 criterion_main!(benches);

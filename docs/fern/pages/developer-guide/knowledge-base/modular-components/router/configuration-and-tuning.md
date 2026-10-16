@@ -152,7 +152,7 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
+Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The same multiplier credits the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), such as from KVCR. Without shared cache it defaults to `0`, so set it to enable that credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.

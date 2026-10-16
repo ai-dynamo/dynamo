@@ -7,8 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dynamo_tokens::SequenceHash;
@@ -25,12 +24,13 @@ use crate::indexer::{
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
-use crate::scheduling::selector::WorkerSelectionPolicy;
+use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
     OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
@@ -125,6 +125,10 @@ struct SelectionEntry {
     is_eagle: bool,
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
+    /// Whether a worker in `workers_tx` consumes router hints, set on publish.
+    hint_capable_workers: AtomicBool,
+    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
+    scores_kv_transfer: bool,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
