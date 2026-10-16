@@ -4,57 +4,86 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
-SCRIPT_PATH = Path(__file__).parents[1] / "files" / "upgrade-preflight" / "check.py"
-SPEC = importlib.util.spec_from_file_location("upgrade_preflight", SCRIPT_PATH)
-upgrade_preflight = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(upgrade_preflight)
+SCRIPT = Path(__file__).resolve().parents[1] / "files/upgrade-preflight/check.py"
+SPEC = importlib.util.spec_from_file_location("preflight", SCRIPT)
+preflight = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(preflight)
 
 
-class ValidateUpgradeTest(unittest.TestCase):
-    def test_allows_patch_upgrade(self):
-        upgrade_preflight.validate_upgrade("1.5.0", "1.5.3")
-
-    def test_allows_next_minor_upgrade(self):
-        upgrade_preflight.validate_upgrade("v1.4.7", "1.5.0-rc.1")
-
-    def test_rejects_skipped_minor(self):
-        with self.assertRaisesRegex(
-            upgrade_preflight.PreflightError, "every intermediate minor"
+class ValidateTransitionTest(unittest.TestCase):
+    def test_allows_same_minor_and_adjacent_minor_transitions(self):
+        for installed, target in (
+            ("1.5.0", "1.5.3"),
+            ("v1.4.7", "1.5.0-rc.1"),
+            ("1.5.0", "1.4.7"),
         ):
-            upgrade_preflight.validate_upgrade("1.2.3", "1.5.0")
+            with self.subTest(installed=installed, target=target):
+                preflight.validate_transition(installed, target)
 
-    def test_rejects_earlier_minor(self):
-        with self.assertRaises(upgrade_preflight.PreflightError):
-            upgrade_preflight.validate_upgrade("1.5.0", "1.4.9")
+    def test_rejects_skipped_minor_upgrade_and_downgrade(self):
+        for installed, target, expected in (
+            ("1.2.3", "1.5.0", "unsupportedUpgradeOverride=1.2"),
+            ("1.5.0", "1.2.3", "unsupportedDowngradeOverride=1.5"),
+        ):
+            with (
+                self.subTest(installed=installed, target=target),
+                self.assertRaisesRegex(ValueError, expected),
+            ):
+                preflight.validate_transition(installed, target)
 
-    def test_rejects_major_upgrade(self):
-        with self.assertRaises(upgrade_preflight.PreflightError):
-            upgrade_preflight.validate_upgrade("1.9.0", "2.0.0")
+    def test_matching_source_minor_override_allows_unsupported_transition(self):
+        preflight.validate_transition("1.2.3", "1.5.0", "1.2")
+        preflight.validate_transition("1.5.3", "1.2.0", "", "1.5")
+
+    def test_stale_override_does_not_allow_another_unsupported_transition(self):
+        with self.assertRaisesRegex(ValueError, "unsupportedUpgradeOverride=1.5"):
+            preflight.validate_transition("1.5.0", "1.7.0", "1.2")
+
+    def test_override_does_not_apply_in_the_other_direction(self):
+        with self.assertRaisesRegex(ValueError, "unsupportedDowngradeOverride=1.5"):
+            preflight.validate_transition("1.5.0", "1.2.0", "1.5", "")
+
+    def test_override_requires_minor_version_form(self):
+        with self.assertRaisesRegex(ValueError, "must be a minor version in N.M form"):
+            preflight.validate_transition("1.2.0", "1.5.0", "1.2.0")
+
+    def test_matching_override_allows_major_transition(self):
+        preflight.validate_transition("1.9.0", "2.0.0", "1.9")
+        preflight.validate_transition("2.0.0", "1.9.0", "", "2.0")
 
     def test_rejects_non_semantic_version(self):
+        with self.assertRaisesRegex(ValueError, "not a supported semantic version"):
+            preflight.validate_transition("latest", "1.5.0")
+
+
+class CheckTest(unittest.TestCase):
+    def test_allows_initial_install_when_deployment_does_not_exist(self):
+        get = Mock(return_value=None)
+        preflight.check(get, "dynamo-system", "dynamo-controller-manager", "1.6.0")
+        self.assertEqual(
+            get.call_args.args,
+            (
+                "/apis/apps/v1/namespaces/dynamo-system/deployments/"
+                "dynamo-controller-manager",
+            ),
+        )
+
+    def test_reads_installed_version_from_operator_deployment(self):
+        get = Mock(
+            return_value={
+                "metadata": {"labels": {"app.kubernetes.io/version": "1.5.2"}}
+            }
+        )
+        preflight.check(get, "dynamo-system", "dynamo-controller-manager", "1.6.0")
+
+    def test_rejects_missing_installed_version_label(self):
+        get = Mock(return_value={"metadata": {"labels": {}}})
         with self.assertRaisesRegex(
-            upgrade_preflight.PreflightError, "not a supported semantic"
+            ValueError, "has no app.kubernetes.io/version label"
         ):
-            upgrade_preflight.validate_upgrade("latest", "1.5.0")
-
-
-class InstalledVersionTest(unittest.TestCase):
-    def test_reads_operator_deployment_label(self):
-        payload = {
-            "items": [{"metadata": {"labels": {"app.kubernetes.io/version": "1.4.2"}}}]
-        }
-        self.assertEqual(upgrade_preflight.installed_version(payload), "1.4.2")
-
-    def test_rejects_ambiguous_operator_deployments(self):
-        with self.assertRaisesRegex(upgrade_preflight.PreflightError, "exactly one"):
-            upgrade_preflight.installed_version({"items": []})
-
-    def test_rejects_missing_version_label(self):
-        with self.assertRaisesRegex(upgrade_preflight.PreflightError, "version label"):
-            upgrade_preflight.installed_version(
-                {"items": [{"metadata": {"labels": {}}}]}
-            )
+            preflight.check(get, "dynamo-system", "dynamo-controller-manager", "1.6.0")
 
 
 if __name__ == "__main__":
