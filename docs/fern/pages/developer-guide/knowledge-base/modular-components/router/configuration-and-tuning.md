@@ -343,6 +343,8 @@ The first successfully dispatched request binds the session ID to its selected w
 
 One behavior is known and unresolved: because siblings share one binding, a concurrent fan-out waits for the first sibling's dispatch to commit before the others are placed.
 
+To bind every request on its own session id instead, set `DYN_ROUTER_SESSION_AFFINITY_BINDING=session` on the frontend; the default is `parent-group`. Subagents are then placed by normal selection, and each one stays on the target that served its own earlier requests. This applies to the prefill and decode bindings alike.
+
 Dynamo resolves the parent session id from the agent headers it already recognizes (`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`, `x-parent-session-id`). On a backend that routes again internally the group can still split across ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled, set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the one the engine records.
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
