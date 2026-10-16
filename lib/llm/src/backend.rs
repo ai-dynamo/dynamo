@@ -284,13 +284,8 @@ impl
                     .and_then(|output| output.data.as_ref())
                     .is_some_and(|data| matches!(data.finish_reason, Some(FinishReason::Error(_))));
                 if carries_usage || backend_failed {
-                    // Native backends can put authoritative cumulative usage
-                    // on a terminal event immediately after the token Dynamo
-                    // recognized locally as EOS. Preserve that metadata without
-                    // emitting duplicate content or a second successful finish
-                    // event. Preserve a backend error with or without usage: it
-                    // is not duplicate success metadata and must reach the
-                    // frontend.
+                    // Preserve usage or errors after a local stop, but strip
+                    // duplicate content and successful finish metadata.
                     if let Some(data) = output.as_mut().and_then(|output| output.data.as_mut()) {
                         data.token_ids.clear();
                         data.tokens = None;
@@ -311,9 +306,7 @@ impl
                     .and_then(|output| output.data.as_ref())
                     .is_some_and(|data| data.finish_reason.is_some());
                 if !is_terminal && state.finished_choices.len() >= state.decoders.len() {
-                    // Once every choice ended locally, tolerate only terminal
-                    // metadata. A nonterminal suffix means the backend ignored
-                    // the stop; cancel rather than burning the remaining budget.
+                    // A nonterminal suffix means the backend ignored the stop.
                     state.stream.context().stop_generating();
                     return None;
                 }
@@ -544,11 +537,7 @@ impl
                         })
                         .unwrap_or((None, None));
 
-                    // If we detected a local stop condition, mark this choice as finished.
-                    // Keep the upstream stream alive just long enough to consume
-                    // a native backend's following terminal-usage event. The
-                    // loop above still cancels on any nonterminal suffix once
-                    // every choice has stopped.
+                    // Mark local stops but keep the stream open for a usage trailer.
                     if finish_reason.is_some() && data.finish_reason.is_none() {
                         state.finished_choices.insert(choice_idx);
                     }
@@ -1993,8 +1982,6 @@ mod tests {
         let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(SyntheticSglangStopEngine {
                 outputs: Some(vec![
-                    // Dynamo recognizes 103 as EOS before the native backend's
-                    // separate terminal event arrives.
                     LLMEngineOutput {
                         token_ids: vec![101, 103],
                         index: Some(0),
