@@ -5,7 +5,10 @@ package lpx
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/url"
 	"os"
@@ -1050,6 +1053,7 @@ func renderLPXTestPodCliqueSet(
 	t.Helper()
 	rendered, _, err := reconciler.renderPodCliqueSet(ctx, deployment, dgd, map[string]*lpx.Workload{desired.workload.ServingComponentName(): desired.workload}, map[string]*lpx.MaterializationPlan{desired.workload.ServingComponentName(): desired.plan}, nil)
 	require.NoError(t, err)
+	require.NoError(t, reconciler.stampClientIdentity(ctx, dgd, rendered))
 	return rendered
 }
 
@@ -1161,4 +1165,185 @@ func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 		require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 		require.NotContains(t, clique.Labels, consts.KubeLabelKaiSchedulerQueue, "clique %s", clique.Name)
 	}
+}
+
+func TestStampClientIdentity(t *testing.T) {
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	dgd.UID = "dgd-uid"
+	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+
+	t.Log("The first render creates the DGD's key; agents get its certificate and mount, every clique the UID")
+	pcs := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	secret := &corev1.Secret{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: "lpx-id-dgd-uid"}, secret))
+	require.True(t, metav1.IsControlledBy(secret, dgd))
+	require.True(t, ptr.Deref(secret.Immutable, false))
+	require.NotEmpty(t, secret.Data["private.key"])
+	require.NotEmpty(t, secret.Data["private.key.pub"])
+	block, _ := pem.Decode(secret.Data["client.pem"])
+	require.NotNil(t, block)
+	marker := fmt.Sprintf("lpx-id-dgd-uid/%x", sha256.Sum256(block.Bytes))
+	agents := 0
+	for _, clique := range pcs.Spec.Template.Cliques {
+		require.Equal(t, "dgd-uid", clique.Labels[consts.KubeLabelDynamoGraphDeploymentUID])
+		require.Equal(t, marker, clique.Annotations[clientIdentityAnnotation], clique.Name)
+		mounted := slices.ContainsFunc(clique.Spec.PodSpec.Containers, func(c corev1.Container) bool {
+			return slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == "/etc/lpx/identity" })
+		})
+		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleAgent {
+			require.False(t, mounted, clique.Name)
+			continue
+		}
+		agents++
+		require.True(t, mounted, clique.Name)
+		require.Equal(t, base64.StdEncoding.EncodeToString(block.Bytes), clique.Annotations[clientCertAnnotation])
+	}
+	require.Positive(t, agents)
+	for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		require.Equal(t, marker, group.Annotations[clientIdentityAnnotation])
+	}
+
+	t.Log("Later renders reuse the key, so the rollout marker stays put")
+	again := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	require.Equal(t, pcs.Spec.Template.Cliques, again.Spec.Template.Cliques)
+	require.Equal(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, again.Spec.Template.PodCliqueScalingGroupConfigs)
+
+	t.Log("References to the cluster-wide MPI SSH Secret get the DGD's own key pair; template items still resolve")
+	config := *r.config
+	config.MPI.SSHSecretName = "ssh-secret" // the fixtures' templates mount this Secret
+	r.config = &config
+	fresh, _, err := r.renderPodCliqueSet(ctx, child, dgd, map[string]*lpx.Workload{desired.workload.ServingComponentName(): desired.workload}, map[string]*lpx.MaterializationPlan{desired.workload.ServingComponentName(): desired.plan}, nil)
+	require.NoError(t, err)
+	custom := []corev1.KeyToPath{{Key: "private.key.pub", Path: "authorized_keys"}}
+	spec := &fresh.Spec.Template.Cliques[0].Spec.PodSpec
+	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "ssh-projected", VolumeSource: corev1.VolumeSource{
+		Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-secret"}, Items: custom}}}}}})
+	require.NoError(t, r.stampClientIdentity(ctx, dgd, fresh))
+	plain := 0
+	for _, clique := range fresh.Spec.Template.Cliques {
+		for _, volume := range clique.Spec.PodSpec.Volumes {
+			if volume.Name == "ssh-secret" {
+				plain++
+				require.Equal(t, "lpx-id-dgd-uid", volume.Secret.SecretName, clique.Name)
+				require.Equal(t, []corev1.KeyToPath{{Key: "private.key", Path: "private.key"}, {Key: "private.key.pub", Path: "private.key.pub"}},
+					volume.Secret.Items, clique.Name)
+			}
+		}
+	}
+	require.Positive(t, plain)
+	projected := spec.Volumes[len(spec.Volumes)-1].Projected.Sources[0].Secret
+	require.Equal(t, "lpx-id-dgd-uid", projected.Name)
+	require.Equal(t, custom, projected.Items)
+
+	t.Log("A Secret the DGD does not control is never adopted")
+	secret.OwnerReferences = nil
+	require.NoError(t, r.Update(ctx, secret))
+	require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, again), "is not controlled by this DGD")
+}
+
+func TestRecreatedClientIdentityReplacesOnDeletePodCliqueSet(t *testing.T) {
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	metav1.SetMetaDataAnnotation(&dgd.ObjectMeta, consts.KubeAnnotationGroveUpdateStrategy, "OnDelete")
+	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	live := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	require.Equal(t, grovev1alpha1.OnDeleteStrategy, live.Spec.UpdateStrategy.Type)
+
+	t.Log("The Secret is deleted while the workload runs; the next render generates new keys under the same name")
+	require.NoError(t, r.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}}))
+	recreated := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+	for i, clique := range recreated.Spec.Template.Cliques {
+		require.NotEqual(t, live.Spec.Template.Cliques[i].Annotations[clientIdentityAnnotation], clique.Annotations[clientIdentityAnnotation], clique.Name)
+	}
+	require.False(t, podCliqueSetLayoutMatches(live, recreated), "OnDelete must replace the PodCliqueSet whole")
+}
+
+func TestClientIdentityRejectsAuthoredVolumeOrMount(t *testing.T) {
+	for name, author := range map[string]func(*corev1.PodSpec){
+		"volume": func(spec *corev1.PodSpec) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		},
+		"mount": func(spec *corev1.PodSpec) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "authored", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "authored", MountPath: identityMountPath + "/"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			author(&dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec)
+			r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			name := desired.workload.ServingComponentName()
+			pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, map[string]*lpx.Workload{name: desired.workload}, map[string]*lpx.MaterializationPlan{name: desired.plan}, nil)
+			require.NoError(t, err)
+			require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, pcs), "LPX agent template")
+		})
+	}
+}
+
+func TestClientIdentityMountsOnlyAgentMainContainer(t *testing.T) {
+	for name, sidecars := range map[string][]corev1.Container{
+		"main only": nil,
+		// A sidecar named after the role must not take main's identity.
+		"sidecar named agent": {{Name: v1beta1.ComponentRoleLPXAgent, Image: "sidecar"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			spec := &dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
+			spec.Containers = append(spec.Containers, sidecars...)
+			r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+
+			t.Log("Render the PodCliqueSet and stamp the DGD's client identity")
+			pcs := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+
+			t.Log("Every agent mounts the identity into its main container and nowhere else")
+			mount := corev1.VolumeMount{Name: identityVolume, MountPath: identityMountPath, ReadOnly: true}
+			agents := 0
+			for _, clique := range pcs.Spec.Template.Cliques {
+				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleAgent {
+					continue
+				}
+				agents++
+				require.Len(t, clique.Spec.PodSpec.Containers, 1+len(sidecars), clique.Name)
+				var mounted []string
+				for _, container := range clique.Spec.PodSpec.Containers {
+					if slices.Contains(container.VolumeMounts, mount) {
+						mounted = append(mounted, container.Name)
+					}
+				}
+				require.Equal(t, []string{consts.MainContainerName}, mounted, clique.Name)
+			}
+			require.Positive(t, agents)
+		})
+	}
+}
+
+func TestOnlyLPXAgentsPublishACertificate(t *testing.T) {
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+
+	t.Log("A hybrid DGD authors a certificate on its GPU worker")
+	const forged = "Zm9yZ2Vk"
+	template := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
+	if template.Annotations == nil {
+		template.Annotations = map[string]string{}
+	}
+	template.Annotations[clientCertAnnotation] = forged
+	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	pcs := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+
+	t.Log("Agents publish the operator's certificate; every other clique publishes none")
+	others := 0
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
+			require.NotEqual(t, forged, clique.Annotations[clientCertAnnotation], clique.Name)
+			continue
+		}
+		others++
+		require.NotContains(t, clique.Annotations, clientCertAnnotation, clique.Name)
+	}
+	require.Positive(t, others)
 }

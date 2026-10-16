@@ -39,6 +39,7 @@ type graphReconciler struct {
 	modelRegistry         lpx.ModelRegistry
 	config                *configv1alpha1.OperatorConfiguration
 	dockerSecretRetriever dynamo.SecretsRetriever
+	apiReader             client.Reader
 
 	client.Client
 }
@@ -54,6 +55,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		runtimeConfig:         runtimeConfig,
 		config:                config,
 		dockerSecretRetriever: secrets,
+		apiReader:             mgr.GetAPIReader(),
 		Client:                mgr.GetClient(),
 	}
 
@@ -212,7 +214,7 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Share the rendered identities with capacity management and request publication.
-	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
+	desiredPCS, resources, err := r.renderDesiredPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

@@ -2283,21 +2283,16 @@ body:has(input[name="recipe-variant"][value="kvbm"]:checked) tr[data-variant~="k
     font-weight: 600;
 }
 
-/* Recipe matrices keep every target readable; only the selected target is highlighted. */
-body:has(input[name="recipe-sku"]:checked):has(input[name="recipe-variant"]:checked) tr.dynamo-muse-spark-performance-row {
-    opacity: 1;
-    font-weight: 400;
-}
-
-body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="agg"],
-body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="disagg"],
-body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="kv-router"],
-body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="agg"],
-body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="disagg"],
-body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="kv-router"] {
-    opacity: 1;
-    font-weight: 600;
+/* Muse-Spark SGLang tables highlight GPU and mode together.
+   vLLM and TensorRT-LLM use the shared data-highlight-sku rule above. */
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb200"][data-muse-variant="agg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb200"][data-muse-variant="disagg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb200"][data-muse-variant="kv-router"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb300"][data-muse-variant="agg"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb300"][data-muse-variant="disagg"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb300"][data-muse-variant="kv-router"] {
     background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    font-weight: 600;
 }
 
 /* Combined sku x variant row highlighting (matrix pages) */
