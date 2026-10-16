@@ -118,10 +118,10 @@ def kineto_events(path: Path, fast: bool = True):
             yield event
 
 
-def process_meta(pid, name: str, labels: str) -> list[dict]:
+def process_meta(pid, name: str, key: str, value) -> list[dict]:
     return [
         {"ph": "M", "name": "process_name", "pid": pid, "args": {"name": name}},
-        {"ph": "M", "name": "process_labels", "pid": pid, "args": {"labels": labels}},
+        {"ph": "M", "name": f"process_{key}", "pid": pid, "args": {key: value}},
     ]
 
 
@@ -188,7 +188,7 @@ def nsys_events(path: Path):
             else {}
         )
         for pid, name in db.execute("SELECT pid, name FROM PROCESSES"):
-            yield from process_meta(pid, name, "CPU")
+            yield from process_meta(pid, name, "labels", "CPU")
         if "ThreadNames" in tables:
             for name_id, tid in db.execute("SELECT nameId, globalTid FROM ThreadNames"):
                 yield {
@@ -210,7 +210,9 @@ def nsys_events(path: Path):
                     pid, tid = f"GPU {lane}", extra
                     if lane not in devices:
                         devices.add(lane)
-                        yield from process_meta(pid, f"CUDA device {lane}", pid)
+                        yield from process_meta(
+                            pid, f"CUDA device {lane}", "labels", pid
+                        )
                 else:
                     pid, tid = (lane >> 24) & 0xFFFFFF, lane & 0xFFFFFF
                 yield {
@@ -238,10 +240,8 @@ def draw_shard(task: dict) -> dict:
     cannot be read fails its target rather than the bundle.
     """
     try:
-        if task["collector"] != "torch_profiler":
-            return draw_views(task, NATIVE_READERS[task["collector"]])
         try:
-            return draw_views(task, kineto_events)
+            return draw_views(task, NATIVE_READERS[task["collector"]])
         except Layout:
             return draw_views(task, partial(kineto_events, fast=False))
     except Exception as exc:
@@ -330,22 +330,9 @@ def draw_views(task: dict, reader) -> dict:
                         if key in names
                         else f"{task['target']} · Kineto profiler ({key})"
                     )
-                    meta = [
-                        {
-                            "ph": "M",
-                            "name": "process_name",
-                            "pid": pid,
-                            "args": {"name": name},
-                        },
-                        {
-                            "ph": "M",
-                            "name": "process_sort_index",
-                            "pid": pid,
-                            "args": {
-                                "sort_index": task["sort"] + pid - task["pid_base"]
-                            },
-                        },
-                    ] + [{**thread, "pid": pid} for thread in threads.get(key, [])]
+                    meta = process_meta(
+                        pid, name, "sort_index", task["sort"] + pid - task["pid_base"]
+                    ) + [{**thread, "pid": pid} for thread in threads.get(key, [])]
                     for item in meta:
                         write(view, json.dumps(item))
                 write(view, line)

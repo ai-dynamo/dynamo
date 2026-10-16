@@ -47,7 +47,7 @@ from pathlib import Path
 
 from . import nvtxt
 from .inspection import inspect_rank, inspect_target, kineto_result, sha256_file
-from .native import NATIVE_READERS, draw_shard
+from .native import NATIVE_READERS, draw_shard, process_meta
 
 
 def attrs(span: dict) -> dict:
@@ -215,10 +215,6 @@ def router_decision(span: dict | None, spans: dict) -> tuple[str | None, str | N
     return None, None
 
 
-def router_worker(span: dict | None, spans: dict) -> str | None:
-    return router_decision(span, spans)[0]
-
-
 def index_requests(manifest, traces, workers, intervals) -> list[dict]:
     triggers = set(manifest["plan"]["trace_ids"])
     entries = []
@@ -226,7 +222,7 @@ def index_requests(manifest, traces, workers, intervals) -> list[dict]:
         phases = []
         for span in spans.values():
             if span["name"].startswith("worker.operation."):
-                worker_id = router_worker(span, spans)
+                worker_id = router_decision(span, spans)[0]
                 target = workers.get(worker_id)
                 start, end = start_end(span)
                 low, high = intervals.get(target, (0, 0))
@@ -244,17 +240,16 @@ def index_requests(manifest, traces, workers, intervals) -> list[dict]:
                     }
                 )
         if trace_id in triggers or any(p["recording_overlap_ns"] for p in phases):
-            request_ids = {
-                attrs(s).get("dynamo.request.id") for s in spans.values()
-            } - {None}
-            session_ids = {
-                attrs(s).get("dynamo.session.id") for s in spans.values()
-            } - {None}
+            values = [attrs(s) for s in spans.values()]
+            ids = {
+                key: min({a.get(key) for a in values} - {None}, default=None)
+                for key in ("dynamo.request.id", "dynamo.session.id")
+            }
             entries.append(
                 {
                     "trace_id": trace_id,
-                    "request_id": min(request_ids, default=None),
-                    "session_id": min(session_ids, default=None),
+                    "request_id": ids["dynamo.request.id"],
+                    "session_id": ids["dynamo.session.id"],
                     "trigger": trace_id in triggers,
                     "phases": sorted(phases, key=lambda p: p["start_unix_ns"]),
                 }
@@ -283,23 +278,11 @@ class Timeline:
         )
         self.first, self.count = False, self.count + 1
 
-    def pid(self, key, name: str, metadata=(), sort: int | None = None) -> int:
+    def pid(self, key, name: str, sort: int) -> int:
         if key not in self.pids:
-            self.pids[key] = pid = len(self.pids) + 1
-            sort = 1_000_000 + pid if sort is None else sort
-            self.emit(
-                {"ph": "M", "name": "process_name", "pid": pid, "args": {"name": name}}
-            )
-            self.emit(
-                {
-                    "ph": "M",
-                    "name": "process_sort_index",
-                    "pid": pid,
-                    "args": {"sort_index": sort},
-                }
-            )
-            for event in metadata:
-                self.emit({**event, "pid": pid})
+            self.pids[key] = len(self.pids) + 1
+            for event in process_meta(self.pids[key], name, "sort_index", sort):
+                self.emit(event)
         return self.pids[key]
 
     def tid(self, pid: int, name: str) -> int:
@@ -403,13 +386,13 @@ def draw_request(timeline, spans: dict, lanes: dict, offsets: dict, track: str) 
                 "span_id": span["spanId"],
                 "process": lane,
                 "raw_start_unix_ns": start,
-                "router_worker_id": router_worker(
+                "router_worker_id": router_decision(
                     spans.get(span.get("parentSpanId")), spans
-                ),
+                )[0],
             }
             | (
-                {"session_id": attrs(span)["dynamo.session.id"]}
-                if attrs(span).get("dynamo.session.id")
+                {"session_id": session}
+                if (session := attrs(span).get("dynamo.session.id"))
                 else {}
             ),
         )
@@ -454,19 +437,14 @@ def request_label(entry: dict) -> str:
 
 def by_session(index: list[dict]) -> list[dict]:
     """Requests grouped by client session (in first-seen order), then by start."""
+
+    def group(entry: dict) -> str:
+        return entry.get("session_id") or entry["trace_id"]
+
     first: dict = {}
-    for position, entry in enumerate(index):
-        first.setdefault(entry.get("session_id") or entry["trace_id"], position)
-    return [
-        entry
-        for _, entry in sorted(
-            enumerate(index),
-            key=lambda item: (
-                first[item[1].get("session_id") or item[1]["trace_id"]],
-                item[0],
-            ),
-        )
-    ]
+    for entry in index:
+        first.setdefault(group(entry), len(first))
+    return sorted(index, key=lambda entry: first[group(entry)])
 
 
 def nsight_reports(
@@ -524,7 +502,8 @@ def nsight_reports(
             # Lane clock -> coordinator clock -> this host -> report clock.
             return unix_ns - offsets.get(lane, 0) + shift - utc + clock
 
-        def clipped(start: int, end: int, message: str, color: int):
+        def clipped(begin: int, end: int, lane: str, message: str, color: int):
+            start, end = local(begin, lane), local(end, lane)
             if end < low or start > high:
                 return None
             if start < low:
@@ -537,12 +516,7 @@ def nsight_reports(
         marks, tid, dropped = [], nvtxt.CONTROL_THREAD + 1, 0
         for window, (begin, end) in sorted(intervals.items()):
             # Recording bounds are on each target's own clock.
-            span = clipped(
-                local(begin, window),
-                local(end, window),
-                f"{window} recording",
-                nvtxt.RECORDING,
-            )
+            span = clipped(begin, end, window, f"{window} recording", nvtxt.RECORDING)
             if span:
                 threads[tid] = (f"Recording · {window}", [span])
                 tid += 1
@@ -571,14 +545,9 @@ def nsight_reports(
                     if entry.get("session_id"):
                         message += f" · session {entry['session_id']}"
                     message += f" · trace {entry['trace_id']}"
-                    if attrs(span).get("x_request_id"):
-                        message += f" · x-request-id {attrs(span)['x_request_id']}"
-                kept = clipped(
-                    local(begin, lane),
-                    local(end, lane),
-                    message,
-                    nvtxt.color(span["name"]),
-                )
+                    if client := attrs(span).get("x_request_id"):
+                        message += f" · x-request-id {client}"
+                kept = clipped(begin, end, lane, message, nvtxt.color(span["name"]))
                 dropped += kept is None
                 if kept:
                     spans[span["spanId"]] = (*kept, span.get("parentSpanId"))

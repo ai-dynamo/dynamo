@@ -151,24 +151,20 @@ def tree_threads(spans: dict) -> list[list]:
         free.append(end)
         return len(threads) - 1
 
+    def lay(items: list, thread: int, last: float) -> None:
+        for item in items:
+            if item[0] < last:  # overlaps an earlier sibling
+                place(item, spare(item[0], item[1]))
+            else:
+                place(item, thread)
+                last = item[1]
+
     def place(item, thread: int) -> None:
         start, end, message, argb, span_id = item
         threads[thread].append((start, end, message, argb))
-        last = start
-        for child in ordered(children.get(span_id, []), (start, end)):
-            if child[0] < last:  # overlaps an earlier sibling
-                place(child, spare(child[0], child[1]))
-            else:
-                place(child, thread)
-                last = child[1]
+        lay(ordered(children.get(span_id, []), (start, end)), thread, start)
 
-    last = None
-    for root in ordered(roots, None):
-        if threads[0] and root[0] < last:
-            place(root, spare(root[0], root[1]))
-        else:
-            place(root, 0)
-            last = root[1]
+    lay(ordered(roots, None), 0, float("-inf"))
     return [thread for thread in threads if thread]
 
 
