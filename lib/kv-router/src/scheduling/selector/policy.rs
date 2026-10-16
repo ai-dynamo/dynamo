@@ -17,8 +17,8 @@ use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelect
 
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
-    WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext,
+    WorkerCandidates, WorkerCapacity, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker,
+    WorkerScorer, WorkerSelectionContext,
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -42,11 +42,15 @@ pub(super) struct ComposedPolicyState {
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
+    scorers_read_capacity: bool,
     unscored_candidates: Vec<CandidateData>,
+    // Index-aligned with `unscored_candidates` when a scorer declared CAPACITY.
+    unscored_capacities: Vec<WorkerCapacity>,
     score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
+    pub(super) capacity_inputs: Vec<WorkerCapacity>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
@@ -104,6 +108,9 @@ impl WorkerSelectionPolicy {
         let scorer_picker_inputs = scorers
             .iter()
             .fold(picker_inputs, |inputs, (required, _)| inputs | *required);
+        let scorers_read_capacity = scorers
+            .iter()
+            .any(|(required, _)| required.contains(WorkerInputs::CAPACITY));
         Self {
             worker_label,
             exclusive_affinity: false,
@@ -114,11 +121,14 @@ impl WorkerSelectionPolicy {
                 filter_inputs,
                 scorer_picker_inputs,
                 picker_inputs,
+                scorers_read_capacity,
                 unscored_candidates: Vec::new(),
+                unscored_capacities: Vec::new(),
                 score_contributions: Vec::new(),
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
+                capacity_inputs: Vec::new(),
             })),
         }
     }
@@ -146,13 +156,16 @@ impl WorkerSelectionPolicy {
 }
 
 #[inline(always)]
+#[expect(clippy::too_many_arguments)]
 fn push_picker_candidate(
     candidate: &CandidateData,
+    capacity: WorkerCapacity,
     cost: f64,
     picker_inputs: WorkerInputs,
     candidates: &mut Vec<ScoredWorkerCandidate>,
     cache_inputs: &mut Vec<WorkerCacheData>,
     load_inputs: &mut Vec<WorkerLoadInput>,
+    capacity_inputs: &mut Vec<WorkerCapacity>,
 ) {
     candidates.push(ScoredWorkerCandidate {
         worker: candidate.worker,
@@ -169,25 +182,35 @@ fn push_picker_candidate(
     if picker_inputs.contains(WorkerInputs::LOAD) {
         load_inputs.push(candidate.load);
     }
+    if picker_inputs.contains(WorkerInputs::CAPACITY) {
+        capacity_inputs.push(capacity);
+    }
 }
 
 impl ComposedPolicyState {
     // Keep row construction and storage together to avoid passing a full row through a call.
     #[inline(always)]
-    fn push_candidate(&mut self, candidate: CandidateData) {
+    /// `capacity` is the worker's advertised capacity when a scorer or the picker declared
+    /// CAPACITY, and the default otherwise.
+    fn push_candidate(&mut self, candidate: CandidateData, capacity: WorkerCapacity) {
         // Build the picker's rows alongside the input snapshot. The scoring loop then only
         // writes costs, without growing vectors or copying optional columns across trait calls.
         push_picker_candidate(
             &candidate,
+            capacity,
             0.0,
             self.picker_inputs,
             &mut self.candidates,
             &mut self.cache_inputs,
             &mut self.load_inputs,
+            &mut self.capacity_inputs,
         );
         if !self.scorers.is_empty() {
             // Picker-only policies do not need a second copy of the worker inputs.
             self.unscored_candidates.push(candidate);
+            if self.scorers_read_capacity {
+                self.unscored_capacities.push(capacity);
+            }
         }
     }
 
@@ -199,6 +222,7 @@ impl ComposedPolicyState {
         let Self {
             scorers,
             unscored_candidates,
+            unscored_capacities,
             score_contributions,
             candidates,
             ..
@@ -212,7 +236,12 @@ impl ComposedPolicyState {
             score_contributions.fill(f64::NAN);
             scorer.score(
                 context,
-                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot),
+                WorkerCandidates::new(
+                    unscored_candidates,
+                    *inputs,
+                    cache_snapshot,
+                    unscored_capacities,
+                ),
                 score_contributions,
             )?;
             for (row, (contribution, scored)) in score_contributions
@@ -241,9 +270,11 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     eligibility: RoutingEligibility<'_>,
 ) -> Result<bool, KvSchedulerError> {
     state.unscored_candidates.clear();
+    state.unscored_capacities.clear();
     state.candidates.clear();
     state.cache_inputs.clear();
     state.load_inputs.clear();
+    state.capacity_inputs.clear();
     if state.filters.is_empty() {
         let materialize_preferred_taint = eligibility.pinned_worker().is_none()
             && state
@@ -262,8 +293,13 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
+            let capacity = if state.scorer_picker_inputs.contains(WorkerInputs::CAPACITY) {
+                WorkerCapacity::of(config)
+            } else {
+                WorkerCapacity::default()
+            };
             input.track_kept_candidate(worker);
-            state.push_candidate(candidate);
+            state.push_candidate(candidate, capacity);
             false
         });
         state.score_candidates(&input.context, &input.cache_snapshot)?;
@@ -275,6 +311,8 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         && state.filter_inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let materialize_additional_preferred_taint = eligibility.pinned_worker().is_none()
         && additional_inputs.contains(WorkerInputs::PREFERRED_TAINT);
+    let materialize_capacity =
+        (state.filter_inputs | state.scorer_picker_inputs).contains(WorkerInputs::CAPACITY);
     let mut has_eligible_worker = false;
     let mut error = None;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
@@ -291,10 +329,15 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             filter_preferred_taint_multiplier,
             state.filter_inputs,
         );
+        let capacity = if materialize_capacity {
+            WorkerCapacity::of(config)
+        } else {
+            WorkerCapacity::default()
+        };
         for (inputs, filter) in &mut state.filters {
             match filter.keep(
                 &input.context,
-                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot),
+                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot, capacity),
             ) {
                 Ok(true) => {}
                 Ok(false) => return false,
@@ -319,7 +362,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         );
         let candidate = filter_candidate.with_inputs_from(&additional, state.scorer_picker_inputs);
         input.track_kept_candidate(worker);
-        state.push_candidate(candidate);
+        state.push_candidate(candidate, capacity);
         false
     });
     if let Some(error) = error {
@@ -552,6 +595,90 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn capacity_inputs_reach_only_declaring_components() {
+        struct CapacityFilter;
+        impl WorkerFilter for CapacityFilter {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CAPACITY
+            }
+
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                let capacity = candidate.capacity().expect("CAPACITY was declared");
+                Ok(capacity.total_kv_blocks().is_some())
+            }
+        }
+
+        struct BlindScorer;
+        impl WorkerScorer for BlindScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                assert!(
+                    candidates
+                        .iter()
+                        .all(|candidate| candidate.capacity().is_none())
+                );
+                costs.fill(0.0);
+                Ok(())
+            }
+        }
+
+        struct LargestKvPicker;
+        impl WorkerPicker for LargestKvPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CAPACITY
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(input
+                    .capacity()
+                    .expect("CAPACITY was declared")
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, capacity)| capacity.total_kv_blocks())
+                    .map(|(row, _)| row)
+                    .expect("eligible candidate"))
+            }
+        }
+
+        let kv = |total_kv_blocks| crate::test_utils::SimpleWorkerConfig {
+            total_kv_blocks,
+            ..Default::default()
+        };
+        // Worker 2 reports no KV capacity, so the filter drops it.
+        let workers = HashMap::from([(0, kv(Some(10))), (1, kv(Some(20))), (2, kv(None))]);
+        let request = base_request(16);
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(CapacityFilter)],
+            vec![Box::new(BlindScorer)],
+            Box::new(LargestKvPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(1));
     }
 
     #[test]

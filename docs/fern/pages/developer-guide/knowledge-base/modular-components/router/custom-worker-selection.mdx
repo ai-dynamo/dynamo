@@ -445,11 +445,15 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
+| `CAPACITY` | `max_num_batched_tokens()` | Prefill tokens the worker batches per engine step, from its runtime config, or `None` if unreported |
+| `CAPACITY` | `total_kv_blocks()` | Total KV blocks on the worker, from its runtime config, or `None` if unreported; this is capacity, not free blocks |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
+`CAPACITY` values change only when a worker registers again, so Dynamo copies them from its cached worker configs. `BusyThresholds::has_room(load, capacity)` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD | CAPACITY` can run the same check.
+
+A filter or scorer reads groups through `WorkerCandidate::cache()`, `load()`, or `capacity()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 
