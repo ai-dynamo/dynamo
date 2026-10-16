@@ -28,7 +28,7 @@ Run from `recipes/beam` with `NAMESPACE` set:
 
 ```bash
 kubectl apply -n "$NAMESPACE" -f perf/perf.yaml
-kubectl logs -n "$NAMESPACE" -f job/beam-synthetic-bench
+kubectl logs -n "$NAMESPACE" -f job/beam-synthetic-bench --pod-running-timeout=10m
 kubectl wait -n "$NAMESPACE" --for=condition=Complete job/beam-synthetic-bench --timeout=7200s
 ```
 
