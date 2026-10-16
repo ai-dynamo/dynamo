@@ -610,10 +610,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         meta_info: Dict[str, Any],
         *,
         return_tokens_as_token_ids: bool = False,
+        top_logprobs_num: int | None = None,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            top_logprobs_num=top_logprobs_num,
         )
 
     def _native_generate_stream(
@@ -753,9 +755,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
-        _, prompt_logprobs_count = _shared_logprobs.parse_logprob_options(
-            output_options
-        )
+        (
+            completion_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(output_options)
         return_tokens_as_token_ids = bool(
             output_options.get("return_tokens_as_token_ids")
         )
@@ -829,6 +832,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
                     prompt_logprobs_count=prompt_logprobs_count,
+                    completion_logprobs_count=completion_logprobs_count,
                     report_kv_cache_hit=not _has_parallel_prefix_warmup(
                         sampling_params
                     ),
@@ -930,6 +934,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
                     prompt_logprobs_count=prompt_logprobs_count,
+                    completion_logprobs_count=completion_logprobs_count,
                     report_kv_cache_hit=not _has_parallel_prefix_warmup(
                         sampling_params
                     ),
@@ -1043,6 +1048,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         submitted_request_id: str | None = None,
         report_kv_cache_hit: bool = True,
         prompt_logprobs_count: int | None = None,
+        completion_logprobs_count: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -1127,6 +1133,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                        top_logprobs_num=completion_logprobs_count,
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
