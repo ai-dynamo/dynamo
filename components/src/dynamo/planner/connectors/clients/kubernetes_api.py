@@ -61,6 +61,7 @@ DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
 GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
+REPLICA_WRITE_FENCE_ANNOTATION = "dynamo.nvidia.com/replica-write-fence"
 KUBERNETES_LIST_PAGE_SIZE = 500
 NONTERMINAL_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
 PARTIAL_OBJECT_METADATA_ACCEPT = (
@@ -407,6 +408,74 @@ class KubernetesAPI:
             )
         )
         logger.info("Claimed DGDSA %s for Planner writer %s", adapter_name, writer_id)
+
+    def patch_scaling_adapter_replica_write_fence(
+        self,
+        graph_deployment_name: str,
+        service_name: str,
+        fence_value: str,
+        *,
+        adapter: Mapping,
+    ) -> None:
+        """Advance a DGDSA resource version after an ambiguous Scale PATCH.
+
+        The caller owns the outer conflict retry so every 409 re-reads and
+        reclassifies the original ambiguous target before writing another fence.
+        """
+        adapter_name = self.scaling_adapter_name(graph_deployment_name, service_name)
+        metadata = adapter.get("metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            raise ValueError("DGDSA metadata is malformed")
+        resource_version = metadata.get("resourceVersion")
+        if not isinstance(resource_version, str) or not resource_version:
+            raise ValueError("DGDSA resourceVersion is unavailable")
+        retry_kubernetes_request(
+            lambda: self.custom_api.patch_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                name=adapter_name,
+                body={
+                    "metadata": {
+                        "resourceVersion": resource_version,
+                        "annotations": {
+                            REPLICA_WRITE_FENCE_ANNOTATION: fence_value,
+                        },
+                    }
+                },
+            )
+        )
+
+    def patch_dgd_replica_write_fence(
+        self,
+        graph_deployment_name: str,
+        fence_value: str,
+        *,
+        deployment: Mapping,
+    ) -> None:
+        """Advance a DGD resource version after an ambiguous replica PATCH.
+
+        The caller owns the outer conflict retry so every 409 re-reads and
+        reclassifies the original ambiguous target before writing another fence.
+        """
+        metadata = deployment.get("metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            raise ValueError("DGD metadata is malformed")
+        resource_version = metadata.get("resourceVersion")
+        if not isinstance(resource_version, str) or not resource_version:
+            raise ValueError("DGD resourceVersion is unavailable")
+        self._patch_dgd_with_merge_patch(
+            graph_deployment_name,
+            {
+                "metadata": {
+                    "resourceVersion": resource_version,
+                    "annotations": {
+                        REPLICA_WRITE_FENCE_ANNOTATION: fence_value,
+                    },
+                }
+            },
+        )
 
     def _update_dgd_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
@@ -1005,6 +1074,13 @@ class KubernetesAPI:
         """List all Pods for a DGD using its stable graph label."""
         return self._list_graph_pods(f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}")
 
+    def list_nonterminal_pods_for_graph(self, dgd_name: str) -> list:
+        """List active Pods for DGD settlement using server-side filtering."""
+        return self._list_graph_pods(
+            f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
+            field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        )
+
     def list_graph_pods(self) -> list:
         """List nonterminal Pods carrying the stable DGD label."""
         return self._list_graph_pods(
@@ -1306,6 +1382,7 @@ class KubernetesAPI:
                     expected_replica_authorities,
                 )
                 generation_observed = self.is_spec_generation_observed(graph_deployment)
+                deployment_ready = self.is_deployment_ready(graph_deployment)
                 (
                     blocking_rollout,
                     rollout_reason,
@@ -1314,22 +1391,25 @@ class KubernetesAPI:
                     not targets_stable
                     or not targets_projected
                     or not generation_observed
+                    or not deployment_ready
                     or blocking_rollout
                 ):
                     logger.info(
                         "[Attempt %d/%d] Waiting for accepted replica targets: "
-                        "unsettled=%s, unprojected=%s, observed=%s, rollout=%s",
+                        "unsettled=%s, unprojected=%s, observed=%s, ready=%s, "
+                        "rollout=%s",
                         attempt + 1,
                         max_attempts,
                         unsettled,
                         unprojected,
                         generation_observed,
+                        deployment_ready,
                         rollout_reason or "settled",
                     )
                     continue
 
                 pods = await asyncio.to_thread(
-                    self.list_pods_for_graph, graph_deployment_name
+                    self.list_nonterminal_pods_for_graph, graph_deployment_name
                 )
                 pods = self.exclude_checkpoint_capture_pods(pods)
                 if self.has_terminating_pods(

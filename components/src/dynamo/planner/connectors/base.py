@@ -31,10 +31,13 @@ class ReplicaUpdateResult:
 
     ``accepted`` reports whether the connector accepted the target. ``applied``
     is true only when this invocation completed at least one write.
+    ``requires_settlement`` forces an exact readiness check before the outcome
+    can be reported, including for an otherwise nonblocking request.
     """
 
     accepted: bool
     applied: bool
+    requires_settlement: bool = False
 
 
 class WorkerInfoProvider(Protocol):

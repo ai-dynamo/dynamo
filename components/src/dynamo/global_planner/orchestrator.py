@@ -311,11 +311,30 @@ class Orchestrator:
     def _target_pool(
         pools: dict[str, PoolSpec], target: TargetReplica
     ) -> PoolSpec | None:
+        role_pool = pools.get(target.sub_component_type.value)
+        if role_pool is not None:
+            if (
+                target.component_name
+                and role_pool.component_name
+                and target.component_name != role_pool.component_name
+            ):
+                raise ValueError(
+                    f"component {target.component_name!r} does not match observed "
+                    f"{target.sub_component_type.value} pool "
+                    f"{role_pool.component_name!r}"
+                )
+            return role_pool
         if target.component_name:
             for pool in pools.values():
                 if pool.component_name == target.component_name:
+                    if pool.sub_type != target.sub_component_type.value:
+                        raise ValueError(
+                            f"component {target.component_name!r} belongs to observed "
+                            f"{pool.sub_type} pool, not requested "
+                            f"{target.sub_component_type.value} pool"
+                        )
                     return pool
-        return pools.get(target.sub_component_type.value)
+        return None
 
     def _budget_target_stages(
         self,
@@ -546,6 +565,11 @@ class Orchestrator:
         # budget is active. The unbounded mode approves without pool state and
         # performs a targeted post-write readback for the response.
         if self.budget_enforcement_enabled():
+            reconcile_pending = getattr(
+                self.capacity_manager, "reconcile_pending_settlements", None
+            )
+            if reconcile_pending is not None:
+                await reconcile_pending()
             all_pools = await run_sync_in_thread(self.capacity_manager.observe, True)
         else:
             refresh_participant = getattr(
@@ -553,6 +577,11 @@ class Orchestrator:
             )
             if refresh_participant is not None:
                 await run_sync_in_thread(refresh_participant, participant_id)
+            reconcile_pending = getattr(
+                self.capacity_manager, "reconcile_pending_settlements", None
+            )
+            if reconcile_pending is not None:
+                await reconcile_pending(participant_id)
             all_pools = {}
 
         previous_intents = self._capture_request_intents(participant_id, targets)
@@ -752,7 +781,7 @@ class Orchestrator:
             completed.append(pid)
             if result.applied and pid not in committed_participants:
                 committed_participants.append(pid)
-            if (blocking or settle) and split_readiness:
+            if (blocking or settle or result.requires_settlement) and split_readiness:
                 try:
                     await self.capacity_manager.wait_for_ready(pid)
                 except Exception as readiness_error:

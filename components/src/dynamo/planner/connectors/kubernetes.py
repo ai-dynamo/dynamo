@@ -19,9 +19,10 @@ import json
 import logging
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Lock
 from typing import Optional
+from uuid import uuid4
 
 from kubernetes.client import ApiException
 
@@ -85,6 +86,10 @@ class _ReplicaAuthorityChanged(ApiException):
     """The selected replica authority disappeared before the write committed."""
 
 
+class _ReplicaStageCommittedError(Exception):
+    """Keep a committed stage out of an enclosing conflict retry."""
+
+
 @dataclass(frozen=True)
 class _ReplicaUpdatePlan:
     """One fully resolved replica target from a single DGD snapshot."""
@@ -94,6 +99,54 @@ class _ReplicaUpdatePlan:
     service: Service
     current_replicas: int
     scaling_adapter: dict | None
+
+
+@dataclass(frozen=True)
+class ReplicaUpdateAttempt:
+    """One dispatched replica target and its pre-write authority state."""
+
+    target: TargetReplica
+    component_name: str
+    previous_replicas: int
+    dgd_uid: str
+    is_adapter: bool
+    authority_uid: str | None
+
+    @classmethod
+    def from_plan(cls, plan: _ReplicaUpdatePlan) -> "ReplicaUpdateAttempt":
+        dgd_metadata = plan.deployment.get("metadata", {}) or {}
+        dgd_uid = dgd_metadata.get("uid")
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            raise ValueError("DGD metadata.uid is unavailable")
+        authority = plan.scaling_adapter
+        _, is_adapter, authority_uid = KubernetesConnector._replica_authority_identity(
+            plan.service, authority
+        )
+        return cls(
+            target=plan.target,
+            component_name=plan.service.name,
+            previous_replicas=plan.current_replicas,
+            dgd_uid=dgd_uid,
+            is_adapter=is_adapter,
+            authority_uid=authority_uid,
+        )
+
+
+class ReplicaUpdateFailure(RuntimeError):
+    """A replica batch stopped after writes completed or became ambiguous."""
+
+    def __init__(
+        self,
+        cause: Exception,
+        committed: list[ReplicaUpdateAttempt],
+        uncertain: list[ReplicaUpdateAttempt],
+    ) -> None:
+        super().__init__(
+            "replica update stopped after partial application; refusing to retry"
+        )
+        self.cause = cause
+        self.committed = tuple(committed)
+        self.uncertain = tuple(uncertain)
 
 
 @dataclass
@@ -112,37 +165,51 @@ class _StartupReductionTracker:
 
 @dataclass
 class _ReplicaUpdateTracker:
-    """Remember whether any write in a retried batch may have committed."""
+    """Track exact replica stages that completed or may have committed."""
 
-    possibly_applied: bool = False
+    committed: list[ReplicaUpdateAttempt] = field(default_factory=list)
 
-    def run(self, write: Callable[[], None]) -> None:
+    @property
+    def possibly_applied(self) -> bool:
+        return bool(self.committed)
+
+    def failure(
+        self,
+        cause: Exception,
+        *,
+        committed_attempts: list[ReplicaUpdateAttempt] | None = None,
+        uncertain_attempts: list[ReplicaUpdateAttempt] | None = None,
+    ) -> ReplicaUpdateFailure:
+        committed = [
+            *self.committed,
+            *(committed_attempts or []),
+        ]
+        return ReplicaUpdateFailure(cause, committed, uncertain_attempts or [])
+
+    def run(
+        self,
+        plans: list[_ReplicaUpdatePlan],
+        write: Callable[[], None],
+    ) -> None:
+        attempts = [ReplicaUpdateAttempt.from_plan(plan) for plan in plans]
         try:
             write()
         except _ReplicaAuthorityChanged as error:
             if self.possibly_applied:
-                raise RuntimeError(
-                    "replica update stopped after partial application; refusing to retry"
-                ) from error
+                raise self.failure(error) from error
             raise RuntimeError(
                 "replica authority changed during update; refusing to retry"
             ) from error
-        except (
-            AmbiguousKubernetesWriteError,
-            _ReplicaTargetCommittedConflict,
-        ) as error:
-            self.possibly_applied = True
-            raise RuntimeError(
-                "replica update stopped after partial application; refusing to retry"
-            ) from error
+        except AmbiguousKubernetesWriteError as error:
+            raise self.failure(error, uncertain_attempts=attempts) from error
+        except (_ReplicaTargetCommittedConflict, _ReplicaStageCommittedError) as error:
+            raise self.failure(error, committed_attempts=attempts) from error
         except Exception as error:
             if self.possibly_applied:
-                raise RuntimeError(
-                    "replica update stopped after partial application; refusing to retry"
-                ) from error
+                raise self.failure(error) from error
             raise
         else:
-            self.possibly_applied = True
+            self.committed.extend(attempts)
 
 
 @dataclass
@@ -1190,9 +1257,10 @@ class KubernetesConnector(PlannerConnector):
                 retry_state.authorities,
             )
             if not should_wait and transaction.possibly_applied:
-                raise RuntimeError(
+                error = RuntimeError(
                     "replica update became unready after partial application"
                 )
+                raise transaction.failure(error) from error
             return should_wait
 
         try:
@@ -1209,6 +1277,138 @@ class KubernetesConnector(PlannerConnector):
         return ReplicaUpdateResult(
             accepted=should_wait,
             applied=transaction.possibly_applied,
+        )
+
+    def resolve_uncertain_replica_attempts(
+        self,
+        expected_dgd_uid: str,
+        attempts: tuple[ReplicaUpdateAttempt, ...],
+    ) -> tuple[ReplicaUpdateAttempt, ...]:
+        """Fence and classify ambiguous stages against their live authority.
+
+        Each returned attempt carries the authoritative target that must settle.
+        If the old target is still authoritative, a metadata CAS advances the
+        resource version and that old target must physically settle too.
+        """
+        if not attempts:
+            return ()
+        if any(attempt.dgd_uid != expected_dgd_uid for attempt in attempts):
+            raise RuntimeError(
+                "ambiguous replica attempt belongs to a different DGD identity"
+            )
+        resolved: list[ReplicaUpdateAttempt] = []
+
+        direct = [attempt for attempt in attempts if not attempt.is_adapter]
+        if direct:
+
+            def classify_direct() -> bool:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
+                metadata = deployment.get("metadata", {}) or {}
+                if metadata.get("uid") != expected_dgd_uid:
+                    raise RuntimeError(
+                        "DGD identity changed after ambiguous replica write"
+                    )
+                components = get_components_by_name(deployment)
+                current_targets: dict[str, int] = {}
+                for attempt in direct:
+                    component = components.get(attempt.component_name)
+                    if component is None or "scalingAdapter" in component:
+                        raise RuntimeError(
+                            "replica authority changed after ambiguous direct-DGD write"
+                        )
+                    current_targets[attempt.component_name] = Service(
+                        name=attempt.component_name, service=component
+                    ).number_replicas()
+                if all(
+                    current_targets[attempt.component_name]
+                    == attempt.target.desired_replicas
+                    for attempt in direct
+                ):
+                    return True
+                if not all(
+                    current_targets[attempt.component_name] == attempt.previous_replicas
+                    for attempt in direct
+                ):
+                    raise RuntimeError(
+                        "ambiguous direct-DGD write has a contradictory target"
+                    )
+                self.kube_api.patch_dgd_replica_write_fence(
+                    self.graph_deployment_name,
+                    str(uuid4()),
+                    deployment=deployment,
+                )
+                return False
+
+            if retry_kubernetes_write(classify_direct):
+                resolved.extend(direct)
+            else:
+                resolved.extend(
+                    self._attempt_with_target(attempt, attempt.previous_replicas)
+                    for attempt in direct
+                )
+
+        for attempt in (attempt for attempt in attempts if attempt.is_adapter):
+
+            def classify_adapter() -> bool:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
+                metadata = deployment.get("metadata", {}) or {}
+                if metadata.get("uid") != expected_dgd_uid:
+                    raise RuntimeError(
+                        "DGD identity changed after ambiguous replica write"
+                    )
+                component = get_components_by_name(deployment).get(
+                    attempt.component_name
+                )
+                if component is None or "scalingAdapter" not in component:
+                    raise RuntimeError(
+                        "replica authority changed after ambiguous DGDSA write"
+                    )
+                adapter = self.kube_api.get_service_scaling_adapter(
+                    self.graph_deployment_name, attempt.component_name
+                )
+                service = Service(name=attempt.component_name, service=component)
+                current_replicas = self._replica_state_from_adapter(
+                    deployment, service, adapter
+                )
+                _, _, current_uid = self._replica_authority_identity(service, adapter)
+                if current_uid != attempt.authority_uid:
+                    raise RuntimeError(
+                        "DGDSA identity changed after ambiguous replica write"
+                    )
+                if current_replicas == attempt.target.desired_replicas:
+                    return True
+                if current_replicas != attempt.previous_replicas:
+                    raise RuntimeError(
+                        "ambiguous DGDSA write has a contradictory target"
+                    )
+                self.kube_api.patch_scaling_adapter_replica_write_fence(
+                    self.graph_deployment_name,
+                    attempt.component_name,
+                    str(uuid4()),
+                    adapter=adapter,
+                )
+                return False
+
+            if retry_kubernetes_write(classify_adapter):
+                resolved.append(attempt)
+            else:
+                resolved.append(
+                    self._attempt_with_target(attempt, attempt.previous_replicas)
+                )
+
+        return tuple(resolved)
+
+    @staticmethod
+    def _attempt_with_target(
+        attempt: ReplicaUpdateAttempt, replicas: int
+    ) -> ReplicaUpdateAttempt:
+        return replace(
+            attempt,
+            target=attempt.target.model_copy(update={"desired_replicas": replicas}),
         )
 
     def _set_component_replicas_once(
@@ -1413,22 +1613,24 @@ class KubernetesConnector(PlannerConnector):
                 startup_reductions.record_attempts([plan])
             if transaction.possibly_applied:
                 transaction.run(
+                    [plan],
                     lambda plan=plan: self._write_adapter_stage_after_prior_updates(
                         deployment,
                         plans,
                         committed_adapter_plans,
                         [],
                         plan,
-                    )
+                    ),
                 )
             else:
                 transaction.run(
+                    [plan],
                     lambda plan=plan: self._write_preflighted_replica_target(
                         plan.deployment,
                         plan.service,
                         plan.target.desired_replicas,
                         plan.scaling_adapter,
-                    )
+                    ),
                 )
             committed_adapter_plans.append(plan)
 
@@ -1437,29 +1639,32 @@ class KubernetesConnector(PlannerConnector):
             if startup_reduction:
                 startup_reductions.record_attempts(dgd_mutations)
             transaction.run(
+                dgd_mutations,
                 lambda: self._write_direct_stage_after_adapter_reductions(
                     deployment,
                     plans,
                     adapter_reductions,
                     dgd_mutations,
-                )
+                ),
             )
         elif len(dgd_mutations) == 1:
             plan = dgd_mutations[0]
             if startup_reduction:
                 startup_reductions.record_attempts(dgd_mutations)
             transaction.run(
+                [plan],
                 lambda: self._write_preflighted_replica_target(
                     plan.deployment,
                     plan.service,
                     plan.target.desired_replicas,
                     None,
-                )
+                ),
             )
         elif dgd_mutations:
             if startup_reduction:
                 startup_reductions.record_attempts(dgd_mutations)
             transaction.run(
+                dgd_mutations,
                 lambda: self.kube_api.update_dgd_replica_targets(
                     self.graph_deployment_name,
                     {
@@ -1467,28 +1672,30 @@ class KubernetesConnector(PlannerConnector):
                         for plan in dgd_mutations
                     },
                     deployment=deployment,
-                )
+                ),
             )
 
         for plan in adapter_increases:
             if transaction.possibly_applied:
                 transaction.run(
+                    [plan],
                     lambda plan=plan: self._write_adapter_stage_after_prior_updates(
                         deployment,
                         plans,
                         committed_adapter_plans,
                         dgd_mutations,
                         plan,
-                    )
+                    ),
                 )
             else:
                 transaction.run(
+                    [plan],
                     lambda plan=plan: self._write_preflighted_replica_target(
                         plan.deployment,
                         plan.service,
                         plan.target.desired_replicas,
                         plan.scaling_adapter,
-                    )
+                    ),
                 )
             committed_adapter_plans.append(plan)
 
@@ -1825,9 +2032,13 @@ class KubernetesConnector(PlannerConnector):
                     pending_target,
                     scaling_adapter,
                 )
-            except (_ReplicaAuthorityChanged, _ReplicaTargetCommittedConflict) as error:
+            except _ReplicaAuthorityChanged as error:
                 raise RuntimeError(
                     "adapter stage stopped after prior replica updates"
+                ) from error
+            except _ReplicaTargetCommittedConflict as error:
+                raise _ReplicaStageCommittedError(
+                    "adapter stage committed before verification failed"
                 ) from error
 
         retry_kubernetes_write(write)

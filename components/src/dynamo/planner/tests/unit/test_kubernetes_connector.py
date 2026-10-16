@@ -30,6 +30,8 @@ from dynamo.planner.connectors.base import PlannerConnector, ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.kubernetes import (
     KubernetesConnector,
+    ReplicaUpdateAttempt,
+    ReplicaUpdateFailure,
     ReplicaUpdateRetryState,
 )
 from dynamo.planner.errors import (
@@ -2285,7 +2287,7 @@ async def test_startup_downscale_latches_ambiguous_committed_dgdsa_write(
     )
     mock_kube_api.get_service_replica_target.return_value = 2
 
-    with pytest.raises(RuntimeError, match="partial application"):
+    with pytest.raises(ReplicaUpdateFailure, match="partial application") as raised:
         await kubernetes_connector.set_component_replicas(
             [
                 TargetReplica(
@@ -2298,7 +2300,238 @@ async def test_startup_downscale_latches_ambiguous_committed_dgdsa_write(
         )
 
     mock_kube_api.update_scaling_adapter_replicas.assert_called_once()
+    assert [attempt.component_name for attempt in raised.value.committed] == ["worker"]
+    assert raised.value.uncertain == ()
     assert kubernetes_connector._startup_scale_down_targets == {"worker": 1}
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_replica_batch_reports_only_dispatched_stage(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _adapter_component("first", "prefill", replicas=1),
+        _adapter_component("second", "decode", replicas=1),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        _scaling_adapter("first", replicas=1),
+        _scaling_adapter("second", replicas=1),
+    ]
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = (
+        AmbiguousKubernetesWriteError(client.ApiException(status=503))
+    )
+
+    with pytest.raises(ReplicaUpdateFailure) as raised:
+        await kubernetes_connector.set_component_replicas_with_result(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name="first",
+                    desired_replicas=2,
+                ),
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="second",
+                    desired_replicas=2,
+                ),
+            ],
+            blocking=False,
+        )
+
+    assert raised.value.committed == ()
+    assert [attempt.component_name for attempt in raised.value.uncertain] == ["first"]
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_direct_batch_reports_atomic_stage(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _component("prefill", "prefill", replicas=1),
+        _component("decode", "decode", replicas=1),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.update_dgd_replica_targets.side_effect = (
+        AmbiguousKubernetesWriteError(client.ApiException(status=503))
+    )
+
+    with pytest.raises(ReplicaUpdateFailure) as raised:
+        await kubernetes_connector.set_component_replicas_with_result(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name="prefill",
+                    desired_replicas=2,
+                ),
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="decode",
+                    desired_replicas=2,
+                ),
+            ],
+            blocking=False,
+        )
+
+    assert raised.value.committed == ()
+    assert [attempt.component_name for attempt in raised.value.uncertain] == [
+        "prefill",
+        "decode",
+    ]
+    mock_kube_api.update_dgd_replica_targets.assert_called_once()
+
+
+def test_resolve_uncertain_adapter_attempt_from_authoritative_readback(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _adapter_component("worker", "decode", replicas=1),
+    )
+    applied_adapter = _scaling_adapter("worker", replicas=2)
+    applied_adapter["metadata"]["resourceVersion"] = "102"
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.get_service_scaling_adapter.return_value = applied_adapter
+    attempt = ReplicaUpdateAttempt(
+        target=TargetReplica(
+            sub_component_type=SubComponentType.DECODE,
+            component_name="worker",
+            desired_replicas=2,
+        ),
+        component_name="worker",
+        previous_replicas=1,
+        dgd_uid="test-graph-uid",
+        is_adapter=True,
+        authority_uid="adapter-worker-uid",
+    )
+
+    resolved = kubernetes_connector.resolve_uncertain_replica_attempts(
+        "test-graph-uid", (attempt,)
+    )
+
+    assert resolved == (attempt,)
+    mock_kube_api.patch_scaling_adapter_replica_write_fence.assert_not_called()
+
+
+def test_resolve_uncertain_adapter_attempt_fences_unchanged_target(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _adapter_component("worker", "decode", replicas=1),
+    )
+    adapter = _scaling_adapter("worker", replicas=1)
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+    attempt = ReplicaUpdateAttempt(
+        target=TargetReplica(
+            sub_component_type=SubComponentType.DECODE,
+            component_name="worker",
+            desired_replicas=2,
+        ),
+        component_name="worker",
+        previous_replicas=1,
+        dgd_uid="test-graph-uid",
+        is_adapter=True,
+        authority_uid="adapter-worker-uid",
+    )
+
+    resolved = kubernetes_connector.resolve_uncertain_replica_attempts(
+        "test-graph-uid", (attempt,)
+    )
+
+    assert len(resolved) == 1
+    assert resolved[0].target.desired_replicas == 1
+    mock_kube_api.patch_scaling_adapter_replica_write_fence.assert_called_once()
+    assert (
+        mock_kube_api.patch_scaling_adapter_replica_write_fence.call_args.kwargs[
+            "adapter"
+        ]
+        is adapter
+    )
+
+
+def test_resolve_uncertain_direct_batch_fences_unchanged_targets(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _component("prefill", "prefill", replicas=1),
+        _component("decode", "decode", replicas=1),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    attempts = tuple(
+        ReplicaUpdateAttempt(
+            target=TargetReplica(
+                sub_component_type=sub_type,
+                component_name=name,
+                desired_replicas=2,
+            ),
+            component_name=name,
+            previous_replicas=1,
+            dgd_uid="test-graph-uid",
+            is_adapter=False,
+            authority_uid=None,
+        )
+        for name, sub_type in (
+            ("prefill", SubComponentType.PREFILL),
+            ("decode", SubComponentType.DECODE),
+        )
+    )
+
+    resolved = kubernetes_connector.resolve_uncertain_replica_attempts(
+        "test-graph-uid", attempts
+    )
+
+    assert [attempt.target.desired_replicas for attempt in resolved] == [1, 1]
+    mock_kube_api.patch_dgd_replica_write_fence.assert_called_once()
+    assert (
+        mock_kube_api.patch_dgd_replica_write_fence.call_args.kwargs["deployment"]
+        is deployment
+    )
+
+
+def test_resolve_uncertain_direct_batch_rereads_after_fence_conflict(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _component("prefill", "prefill", replicas=1),
+        _component("decode", "decode", replicas=1),
+    )
+    applied = deepcopy(deployment)
+    applied["metadata"]["resourceVersion"] = "2"
+    for component in get_components_by_name(applied).values():
+        component["replicas"] = 2
+    mock_kube_api.get_graph_deployment.side_effect = [deployment, applied]
+    mock_kube_api.patch_dgd_replica_write_fence.side_effect = client.ApiException(
+        status=409
+    )
+    attempts = tuple(
+        ReplicaUpdateAttempt(
+            target=TargetReplica(
+                sub_component_type=sub_type,
+                component_name=name,
+                desired_replicas=2,
+            ),
+            component_name=name,
+            previous_replicas=1,
+            dgd_uid="test-graph-uid",
+            is_adapter=False,
+            authority_uid=None,
+        )
+        for name, sub_type in (
+            ("prefill", SubComponentType.PREFILL),
+            ("decode", SubComponentType.DECODE),
+        )
+    )
+
+    resolved = kubernetes_connector.resolve_uncertain_replica_attempts(
+        "test-graph-uid", attempts
+    )
+
+    assert resolved == attempts
+    assert mock_kube_api.get_graph_deployment.call_count == 2
+    mock_kube_api.patch_dgd_replica_write_fence.assert_called_once()
 
 
 @pytest.mark.asyncio

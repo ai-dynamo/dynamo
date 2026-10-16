@@ -255,6 +255,32 @@ async def test_submit_approves_and_actuates(use_lock):
 
 
 @pytest.mark.asyncio
+async def test_unbounded_submit_refreshes_replacement_before_reconciliation():
+    class ReplacementCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+            self.old_settlement = True
+
+        def refresh_participant(self, participant_id):
+            self.events.append("refresh")
+            self.old_settlement = False
+
+        async def reconcile_pending_settlements(self, participant_id=None):
+            assert not self.old_settlement
+            self.events.append("reconcile")
+
+    cm = ReplacementCapacityManager()
+    cm.add("default/a", decode=1)
+    orch = _orch(cm)
+
+    result = await _submit(orch, "default/a", _targets(decode=2))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.events == ["refresh", "reconcile"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("max_gpus", [-1, 2])
 async def test_submit_rejects_empty_targets_before_backend_dispatch(max_gpus):
     cm = FakeCapacityManager()
@@ -279,6 +305,51 @@ async def test_budget_submit_rejects_duplicate_resolved_pool_targets():
         await _submit(orch, "default/a", targets)
 
     assert cm.pools["default/a"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefill", [1, None])
+async def test_budget_submit_rejects_component_name_role_mismatch(prefill):
+    class NamedPoolCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.scale_calls = 0
+
+        def observe(self, require_complete=False):
+            return {
+                participant_id: {
+                    role: PoolSpec(
+                        role,
+                        replicas,
+                        gpu,
+                        component_name=f"{role}-svc",
+                    )
+                    for role, (replicas, gpu) in pools.items()
+                }
+                for participant_id, pools in self.pools.items()
+            }
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            return await super().scale(participant_id, targets, blocking)
+
+    cm = NamedPoolCapacityManager()
+    cm.add("default/a", prefill=prefill, decode=3)
+    orch = _orch(cm, max_gpus=5)
+    target = TargetReplica(
+        sub_component_type=SubComponentType.PREFILL,
+        component_name="decode-svc",
+        desired_replicas=2,
+    )
+
+    with pytest.raises(ValueError, match="(does not match|not requested) prefill pool"):
+        await _submit(orch, "default/a", [target])
+
+    assert cm.scale_calls == 0
+    if prefill is None:
+        assert "prefill" not in cm.pools["default/a"]
+    else:
+        assert cm.pools["default/a"]["prefill"][0] == 1
 
 
 @pytest.mark.asyncio
@@ -871,6 +942,42 @@ async def test_blocking_transfer_reports_partial_error_when_downscale_does_not_s
     assert "downscale did not settle" in result.message
     assert cm.pools["default/a"]["decode"][0] == 1
     assert cm.pools["default/b"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
+async def test_nonblocking_uncertain_write_forces_settlement_before_return():
+    class UncertainCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.wait_calls = 0
+
+        async def scale(self, participant_id, targets, blocking):
+            await super().scale(participant_id, targets, blocking)
+            return ReplicaUpdateResult(
+                accepted=True,
+                applied=True,
+                requires_settlement=True,
+            )
+
+        async def wait_for_ready(self, participant_id):
+            self.wait_calls += 1
+            raise RuntimeError("ambiguous write did not settle")
+
+    cm = UncertainCapacityManager()
+    cm.add("default/a", decode=1)
+    orch = _orch(cm)
+
+    result = await orch.submit(
+        "default/a",
+        _targets(decode=0),
+        blocking=False,
+        deployment_name="default/a",
+        caller_name="default/a",
+    )
+
+    assert result.status == ScaleStatus.ERROR
+    assert "ambiguous write did not settle" in result.message
+    assert cm.wait_calls == 1
 
 
 @pytest.mark.asyncio

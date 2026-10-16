@@ -28,6 +28,7 @@ from dynamo.planner.connectors.clients.kubernetes_api import (
     KUBERNETES_LIST_PAGE_SIZE,
     NONTERMINAL_POD_FIELD_SELECTOR,
     PARTIAL_OBJECT_METADATA_ACCEPT,
+    REPLICA_WRITE_FENCE_ANNOTATION,
     KubernetesAPI,
 )
 from dynamo.planner.errors import (
@@ -322,6 +323,60 @@ def test_update_scaling_adapter_replicas_is_strict(k8s_api, mock_custom_api):
     )
     mock_custom_api.get_namespaced_custom_object.assert_not_called()
     mock_custom_api.api_client.call_api.assert_not_called()
+
+
+def test_patch_scaling_adapter_replica_write_fence(k8s_api, mock_custom_api):
+    adapter = {
+        "metadata": {
+            "name": "test-deployment-frontend",
+            "resourceVersion": "101",
+        }
+    }
+
+    k8s_api.patch_scaling_adapter_replica_write_fence(
+        "test-deployment", "Frontend", "fence-1", adapter=adapter
+    )
+
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",
+        body={
+            "metadata": {
+                "resourceVersion": "101",
+                "annotations": {REPLICA_WRITE_FENCE_ANNOTATION: "fence-1"},
+            }
+        },
+    )
+
+
+def test_patch_dgd_replica_write_fence(k8s_api, mock_custom_api):
+    deployment = {
+        "metadata": {
+            "name": "test-deployment",
+            "resourceVersion": "11",
+        }
+    }
+
+    k8s_api.patch_dgd_replica_write_fence(
+        "test-deployment", "fence-1", deployment=deployment
+    )
+
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeployments",
+        name="test-deployment",
+        body={
+            "metadata": {
+                "resourceVersion": "11",
+                "annotations": {REPLICA_WRITE_FENCE_ANNOTATION: "fence-1"},
+            }
+        },
+    )
 
 
 def test_update_scaling_adapter_replicas_never_falls_back_on_404(
@@ -1103,6 +1158,7 @@ def _stable_worker_dgd(
         },
         "status": {
             "observedGeneration": observed_generation,
+            "conditions": [{"type": "Ready", "status": "True"}],
             "components": {
                 "decode": {
                     "gpuPowerLimitWatts": decode_watts,
@@ -1180,6 +1236,7 @@ def _mock_pod_list(mock_core_api, pods: list, *, component: str = "decode"):
         pod.metadata.labels = {"nvidia.com/dynamo-component": component}
     result = MagicMock()
     result.items = pods
+    result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
 
 
@@ -1344,6 +1401,36 @@ async def test_wait_for_replica_targets_ignores_stale_ready_condition(
             "test-deployment",
             expected_dgd_uid="dgd-uid",
             expected_replica_targets={"decode": 1},
+            expected_replica_authorities={"decode": (False, None)},
+            max_attempts=2,
+            delay_seconds=0,
+        )
+
+    assert got is settled
+    assert get_dgd.call_count == 2
+    mock_core_api.list_namespaced_pod.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_requires_current_workload_ready(
+    k8s_api, mock_core_api
+):
+    projected = _stable_worker_dgd(generation=2, observed_generation=2)
+    projected["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    settled = deepcopy(projected)
+    settled["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("decode-0"), _make_pod("decode-1")],
+    )
+
+    with patch.object(
+        k8s_api, "get_graph_deployment", side_effect=[projected, settled]
+    ) as get_dgd:
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 2},
             expected_replica_authorities={"decode": (False, None)},
             max_attempts=2,
             delay_seconds=0,
@@ -2072,6 +2159,7 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
     decode = _make_pod("decode-0", component="decode")
     result = MagicMock()
     result.items = [prefill, decode]
+    result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
 
     pods = k8s_api.list_pods_for_graph("my-dgd")
@@ -2088,6 +2176,23 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
         "prefill": [prefill],
         "decode": [decode],
     }
+
+
+def test_list_nonterminal_pods_for_graph_filters_at_server(k8s_api, mock_core_api):
+    result = MagicMock()
+    result.items = [_make_pod("decode-0", component="decode")]
+    result.metadata._continue = None
+    mock_core_api.list_namespaced_pod.return_value = result
+
+    assert k8s_api.list_nonterminal_pods_for_graph("my-dgd") == result.items
+
+    mock_core_api.list_namespaced_pod.assert_called_once_with(
+        namespace="default",
+        label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        limit=KUBERNETES_LIST_PAGE_SIZE,
+        _continue=None,
+    )
 
 
 def test_list_graph_pods_uses_untyped_metadata_request(k8s_api):

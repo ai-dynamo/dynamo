@@ -16,6 +16,10 @@ from dynamo.global_planner.capacity_manager import PoolSpec
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
+from dynamo.planner.connectors.kubernetes import (
+    ReplicaUpdateAttempt,
+    ReplicaUpdateFailure,
+)
 from dynamo.planner.errors import (
     DynamoGraphDeploymentNotFoundError,
     GPUShapeUnavailableError,
@@ -114,6 +118,9 @@ def _install_connector(
     connector.kube_api = MagicMock()
     connector.kube_api.current_namespace = key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
+    connector.kube_api.fetch_authoritative_replica_targets = MagicMock(
+        side_effect=lambda deployment: deployment
+    )
     connector.kube_api.list_pods_for_graph = MagicMock(return_value=[])
     connector._test_deployment = spec
 
@@ -434,6 +441,11 @@ async def test_scale_preserves_public_none_return():
 
     assert result is None
     connector.set_component_replicas_with_result.assert_awaited_once()
+    connector.wait_for_replica_targets.assert_awaited_once_with(
+        expected_dgd_uid="dgd-uid",
+        expected_targets={"prefill-svc": 3},
+        expected_authorities={"prefill-svc": (False, None)},
+    )
 
 
 @pytest.mark.asyncio
@@ -529,6 +541,143 @@ async def test_wait_for_ready_uses_accepted_replica_transaction():
     )
 
 
+@pytest.mark.asyncio
+async def test_possibly_committed_write_settles_before_failure_is_reported():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    target = TargetReplica(
+        sub_component_type=SubComponentType.PREFILL,
+        component_name="prefill-svc",
+        desired_replicas=0,
+    )
+    attempt = ReplicaUpdateAttempt(
+        target=target,
+        component_name="prefill-svc",
+        previous_replicas=1,
+        dgd_uid="dgd-uid",
+        is_adapter=False,
+        authority_uid=None,
+    )
+    failure = ReplicaUpdateFailure(RuntimeError("ambiguous"), [], [attempt])
+
+    async def fail_after_dispatch(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        raise failure
+
+    connector.set_component_replicas_with_result.side_effect = fail_after_dispatch
+    connector.resolve_uncertain_replica_attempts.return_value = (attempt,)
+
+    result = await cm.scale_with_result("default/my-dgd", [target], blocking=False)
+    with pytest.raises(ReplicaUpdateFailure) as raised:
+        await cm.wait_for_ready("default/my-dgd")
+
+    assert result == ReplicaUpdateResult(
+        accepted=True, applied=True, requires_settlement=True
+    )
+    assert raised.value is failure
+    connector.wait_for_replica_targets.assert_awaited_once_with(
+        expected_dgd_uid="dgd-uid",
+        expected_targets={"prefill-svc": 0},
+        expected_authorities={"prefill-svc": (False, None)},
+    )
+    assert "default/my-dgd" not in cm._replica_settlements
+
+
+@pytest.mark.asyncio
+async def test_compatibility_scale_settles_possibly_committed_write():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    target = TargetReplica(
+        sub_component_type=SubComponentType.PREFILL,
+        component_name="prefill-svc",
+        desired_replicas=0,
+    )
+    attempt = ReplicaUpdateAttempt(
+        target=target,
+        component_name="prefill-svc",
+        previous_replicas=1,
+        dgd_uid="dgd-uid",
+        is_adapter=False,
+        authority_uid=None,
+    )
+    failure = ReplicaUpdateFailure(RuntimeError("ambiguous"), [], [attempt])
+
+    async def fail_after_dispatch(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        raise failure
+
+    connector.set_component_replicas_with_result.side_effect = fail_after_dispatch
+    connector.resolve_uncertain_replica_attempts.return_value = (attempt,)
+
+    with pytest.raises(ReplicaUpdateFailure) as raised:
+        await cm.scale("default/my-dgd", [target], blocking=False)
+
+    assert raised.value is failure
+    connector.wait_for_replica_targets.assert_awaited_once_with(
+        expected_dgd_uid="dgd-uid",
+        expected_targets={"prefill-svc": 0},
+        expected_authorities={"prefill-svc": (False, None)},
+    )
+    assert "default/my-dgd" not in cm._replica_settlements
+
+
+@pytest.mark.asyncio
+async def test_unresolved_replica_write_blocks_complete_observation():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    target = TargetReplica(
+        sub_component_type=SubComponentType.PREFILL,
+        component_name="prefill-svc",
+        desired_replicas=0,
+    )
+    attempt = ReplicaUpdateAttempt(
+        target=target,
+        component_name="prefill-svc",
+        previous_replicas=1,
+        dgd_uid="dgd-uid",
+        is_adapter=False,
+        authority_uid=None,
+    )
+    failure = ReplicaUpdateFailure(RuntimeError("ambiguous"), [], [attempt])
+
+    async def fail_after_dispatch(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        raise failure
+
+    connector.set_component_replicas_with_result.side_effect = fail_after_dispatch
+    connector.resolve_uncertain_replica_attempts.side_effect = RuntimeError(
+        "readback failed"
+    )
+    await cm.scale_with_result("default/my-dgd", [target], blocking=False)
+
+    with pytest.raises(RuntimeError, match="readback failed"):
+        await cm.wait_for_ready("default/my-dgd")
+    with pytest.raises(RuntimeError, match="awaiting authoritative settlement"):
+        cm.observe(require_complete=True)
+
+    assert cm._replica_settlements["default/my-dgd"].protected
+
+    fenced_attempt = ReplicaUpdateAttempt(
+        target=target.model_copy(update={"desired_replicas": 1}),
+        component_name="prefill-svc",
+        previous_replicas=1,
+        dgd_uid="dgd-uid",
+        is_adapter=False,
+        authority_uid=None,
+    )
+    connector.resolve_uncertain_replica_attempts.side_effect = None
+    connector.resolve_uncertain_replica_attempts.return_value = (fenced_attempt,)
+    await cm.reconcile_pending_settlements("default/my-dgd")
+
+    connector.wait_for_replica_targets.assert_awaited_once_with(
+        expected_dgd_uid="dgd-uid",
+        expected_targets={"prefill-svc": 1},
+        expected_authorities={"prefill-svc": (False, None)},
+    )
+    assert "default/my-dgd" not in cm._replica_settlements
+    assert cm.observe(require_complete=True)["default/my-dgd"]
+
+
 # ---------------------------------------------------------------------------- #
 # Observe / current_replicas (v1beta1 component reading)                       #
 # ---------------------------------------------------------------------------- #
@@ -554,6 +703,33 @@ def test_observe_parses_typed_components():
         gpu_per_replica=2,
         component_name="decode-svc",
     )
+
+
+@pytest.mark.parametrize("implicit_inventory", [False, True])
+def test_observe_uses_authoritative_adapter_target(implicit_inventory):
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    connector = _install_connector(
+        cm, "default/model", deployment, parent_dgd_name="model"
+    )
+    authoritative = _listed_dgd(deployment, "model")
+    authoritative["spec"]["components"][0]["replicas"] = 3
+    connector.kube_api.fetch_authoritative_replica_targets.return_value = authoritative
+
+    if implicit_inventory:
+        cm._observe_all_deployments = True
+        cm._inventory_api = connector.kube_api
+        connector.kube_api.list_graph_deployments.return_value = [
+            _listed_dgd(deployment, "model")
+        ]
+
+    pools = cm.observe(require_complete=True)["default/model"]
+
+    assert pools["prefill"].current_replicas == 3
+    connector.kube_api.fetch_authoritative_replica_targets.assert_called_once()
+    observed = connector.kube_api.fetch_authoritative_replica_targets.call_args.args[0]
+    assert observed["spec"]["components"][0]["replicas"] == 1
 
 
 def test_observe_multinode_scales_gpu_count():

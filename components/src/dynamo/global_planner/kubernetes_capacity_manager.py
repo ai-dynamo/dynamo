@@ -26,6 +26,7 @@ from typing import Optional, TypeVar
 from kubernetes import client
 from kubernetes.aio.utils.retry import retry_on_conflict
 
+from dynamo.common.async_utils import run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -34,7 +35,11 @@ from dynamo.global_planner.capacity_manager import (
 from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
-from dynamo.planner.connectors.kubernetes import ReplicaUpdateRetryState
+from dynamo.planner.connectors.kubernetes import (
+    ReplicaUpdateAttempt,
+    ReplicaUpdateFailure,
+    ReplicaUpdateRetryState,
+)
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.planner.monitoring.dgd_services import (
     V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
@@ -56,6 +61,9 @@ class _ReplicaSettlement:
     dgd_uid: str
     targets: dict[str, int]
     authorities: dict[str, tuple[bool, str | None]]
+    uncertain: tuple[ReplicaUpdateAttempt, ...] = ()
+    completion_error: ReplicaUpdateFailure | None = None
+    protected: bool = False
 
 
 class KubernetesCapacityManager(CapacityManager):
@@ -336,6 +344,12 @@ class KubernetesCapacityManager(CapacityManager):
         the dict before it blocks on the scale lock. Without the snapshot, that
         insertion races iteration.
         """
+        if require_complete and self._replica_settlements:
+            participants = ", ".join(sorted(self._replica_settlements))
+            raise RuntimeError(
+                "replica writes are still awaiting authoritative settlement for "
+                f"{participants}"
+            )
         all_pools: PoolSnapshot = {}
         connectors_snapshot = list(self.connectors.items())
         if not self._observe_all_deployments:
@@ -540,7 +554,8 @@ class KubernetesCapacityManager(CapacityManager):
         deployment: dict,
         role_hints: Optional[dict[str, str]] = None,
     ) -> dict[str, PoolSpec]:
-        """Build one participant's pools from a listed DGD object."""
+        """Build pools from a DGD after resolving live replica authorities."""
+        deployment = connector.kube_api.fetch_authoritative_replica_targets(deployment)
         pools: dict[str, PoolSpec] = {}
         components_by_pool: dict[str, str] = {}
         role_hints = role_hints or {}
@@ -601,7 +616,9 @@ class KubernetesCapacityManager(CapacityManager):
         blocking: bool,
     ) -> None:
         """Apply desired targets while preserving the CapacityManager contract."""
-        await self.scale_with_result(participant_id, targets, blocking)
+        result = await self.scale_with_result(participant_id, targets, blocking)
+        if result.accepted and (blocking or result.requires_settlement):
+            await self.wait_for_ready(participant_id)
 
     async def scale_with_result(
         self,
@@ -616,6 +633,11 @@ class KubernetesCapacityManager(CapacityManager):
         rejection.
         """
         connector = self.connectors[participant_id]
+        previous_settlement = self._replica_settlements.get(participant_id)
+        if previous_settlement is not None and previous_settlement.protected:
+            raise RuntimeError(
+                f"participant {participant_id!r} has an unresolved replica write"
+            )
         self._replica_settlements.pop(participant_id, None)
         observed_uid = self._observed_uids.get(participant_id)
         retry_states = self._replica_retry_states.get()
@@ -625,11 +647,34 @@ class KubernetesCapacityManager(CapacityManager):
             retry_state = retry_states.setdefault(
                 participant_id, ReplicaUpdateRetryState(dgd_uid=observed_uid)
             )
-        result = await connector.set_component_replicas_with_result(
-            targets,
-            blocking=blocking,
-            retry_state=retry_state,
-        )
+        try:
+            result = await connector.set_component_replicas_with_result(
+                targets,
+                blocking=blocking,
+                retry_state=retry_state,
+            )
+        except ReplicaUpdateFailure as error:
+            if retry_state.dgd_uid is None:
+                raise RuntimeError(
+                    "possibly committed replica update has no DGD identity"
+                ) from error
+            settled_targets, settled_authorities = self._attempt_settlement_maps(
+                error.committed
+            )
+            self._replica_uids[participant_id] = retry_state.dgd_uid
+            self._replica_settlements[participant_id] = _ReplicaSettlement(
+                dgd_uid=retry_state.dgd_uid,
+                targets=settled_targets,
+                authorities=settled_authorities,
+                uncertain=error.uncertain,
+                completion_error=error,
+                protected=True,
+            )
+            return ReplicaUpdateResult(
+                accepted=True,
+                applied=True,
+                requires_settlement=True,
+            )
         if retry_state.dgd_uid is not None:
             self._replica_uids[participant_id] = retry_state.dgd_uid
         if result.accepted:
@@ -684,6 +729,25 @@ class KubernetesCapacityManager(CapacityManager):
             )
         return result
 
+    @staticmethod
+    def _attempt_settlement_maps(
+        attempts: tuple[ReplicaUpdateAttempt, ...],
+    ) -> tuple[dict[str, int], dict[str, tuple[bool, str | None]]]:
+        targets: dict[str, int] = {}
+        authorities: dict[str, tuple[bool, str | None]] = {}
+        for attempt in attempts:
+            previous = targets.get(attempt.component_name)
+            if previous is not None and previous != attempt.target.desired_replicas:
+                raise RuntimeError(
+                    f"component {attempt.component_name!r} has conflicting settlements"
+                )
+            targets[attempt.component_name] = attempt.target.desired_replicas
+            authorities[attempt.component_name] = (
+                attempt.is_adapter,
+                attempt.authority_uid,
+            )
+        return targets, authorities
+
     def supports_split_readiness(self) -> bool:
         return True
 
@@ -695,13 +759,59 @@ class KubernetesCapacityManager(CapacityManager):
             raise RuntimeError(
                 f"participant {participant_id!r} has no accepted replica settlement"
             )
-        await connector.wait_for_replica_targets(
-            expected_dgd_uid=settlement.dgd_uid,
-            expected_targets=settlement.targets,
-            expected_authorities=settlement.authorities,
-        )
+        try:
+            if settlement.uncertain:
+                resolved = await run_sync_in_thread(
+                    connector.resolve_uncertain_replica_attempts,
+                    settlement.dgd_uid,
+                    settlement.uncertain,
+                )
+                resolved_targets, resolved_authorities = self._attempt_settlement_maps(
+                    resolved
+                )
+                settlement = replace(
+                    settlement,
+                    targets={**settlement.targets, **resolved_targets},
+                    authorities={**settlement.authorities, **resolved_authorities},
+                    uncertain=(),
+                )
+                self._replica_settlements[participant_id] = settlement
+            if settlement.targets:
+                await connector.wait_for_replica_targets(
+                    expected_dgd_uid=settlement.dgd_uid,
+                    expected_targets=settlement.targets,
+                    expected_authorities=settlement.authorities,
+                )
+        except Exception:
+            current = self._replica_settlements.get(participant_id)
+            if current is settlement and not current.protected:
+                self._replica_settlements[participant_id] = replace(
+                    current, protected=True
+                )
+            raise
         if self._replica_settlements.get(participant_id) is settlement:
             self._replica_settlements.pop(participant_id, None)
+        if settlement.completion_error is not None:
+            raise settlement.completion_error
+
+    async def reconcile_pending_settlements(
+        self, participant_id: str | None = None
+    ) -> None:
+        """Resume failed replica settlements before a new budget observation."""
+        if participant_id is None:
+            participants = tuple(self._replica_settlements)
+        elif participant_id in self._replica_settlements:
+            participants = (participant_id,)
+        else:
+            participants = ()
+        for pending_participant_id in participants:
+            try:
+                await self.wait_for_ready(pending_participant_id)
+            except ReplicaUpdateFailure:
+                # The physical settlement completed and wait_for_ready removed
+                # the marker before surfacing the previous request's error.
+                if pending_participant_id in self._replica_settlements:
+                    raise
 
     async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Re-run the complete budget transaction after a Kubernetes conflict."""
