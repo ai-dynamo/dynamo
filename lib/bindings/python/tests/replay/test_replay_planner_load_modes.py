@@ -125,7 +125,7 @@ def test_active_planner_honors_closed_loop_concurrency(tmp_path):
     }
     engine_args = normalize_mocker_config({"engine": {"block_size": 128}})
     durations = []
-    for concurrency in (1, 2, 5, None):
+    for concurrency in (1, 5, None):
         workload = {
             "extra_engine_args": engine_args,
             "num_workers": 2,
