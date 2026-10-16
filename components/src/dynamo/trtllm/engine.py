@@ -180,6 +180,23 @@ class TensorRTLLMEngine:
             return {}
         return get_capacity()
 
+    def abort(self, request_id: int) -> None:
+        """Abort an in-flight request or an unclaimed KV session."""
+        if not self._llm:
+            return
+        executor = getattr(self._llm, "_executor", None)
+        abort_fn = getattr(executor, "abort_request", None)
+        if not callable(abort_fn):
+            abort_fn = getattr(self._llm, "abort", None)
+        if not callable(abort_fn):
+            logger.debug("TensorRT-LLM engine object does not support abort()")
+            return
+        try:
+            abort_fn(request_id)
+        except Exception as e:
+            logger.error("TensorRT-LLM abort failed for request %s: %s", request_id, e)
+            raise
+
     @staticmethod
     def _is_unsupported_encoder_arch(model_path: str) -> bool:
         """Return True if *model_path*'s architecture is not supported by
