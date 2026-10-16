@@ -250,10 +250,24 @@ async def test_monitor_skips_engine_shutdown_when_engine_is_dead(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(10)
-async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch):
+@pytest.mark.parametrize("runtime_fails", [False, True])
+async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch, runtime_fails):
+    """Stop admission before teardown, even if runtime shutdown raises."""
     exit_calls = _record_exit(monkeypatch)
     engine = _HangingShutdownEngine([False])
-    runtime = _FakeRuntime()
+    runtime = _FakeRuntime(
+        shutdown_exception=RuntimeError("runtime shutdown failed")
+        if runtime_fails
+        else None
+    )
+    runtime_calls_at_teardown = []
+    engine_shutdown = engine.shutdown
+
+    def shutdown_engine():
+        runtime_calls_at_teardown.append(runtime.shutdown_count)
+        engine_shutdown()
+
+    monkeypatch.setattr(engine, "shutdown", shutdown_engine)
 
     try:
         monitor = TrtllmEngineMonitor(
@@ -270,6 +284,7 @@ async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch):
         await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
 
         assert ticks > 5
+        assert runtime_calls_at_teardown == [1]
         assert engine.shutdown_count == 1
         assert runtime.shutdown_count == 1
         assert exit_calls == [1]

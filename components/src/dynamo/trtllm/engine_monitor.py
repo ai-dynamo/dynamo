@@ -40,7 +40,9 @@ def exit_worker_on_fatal_error(
     """Shut down the worker after a fatal engine error and exit with code 1.
 
     Safe to call from any thread; it never waits on the asyncio event loop.
-    Only the first call acts. When the TRT-LLM executor has recorded a fatal
+    Only the first call acts. Runtime shutdown stops admission before engine
+    teardown begins; a runtime shutdown error does not skip engine cleanup.
+    When the TRT-LLM executor has recorded a fatal
     error, its worker world is dead and TRT-LLM teardown is skipped: that
     teardown sends to and joins the dead ranks, and its IPC sockets may be in
     use by a thread that is already blocked on them. Otherwise the teardown
@@ -50,6 +52,16 @@ def exit_worker_on_fatal_error(
     if not _fatal_exit_lock.acquire(blocking=False):
         return
     try:
+        if runtime is not None:
+            try:
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                runtime.shutdown()
+            except Exception as exc:
+                logger.warning(
+                    "Dynamo Runtime shutdown failed during TRT-LLM fatal shutdown: %r",
+                    exc,
+                    exc_info=True,
+                )
         if engine is not None:
             fatal_error = engine.get_health_check_fatal_error()
             if fatal_error is not None:
@@ -63,9 +75,6 @@ def exit_worker_on_fatal_error(
                         EngineHealthMonitorConfig.from_env().shutdown_timeout
                     )
                 _shutdown_engine(engine, shutdown_timeout)
-        if runtime is not None:
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            runtime.shutdown()
     except Exception as exc:
         logger.warning(
             "Error during TRT-LLM fatal shutdown: %r",
