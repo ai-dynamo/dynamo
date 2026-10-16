@@ -100,6 +100,8 @@ class EnvironmentObservePlugin:
             decode_scaling_in_progress=(
                 self.require_decode and state.decode.replicas.scaling
             ),
+            pending_num_prefill=state.prefill.replicas.pending_startup,
+            pending_num_decode=state.decode.replicas.pending_startup,
         )
 
 

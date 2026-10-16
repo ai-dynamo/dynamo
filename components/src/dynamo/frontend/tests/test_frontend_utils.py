@@ -11,7 +11,9 @@ from dynamo.frontend.utils import (
     make_backend_error,
     make_internal_error,
     resolve_chat_template,
+    validate_legacy_guided_decoding_constraints,
 )
+from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [
     pytest.mark.unit,
@@ -36,6 +38,42 @@ class TestMakeBackendError:  # FRONTEND.8 — BackendError construction
         resp = {"status": "error"}
         err = make_backend_error(resp)
         assert err["error"]["message"] == "unknown backend error"
+
+
+class TestValidateLegacyGuidedDecodingConstraints:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"guided_json": {"type": "object"}, "guided_regex": "a+"},
+            {"guided_regex": "a+", "guided_grammar": 'root ::= "a"'},
+        ],
+    )
+    def test_rejects_multiple_constraints(self, payload):
+        with pytest.raises(
+            InvalidArgument,
+            match="Only one guided-decoding constraint can be set; received:",
+        ):
+            validate_legacy_guided_decoding_constraints(payload)
+
+    def test_accepts_one_constraint_and_ignores_modifiers(self):
+        validate_legacy_guided_decoding_constraints(
+            {
+                "guided_json": {"type": "object"},
+                "guided_whitespace_pattern": r"[\n ]?",
+                "guided_decoding_backend": "xgrammar",
+            }
+        )
+
+    def test_empty_choice_is_not_an_active_constraint(self):
+        # An empty list is a caller supplying no choices, which is no constraint.
+        validate_legacy_guided_decoding_constraints({"guided_choice": []})
+
+    @pytest.mark.parametrize("choice", ["yes", ("x", "y"), 5])
+    def test_non_list_choice_is_rejected(self, choice):
+        # Ignoring a malformed choice would generate unconstrained text for a
+        # caller who believes it constrained the output.
+        with pytest.raises(InvalidArgument, match="guided_choice must be a list"):
+            validate_legacy_guided_decoding_constraints({"guided_choice": choice})
 
     def test_empty_string_message_uses_fallback(self):
         resp = {"status": "error", "message": ""}

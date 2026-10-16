@@ -85,41 +85,6 @@ impl RemoteIndexer {
         })
     }
 
-    pub(super) async fn find_matches_by_tier(
-        &self,
-        block_hashes: Vec<LocalBlockHash>,
-        device_only: bool,
-    ) -> Result<TieredMatchDetails> {
-        self.validate_topology_if_ready().await.inspect_err(|_| {
-            self.metrics.increment_query_failures();
-        })?;
-
-        let request = IndexerQueryRequest {
-            model_name: self.model_name.clone(),
-            block_hashes,
-            device_only,
-        };
-        let mut stream: ManyOut<IndexerQueryResponse> = self
-            .query_router
-            .round_robin(SingleIn::new(request))
-            .await
-            .inspect_err(|_| {
-                self.metrics.increment_query_failures();
-            })?;
-
-        match stream.next().await {
-            Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
-            Some(IndexerQueryResponse::Error(msg)) => {
-                self.metrics.increment_query_failures();
-                Err(anyhow::anyhow!("Remote indexer error: {}", msg))
-            }
-            None => {
-                self.metrics.increment_query_failures();
-                Err(anyhow::anyhow!("Remote indexer returned empty response"))
-            }
-        }
-    }
-
     pub(super) async fn record_hashed_routing_decision(
         &self,
         worker: WorkerWithDpRank,
@@ -198,8 +163,55 @@ impl RemoteIndexer {
 
         Ok(())
     }
+}
 
-    pub(super) fn use_kv_events(&self) -> bool {
+#[async_trait::async_trait]
+impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndexer {
+    async fn find_matches_by_tier(
+        &self,
+        block_hashes: Vec<LocalBlockHash>,
+        device_only: bool,
+    ) -> Result<TieredMatchDetails> {
+        self.validate_topology_if_ready().await.inspect_err(|_| {
+            self.metrics.increment_query_failures();
+        })?;
+
+        let request = IndexerQueryRequest {
+            model_name: self.model_name.clone(),
+            block_hashes,
+            device_only,
+        };
+        let mut stream: ManyOut<IndexerQueryResponse> = self
+            .query_router
+            .round_robin(SingleIn::new(request))
+            .await
+            .inspect_err(|_| {
+                self.metrics.increment_query_failures();
+            })?;
+
+        match stream.next().await {
+            Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
+            Some(IndexerQueryResponse::Error(msg)) => {
+                self.metrics.increment_query_failures();
+                Err(anyhow::anyhow!("Remote indexer error: {}", msg))
+            }
+            None => {
+                self.metrics.increment_query_failures();
+                Err(anyhow::anyhow!("Remote indexer returned empty response"))
+            }
+        }
+    }
+
+    async fn record_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        hashes: dynamo_kv_router::indexer::RoutingDecisionHashes,
+    ) -> Result<()> {
+        self.record_hashed_routing_decision(worker, hashes.local_hashes, hashes.sequence_hashes)
+            .await
+    }
+
+    fn use_kv_events(&self) -> bool {
         self.use_kv_events
     }
 }
@@ -577,7 +589,7 @@ mod tests {
             .unwrap();
         let _ = side.flush().await;
 
-        let indexer = Indexer::KvIndexer {
+        let indexer = Indexer::Single {
             primary: KvIndexer::new(
                 CancellationToken::new(),
                 4,
@@ -586,6 +598,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: Some(SideIndexer::KvIndexer(side)),
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
 
         assert_eq!(
@@ -629,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn query_engine_returns_tiered_scores_with_lower_tier() {
         let worker = WorkerWithDpRank::new(7, 0);
-        let indexer = Indexer::KvIndexer {
+        let indexer = Indexer::Single {
             primary: KvIndexer::new(
                 CancellationToken::new(),
                 4,
@@ -638,14 +651,16 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
 
         // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
         indexer
-            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .try_apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await
+            .unwrap();
         indexer
-            .apply_event(store_event(
+            .try_apply_event(store_event(
                 7,
                 0,
                 2,
@@ -653,9 +668,10 @@ mod tests {
                 &[13],
                 StorageTier::HostPinned,
             ))
-            .await;
+            .await
+            .unwrap();
 
-        let Indexer::KvIndexer {
+        let Indexer::Single {
             primary,
             lower_tier,
             ..
@@ -728,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn query_engine_device_only_skips_lower_tiers() {
         let worker = WorkerWithDpRank::new(7, 0);
-        let indexer = Indexer::KvIndexer {
+        let indexer = Indexer::Single {
             primary: KvIndexer::new(
                 CancellationToken::new(),
                 4,
@@ -737,13 +753,15 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
 
         indexer
-            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .try_apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await
+            .unwrap();
         indexer
-            .apply_event(store_event(
+            .try_apply_event(store_event(
                 7,
                 0,
                 2,
@@ -751,9 +769,10 @@ mod tests {
                 &[13],
                 StorageTier::HostPinned,
             ))
-            .await;
+            .await
+            .unwrap();
 
-        let Indexer::KvIndexer {
+        let Indexer::Single {
             primary,
             lower_tier,
             ..

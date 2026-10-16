@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-import dynamo.common.multimodal.audio_loader as audio_loader_module
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB  # isort: skip
 
 pytestmark = [
     pytest.mark.unit,
@@ -43,6 +46,21 @@ async def test_load_audio_rejects_http_by_default():
 
     with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_audio("http://example.com/x.wav")
+
+
+@pytest.mark.asyncio
+async def test_load_audio_logs_rejected_data_url_bounded(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    oversized = "data:audio/wav;base64," + "A" * (1024 * 1024)
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UrlValidationError, match="exceeds"):
+            await loader.load_audio(oversized)
+
+    assert "URL rejected loading audio" in caplog.text
+    assert "payload elided" in caplog.text
+    assert max(len(record.getMessage()) for record in caplog.records) < 1024
 
 
 @pytest.mark.asyncio
@@ -92,6 +110,25 @@ async def test_load_audio_rejects_empty_waveform():
 
     with pytest.raises(ValueError, match="empty"):
         await loader.load_audio("https://example.com/empty.wav")
+
+
+@pytest.mark.asyncio
+async def test_http_fetch_honors_configured_media_limit(monkeypatch):
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    waveform = np.zeros(8, dtype=np.float32)
+
+    class _MediaIO:
+        def load_bytes(self, content):
+            return waveform, 16000.0
+
+    mock_fetch = AsyncMock(return_value=b"audio")
+    monkeypatch.setattr(audio_loader_module, "fetch_bytes", mock_fetch)
+    monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: _MediaIO())
+
+    await loader._load_audio_with_vllm("https://example.com/limited.wav")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -187,11 +224,14 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_audio_missing_decoder_is_actionable():
+async def test_load_audio_missing_decoder_is_actionable(carrier_imports):
     """vLLM's own hint here is `pip install vllm[audio]`, which drags in an
     unpinned stack; the wrap must point at the validated bounded install and
     say there is no hardware alternative for audio."""
     loader = AudioLoader()
+    # 'av' genuinely absent, independent of what the test machine has
+    # installed: _install_hint asks the running interpreter.
+    carrier_imports()
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
         side_effect=ImportError("Please install vllm[audio] for audio support")
     )
@@ -217,3 +257,26 @@ async def test_load_audio_batch_preserves_missing_decoder_error():
         await loader.load_audio_batch([{"Url": "https://example.com/x.mp3"}])
 
     assert exc_info.value is err
+
+
+@pytest.mark.asyncio
+async def test_load_audio_preserves_a_configuration_error(monkeypatch):
+    """An operator fault must not reach the client as a 4xx.
+
+    ``load_audio`` converts unknown exceptions into ``ValueError``, and
+    ``py_err_to_dynamo`` maps ``ValueError`` to ``InvalidArgument``. Measured
+    before this was preserved: an ``HttpError`` from the egress-proxy gate
+    arrived as ``builtins.ValueError``, so audio clients saw a 4xx for a
+    deployment misconfiguration.
+    """
+    loader = AudioLoader.__new__(AudioLoader)
+
+    async def _boom(url):
+        raise HttpConfigurationError("egress proxy is not trusted")
+
+    monkeypatch.setattr(loader, "_load_audio_with_vllm", _boom, raising=False)
+
+    with pytest.raises(HttpConfigurationError) as excinfo:
+        await loader.load_audio("https://example.com/a.wav")
+
+    assert not isinstance(excinfo.value, ValueError)

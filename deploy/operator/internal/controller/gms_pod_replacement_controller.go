@@ -10,10 +10,10 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,9 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-// gmsPodReplacementReconciler replaces Pods that cannot safely recover after
-// their native GMS sidecar restarts. The current eligibility policy is limited
-// to owned Snapshot restore-target Pods.
+// gmsPodReplacementReconciler replaces owned restore Pods after a native GMS
+// sidecar restart that cannot recover in place.
 type gmsPodReplacementReconciler struct {
 	client.Client
 	config        *configv1alpha1.OperatorConfiguration
@@ -67,11 +66,24 @@ func (r *gmsPodReplacementReconciler) setupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// isGMSPodReplacementEligible reports whether an owned Dynamo restore Pod must be recreated.
+// Pod must not be nil.
 func isGMSPodReplacementEligible(pod *corev1.Pod) bool {
-	return pod != nil &&
-		pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue &&
-		metav1.GetControllerOf(pod) != nil &&
-		hasRestartedNativeGMSServer(pod)
+	// Require both a replacing controller and Dynamo workload identity before deleting a Pod.
+	if metav1.GetControllerOf(pod) == nil ||
+		pod.Labels[commonconsts.KubeLabelDynamoComponent] == "" ||
+		pod.Labels[commonconsts.KubeLabelDynamoNamespace] == "" {
+		return false
+	}
+
+	if pod.Annotations[podcontract.RestoreFromAnnotation] == "" {
+		return false
+	}
+	switch podcontract.ClassifyRestoreOutcome(pod.Status.Conditions) {
+	case podcontract.RestoreOutcomeFailed, podcontract.RestoreOutcomePartiallySucceeded:
+		return false
+	}
+	return hasRestartedNativeGMSServer(pod)
 }
 
 func hasRestartedNativeGMSServer(pod *corev1.Pod) bool {

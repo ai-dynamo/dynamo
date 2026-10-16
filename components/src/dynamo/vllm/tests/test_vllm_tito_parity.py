@@ -216,7 +216,7 @@ class TestLogprobTokenIds:
     OpenAI adapters do, so `SamplingParams.verify()` accepts the pair."""
 
     @staticmethod
-    def _build(output_options, sampling_options=None):
+    def _build(output_options, sampling_options=None, extra_args=None):
         from dynamo.vllm.handlers import build_sampling_params
 
         return build_sampling_params(
@@ -225,6 +225,7 @@ class TestLogprobTokenIds:
                 "sampling_options": sampling_options or {},
                 "stop_conditions": {},
                 "output_options": output_options,
+                "extra_args": extra_args or {},
             },
             {},
         )
@@ -244,6 +245,23 @@ class TestLogprobTokenIds:
     def test_empty_id_list_falls_through_to_top_k(self):
         sp = self._build({"logprobs": 5}, sampling_options={"logprob_token_ids": []})
         assert sp.logprobs == 5
+
+    def test_unsigned_full_vocab_sentinel_restores_vllm_value(self):
+        sp = self._build({"logprobs": 2**32 - 1, "prompt_logprobs": 2**32 - 1})
+        assert sp.logprobs == -1
+        assert sp.prompt_logprobs == -1
+
+    def test_prompt_logprobs_bypass_prefix_cache_by_default(self):
+        sp = self._build({"prompt_logprobs": 1})
+        assert sp.prompt_logprobs == 1
+        assert sp.skip_reading_prefix_cache is True
+
+    def test_explicit_prefix_cache_setting_is_preserved(self):
+        sp = self._build(
+            {"prompt_logprobs": 1},
+            extra_args={"skip_reading_prefix_cache": False},
+        )
+        assert sp.skip_reading_prefix_cache is False
 
 
 class TestFlattenLogprobs:

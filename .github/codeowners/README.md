@@ -49,6 +49,52 @@ adding required approvals.
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
 
+### Add owners without dropping existing accountability
+
+GitHub uses last-match-wins semantics, so a narrower row replaces the complete
+owner set from earlier rows. A `shared` entry therefore lists its **complete**
+owner set -- the enclosing owners it keeps, then the ones being added:
+
+```yaml
+shared:
+  - glob: deploy/inference-gateway/epp/Dockerfile
+    owners: [epp, ops, operator]   # epp+ops kept, operator added
+```
+
+The strict gate checks that restatement, so omitting `epp` above fails the
+build rather than quietly taking the file from them. Enclosure is resolved, not
+tiered: a shared row is measured against whoever owns the path immediately
+before it, which may have been decided by an ancestor several levels up or by
+an intermediate rule that already reassigned it. The catch-all never counts --
+every explicit row exists to replace it.
+
+That check covers `shared` rows only. An area `path_globs` entry nested inside
+another area's directory still replaces the outer owner silently. Whether an
+owner should inherit down a subtree at all is an open question about the
+ownership model; until it is settled, a reviewer reading the `areas.yaml` diff
+is the control there.
+
+For an invariant that should not emit another CODEOWNERS row, use
+`required_owners`. The strict gate checks every matching tracked file against
+the final generated artifact:
+
+```yaml
+required_owners:
+  - glob: deploy/operator/
+    owners: [operator]
+```
+
+This is appropriate for parent-team guarantees. A narrower specialist rule
+under `deploy/operator/` may add GMS or Observability, but it cannot silently
+remove Operator. Each `required_owners` glob must match at least one tracked
+path; strict validation rejects stale contracts after their final path is
+deleted.
+
+Removing a `required_owners` entry lifts the requirement -- deliberately, or a
+contract could never be retired. The edit is itself a policy change: it is
+judged full-tree and reviewed by this directory's owners, so lifting a
+guarantee is always a visible, owned decision.
+
 ## External contributors
 
 An external individual who has earned ownership of an area is granted it by
@@ -84,6 +130,18 @@ generated outputs together.
 
 - any tracked file falls through to no owner (**coverage gate**) - a new
   directory no area claims blocks the PR until `areas.yaml` is updated; or
+- any declared ownership glob matches no tracked file (**stale policy gate**) -
+  a PR that deletes or renames a glob's final matching path must prune the
+  declaration in the same PR (that edit makes it a policy change, so the PR
+  is then judged full-tree like any routing change). Staleness a PR merely
+  inherited from its base is a warning there and blocks only policy PRs and
+  full-tree runs, so base churn never red-Xes unrelated work; or
+- final last-match resolution removes an owner promised by `required_owners`,
+  or a blocking file-type declaration (**ownership contract gate**) - coverage
+  by the wrong team no longer counts as success; or
+- a `shared` row drops an owner granted by the row it overrides (**shared
+  additivity gate**) - the restatement `shared` requires is machine-checked,
+  not trusted; or
 - the committed `CODEOWNERS` or `CONTRIBUTORS.md` differs from what the sources
   produce (**drift check**) - so the outputs always match their sources.
 

@@ -7,7 +7,7 @@ subtitle: Configures Planner optimization targets, scaling modes, and PlannerCon
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
-Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AIConfigurator estimate is unavailable.
+Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AISimulate estimate is unavailable.
 
 For a quick overview, see the [Planner overview](overview.md). For architecture internals, see [Planner Design](planner-design.md).
 
@@ -18,14 +18,14 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the `aiconfigurator-core` Python wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisimulate` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
 - Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
-- Use **`sla`** when you want to target specific TTFT/ITL values with native AIC estimates, optional bootstrap profiling data, or live FPM warmup.
+- Use **`sla`** when you want to target specific TTFT/ITL values with native AISimulate estimates, optional bootstrap profiling data, or live FPM warmup.
 
 ## PlannerConfig Reference
 
@@ -75,7 +75,7 @@ Advisory mode is suggestion-only. The Planner computes recommended replica count
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AIC core performance modeling with `ttft_ms`/`itl_ms` targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AISimulate performance modeling with `ttft_ms`/`itl_ms` targets. |
 
 When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
@@ -94,23 +94,62 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
-SLA mode uses a Planner-owned engine-query layer. If `aic_perf_model` is present, the Planner passes the native AIC model identity and engine limits directly to `aiconfigurator_core.sdk.RustForwardPassPerfModel`. Unsupported native AIC configs automatically fall back to the wheel's observed-FPM regression model. If `aic_perf_model` is absent, the wheel starts an FPM regression model and becomes ready after enough self-benchmark or live FPM observations.
+SLA mode constructs each role's model through
+`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`ais_perf_model.roles` to the complete AISimulate configuration for each deployed
+role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
+aggregated deployment. Each role key must match its `worker_type`.
 
-At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIC is available or enough live FPMs have warmed the regression fallback.
+New configurations default to `estimation_mode: auto` and `fallback_policy: deny`.
+Auto searches `op_level`, `fpm_interpolation`, then `fpm_regression`; `deny` prevents
+fallback only when you explicitly select a mode. Without `ais_perf_model`, the
+Planner creates a cold `fpm_regression` model and trains it from self-benchmark
+or live forward-pass metrics (FPM).
 
-Manual native AIC perf-model config:
+Each role accepts the complete upstream schema, including ordered `systems_paths`,
+`database_mode`, `transfer_policy`, quantization and speculation settings, and
+nested `estimator_config` controls. Explicit estimator controls override the
+Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
+`[4, 4]` grid; regression and correction may use separate grids. Unknown fields
+and conflicting worker identities are rejected.
+
+Configure model identity and estimator controls through `ais_perf_model.roles`.
+The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
+
+At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
+
+Configure the role models in a DynamoGraphDeploymentRequest:
 
 ```yaml
 spec:
   features:
     planner:
       optimization_target: sla
-      aic_perf_model:
-        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-        system: h200_sxm
-        backend: vllm
-        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      mode: disagg
+      ais_perf_model:
+        roles:
+          prefill:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: prefill
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+          decode:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: decode
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+            estimator_config:
+              fpm_regression:
+                sampling:
+                  bins_per_axis: [4, 4]
+                  max_observations: 64
+                min_observations: 5
 ```
 
 ### Throughput-Based Scaling Settings
@@ -118,6 +157,7 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
+| `max_throughput_scaling_replicas` | int | `8` | Maximum replica-count change per component from one throughput observation. The capped target persists until the next throughput observation. GPU and power budgets may reduce it further; endpoint and out-of-band budget recovery take precedence. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
 | `min_endpoint` | int | `1` | Minimum endpoints for `agg` mode. In `disagg` mode, applies the same minimum to prefill and decode. In `prefill` or `decode` mode, supplies the active role when its role-specific field is `null`. May be `0` for scale-to-zero compatibility. |
 | `prefill_min_endpoint` | int or `null` | `null` | Minimum prefill endpoints for `disagg` and `prefill` modes. When set, replaces the prefill value from `min_endpoint`. Must be at least `1`. |
@@ -173,23 +213,26 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 | `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
-| `control_api_port` | int | `9086` | Port for the loopback-only runtime minimum-endpoint API. Set to `0` to disable. |
+| `control_api_port` | int | `9086` | Port for the loopback-only runtime endpoint and GPU budget API. Set to `0` to disable. |
 
 ### Runtime Minimum Endpoint API
 
-The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
+The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Every mode also accepts `min_gpu_budget` and `max_gpu_budget`. A response includes the active endpoint fields and both GPU budgets. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
 
-In Kubernetes, port-forward to the Planner pod and patch the active mode's field:
+In Kubernetes, port-forward to the Planner pod and patch the active mode's field. The following example updates a Planner in `disagg` mode:
 
 ```bash
 kubectl port-forward pod/<planner-pod> 9086:9086
 curl http://127.0.0.1:9086/v1/min-endpoints
 curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
   --header 'Content-Type: application/json' \
-  --data '{"decode_min_endpoint": 3}'
+  --data '{"prefill_min_endpoint": 8, "decode_min_endpoint": 8, "min_gpu_budget": 16, "max_gpu_budget": 64}'
 ```
 
-The update is atomic. The Planner rejects malformed values, fields that are inactive for the current mode, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same footprint checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+The update is atomic. Use `-1` to disable either GPU budget. The Planner rejects malformed values, fields that are inactive for the current mode, a `min_gpu_budget` greater than `max_gpu_budget` when both are enabled, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+
+> [!WARNING]
+> If a scaling submission loses its acknowledgement after the Planner stops waiting for it, a later submission error leaves the outcome unknown. The Planner then stops automatic effect submission to avoid duplicating an action that the remote service might have applied. Runtime `GET` and `PATCH` remain available. Verify the deployment's desired and Ready replica counts, then restart the Planner to resume automatic submission.
 
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 

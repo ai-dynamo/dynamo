@@ -25,7 +25,7 @@ use super::bucket::{CuckooBucketStore, OwnedPackedCkfLane, PackedBucket};
 use super::canonical::CanonicalSequenceBlockHash;
 use super::global::GlobalCkfBucketImage;
 use super::mutator::{CuckooInsertionScratch, CuckooMutator, lane_rng_seed};
-use super::{CkfBuildError, CkfConfig, bucket_count, validate_config};
+use super::{CkfBuildError, CkfConfig};
 
 const FORMAT_VERSION: u16 = 1;
 const FINGERPRINT_BITS: u8 = 16;
@@ -457,6 +457,8 @@ impl DcCkfRankReplacement {
 /// Exact and physical CKF state for one DC-local indexer pool.
 #[derive(Debug)]
 pub struct DcCkfState {
+    delegate:
+        Option<std::sync::Arc<dyn crate::indexer::KvIndexerDelegate<CanonicalSequenceBlockHash>>>,
     /// Per-source engine vocabulary. Lineage and ownership commit even when physical admission
     /// is capacity-omitted, so CKF capacity does not bound this memory; the operative bound is
     /// the source engine's own KV-cache block count, because the engine emits `Removed` when it
@@ -486,10 +488,21 @@ pub struct DcCkfState {
 }
 
 impl DcCkfState {
+    /// Construct exact ownership state with a fixed canonical-hash delegate.
+    /// Notifications include owned hashes omitted from the physical filter for capacity.
+    pub fn new_with_delegate(
+        config: CkfConfig,
+        delegate: std::sync::Arc<dyn crate::indexer::KvIndexerDelegate<CanonicalSequenceBlockHash>>,
+    ) -> Result<Self, CkfBuildError> {
+        let mut state = Self::new(config)?;
+        state.delegate = Some(delegate);
+        Ok(state)
+    }
+
     pub fn new(config: CkfConfig) -> Result<Self, CkfBuildError> {
-        validate_config(config)?;
-        let bucket_count = bucket_count(config.expected_blocks_per_dc)?;
+        let bucket_count = config.bucket_count()?;
         Ok(Self {
+            delegate: None,
             source_lineage: FxHashMap::default(),
             canonical_owners: FxHashMap::default(),
             resident_count: 0,
@@ -714,7 +727,20 @@ impl DcCkfState {
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
-        *self = replacement;
+        replacement.delegate = self.delegate.take();
+        let previous = std::mem::replace(self, replacement);
+        if let Some(delegate) = &self.delegate {
+            for &hash in previous.canonical_owners.keys() {
+                if !self.canonical_owners.contains_key(&hash) {
+                    delegate.on_remove(hash);
+                }
+            }
+            for &hash in self.canonical_owners.keys() {
+                if !previous.canonical_owners.contains_key(&hash) {
+                    delegate.on_create(hash);
+                }
+            }
+        }
         Ok(self.drain_publication())
     }
 
@@ -913,7 +939,7 @@ impl DcCkfState {
             .filter(|canonical| !self.is_resident(canonical))
             .count();
         let maximum_new_touches = admission_candidates
-            .checked_mul(self.config.max_kicks.saturating_add(1))
+            .checked_mul(self.config.max_kicks + 1)
             .and_then(|touches| touches.checked_add(reoffered_admissions))
             .ok_or(KvCacheEventError::AllocationFailed)?
             .min(self.format.bucket_count);
@@ -922,8 +948,10 @@ impl DcCkfState {
         if !scratch.new_mappings.is_empty() {
             if let Some(lineage) = self.source_lineage.get_mut(&worker) {
                 for &(external, canonical) in &scratch.new_mappings {
-                    let previous = lineage.insert(external, canonical);
-                    debug_assert!(previous.is_none());
+                    assert!(
+                        lineage.insert(external, canonical).is_none(),
+                        "prepared store replaced an existing source mapping"
+                    );
                 }
             } else {
                 let mut lineage = FxHashMap::default();
@@ -937,7 +965,11 @@ impl DcCkfState {
             }
             for (&canonical, &increment) in &scratch.owner_increments {
                 let ownership = self.canonical_owners.entry(canonical).or_default();
+                let is_first_owner = ownership.owners == 0;
                 ownership.owners += increment;
+                if is_first_owner && let Some(delegate) = &self.delegate {
+                    delegate.on_create(canonical);
+                }
             }
         }
 
@@ -1014,7 +1046,7 @@ impl DcCkfState {
         let maximum_new_touches = replacement
             .canonical_candidates
             .len()
-            .checked_mul(self.config.max_kicks.saturating_add(1))
+            .checked_mul(self.config.max_kicks + 1)
             .ok_or(KvCacheEventError::AllocationFailed)?
             .min(self.format.bucket_count);
         self.reserve_publication_scratch(maximum_new_touches)?;
@@ -1052,14 +1084,13 @@ impl DcCkfState {
     /// Record a successful admission. The owner entry always exists here: every admission
     /// candidate comes from a mapping whose ownership was committed earlier in the same operation.
     fn mark_resident(&mut self, canonical: CanonicalSequenceBlockHash) {
-        match self.canonical_owners.get_mut(&canonical) {
-            Some(ownership) => {
-                debug_assert!(!ownership.resident);
-                ownership.resident = true;
-                self.resident_count += 1;
-            }
-            None => debug_assert!(false, "admitted a canonical hash with no owner"),
-        }
+        let ownership = self
+            .canonical_owners
+            .get_mut(&canonical)
+            .expect("admitted a canonical hash with no owner");
+        assert!(!ownership.resident, "canonical hash admitted twice");
+        ownership.resident = true;
+        self.resident_count += 1;
     }
 
     fn insert_canonical(
@@ -1120,6 +1151,7 @@ impl DcCkfState {
             .copied()
             .ok_or(KvCacheEventError::IndexerInvariantViolation)?;
         let current = ownership.owners;
+        assert_ne!(current, 0, "source mapping has no canonical owner");
         let remove_resident = current == 1 && ownership.resident;
         if remove_resident {
             self.reserve_publication_scratch(1)?;
@@ -1128,10 +1160,11 @@ impl DcCkfState {
             .source_lineage
             .remove(&worker)
             .ok_or(KvCacheEventError::IndexerInvariantViolation)?;
-        if lineage.get(&external) != Some(&canonical) {
-            self.source_lineage.insert(worker, lineage);
-            return Err(KvCacheEventError::IndexerInvariantViolation);
-        }
+        assert_eq!(
+            lineage.get(&external),
+            Some(&canonical),
+            "source mapping changed during actor-owned removal"
+        );
         if remove_resident {
             let dirty = &mut self.publication.dirty;
             let physical_touches = &mut self.telemetry.physical_touches;
@@ -1148,22 +1181,30 @@ impl DcCkfState {
         }
 
         if current == 1 {
-            if self.canonical_owners.remove(&canonical).is_none() {
-                self.source_lineage.insert(worker, lineage);
-                return Err(KvCacheEventError::IndexerInvariantViolation);
-            }
+            assert!(
+                self.canonical_owners.remove(&canonical).is_some(),
+                "source mapping references missing ownership"
+            );
             if remove_resident {
-                self.resident_count -= 1;
+                self.resident_count = self
+                    .resident_count
+                    .checked_sub(1)
+                    .expect("resident ownership is missing from the resident count");
             }
         } else {
-            let Some(ownership) = self.canonical_owners.get_mut(&canonical) else {
-                self.source_lineage.insert(worker, lineage);
-                return Err(KvCacheEventError::IndexerInvariantViolation);
-            };
+            let ownership = self
+                .canonical_owners
+                .get_mut(&canonical)
+                .expect("source mapping references missing ownership");
             ownership.owners = current - 1;
         }
+        if current == 1
+            && let Some(delegate) = &self.delegate
+        {
+            delegate.on_remove(canonical);
+        }
         let removed = lineage.remove(&external);
-        debug_assert_eq!(removed, Some(canonical));
+        assert_eq!(removed, Some(canonical));
         if !lineage.is_empty() {
             self.source_lineage.insert(worker, lineage);
         }
@@ -1188,7 +1229,7 @@ impl DcCkfState {
             self.remove(worker, hash)?;
         }
         self.remove_scratch.clear();
-        self.source_lineage.remove(&worker);
+        assert!(self.source_lineage.remove(&worker).is_none());
         Ok(())
     }
 
@@ -1216,6 +1257,9 @@ impl DcCkfState {
             }
             images
         });
+        let net_reverted = distinct_touched
+            .checked_sub(emitted_images as u64)
+            .expect("emitted images exceed distinct touched buckets");
         self.publication.dirty.clear();
         self.telemetry.distinct_touched_buckets = self
             .telemetry
@@ -1228,7 +1272,7 @@ impl DcCkfState {
         self.telemetry.net_reverted_buckets = self
             .telemetry
             .net_reverted_buckets
-            .saturating_add(distinct_touched.saturating_sub(emitted_images as u64));
+            .saturating_add(net_reverted);
         self.publication.pending_events = 0;
         Some(DcCkfPublicationBatch { images: images? })
     }
@@ -1237,11 +1281,12 @@ impl DcCkfState {
         &mut self,
         maximum_new_touches: usize,
     ) -> Result<(), KvCacheEventError> {
-        let maximum_new_touches = maximum_new_touches.min(
-            self.format
-                .bucket_count
-                .saturating_sub(self.publication.dirty.buckets.len()),
-        );
+        let available_buckets = self
+            .format
+            .bucket_count
+            .checked_sub(self.publication.dirty.buckets.len())
+            .expect("dirty bucket set exceeds filter bucket count");
+        let maximum_new_touches = maximum_new_touches.min(available_buckets);
         self.publication.dirty.try_reserve(maximum_new_touches)
     }
 
@@ -2232,13 +2277,17 @@ mod tests {
     #[test]
     fn replacement_failure_after_valid_prefix_leaves_state_untouched() {
         let existing = WorkerWithDpRank::new(1, 0);
-        let mut state = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        let recorder =
+            std::sync::Arc::new(crate::indexer::delegate_tests::CanonicalRecorder::default());
+        let mut state =
+            DcCkfState::new_with_delegate(CkfConfig::new(64), recorder.clone()).unwrap();
         assert!(
             state
                 .apply_event(stored(existing, 1, &[7]))
                 .first_error()
                 .is_none()
         );
+        assert_eq!(recorder.take(), vec![(true, canonical_root(7))]);
         state.barrier_snapshot().unwrap();
         let lineage_before = state.source_lineage.clone();
         let owners_before = state.canonical_owners.clone();
@@ -2256,6 +2305,14 @@ mod tests {
         assert!(!state.is_resident(&canonical_root(11)));
         assert!(!state.is_resident(&canonical_root(13)));
         assert!(state.drain_publication().is_none());
+        assert!(recorder.take().is_empty());
+
+        state.fail_replacement_install_after = None;
+        state.replace_rank(existing, replacement(&[11])).unwrap();
+        assert_eq!(
+            recorder.take(),
+            vec![(false, canonical_root(7)), (true, canonical_root(11))]
+        );
     }
 
     #[test]

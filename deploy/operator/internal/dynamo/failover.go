@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -311,13 +312,14 @@ func gmsRCTName(serviceName string, rank int32) string {
 }
 
 // gmsResourceClaimTemplateConfigs builds one PCS-level ResourceClaimTemplateConfig
-// per rank. Each RCT has the same GPU spec but a distinct per-rank name so that
-// each rank's GMS + engine pods get their own ResourceClaim.
-func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements, roles []ServiceRole) ([]grovev1alpha1.ResourceClaimTemplateConfig, error) {
-	gpuCount, err := getGPUCount(resources)
-	if err != nil {
-		return nil, err
-	}
+// per rank. Each rank resolves the complete template for its semantic engine
+// role, so Leader and Worker may request different GPU counts.
+func gmsResourceClaimTemplateConfigs(
+	serviceName string,
+	gmsSpec *v1beta1.GPUMemoryServiceSpec,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	roles []ServiceRole,
+) ([]grovev1alpha1.ResourceClaimTemplateConfig, error) {
 	seen := map[int32]bool{}
 	configs := make([]grovev1alpha1.ResourceClaimTemplateConfig, 0, len(roles))
 	for _, r := range roles {
@@ -325,6 +327,18 @@ func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMem
 			continue
 		}
 		seen[r.Rank] = true
+		engineRole, ok := engineRoleForRank(roles, r.Rank)
+		if !ok {
+			return nil, fmt.Errorf("rank %d has no engine role", r.Rank)
+		}
+		resourceComponent, err := EffectiveComponentForRole(component, engineRole)
+		if err != nil {
+			return nil, fmt.Errorf("resolve GPU resources for rank %d role %q: %w", r.Rank, engineRole, err)
+		}
+		gpuCount, err := getGPUCount(GetMainContainerResources(resourceComponent))
+		if err != nil {
+			return nil, fmt.Errorf("resolve GPU count for rank %d role %q: %w", r.Rank, engineRole, err)
+		}
 		configs = append(configs, grovev1alpha1.ResourceClaimTemplateConfig{
 			Name: gmsRCTName(serviceName, r.Rank),
 			TemplateSpec: resourcev1.ResourceClaimTemplateSpec{
@@ -346,6 +360,15 @@ func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMem
 		})
 	}
 	return configs, nil
+}
+
+func engineRoleForRank(roles []ServiceRole, rank int32) (Role, bool) {
+	for _, role := range roles {
+		if role.Rank == rank && role.Role != RoleGMS {
+			return role.Role, true
+		}
+	}
+	return "", false
 }
 
 // gmsResourceSharingEntries builds one PCSG-level ResourceSharingSpec per rank.
@@ -400,6 +423,49 @@ const (
 	failoverEngineCount = 2
 )
 
+// ValidateSnapshotFailover checks the requirements for snapshot-backed intra-pod
+// failover. component and fldPath must not be nil.
+func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
+	config := GetCheckpoint(component)
+
+	// Apply these checks only to snapshot-backed intra-pod failover.
+	if config == nil || !IsIntraPodFailoverEnabled(component) || component.IsInterPodGMSEnabled() {
+		return nil
+	}
+
+	var allErrs field.ErrorList
+
+	// Resolve the backend exactly as rendering does, including command inference.
+	// TRT-LLM snapshot failover is not supported yet; reject it at admission.
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	if err != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"))
+	} else if !snapshotFailoverBackendSupported(backendFramework) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), fmt.Sprintf("Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: %s)", backendFramework)))
+	}
+
+	// Require a single node setup.
+	if component.GetNumberOfNodes() != 1 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Snapshot-backed intra-pod failover requires a single node setup"))
+	}
+
+	// Capture main; an omitted target container name defaults to main.
+	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("experimental", "checkpoint", "targetContainerName"), config.TargetContainerName, "must be main for intra-pod failover"))
+	}
+
+	// Automatic capture requires WaitForCheckpoint so workers start from a ready snapshot.
+	automaticCapture := strings.TrimSpace(ptr.Deref(config.CheckpointRef, "")) == ""
+	if automaticCapture && config.StartupPolicy != v1beta1.CheckpointStartupPolicyWaitForCheckpoint {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "startupPolicy"), "Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"))
+	}
+	return allErrs
+}
+
+func snapshotFailoverBackendSupported(backendFramework BackendFramework) bool {
+	return backendFramework == BackendFrameworkVLLM || backendFramework == BackendFrameworkSGLang
+}
+
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
 // engine pod. v1beta1 FailoverSpec is presence-only: v1alpha1 conversion only
@@ -421,39 +487,55 @@ func IntraPodFailoverEngineContainerNames() []string {
 	return names
 }
 
-// buildFailoverPod clones the main container into two engine containers (active + standby).
-// This runs AFTER applyGPUMemoryService, so the main container already has DRA claims,
-// shared volume mount, and TMPDIR set. This function only handles engine duplication
-// and failover-specific env vars.
-//
-// Non-main containers (e.g. frontend sidecar) are preserved in the final pod spec.
-func buildFailoverPod(
-	podSpec *corev1.PodSpec,
-	numberOfNodes int32,
-	backendFramework BackendFramework,
-) error {
+// PrepareSnapshotFailoverCapture removes defaults that can create conflicting
+// listeners when a snapshot is restored into both engines in one Pod.
+// FPM is handled because WorkerDefaults automatically injects its port.
+// Other activation paths and runtime socket cleanup remain engine concerns.
+// Mutates container, which must not be nil.
+func PrepareSnapshotFailoverCapture(container *corev1.Container) {
+	// Remove the FPM port from the capture environment.
+	filtered := container.Env[:0]
+	for _, env := range container.Env {
+		if env.Name != "DYN_FORWARDPASS_METRIC_PORT" {
+			filtered = append(filtered, env)
+		}
+	}
+	container.Env = filtered
+}
+
+// buildSnapshotFailoverPod prepares the restored active/standby pair for vLLM
+// and SGLang with GMS V1. TRT-LLM is gated until its restore/election path exists.
+// Collective ports are captured state, so cold shadow overrides do not apply.
+// Mutates podSpec, which must not be nil and must already have GMS resources.
+func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+	// Defend direct rendering as well as objects that bypassed admission.
+	if !snapshotFailoverBackendSupported(backendFramework) {
+		return fmt.Errorf("Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: %s)", backendFramework)
+	}
+	if numberOfNodes != 1 {
+		return fmt.Errorf("Snapshot-backed intra-pod failover requires a single node setup")
+	}
+
+	return buildFailoverEnginePair(podSpec)
+}
+
+// buildFailoverEnginePair replaces main with two engine containers, preserving
+// sidecars and the already configured DRA claim and GMS shared mount. Both the
+// snapshot path and cold-start failover path use these identity/probe settings.
+// Mutates podSpec, which must not be nil and must have main as its first container.
+func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
 	}
 
+	// Clone main before applying any path-specific overrides.
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
-
 	engines := make([]corev1.Container, failoverEngineCount)
 	for i := range failoverEngineCount {
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}
-
 	podSpec.Containers = append(engines, sidecars...)
-
-	// Backend-specific overrides
-	switch backendFramework {
-	case BackendFrameworkVLLM:
-		applyVLLMOverrides(podSpec, numberOfNodes)
-	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
-	}
-
 	return nil
 }
 
@@ -484,6 +566,8 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		"DYN_HEALTH_CHECK_ENABLED":              true,
 		"CONTAINER_NAME":                        true,
 		"DYN_FORWARDPASS_METRIC_PORT":           true,
+		// Only the cold-start failover path re-enables shadow mode after cloning.
+		"DYN_VLLM_GMS_SHADOW_MODE": true,
 	}
 
 	var filtered []corev1.EnvVar

@@ -3,14 +3,14 @@
 
 """Move non-Parameter tensors out of GMS storage before weight publication.
 
-Dynamo Snapshot invokes this copy only after a whole engine has been put to
-sleep by GMS. Restore preserves the same Python/Torch process state, TensorImpls,
-post-partition StorageImpl graph, layouts, allocation IDs, and CUDA VA
-reservations. Model construction, loading, and this copy do not run again after
-restore. The rank-local GMS sidecar survives separately and retains committed
-weight backing. Copies made with Torch's default allocator are ordinary
-process-owned Snapshot state. KV physical backing and contents are not retained;
-fresh backing is mapped at preserved VAs.
+Dynamo Snapshot invokes this copy while a whole engine is paused, before GMS
+publishes and unmaps its weights. Restore preserves the same Python/Torch process
+state, TensorImpls, post-partition StorageImpl graph, layouts, allocation IDs,
+and CUDA VA reservations. Model construction, loading, and this copy do not run
+again after restore. The rank-local GMS sidecar survives separately and retains
+committed weight backing. Copies made with Torch's default allocator are
+ordinary process-owned Snapshot state. KV physical backing and contents are not
+retained; fresh backing is mapped at preserved VAs.
 
 One GMS source storage may contain Parameters and other tensor views::
 
@@ -138,16 +138,17 @@ def _clone_storage_spans_and_rebind_tensors(
     return copied_bytes
 
 
-def _iter_live_tensors(model: object):
-    yield from model.parameters()
+def _iter_live_tensors(models: Iterable[object]):
+    for model in models:
+        yield from model.parameters()
     for value in gc.get_objects():
         if issubclass(type(value), torch.Tensor) and value.layout is torch.strided:
             yield value
 
 
-def _discover_live_tensors(model: object) -> list[tuple[torch.Tensor, bool]]:
+def _discover_live_tensors(models: Iterable[object]) -> list[tuple[torch.Tensor, bool]]:
     objects: dict[int, tuple[torch.Tensor, bool]] = {}
-    for tensor in _iter_live_tensors(model):
+    for tensor in _iter_live_tensors(models):
         tensor_id = int(tensor._cdata)
         tensor_object = objects.get(tensor_id)
         if tensor_object is None:
@@ -178,7 +179,7 @@ def _containing_mapping(
 
 
 def copy_non_parameter_tensors_to_default_allocator(
-    model: object,
+    models: Iterable[object],
     mappings: tuple[LocalMapping, ...],
 ) -> tuple[int, int]:
     """Copy live non-Parameters out of GMS and return span/copy byte counts."""
@@ -187,7 +188,7 @@ def copy_non_parameter_tensors_to_default_allocator(
     mapping_bases = tuple(mapping.base for mapping in mappings)
     retained_parameter_spans: list[tuple[int, int]] = []
     non_parameters: list[torch.Tensor] = []
-    for tensor, is_parameter in _discover_live_tensors(model):
+    for tensor, is_parameter in _discover_live_tensors(models):
         if _containing_mapping(tensor, mappings, mapping_bases) is None:
             continue
         if not is_parameter:

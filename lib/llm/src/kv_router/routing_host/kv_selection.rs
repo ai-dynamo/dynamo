@@ -6,19 +6,19 @@ use std::collections::HashSet;
 use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    router_hint::RouterHint,
-    scheduling::{AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
-    selector::WorkerSelector,
+    kv_hints::KvHint,
+    protocols::{
+        BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+    },
+    scheduling::{
+        AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
+        queue::BookingHandle,
+    },
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{
-        FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
-        routing_host::RoutingHost,
-    },
-    local_model::runtime_config::ModelRuntimeConfig,
+    kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -29,15 +29,23 @@ use crate::{
 
 pub(super) struct WorkerSelection {
     pub(super) worker: WorkerWithDpRank,
+    /// The booking's handle until the request's cleanup takes it over.
+    pub(super) booking: Option<BookingHandle>,
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
+    pub(super) selected_raw_cached_tokens: Option<usize>,
+    /// Greatest raw router-visible overlap among eligible workers, in tokens.
+    pub(super) max_raw_cached_tokens: Option<usize>,
     pub(super) potential_decode_blocks: u64,
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) router_hint: Option<RouterHint>,
+    pub(super) kv_hint: Option<KvHint>,
+    pub(super) request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
+// Transient return value; `Routed` is moved into `WorkerSelection` right away.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum SelectionOutcome {
     Routed(WorkerSelection),
     QueueRejected(QueueRejection),
@@ -69,6 +77,7 @@ impl<'a> RoutingRequestParts<'a> {
 }
 
 pub(super) struct SelectionOptions {
+    pub(super) pinned_target: Option<AffinityTarget>,
     pub(super) affinity_target: Option<AffinityTarget>,
     pub(super) planned_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
@@ -89,18 +98,16 @@ struct BestMatchArgs<'a> {
     policy_class: Option<String>,
     session_context: Option<dynamo_kv_router::SessionContext>,
     expected_output_tokens: Option<u32>,
+    affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
     admission: FindBestMatchAdmission,
 }
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<SelectionOutcome, Error> {
-        let outcome = self
+        let admitted = self
             .kv_router()
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
@@ -116,59 +123,41 @@ where
                 args.policy_class,
                 args.session_context,
                 args.expected_output_tokens,
+                args.affinity_target,
                 args.pinned_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 args.admission,
             )
             .await?;
-        match outcome {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => match outcome {
-                FindBestMatchOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    routing_hashes,
-                    router_hint,
-                } => Ok(SelectionOutcome::Routed(WorkerSelection {
-                    worker,
-                    overlap_amount: overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load: None,
-                    routing_hashes,
-                    router_hint,
-                })),
-                FindBestMatchOutcome::QueueRejected { rejection } => {
-                    Ok(SelectionOutcome::QueueRejected(rejection))
-                }
-            },
-            FindBestMatchInnerOutcome::WithoutAdmission(outcome) => match outcome {
-                crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load,
-                    routing_hashes,
-                } => Ok(SelectionOutcome::Routed(WorkerSelection {
-                    worker,
-                    overlap_amount: overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load: Some(selected_worker_load),
-                    routing_hashes,
-                    router_hint: None,
-                })),
-                crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { rejection } => {
-                    Ok(SelectionOutcome::QueueRejected(rejection))
-                }
-            },
+        match admitted.outcome {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                effective_overlap_blocks,
+                cached_tokens,
+                selected_raw_cached_tokens,
+                max_raw_cached_tokens,
+                potential_decode_blocks,
+                routing_hashes,
+                kv_hint,
+            } => Ok(SelectionOutcome::Routed(WorkerSelection {
+                worker,
+                booking: admitted.booking,
+                overlap_amount: overlap_blocks,
+                effective_overlap_blocks,
+                cached_tokens,
+                selected_raw_cached_tokens,
+                max_raw_cached_tokens,
+                potential_decode_blocks,
+                selected_worker_load: admitted.advisory_load,
+                routing_hashes,
+                kv_hint,
+                request_lifecycle: None,
+            })),
+            FindBestMatchOutcome::QueueRejected { rejection } => {
+                Ok(SelectionOutcome::QueueRejected(rejection))
+            }
         }
     }
 
@@ -224,13 +213,14 @@ where
         let return_routing_hashes =
             !is_query_only && self.kv_router().indexer().records_routing_decisions();
         let SelectionOptions {
+            pinned_target,
             affinity_target,
             planned_worker,
             policy_class,
             session_context,
             admission,
         } = options;
-        let worker_only_affinity = affinity_target.filter(|target| target.dp_rank.is_none());
+        let worker_only_affinity = pinned_target.filter(|target| target.dp_rank.is_none());
         if let Some(target) = worker_only_affinity {
             match &mut allowed_worker_ids {
                 Some(allowed_workers) => {
@@ -252,7 +242,7 @@ where
             }
             (explicit_pin, _) => explicit_pin,
         };
-        let affinity_pin = affinity_target.and_then(|target| {
+        let affinity_pin = pinned_target.and_then(|target| {
             target
                 .dp_rank
                 .map(|dp_rank| (target.worker_id, Some(dp_rank)))
@@ -299,6 +289,8 @@ where
                     policy_class,
                     session_context,
                     expected_output_tokens,
+                    affinity_target: affinity_target
+                        .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
                     pinned_worker: None,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
@@ -365,6 +357,7 @@ where
             policy_class,
             session_context,
             expected_output_tokens,
+            affinity_target: None,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,

@@ -597,6 +597,7 @@ async fn main() -> Result<()> {
             stddev: 0.0,
         },
         shared_prefix_ratio: 0.0,
+        cached_prefix_tokens: 0,
         num_prefix_groups: 0,
         first_turn_arrivals: ArrivalSpec::Burst,
         inter_turn_delays: if args.mean_delay_ms == 0 {

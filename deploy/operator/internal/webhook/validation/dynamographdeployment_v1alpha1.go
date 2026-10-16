@@ -27,7 +27,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
-		!v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
 	return v.validateDynamoGraphDeploymentSpecV1alpha1(
@@ -61,6 +61,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			servicePath,
 			dynamoNamespace,
 		)...)
+	}
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntimeV1Alpha1(spec, fldPath)...)
 	}
 	return allErrs
 }

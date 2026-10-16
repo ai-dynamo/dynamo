@@ -6,5 +6,8 @@
   "dependencies": {
     "node-ical": "0.20.0"
   },
+  "overrides": {
+    "axios": ">=1.18.1 <2.0.0"
+  },
   "private": true
 }

@@ -34,7 +34,7 @@ impl KvStateAgentHost {
         let endpoint = self.endpoint.clone();
         let max_slots = self.max_slots;
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
                     llm_rs::kv_router::publisher::KvStateAgentHost::start(
@@ -53,7 +53,7 @@ impl KvStateAgentHost {
 
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             Python::with_gil(|py| {
                 pythonize::pythonize(py, inner.status().as_ref())
                     .map(|value| value.unbind())
@@ -64,14 +64,12 @@ impl KvStateAgentHost {
 
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.shutdown().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.shutdown().await.map_err(to_pyerr) })
     }
 
     fn wait_terminated<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner.wait_terminated().await;
             Ok(())
         })
@@ -155,7 +153,7 @@ impl KvStateAttachmentOwner {
         let worker_id = self.worker_id;
         let descriptors = self.descriptors.clone();
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
                     llm_rs::kv_router::publisher::KvStateAttachmentOwner::start(
@@ -173,9 +171,7 @@ impl KvStateAttachmentOwner {
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.close().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.close().await.map_err(to_pyerr) })
     }
 }
 

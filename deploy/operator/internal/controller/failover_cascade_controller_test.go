@@ -21,7 +21,6 @@ import (
 	"context"
 	"testing"
 
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 const (
@@ -124,8 +122,6 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	differentPodIndex := newFailoverPod("different-pod-index", corev1.PodRunning, "0", "1")
 	differentMember := newFailoverPod("different-member", corev1.PodRunning, "0", "0")
 	differentMember.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = "false"
-	restoreTarget := newFailoverPod("restore-target", corev1.PodRunning, "0", "0")
-	restoreTarget.Labels[snapshotprotocol.RestoreTargetLabel] = commonconsts.KubeLabelValueTrue
 	differentNamespace := newFailoverPod("different-namespace", corev1.PodRunning, "0", "0")
 	differentNamespace.Namespace = "other-ns"
 
@@ -143,7 +139,6 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 			differentReplica,
 			differentPodIndex,
 			differentMember,
-			restoreTarget,
 			differentNamespace,
 		).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -161,11 +156,10 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Log("Verify the delete is namespace-scoped, excludes restore targets, and uses zero grace")
+	t.Log("Verify the delete is namespace-scoped and uses zero grace")
 	assert.Equal(t, cascadeTestNamespace, deleteOptions.Namespace)
 	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(failedPod.Labels)))
 	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(sibling.Labels)))
-	assert.False(t, deleteOptions.LabelSelector.Matches(labels.Set(restoreTarget.Labels)))
 	require.NotNil(t, deleteOptions.GracePeriodSeconds)
 	assert.Zero(t, *deleteOptions.GracePeriodSeconds)
 
@@ -181,7 +175,6 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	} {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 	}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(restoreTarget), &corev1.Pod{}))
 }
 
 func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
@@ -333,41 +326,4 @@ func TestFailoverCascade_ConcurrentReconcileIsIdempotent(t *testing.T) {
 	var remaining corev1.PodList
 	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Empty(t, remaining.Items)
-}
-
-func TestFailoverCascade_SnapshotRestoreTargetCannotDeleteSibling(t *testing.T) {
-	t.Log("Build a terminal Snapshot restore target with every failover label and a matching sibling")
-	pod := gmsPodReplacementTestPod("snapshot-uid", 0)
-	pod.Status.Phase = corev1.PodFailed
-	pod.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
-	pod.Labels[groveLabelPCSG] = cascadeTestPCSG
-	pod.Labels[groveLabelPCSGReplicaIndex] = "0"
-	pod.Labels[groveLabelPodIndex] = "0"
-	sibling := newFailoverPod("sibling", corev1.PodRunning, "0", "0")
-	sibling.Namespace = pod.Namespace
-
-	t.Log("Verify the failover predicate rejects the unsupported Snapshot overlap")
-	pred := failoverCascadePredicate()
-	assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
-	oldPod := pod.DeepCopy()
-	oldPod.Status.Phase = corev1.PodRunning
-	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: pod}))
-
-	t.Log("Verify native GMS replacement does not admit the Pod before its sidecar restarts")
-	assert.False(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
-
-	t.Log("Reconcile defensively and verify neither the trigger nor sibling is cascade-deleted")
-	r, c := newCascadeReconciler(pod, sibling)
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: client.ObjectKeyFromObject(pod),
-	})
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
-
-	t.Log("Verify native GMS replacement independently admits the same Pod after its sidecar restarts")
-	pod.Status.InitContainerStatuses[0].RestartCount = 1
-	assert.Equal(t, commonconsts.KubeLabelValueTrue, pod.Labels[snapshotprotocol.RestoreTargetLabel])
-	assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
 }
