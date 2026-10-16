@@ -363,9 +363,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    // Keep Rust unit tests here free of Python C API calls. This crate uses
-    // PyO3's `extension-module` feature, so standalone `cargo test` binaries
-    // intentionally do not link libpython. Python behavior is covered by
+    // Codec-only checks live here; Python-facing behavior is covered by
     // tests/test_request_plane_python_payload.py against the built extension.
 
     use super::{
