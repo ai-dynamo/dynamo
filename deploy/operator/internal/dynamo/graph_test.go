@@ -6783,7 +6783,8 @@ func TestGenerateBasePodSpec_EmptyMainContainerPortsOverrideWorkerDefaults(t *te
 	require.Empty(t, podSpec.Containers[0].Ports)
 }
 
-func TestGenerateBasePodSpec_LegacyEPPAuthoredCommandDropsDefaultArgs(t *testing.T) {
+func TestGenerateBasePodSpec_LegacyEPPAuthoredCommandPreservesDefaultArgs(t *testing.T) {
+	t.Log("Render a legacy EPP with an authored command and no arguments")
 	podSpec, err := GenerateBasePodSpec(
 		&v1beta1.DynamoComponentDeploymentSharedSpec{
 			ComponentName: "epp",
@@ -6818,10 +6819,20 @@ func TestGenerateBasePodSpec_LegacyEPPAuthoredCommandDropsDefaultArgs(t *testing
 		staticContainerGPUCount(0),
 	)
 
+	t.Log("Check that the authored command keeps the generated legacy EPP launch arguments")
 	require.NoError(t, err)
 	require.NotEmpty(t, podSpec.Containers)
 	require.Equal(t, []string{"/epp"}, podSpec.Containers[0].Command)
-	require.Nil(t, podSpec.Containers[0].Args)
+	require.Equal(t, []string{
+		"--pool-name", "test-deployment-pool",
+		"--pool-namespace", "default",
+		"--pool-group", "inference.networking.k8s.io",
+		"-v", "4",
+		"--zap-encoder", "json",
+		"--grpc-port", "9002",
+		"--grpc-health-port", "9003",
+		"--config-file", "/etc/epp/epp-config-dynamo.yaml",
+	}, podSpec.Containers[0].Args)
 }
 
 func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {

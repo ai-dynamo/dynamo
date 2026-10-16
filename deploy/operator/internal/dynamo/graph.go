@@ -1807,10 +1807,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if main := GetMainContainer(component); main != nil {
 		// Copy the authored container before merging fields and environment variables.
 		main = main.DeepCopy()
-		// An authored command owns the argv; mergo would keep default args under it.
-		if len(main.Command) > 0 {
+
+		// Authored frontend commands replace the default invocation; other components retain their launch arguments.
+		if component.ComponentType == v1beta1.ComponentTypeFrontend && len(main.Command) > 0 {
 			container.Args = nil
 		}
+
+		// Merge authored fields and environment variables into the component defaults.
 		baseEnv := container.Env
 		if err := mergo.Merge(&container, *main, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
