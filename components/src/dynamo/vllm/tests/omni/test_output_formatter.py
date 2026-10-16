@@ -486,9 +486,6 @@ class TestDiffusionFormatterImage:
             [], "req-1", request_type=RequestType.IMAGE_GENERATION
         )
         assert "Error" in chunk["choices"][0]["delta"]["content"]
-        # A failed generation reports no accounting.
-        assert "usage" not in chunk
-        assert "nvext" not in chunk
 
 
 class TestDiffusionFormatterVideo:

@@ -114,8 +114,7 @@ class ImageAccounting(BaseModel):
     ``input_reference`` or ``/v1/images/edits`` request."""
 
     num_inference_steps: Optional[int] = None
-    """The step count the request asked for (``nvext.num_inference_steps``).
-    ``None`` when the model default applied."""
+    """The step count the backend ran. ``None`` when the backend does not know it."""
 
 
 class ImagesResponseNvExt(BaseModel):
