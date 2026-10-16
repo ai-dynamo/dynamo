@@ -520,11 +520,6 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 }
 
-/// A KV fetch extends the device and host-pinned prefix; disk is not counted.
-pub(crate) fn transfer_local_prefix_blocks(device: usize, host_pinned: usize) -> u32 {
-    u32::try_from(device.saturating_add(host_pinned)).unwrap_or(u32::MAX)
-}
-
 impl SchedulingRequest {
     #[inline]
     pub fn eligibility(&self) -> RoutingEligibility<'_> {
@@ -564,13 +559,13 @@ impl SchedulingRequest {
         blocks.saturating_mul(block_size as usize)
     }
 
-    /// The prefix a KV fetch would extend on `worker`.
+    /// The prefix a KV fetch would extend on `worker`: its device and
+    /// host-pinned overlap. Disk is not counted.
     pub(crate) fn transfer_local_prefix_blocks_for(&self, worker: WorkerWithDpRank) -> u32 {
         let tiers = &self.overlap.tier_overlap_blocks;
-        transfer_local_prefix_blocks(
-            tiers.device.get(&worker).copied().unwrap_or(0),
-            tiers.host_pinned.get(&worker).copied().unwrap_or(0),
-        )
+        let device = tiers.device.get(&worker).copied().unwrap_or(0);
+        let host_pinned = tiers.host_pinned.get(&worker).copied().unwrap_or(0);
+        u32::try_from(device.saturating_add(host_pinned)).unwrap_or(u32::MAX)
     }
 
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
