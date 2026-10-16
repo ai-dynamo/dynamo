@@ -3,7 +3,12 @@
 
 //! Single-threaded compressed radix tree for KV cache routing.
 
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::sync::Arc;
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    rc::{Rc, Weak},
+};
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
@@ -18,6 +23,7 @@ type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedRadixBlock>;
 pub(crate) struct RadixBlock {
     state: NodeState,
     children: FxHashMap<LocalBlockHash, SharedRadixBlock>,
+    parent: Weak<RefCell<RadixBlock>>,
     /// Once a node has children it is never eligible for leaf extension again.
     internal: bool,
 }
@@ -27,21 +33,50 @@ impl RadixBlock {
         Self {
             state: NodeState::empty(),
             children: FxHashMap::default(),
+            parent: Weak::new(),
             internal: true,
         }
     }
 
-    fn for_blocks(blocks: &[KvCacheStoredBlockData], worker: WorkerWithDpRank) -> Self {
+    fn for_blocks(
+        blocks: &[KvCacheStoredBlockData],
+        worker: WorkerWithDpRank,
+        parent: &SharedRadixBlock,
+    ) -> Self {
         Self {
             state: NodeState::for_blocks(blocks, worker),
             children: FxHashMap::default(),
+            parent: Rc::downgrade(parent),
             internal: false,
         }
     }
 
-    fn clear_children_if_unreachable(&mut self) {
-        if self.state.full_edge_workers.is_empty() {
-            self.children.clear();
+    fn prune_unreachable(node: &SharedRadixBlock) {
+        let (parent, key) = {
+            let mut node_ref = node.borrow_mut();
+            debug_assert!(!node_ref.state.edge.is_empty(), "cannot prune the root");
+            if node_ref.state.full_edge_workers.is_empty() {
+                node_ref.children.clear();
+            }
+            if node_ref.state.has_any_workers() {
+                return;
+            }
+            (
+                node_ref.parent.upgrade(),
+                node_ref.state.edge.first().map(|&(key, _)| key),
+            )
+        };
+        if let (Some(parent), Some(key)) = (parent, key) {
+            let mut parent = parent.borrow_mut();
+            // A detached node can outlive its old edge through a worker lookup.
+            // Do not remove a replacement that now uses the same local hash.
+            if parent
+                .children
+                .get(&key)
+                .is_some_and(|child| Rc::ptr_eq(child, node))
+            {
+                parent.children.remove(&key);
+            }
         }
     }
 }
@@ -49,6 +84,7 @@ impl RadixBlock {
 pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
+    lifecycle: super::HashLifecycle,
 }
 
 impl Default for RadixTree {
@@ -79,11 +115,28 @@ impl Drop for RadixTree {
 }
 
 impl RadixTree {
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     pub fn new() -> Self {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
+            lifecycle: super::HashLifecycle::default(),
         }
+    }
+
+    pub(crate) fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> bool {
+        self.lookup
+            .get(&worker)
+            .is_some_and(|lookup| lookup.contains_key(&block_hash))
     }
 
     pub fn find_match_details(
@@ -98,7 +151,7 @@ impl RadixTree {
         &self,
         sequence: Vec<LocalBlockHash>,
         early_exit: bool,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.is_empty() {
@@ -111,8 +164,8 @@ impl RadixTree {
         let mut seq_pos = 0usize;
         let mut first_node = true;
         let mut last_matched_hash = None;
-        let mut router_hint_root_chain =
-            retain_router_hint_chain.then(|| Vec::with_capacity(sequence.len()));
+        let mut kv_transfer_chain =
+            retain_kv_transfer_chain.then(|| Vec::with_capacity(sequence.len()));
 
         while seq_pos < sequence.len() {
             let Some(node) = next.take() else {
@@ -133,7 +186,7 @@ impl RadixTree {
                 break;
             }
 
-            if let Some(block_hashes) = router_hint_root_chain.as_mut() {
+            if let Some(block_hashes) = kv_transfer_chain.as_mut() {
                 block_hashes.extend(
                     node.state
                         .edge
@@ -215,8 +268,8 @@ impl RadixTree {
             }
         }
 
-        if let Some(block_hashes) = router_hint_root_chain {
-            details.retain_router_hint_root_candidates(block_hashes);
+        if let Some(block_hashes) = kv_transfer_chain {
+            details.retain_kv_transfer_candidates(block_hashes);
         }
 
         details
@@ -291,6 +344,7 @@ impl RadixTree {
                     };
                     if !node_ref.state.covers_pos(worker, pos) {
                         self.lookup.get_mut(&worker).unwrap().remove(&parent_hash);
+                        self.lifecycle.remove(worker, parent_hash);
                         self.log_missing_parent(worker, event_id, &store);
                         return Err(KvCacheEventError::ParentBlockNotFound);
                     }
@@ -339,7 +393,9 @@ impl RadixTree {
                     break;
                 }
 
-                let child = Rc::new(RefCell::new(RadixBlock::for_blocks(remaining, worker)));
+                let child = Rc::new(RefCell::new(RadixBlock::for_blocks(
+                    remaining, worker, &parent,
+                )));
                 {
                     let mut parent_ref = parent.borrow_mut();
                     parent_ref.internal = true;
@@ -350,36 +406,18 @@ impl RadixTree {
                 break;
             };
 
-            let (edge_len, match_len, mismatch) = {
+            let (edge_len, match_len) = {
                 let child_ref = child.borrow();
                 let edge_len = child_ref.state.edge.len();
-                let mut mismatch = None;
                 let match_len = child_ref
                     .state
                     .edge
                     .iter()
                     .zip(remaining)
-                    .take_while(|((local_hash, existing_hash), block)| {
-                        if local_hash != &block.tokens_hash {
-                            return false;
-                        }
-                        if existing_hash != &block.block_hash && mismatch.is_none() {
-                            mismatch = Some((block.block_hash, *existing_hash));
-                        }
-                        true
-                    })
+                    .take_while(|((local_hash, _), block)| *local_hash == block.tokens_hash)
                     .count();
-                (edge_len, match_len, mismatch)
+                (edge_len, match_len)
             };
-
-            if let Some((expected, actual)) = mismatch {
-                duplicate_store = false;
-                tracing::warn!(
-                    ?expected,
-                    ?actual,
-                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                );
-            }
 
             if match_len < edge_len {
                 if match_len == remaining.len() {
@@ -397,7 +435,7 @@ impl RadixTree {
                 self.update_lookup_for_blocks(worker, &remaining[..match_len], &child);
 
                 let tail = &remaining[match_len..];
-                let tail_node = Rc::new(RefCell::new(RadixBlock::for_blocks(tail, worker)));
+                let tail_node = Rc::new(RefCell::new(RadixBlock::for_blocks(tail, worker, &child)));
                 {
                     let mut child_ref = child.borrow_mut();
                     child_ref.internal = true;
@@ -511,27 +549,47 @@ impl RadixTree {
                     full_edge_workers: suffix_full,
                 },
                 children: std::mem::take(&mut node_ref.children),
+                parent: Rc::downgrade(node),
                 internal: node_ref.internal,
             }));
+            for child in suffix.borrow().children.values() {
+                child.borrow_mut().parent = Rc::downgrade(&suffix);
+            }
             node_ref.children.insert(suffix_first_local, suffix.clone());
             node_ref.internal = true;
             suffix
         };
 
+        // Removal does not invalidate descendants, so a detached node can keep bits
+        // for a worker whose lookup no longer names it: the worker stored those
+        // blocks again on the live path, or its lookup was cleared. Move only the
+        // entries that still name the split node.
         let suffix_ref = suffix.borrow();
-        for &worker in &suffix_ref.state.full_edge_workers {
-            let blocks = suffix_ref.state.edge.iter().map(|&(_, hash)| hash);
-            let lookup = self.lookup.get_mut(&worker).unwrap();
-            for hash in blocks {
-                lookup.insert(hash, suffix.clone());
-            }
-        }
-        for (&worker, &cutoff) in &suffix_ref.state.worker_cutoffs {
-            let lookup = self.lookup.get_mut(&worker).unwrap();
+        let edge_len = suffix_ref.state.edge.len();
+        let full = suffix_ref
+            .state
+            .full_edge_workers
+            .iter()
+            .map(|&worker| (worker, edge_len));
+        let partial = suffix_ref
+            .state
+            .worker_cutoffs
+            .iter()
+            .map(|(&worker, &cutoff)| (worker, cutoff));
+        for (worker, cutoff) in full.chain(partial) {
+            let Some(lookup) = self.lookup.get_mut(&worker) else {
+                continue;
+            };
             for &(_, hash) in &suffix_ref.state.edge[..cutoff] {
-                lookup.insert(hash, suffix.clone());
+                if let Some(entry) = lookup.get_mut(&hash)
+                    && Rc::ptr_eq(entry, node)
+                {
+                    *entry = suffix.clone();
+                }
             }
         }
+        drop(suffix_ref);
+        RadixBlock::prune_unreachable(&suffix);
     }
 
     fn update_lookup_for_blocks(
@@ -547,6 +605,7 @@ impl RadixTree {
                 Some(existing) if Rc::ptr_eq(&existing, node) => {}
                 _ => changed = true,
             }
+            self.lifecycle.insert(worker, block.block_hash);
         }
         changed
     }
@@ -577,12 +636,17 @@ impl RadixTree {
             return Err(KvCacheEventError::BlockNotFound);
         };
         let mut first_error = None;
-        let mut eagerly_removed = FxHashSet::default();
+        // Hashes this event already dropped while truncating a node. They only
+        // matter when a later hash misses the lookup, which is rare, so they are
+        // indexed on the first miss instead of on every truncation.
+        let mut eagerly_removed = Vec::new();
+        let mut eagerly_removed_index = FxHashSet::default();
         let mut block_hashes = remove.block_hashes.into_iter().peekable();
 
         while let Some(block_hash) = block_hashes.next() {
             let Some(node) = lookup.remove(&block_hash) else {
-                if eagerly_removed.contains(&block_hash) {
+                eagerly_removed_index.extend(eagerly_removed.drain(..));
+                if eagerly_removed_index.contains(&block_hash) {
                     continue;
                 }
                 tracing::warn!(
@@ -638,16 +702,16 @@ impl RadixTree {
                 // worker. Otherwise stale descendants can be reused as store parents,
                 // reactivated by restoring only the removed block, or emitted by dumps
                 // without a valid worker-specific parent.
-                let outcome = node_ref
+                node_ref
                     .state
-                    .remove_worker_at_pos(worker, min_pos, min_hash);
-                node_ref.clear_children_if_unreachable();
-                outcome
+                    .remove_worker_at_pos(worker, min_pos, min_hash)
             };
-            for stale_hash in outcome.stale_hashes {
+            RadixBlock::prune_unreachable(&node);
+            for &stale_hash in &outcome.stale_hashes {
                 lookup.remove(&stale_hash);
-                eagerly_removed.insert(stale_hash);
+                self.lifecycle.remove(worker, stale_hash);
             }
+            eagerly_removed.extend_from_slice(&outcome.stale_hashes);
         }
 
         first_error.map_or(Ok(()), Err)
@@ -665,14 +729,18 @@ impl RadixTree {
             let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) else {
                 continue;
             };
+            if self.lifecycle.is_enabled() {
+                for &hash in blocks.keys() {
+                    self.lifecycle.remove(worker, hash);
+                }
+            }
             let mut seen = FxHashSet::default();
             for node in blocks.into_values() {
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                let mut node_ref = node.borrow_mut();
-                node_ref.state.drop_worker(worker);
-                node_ref.clear_children_if_unreachable();
+                node.borrow_mut().state.drop_worker(worker);
+                RadixBlock::prune_unreachable(&node);
             }
             if keep_worker {
                 self.lookup.insert(worker_key, FxHashMap::default());
@@ -689,14 +757,18 @@ impl RadixTree {
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
+        if self.lifecycle.is_enabled() {
+            for &hash in blocks.keys() {
+                self.lifecycle.remove(worker, hash);
+            }
+        }
         let mut seen = FxHashSet::default();
         for node in blocks.into_values() {
             if !seen.insert(Rc::as_ptr(&node)) {
                 continue;
             }
-            let mut node_ref = node.borrow_mut();
-            node_ref.state.drop_worker(worker);
-            node_ref.clear_children_if_unreachable();
+            node.borrow_mut().state.drop_worker(worker);
+            RadixBlock::prune_unreachable(&node);
         }
     }
 
@@ -830,8 +902,215 @@ mod tests {
     use super::*;
     use crate::indexer::WorkerKvQueryResponse;
     use crate::test_utils::{
-        create_remove_event, create_store_event, make_store_event, snapshot_events,
+        create_remove_event, create_store_event, make_clear_event_with_dp_rank, make_store_event,
+        make_store_event_with_parent, remove_event, snapshot_events,
     };
+
+    fn seq_hash(blocks: &[u64]) -> ExternalSequenceBlockHash {
+        let local_hashes = blocks
+            .iter()
+            .copied()
+            .map(LocalBlockHash)
+            .collect::<Vec<_>>();
+        ExternalSequenceBlockHash(*compute_seq_hash_for_block(&local_hashes).last().unwrap())
+    }
+
+    fn on(worker: WorkerWithDpRank, mut event: RouterEvent) -> RouterEvent {
+        event.worker_id = worker.worker_id;
+        event.event.dp_rank = worker.dp_rank;
+        event
+    }
+
+    /// A `RadixTree` fed alongside a set-semantics reference, in which a worker
+    /// matches every leading query block it still holds. The tree may score a
+    /// worker lower than the reference, but never higher.
+    #[derive(Default)]
+    struct ReferenceTree {
+        tree: RadixTree,
+        held: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
+    }
+
+    impl ReferenceTree {
+        fn apply(&mut self, event: RouterEvent) {
+            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+            match &event.event.data {
+                KvCacheEventData::Stored(store) => {
+                    let held = self.held.entry(worker).or_default();
+                    if store
+                        .parent_hash
+                        .is_none_or(|parent| held.contains(&parent))
+                    {
+                        held.extend(store.blocks.iter().map(|block| block.block_hash));
+                    }
+                }
+                KvCacheEventData::Removed(remove) => {
+                    if let Some(held) = self.held.get_mut(&worker) {
+                        for hash in &remove.block_hashes {
+                            held.remove(hash);
+                        }
+                    }
+                }
+                KvCacheEventData::Cleared => {
+                    self.held.remove(&worker);
+                }
+            }
+            let _ = self.tree.apply_event(event);
+        }
+
+        fn remove_worker(&mut self, worker_id: WorkerId) {
+            self.held.retain(|worker, _| worker.worker_id != worker_id);
+            self.tree.remove_worker(worker_id);
+        }
+
+        fn clear_all_blocks(&mut self, worker_id: WorkerId) {
+            self.held.retain(|worker, _| worker.worker_id != worker_id);
+            self.tree.clear_all_blocks(worker_id);
+        }
+
+        fn holds(&self, worker: WorkerWithDpRank, hash: ExternalSequenceBlockHash) -> bool {
+            self.held
+                .get(&worker)
+                .is_some_and(|held| held.contains(&hash))
+        }
+
+        /// Returns the tree's scores for `query`, or describes the first worker
+        /// the tree credits with more leading blocks than the worker holds.
+        fn checked_scores(
+            &self,
+            query: &[u64],
+        ) -> Result<FxHashMap<WorkerWithDpRank, u32>, String> {
+            let local_hashes = query
+                .iter()
+                .copied()
+                .map(LocalBlockHash)
+                .collect::<Vec<_>>();
+            let hashes = compute_seq_hash_for_block(&local_hashes);
+            let scores = self.tree.find_matches(local_hashes, false).scores;
+            for (&worker, &score) in &scores {
+                let held = hashes
+                    .iter()
+                    .take_while(|&&hash| self.holds(worker, ExternalSequenceBlockHash(hash)))
+                    .count();
+                if score as usize > held {
+                    return Err(format!(
+                        "{worker:?} scored {score} on {query:?} but holds {held} leading blocks"
+                    ));
+                }
+            }
+            Ok(scores)
+        }
+
+        fn scores(&self, query: &[u64]) -> FxHashMap<WorkerWithDpRank, u32> {
+            self.checked_scores(query).unwrap()
+        }
+    }
+
+    #[test]
+    fn cache_churn_releases_evicted_branches() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        for hash in [4, 5, 6, 7, 8] {
+            for worker in [1, 2] {
+                tree.apply_event(create_store_event(worker, hash, vec![1, 2, hash], None))
+                    .unwrap();
+            }
+            let branch = Rc::downgrade(
+                &tree.lookup[&WorkerWithDpRank::new(1, 0)][&ExternalSequenceBlockHash(hash * 100)],
+            );
+            if hash == 4 {
+                // Splitting the parent moves its existing children to the suffix.
+                tree.apply_event(create_store_event(1, hash, vec![1, 99], None))
+                    .unwrap();
+            }
+            tree.apply_event(create_remove_event(1, hash + 1, vec![hash]))
+                .unwrap();
+            assert!(
+                branch.upgrade().is_some(),
+                "another worker still owns the branch"
+            );
+            match hash % 4 {
+                0 => tree
+                    .apply_event(create_remove_event(2, hash + 1, vec![hash]))
+                    .unwrap(),
+                1 => tree.remove_worker(2),
+                2 => tree.remove_worker_dp_rank(2, 0),
+                _ => tree.clear_all_blocks(2),
+            }
+            assert!(
+                branch.upgrade().is_none(),
+                "evicted branch is still retained"
+            );
+            assert_eq!(tree.edge_lengths_for_test(), vec![1, 1, 1, 1]);
+            assert_eq!(tree.current_size(), if hash % 4 == 0 { 6 } else { 4 });
+        }
+    }
+
+    #[test]
+    fn removing_detached_node_preserves_replacement() {
+        let mut tree = RadixTree::new();
+        for blocks in [vec![1, 2, 3, 4], vec![1, 2, 3, 9]] {
+            tree.apply_event(create_store_event(2, 0, blocks, None))
+                .unwrap();
+        }
+        tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        let old_branch = Rc::downgrade(
+            &tree.lookup[&WorkerWithDpRank::new(2, 0)][&ExternalSequenceBlockHash(400)],
+        );
+        for worker in [1, 2] {
+            tree.apply_event(create_remove_event(worker, 1, vec![3]))
+                .unwrap();
+        }
+        // The existing descendant-invalidation gap leaves worker 2's old node
+        // in its lookup after the parent has disconnected it.
+        assert!(old_branch.upgrade().is_some());
+        tree.apply_event(create_store_event(
+            1,
+            2,
+            vec![3],
+            Some(ExternalSequenceBlockHash(200)),
+        ))
+        .unwrap();
+        tree.apply_event(create_store_event(
+            1,
+            3,
+            vec![4],
+            Some(ExternalSequenceBlockHash(300)),
+        ))
+        .unwrap();
+        tree.apply_event(create_remove_event(2, 3, vec![4]))
+            .unwrap();
+
+        assert!(old_branch.upgrade().is_none());
+        let scores = tree.find_matches((1..=4).map(LocalBlockHash).collect(), false);
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&4));
+    }
+
+    #[test]
+    fn split_releases_unowned_suffix() {
+        let mut tree = RadixTree::new();
+        for worker in [1, 2] {
+            tree.apply_event(create_store_event(worker, 0, vec![1, 2, 3], None))
+                .unwrap();
+        }
+        tree.apply_event(create_remove_event(1, 1, vec![2]))
+            .unwrap();
+        tree.apply_event(create_remove_event(2, 1, vec![1]))
+            .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![3]);
+
+        tree.apply_event(create_store_event(
+            1,
+            2,
+            vec![9],
+            Some(ExternalSequenceBlockHash(100)),
+        ))
+        .unwrap();
+
+        assert_eq!(tree.edge_lengths_for_test(), vec![1, 1]);
+        assert_eq!(tree.current_size(), 2);
+    }
 
     #[test]
     fn rejects_self_referencing_store() {
@@ -864,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn find_match_details_can_retain_router_hint_root_candidates() {
+    fn find_match_details_can_retain_kv_transfer_candidates() {
         let mut tree = RadixTree::new();
         tree.apply_event(make_store_event(7, &[11, 12])).unwrap();
         tree.apply_event(make_store_event(8, &[11, 12, 13]))
@@ -890,13 +1169,13 @@ mod tests {
         .map(ExternalSequenceBlockHash)
         .collect::<Vec<_>>();
 
-        let candidates = details.router_hint_root_candidates.unwrap();
+        let candidates = details.kv_transfer_candidates.unwrap();
         assert_eq!(candidates.block_hashes, expected_hashes);
         assert_eq!(
             candidates.owner_prefix_blocks,
             vec![
-                (WorkerWithDpRank::new(7, 0), 2),
-                (WorkerWithDpRank::new(8, 0), 3),
+                (WorkerWithDpRank::new(7, 0).into(), 2),
+                (WorkerWithDpRank::new(8, 0).into(), 3),
             ]
         );
     }
@@ -969,6 +1248,48 @@ mod tests {
         assert_eq!(
             snapshot_events(with_missing.dump_tree_as_events()),
             snapshot_events(expected.dump_tree_as_events())
+        );
+    }
+
+    #[test]
+    fn hashes_truncated_earlier_in_a_removal_are_not_missing() {
+        fn two_root_tree() -> RadixTree {
+            let mut tree = RadixTree::new();
+            tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
+                .unwrap();
+            tree.apply_event(create_store_event(0, 1, vec![10], None))
+                .unwrap();
+            tree
+        }
+
+        let mut expected = two_root_tree();
+        expected
+            .apply_event(create_remove_event(0, 2, vec![2]))
+            .unwrap();
+        expected
+            .apply_event(create_remove_event(0, 3, vec![10]))
+            .unwrap();
+        let expected = snapshot_events(expected.dump_tree_as_events());
+
+        // Removing 2 truncates 3 and 4 before they are listed, and 10 is
+        // truncated after an unrelated miss has already been checked.
+        let mut listed_later = two_root_tree();
+        listed_later
+            .apply_event(create_remove_event(0, 2, vec![2, 10, 4, 3]))
+            .unwrap();
+        assert_eq!(
+            snapshot_events(listed_later.dump_tree_as_events()),
+            expected
+        );
+
+        let mut with_missing = two_root_tree();
+        assert_eq!(
+            with_missing.apply_event(create_remove_event(0, 2, vec![2, 999, 10, 3, 10])),
+            Err(KvCacheEventError::BlockNotFound)
+        );
+        assert_eq!(
+            snapshot_events(with_missing.dump_tree_as_events()),
+            expected
         );
     }
 
@@ -1062,5 +1383,189 @@ mod tests {
             serde_json::to_vec(&compact).unwrap().len()
                 < serde_json::to_vec(&uncompressed).unwrap().len()
         );
+    }
+
+    #[test]
+    fn split_keeps_lookup_entries_that_name_another_node() {
+        let mut tree = ReferenceTree::default();
+        for event in [
+            make_store_event(3, &[1, 2, 3, 6000, 6001]),
+            make_store_event_with_parent(3, &[1, 2, 3], &[4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
+            make_store_event(1, &[1, 2, 3, 4]),
+            remove_event(3, 0, 0, vec![seq_hash(&[1, 2, 3])]),
+            make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6, 7, 7000]),
+            // Worker 1 leaves [1, 2, 3] without a full holder, which detaches its
+            // subtree while worker 3 still holds bits there.
+            remove_event(1, 0, 0, vec![seq_hash(&[1])]),
+            // Worker 3 stores 2..=11 again on the live path.
+            make_store_event_with_parent(3, &[1], &[2, 3, 4, 5]),
+            make_store_event_with_parent(3, &[1, 2, 3, 4, 5], &[6, 7, 8, 9, 10, 11]),
+            // Worker 1 splits detached nodes that still carry worker 3's stale bits.
+            make_store_event_with_parent(
+                1,
+                &[1, 2, 3, 4, 5, 6],
+                &[
+                    7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 1000,
+                ],
+            ),
+            make_store_event_with_parent(1, &(1..=10).collect::<Vec<_>>(), &[11, 12, 4000]),
+            // Worker 3's removal must still reach the live node holding 11.
+            remove_event(3, 0, 0, vec![seq_hash(&(1..=11).collect::<Vec<_>>())]),
+        ] {
+            tree.apply(event);
+        }
+
+        let scores = tree.scores(&(1..=11).collect::<Vec<_>>());
+        assert_eq!(scores.get(&WorkerWithDpRank::new(3, 0)), Some(&10));
+    }
+
+    #[test]
+    fn split_skips_workers_without_lookup() {
+        let two_workers = (WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0));
+        let two_ranks = (WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1));
+        let clear: fn(&mut ReferenceTree, WorkerWithDpRank) = |tree, worker| {
+            tree.apply(make_clear_event_with_dp_rank(
+                worker.worker_id,
+                worker.dp_rank,
+            ))
+        };
+        let remove_worker: fn(&mut ReferenceTree, WorkerWithDpRank) =
+            |tree, worker| tree.remove_worker(worker.worker_id);
+        let clear_all_blocks: fn(&mut ReferenceTree, WorkerWithDpRank) =
+            |tree, worker| tree.clear_all_blocks(worker.worker_id);
+
+        for ((stale, splitter), drop_stale) in [
+            (two_workers, clear),
+            (two_ranks, clear),
+            (two_workers, remove_worker),
+            (two_workers, clear_all_blocks),
+        ] {
+            let mut tree = ReferenceTree::default();
+            for (worker, event) in [
+                (splitter, make_store_event(0, &[1, 2, 3, 4])),
+                (
+                    stale,
+                    make_store_event(0, &[1, 2, 3, 4, 5, 4000, 4001, 4002]),
+                ),
+                (
+                    splitter,
+                    make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6, 7, 8, 9, 10]),
+                ),
+                (
+                    stale,
+                    make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6, 1000, 1001, 1002]),
+                ),
+                (splitter, remove_event(0, 0, 0, vec![seq_hash(&[1])])),
+                (
+                    splitter,
+                    make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6], &[1000, 1001, 1002, 1003]),
+                ),
+                // Detaches everything below [1, 2]. Once `stale` stores those blocks
+                // again on the live path, its lookup no longer names the detached
+                // [1000, ..] node that still carries its bits.
+                (stale, remove_event(0, 0, 0, vec![seq_hash(&[1, 2])])),
+                (stale, make_store_event(0, &[1, 2, 3, 4, 5, 6])),
+                (
+                    stale,
+                    make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6, 1000, 1001, 1002]),
+                ),
+            ] {
+                tree.apply(on(worker, event));
+            }
+            drop_stale(&mut tree, stale);
+            // Splits the detached node, which still carries bits for `stale`.
+            tree.apply(on(
+                splitter,
+                make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6, 1000], &[1001, 5000]),
+            ));
+
+            assert_eq!(tree.tree.tree_size_for_worker(stale).unwrap_or(0), 0);
+            assert!(
+                tree.scores(&[1, 2, 3, 4, 5, 6, 1000, 1001, 5000])
+                    .is_empty()
+            );
+            tree.apply(on(stale, make_store_event(0, &[1, 2, 3])));
+            assert_eq!(
+                tree.scores(&[1, 2, 3, 4]),
+                FxHashMap::from_iter([(stale, 3)])
+            );
+        }
+    }
+
+    #[test]
+    fn random_events_never_overcount() {
+        let workers = [
+            WorkerWithDpRank::new(1, 0),
+            WorkerWithDpRank::new(1, 1),
+            WorkerWithDpRank::new(2, 0),
+            WorkerWithDpRank::new(3, 0),
+        ];
+        for seed in 0..32 {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            // Each document shares a prefix with an earlier one, so stores split
+            // and extend edges, and holes detach subtrees.
+            let mut docs = vec![(1..=24).collect::<Vec<u64>>()];
+            for doc_id in 1..10 {
+                let parent = &docs[rng.usize(..docs.len())];
+                let mut doc = parent[..rng.usize(1..parent.len())].to_vec();
+                doc.extend((0..rng.u64(1..=12)).map(|i| 1000 * doc_id + i));
+                docs.push(doc);
+            }
+            let doc_hashes = docs
+                .iter()
+                .map(|doc| {
+                    let local_hashes = doc.iter().copied().map(LocalBlockHash).collect::<Vec<_>>();
+                    compute_seq_hash_for_block(&local_hashes)
+                        .into_iter()
+                        .map(ExternalSequenceBlockHash)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            let mut tree = ReferenceTree::default();
+            for step in 0..2000 {
+                let worker = workers[rng.usize(..workers.len())];
+                let doc_id = rng.usize(..docs.len());
+                let (doc, hashes) = (&docs[doc_id], &doc_hashes[doc_id]);
+                let held = (0..doc.len())
+                    .filter(|&pos| tree.holds(worker, hashes[pos]))
+                    .collect::<Vec<_>>();
+                match rng.u32(..100) {
+                    0..45 => {
+                        let starts = (0..doc.len())
+                            .filter(|&pos| pos == 0 || tree.holds(worker, hashes[pos - 1]))
+                            .collect::<Vec<_>>();
+                        let start = starts[rng.usize(..starts.len())];
+                        let end = rng.usize(start + 1..=doc.len());
+                        let event =
+                            make_store_event_with_parent(0, &doc[..start], &doc[start..end]);
+                        tree.apply(on(worker, event));
+                    }
+                    45..75 if !held.is_empty() => {
+                        let pos = held[rng.usize(..held.len())];
+                        tree.apply(on(worker, remove_event(0, 0, 0, vec![hashes[pos]])));
+                    }
+                    // Evict a held run tail-first, as an engine frees a sequence.
+                    75..95 if !held.is_empty() => {
+                        let from = held[rng.usize(..held.len())];
+                        let run = held.iter().rev().take_while(|&&pos| pos >= from);
+                        let event = remove_event(0, 0, 0, run.map(|&pos| hashes[pos]).collect());
+                        tree.apply(on(worker, event));
+                    }
+                    95..98 => tree.apply(make_clear_event_with_dp_rank(
+                        worker.worker_id,
+                        worker.dp_rank,
+                    )),
+                    98 => tree.remove_worker(worker.worker_id),
+                    99 => tree.clear_all_blocks(worker.worker_id),
+                    _ => continue,
+                }
+                for doc in &docs {
+                    if let Err(overcount) = tree.checked_scores(doc) {
+                        panic!("seed {seed} step {step}: {overcount}");
+                    }
+                }
+            }
+        }
     }
 }

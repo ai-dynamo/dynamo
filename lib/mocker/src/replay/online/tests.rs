@@ -13,14 +13,15 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::common::protocols::{
-    DirectRequest, EngineType, MockEngineArgs, PreemptionMode, SglangArgs,
-};
+use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, PreemptionMode};
 use crate::live::ObservedAdmission;
-use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+use crate::loadgen::{
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticHashIdScope, AgenticMooncakeHeader,
+    AgenticMooncakeRow, AgenticSourceProvenance, AgenticTrace, SessionTrace, Trace, TurnTrace,
+};
 use crate::replay::{ReplayRouterMode, ReplayTerminalStatus, SlaThresholds};
 
-use super::ReplayRouter;
 use super::entrypoints::{
     OnlineReplayConfig, OnlineReplayOptions, simulate_agentic_trace_workload,
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
@@ -33,17 +34,20 @@ use super::recorder::{
 };
 use super::state::{LiveReplayMode, WorkloadDispatchState, arrival_event};
 use super::task::wait_for_workload_progress;
+use super::{ReplayPlacement, ReplayRouter};
 
-fn replay_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .speedup_ratio(1000.0)
-        .block_size(64)
-        .build()
-        .unwrap()
+fn replay_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "speedup_ratio": 1000.0,
+            "block_size": 64
+        }
+    }))
+    .unwrap()
 }
 
 fn replay_config(
-    args: MockEngineArgs,
+    args: MockerConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     options: OnlineReplayOptions,
@@ -51,17 +55,16 @@ fn replay_config(
     OnlineReplayConfig::new(args, None, None, num_workers, router_mode, options)
 }
 
-fn sglang_replay_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(EngineType::Sglang)
-        .num_gpu_blocks(512)
-        .speedup_ratio(1000.0)
-        .sglang(Some(SglangArgs {
-            page_size: Some(2),
-            ..Default::default()
-        }))
-        .build()
-        .unwrap()
+fn sglang_replay_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang,
+            "num_gpu_blocks": 512,
+            "speedup_ratio": 1000.0,
+            "block_size": 2
+        }
+    }))
+    .unwrap()
 }
 
 fn request(uuid: u128, token: u32, arrival_timestamp_ms: Option<f64>) -> DirectRequest {
@@ -115,26 +118,28 @@ async fn admission_timestamp_is_preserved_when_forwarding_is_delayed() {
         })
         .unwrap();
     drop(recorder_tx);
-    let report = recorder.finish(500.0).await.unwrap();
+    let report = recorder.finish(500.0, None, None).await.unwrap();
     let record = &report.per_request[0];
     assert_eq!(record.first_admit_ms, Some(0.0));
     assert!(record.first_admit_ms <= record.first_token_ms);
     assert!(record.first_admit_ms.unwrap() <= record.terminal_time_ms);
 }
 
-fn trtllm_reject_args() -> MockEngineArgs {
+fn trtllm_reject_args() -> MockerConfig {
     // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
-    MockEngineArgs::builder()
-        .engine_type(EngineType::Trtllm)
-        .block_size(4)
-        .num_gpu_blocks(4)
-        .max_num_batched_tokens(Some(64))
-        .max_num_seqs(Some(4))
-        .enable_prefix_caching(false)
-        .enable_chunked_prefill(true)
-        .speedup_ratio(1000.0)
-        .build()
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Trtllm,
+            "block_size": 4,
+            "num_gpu_blocks": 4,
+            "max_num_batched_tokens": 64,
+            "max_num_seqs": 4,
+            "enable_prefix_caching": false,
+            "enable_chunked_prefill": true,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
 fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRequest {
@@ -242,12 +247,14 @@ fn test_online_trace_workload_completes_multiturn_sessions() {
 
 #[test]
 fn online_report_options_populate_request_goodput_and_capacity_metrics() {
-    let args = MockEngineArgs::builder()
-        .speedup_ratio(1000.0)
-        .block_size(64)
-        .aic_tp_size(Some(2))
-        .build()
-        .unwrap();
+    let args = MockerConfig::from_value(serde_json::json!({
+        "tensor_parallel_size": 2,
+        "engine": {
+            "speedup_ratio": 1000.0,
+            "block_size": 64
+        }
+    }))
+    .unwrap();
     let report = simulate_trace_workload(
         replay_config(
             args,
@@ -286,33 +293,49 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
 
 #[test]
 fn online_agentic_trace_releases_dependency_after_parent_completion() {
-    let trace = AgenticTrace {
-        block_size: 64,
-        turns: vec![
-            AgenticTurnTrace {
+    let trace = AgenticTrace::from_agentic_mooncake_rows(
+        AgenticMooncakeHeader {
+            schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+            version: AGENTIC_MOONCAKE_VERSION,
+            block_size: 64,
+            hash_id_scope: AgenticHashIdScope::Local,
+            source: AgenticSourceProvenance {
+                format: "test".to_string(),
+                digest: "online-agentic-dependency".to_string(),
+            },
+        },
+        vec![
+            AgenticMooncakeRow {
                 request_id: "root".to_string(),
+                play_id: "play".to_string(),
                 session_id: "root".to_string(),
-                input_length: 64,
-                max_output_tokens: 2,
-                hash_ids: vec![1],
-                first_ready_timestamp_ms: Some(0.0),
-                prefix_reset: true,
+                model: "model".to_string(),
+                input_length: Some(64),
+                output_length: Some(2),
+                hash_ids: Some(vec![1]),
+                not_before_ms: 0.0,
                 ..Default::default()
             },
-            AgenticTurnTrace {
+            AgenticMooncakeRow {
                 request_id: "dependent".to_string(),
+                play_id: "play".to_string(),
                 session_id: "dependent".to_string(),
-                input_length: 64,
-                max_output_tokens: 2,
-                hash_ids: vec![2],
-                first_ready_timestamp_ms: Some(0.0),
-                delay_after_dependencies_ms: 5.0,
-                wait_for: vec!["root".to_string()],
-                prefix_reset: true,
+                model: "model".to_string(),
+                input_length: Some(64),
+                output_length: Some(2),
+                hash_ids: Some(vec![2]),
+                not_before_ms: 0.0,
+                dependencies: vec![AgenticDependency {
+                    request_id: "root".to_string(),
+                    trigger: AgenticDependencyTrigger::Completion,
+                    delay_ms: 5.0,
+                    relation: AgenticDependencyRelation::Sequence,
+                }],
                 ..Default::default()
             },
         ],
-    };
+    )
+    .unwrap();
     let report = simulate_agentic_trace_workload(
         replay_config(
             replay_args(),
@@ -324,6 +347,7 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
             },
         ),
         trace,
+        None,
     )
     .unwrap();
 
@@ -377,7 +401,7 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
         &args,
         Some(KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }),
         Some(Arc::new(FixedPrefillLoadEstimator {
@@ -389,10 +413,13 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
 
     assert_eq!(
         router
-            .select_worker(&request(1, 11, Some(0.0)), 1)
+            .select_worker(&request(1, 11, Some(0.0)), 1, 1)
             .await
             .unwrap(),
-        0
+        ReplayPlacement {
+            worker_idx: 0,
+            dp_rank: 0,
+        }
     );
     assert_eq!(
         router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
@@ -524,6 +551,84 @@ fn test_online_trace_replay_uses_round_robin_dispatch() {
             .unwrap();
 
     assert_eq!(stats.dispatch_history, vec![0, 1, 2, 0, 1]);
+}
+
+#[tokio::test]
+async fn test_online_trace_replay_uses_grouped_attention_dp_engine() {
+    let mut args = replay_args();
+    args.dp_size = 2;
+    let pending = VecDeque::from(vec![
+        request(1, 1, Some(0.0)),
+        request(2, 2, Some(1.0)),
+        request(3, 3, Some(2.0)),
+        request(4, 4, Some(3.0)),
+    ]);
+    let runtime = LiveRuntime::new(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
+        pending,
+        LiveReplayMode::Trace,
+        CancellationToken::new(),
+    )
+    .unwrap();
+
+    assert_eq!(runtime.engines().len(), 2);
+    let (report, stats) = runtime.run().await.unwrap();
+    assert_eq!(report.request_counts.completed_requests, 4);
+    assert_eq!(stats.dispatch_history, vec![0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn terminal_delivery_waits_for_grouped_completion_boundary_before_shutdown() {
+    let mut terminal_request = request(10, 10, Some(0.0));
+    terminal_request.max_output_tokens = 1;
+    terminal_request.output_token_ids = Some(vec![10_010]);
+    let runtime = LiveRuntime::new(
+        replay_config(
+            replay_args(),
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
+        VecDeque::from(vec![terminal_request]),
+        LiveReplayMode::Trace,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let engines = runtime.engines();
+    let boundary = engines[0].pause_completion_boundary_before_finish();
+    let run = tokio::spawn(runtime.run());
+
+    tokio::time::timeout(Duration::from_secs(1), boundary.wait_until_reached())
+        .await
+        .expect("completion dispatcher should reach the final boundary");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while engines[0].active_request_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal output should be delivered before boundary finish");
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !engines[0].group_is_cancelled(),
+        "LiveRunSession must drain the completion boundary before shutdown cancellation"
+    );
+    assert!(!run.is_finished());
+
+    boundary.release();
+    let (report, _) = tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("orderly boundary release should finish replay")
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.request_counts.completed_requests, 1);
 }
 
 #[tokio::test]
@@ -717,19 +822,21 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
     assert_eq!(stats.freed_count, 1);
 }
 
-#[test]
-fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
-    let args = MockEngineArgs::builder()
-        .block_size(4)
-        .num_gpu_blocks(6)
-        .max_num_batched_tokens(Some(16))
-        .max_num_seqs(Some(2))
-        .enable_chunked_prefill(true)
-        .enable_prefix_caching(false)
-        .preemption_mode(PreemptionMode::Lifo)
-        .speedup_ratio(1000.0)
-        .build()
-        .unwrap();
+#[tokio::test(start_paused = true)]
+async fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "block_size": 4,
+            "num_gpu_blocks": 6,
+            "max_num_batched_tokens": 16,
+            "max_num_seqs": 2,
+            "enable_chunked_prefill": true,
+            "enable_prefix_caching": false,
+            "preemption_mode": PreemptionMode::Lifo,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap();
     let requests = (0..2)
         .map(|request_idx| DirectRequest {
             tokens: (0..8).map(|token| request_idx * 100 + token).collect(),
@@ -739,14 +846,20 @@ fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
         })
         .collect();
 
-    let (report, stats) = simulate_concurrency_requests_with_stats(
-        args,
+    // Advance modeled time only after both request tasks can submit.
+    let runtime = LiveRuntime::new(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        2,
-        1,
-        ReplayRouterMode::RoundRobin,
+        LiveReplayMode::Concurrency { max_in_flight: 2 },
+        CancellationToken::new(),
     )
     .unwrap();
+    let (report, stats) = runtime.run().await.unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 2);
     assert!(

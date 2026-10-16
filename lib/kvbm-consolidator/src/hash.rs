@@ -7,7 +7,7 @@
 //! The router expects a u64 per block-edge. The 128-bit PLH packs `(mode | position |
 //! parent_fragment | current_fragment)`. The u64 the router consumes is what a *child*
 //! at `position+1` would see as its `parent_hash_fragment` — produced by
-//! [`PositionalLineageHash::parent_fragment_for_child_position`], which handles the
+//! `PositionalLineageHash::parent_fragment_for_child_position`, which handles the
 //! 0→1 (pos 256) and 1→2 (pos 65536) mode-boundary alignments.
 
 use kvbm_logical::SequenceHash;

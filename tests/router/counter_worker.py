@@ -84,7 +84,12 @@ class CounterWorkerArgGroup(ArgGroup):
             default="tcp",
             help="Request plane.",
         )
-        RouterArgGroup().add_arguments(parser)
+        # A worker, but one whose whole purpose is to advertise a per-worker
+        # config, so it opts into a concrete default rather than inheriting.
+        # Values stated explicitly to preserve this worker's prior behavior.
+        RouterArgGroup(
+            default_router_mode="round-robin", include_frontend_only=True
+        ).add_arguments(parser)
         KvRouterArgGroup().add_arguments(parser)
 
 

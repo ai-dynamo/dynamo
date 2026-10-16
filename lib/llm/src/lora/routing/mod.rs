@@ -42,7 +42,7 @@ pub trait LoraAllocator: Send + Sync {
         self.compute_replica_set(lora_name, workers, replica_factor)
     }
 
-    /// Stability-preserving slot-aware variant: like [`compute_replica_set_with_slots`],
+    /// Stability-preserving slot-aware variant: like [`Self::compute_replica_set_with_slots`],
     /// but retains workers from `prior` (the LoRA's current placement) when they are still
     /// present and not at capacity, before filling remaining slots from the ranked list.
     ///

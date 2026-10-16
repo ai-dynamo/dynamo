@@ -5,7 +5,7 @@ use dynamo_llm::protocols::{
     Annotated, ContentProvider, DataStream,
     codec::{Message, SseCodecError, create_message_stream},
     openai::{
-        ParsingOptions,
+        GuidedToolConstraint, ParsingOptions,
         chat_completions::{
             NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
             aggregator::ChatCompletionAggregator,
@@ -17,7 +17,11 @@ use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
     CreateChatCompletionStreamResponse, Role,
 };
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use futures::StreamExt;
+
+#[path = "../../runtime/src/test_utils.rs"]
+mod test_utils;
 
 fn get_text(content: &ChatCompletionMessageContent) -> &str {
     match content {
@@ -185,7 +189,9 @@ fn make_stream_delta(
             usage: None,
         },
         nvext,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     })
 }
 
@@ -256,4 +262,966 @@ async fn test_nvext_none_when_absent() {
             .unwrap();
 
     assert_eq!(result.nvext, None);
+}
+
+// ===================================
+// Muse unified batch finalize (topology B)
+// ===================================
+
+async fn run_qwen_unified_batch_suppression_assertions() {
+    let raw = concat!(
+        "<think>Look it up.</think>",
+        "<tool_call>\n<function=get_weather>\n",
+        "<parameter=location>Paris</parameter>\n</function>\n</tool_call>"
+    );
+    let options = ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+        .with_tool_call_parsing_enabled(false);
+    assert!(
+        options.tool_call_parser.is_some(),
+        "by default, the qwen3 pair must retain the whole-response decoder \
+         so it can still strip native markup even though tool calls are suppressed"
+    );
+
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        options,
+    )
+    .await
+    .unwrap();
+    let choice = result.inner.choices.first().expect("one choice");
+    let content = choice
+        .message
+        .content
+        .as_ref()
+        .map(get_text)
+        .unwrap_or_default();
+
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up.")
+    );
+    assert!(choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty));
+    assert!(
+        !content.contains("<tool_call>"),
+        "raw markup leaked: {content:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    assert_eq!(
+        std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
+        Ok("2")
+    );
+    run_qwen_unified_batch_suppression_assertions().await;
+}
+
+async fn run_qwen_unified_batch_v1_assertions() {
+    let raw = concat!(
+        "<think>Look it up.</think>",
+        "<tool_call>\n<function=get_weather>\n",
+        "<parameter=location>Paris</parameter>\n</function>\n</tool_call>"
+    );
+    let options = ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+        .with_tool_call_parsing_enabled(false);
+    assert_eq!(
+        options.tool_call_parser, None,
+        "with the v1 rollback set, a qwen3 pair must not retain a whole-response decoder \
+         when tool-call parsing is disabled"
+    );
+
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        options,
+    )
+    .await
+    .unwrap();
+    let choice = result.inner.choices.first().expect("one choice");
+    let content = choice
+        .message
+        .content
+        .as_ref()
+        .map(get_text)
+        .unwrap_or_default();
+
+    assert_eq!(
+        content, raw,
+        "with no decoder retained (flag off), the raw markup must pass through \
+         unparsed rather than be silently stripped by a decoder that shouldn't be \
+         running"
+    );
+    assert_eq!(choice.message.reasoning_content, None);
+    assert!(choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty));
+}
+
+#[tokio::test]
+async fn test_qwen_unified_batch_reverts_to_v1_when_requested() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_qwen_unified_batch_reverts_to_v1_when_requested"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
+    assert_eq!(
+        std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
+        Ok("1")
+    );
+    run_qwen_unified_batch_v1_assertions().await;
+}
+
+fn assert_guided_batch_call(result: &NvCreateChatCompletionResponse) {
+    let choice = result.inner.choices.first().expect("one choice");
+    let calls = choice.message.tool_calls.as_ref().expect("tool_calls");
+    assert_eq!(calls.len(), 1, "expected one guided tool call");
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+        serde_json::json!({"location": "Paris"})
+    );
+    assert!(
+        choice
+            .message
+            .content
+            .as_ref()
+            .is_none_or(|content| get_text(content).is_empty()),
+        "guided payload must not be returned as visible content: {:?}",
+        choice.message.content
+    );
+}
+
+fn muse_raw_batch_deltas() -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+    vec![
+        make_stream_delta(
+            Some("<|start|>assistant to=self<|message|>Look it up.<|eom|>"),
+            None,
+        ),
+        make_stream_delta(
+            Some(
+                "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+            ),
+            None,
+        ),
+        make_stream_delta(
+            Some("<|start|>assistant to=user<|message|>It's 18C.<|eot|>"),
+            None,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn test_qwen_unified_batch_finalizes_raw_guided_json() {
+    for (raw, constraint) in [
+        (
+            r#"[{"name":"get_weather","parameters":{"location":"Paris"}}]"#,
+            GuidedToolConstraint::GuidedJsonRequired,
+        ),
+        (
+            r#"{"location":"Paris"}"#,
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            },
+        ),
+    ] {
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(raw), None)]),
+            ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+                .with_guided_tool_constraint(constraint),
+        )
+        .await
+        .unwrap();
+
+        assert_guided_batch_call(&result);
+    }
+}
+
+#[tokio::test]
+async fn test_qwen_unified_batch_recovers_native_structural_tag_output() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_qwen_unified_batch_recovers_native_structural_tag_output"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    assert_eq!(
+        std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
+        Ok("2")
+    );
+    let raw = concat!(
+        "<think>Look it up.</think>",
+        "<tool_call>\n<function=get_weather>\n",
+        "<parameter=location>Paris</parameter>\n</function>\n</tool_call>"
+    );
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+            // Topology B does not carry the worker's installed structural tag back to
+            // the frontend, so request-only reconstruction may classify this as JSON.
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up.")
+    );
+    assert_guided_batch_call(&result);
+}
+
+/// Regression for a `GuidedJsonNamed` fallback that recovers a DIFFERENT tool than the
+/// one `tool_choice` pinned, on the qwen3 unified-batch path. Site 3:
+/// `unified_parser::batch_tool_output_mode`/`parse_complete`'s native-fallback filter.
+#[tokio::test]
+async fn test_qwen_unified_batch_drops_native_tool_markup_naming_a_different_tool() {
+    let raw = concat!(
+        "<think>Look it up.</think>",
+        "<tool_call>\n<function=get_stock_price>\n",
+        "<parameter=symbol>NVDA</parameter>\n</function>\n</tool_call>"
+    );
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            }),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty()),
+        "client pinned tool_choice to get_weather but received a call for a different tool \
+         (get_stock_price) recovered from the native fallback: {:?}",
+        choice.message.tool_calls,
+    );
+}
+
+#[tokio::test]
+async fn test_forced_batch_recovers_observed_native_tool_markup() {
+    let native_cases = [
+        (
+            "minimax_m2",
+            "<minimax:tool_call><invoke name=\"get_weather\"><parameter name=\"location\">Paris</parameter></invoke></minimax:tool_call>",
+        ),
+        (
+            "kimi_k2",
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"Paris\"}<|tool_call_end|><|tool_calls_section_end|>",
+        ),
+        (
+            "deepseek_v4",
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">Paris</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        ),
+    ];
+
+    for (parser, raw) in native_cases {
+        for constraint in [
+            GuidedToolConstraint::GuidedJsonRequired,
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            },
+        ] {
+            let result = NvCreateChatCompletionResponse::from_annotated_stream(
+                futures::stream::iter([make_stream_delta(Some(raw), None)]),
+                ParsingOptions::new(Some(parser.to_string()), None)
+                    .with_guided_tool_constraint(constraint.clone()),
+            )
+            .await
+            .unwrap();
+            let choice = result.inner.choices.first().expect("one choice");
+            let calls = choice.message.tool_calls.as_ref().unwrap_or_else(|| {
+                panic!("{parser} {constraint:?} did not recover its native tool call")
+            });
+
+            assert_eq!(calls.len(), 1, "{parser} {constraint:?}");
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+                serde_json::json!({"location": "Paris"}),
+                "{parser} {constraint:?}",
+            );
+            assert!(
+                choice
+                    .message
+                    .content
+                    .as_ref()
+                    .is_none_or(|content| get_text(content).is_empty()),
+                "{parser} {constraint:?} leaked native markup as content: {:?}",
+                choice.message.content,
+            );
+        }
+    }
+}
+
+/// Regression for a `GuidedJsonNamed` fallback that recovers a DIFFERENT tool than the
+/// one `tool_choice` pinned: a malformed guided-JSON output that happens to embed native
+/// markup naming another tool must not be handed back to the client as if it were the
+/// forced tool. Site 1: `aggregator::parse_complete_tool_output`'s native-fallback path.
+#[tokio::test]
+async fn test_forced_batch_drops_native_tool_markup_naming_a_different_tool() {
+    let native_cases = [
+        (
+            "minimax_m2",
+            "<minimax:tool_call><invoke name=\"get_stock_price\"><parameter name=\"symbol\">NVDA</parameter></invoke></minimax:tool_call>",
+        ),
+        (
+            "kimi_k2",
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_stock_price:0<|tool_call_argument_begin|>{\"symbol\":\"NVDA\"}<|tool_call_end|><|tool_calls_section_end|>",
+        ),
+    ];
+
+    for (parser, raw) in native_cases {
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(raw), None)]),
+            ParsingOptions::new(Some(parser.to_string()), None).with_guided_tool_constraint(
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".to_string(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let choice = result.inner.choices.first().expect("one choice");
+
+        assert!(
+            choice
+                .message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty()),
+            "{parser}: client pinned tool_choice to get_weather but received a call for a \
+             different tool recovered from the native fallback: {:?}",
+            choice.message.tool_calls,
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_muse_unified_batch_finalizes_raw_guided_json() {
+    for (raw, constraint) in [
+        (
+            r#"[{"name":"get_weather","parameters":{"location":"Paris"}}]"#,
+            GuidedToolConstraint::GuidedJsonRequired,
+        ),
+        (
+            r#"{"location":"Paris"}"#,
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            },
+        ),
+    ] {
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(raw), None)]),
+            ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+                .with_guided_tool_constraint(constraint),
+        )
+        .await
+        .unwrap();
+
+        assert_guided_batch_call(&result);
+    }
+}
+
+#[tokio::test]
+async fn test_forced_muse_batch_recovers_observed_native_markup() {
+    for constraint in [
+        GuidedToolConstraint::GuidedJsonRequired,
+        GuidedToolConstraint::GuidedJsonNamed {
+            tool_name: "get_weather".to_string(),
+        },
+    ] {
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter(muse_raw_batch_deltas()),
+            ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+                .with_guided_tool_constraint(constraint.clone()),
+        )
+        .await
+        .unwrap();
+        let choice = result.inner.choices.first().expect("one choice");
+
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Look it up.")
+        );
+        assert_eq!(
+            get_text(choice.message.content.as_ref().expect("content")),
+            "It's 18C."
+        );
+        let calls =
+            choice.message.tool_calls.as_ref().unwrap_or_else(|| {
+                panic!("Muse {constraint:?} did not recover its native tool call")
+            });
+        assert_eq!(calls.len(), 1, "{constraint:?}");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"location": "Paris"}),
+            "{constraint:?}",
+        );
+    }
+}
+
+/// Regression for a `GuidedJsonNamed` fallback that recovers a DIFFERENT tool than the
+/// one `tool_choice` pinned, on the muse unified-batch path. Site 2:
+/// `aggregator`'s muse unified-batch guided-JSON-error fallback branch.
+#[tokio::test]
+async fn test_forced_muse_batch_drops_native_markup_naming_a_different_tool() {
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter(muse_raw_batch_deltas()),
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None).with_guided_tool_constraint(
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_stock_price".to_string(),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let choice = result.inner.choices.first().expect("one choice");
+
+    assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty()),
+        "client pinned tool_choice to get_stock_price but received a call for a different \
+         tool (get_weather) recovered from the native fallback: {:?}",
+        choice.message.tool_calls,
+    );
+}
+
+/// Topology B: raw muse markup reaches the aggregator un-split (the frontend
+/// holds the tool_call_parser, but the worker did not run the streaming hook, so
+/// the deltas carry raw text). The finalize block must route muse through the
+/// UNIFIED parser and populate reasoning_content + content + tool_calls on the
+/// final message — the reasoning channel is the one thing the v2 tool-only
+/// `parse_complete` cannot recover.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_splits_all_channels() {
+    let stream = futures::stream::iter(muse_raw_batch_deltas());
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up."),
+        "reasoning_content must come from the unified batch finalize"
+    );
+    assert_eq!(
+        get_text(choice.message.content.as_ref().expect("content")),
+        "It's 18C."
+    );
+    let tool_calls = choice.message.tool_calls.as_ref().expect("tool_calls");
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0].function.name, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+}
+
+/// Reasoning-only card (topology B): `reasoning_parser=muse_glimmer`, NO
+/// `tool_call_parser` — the card shape the streaming guard, `unified_family`, and
+/// `parser_requires_special_tokens` all support on either name. The batch finalize
+/// must key on the reasoning name too, so raw channel markup never survives into the
+/// non-streaming response.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_routes_on_reasoning_name_only() {
+    let stream = futures::stream::iter(muse_raw_batch_deltas());
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        ParsingOptions::new(None, Some("muse_glimmer".to_string())),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    let content = get_text(choice.message.content.as_ref().expect("content"));
+    assert!(
+        !content.contains("<|start|>") && !content.contains("<atem:invoke"),
+        "raw markup leaked into content: {content:?}"
+    );
+    assert_eq!(content, "It's 18C.");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up."),
+        "reasoning_content must be split even when only the reasoning name is set"
+    );
+    let tool_calls = choice.message.tool_calls.as_ref().expect("tool_calls");
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0].function.name, "get_weather");
+}
+
+/// Batch counterpart of the streaming `none` pin. A caller that disabled tool calling
+/// still needs the reasoning/content split and the marker stripping — muse has no v1
+/// reasoning parser to fall back on — but must not receive `tool_calls`. The handlers
+/// express that with the shared tool-call response policy.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_suppresses_calls_when_disabled() {
+    let stream = futures::stream::iter(muse_raw_batch_deltas());
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+            .with_tool_call_parsing_enabled(false),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty()),
+        "a request that disabled tools must not return tool_calls: {:?}",
+        choice.message.tool_calls
+    );
+    // The split and the stripping still have to happen.
+    let content = get_text(choice.message.content.as_ref().expect("content"));
+    assert_eq!(content, "It's 18C.");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up.")
+    );
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !content.contains(marker),
+            "marker {marker:?} leaked: {content:?}"
+        );
+    }
+}
+
+// ===================================
+// Muse batch-finalize regression tests (Fix A/B/C)
+// ===================================
+
+/// Fix A: a guided-JSON response that legitimately contains zero tool calls
+/// (`[]` under `tool_choice: "required"`) must not wipe the batch's original raw
+/// text. Before the fix, the muse unified block's guided-JSON success arm
+/// (`Ok((calls, String::new(), String::new()))`) fed into an unconditional
+/// `choice.text = content`, which always blanked `choice.text` to empty
+/// regardless of whether the guided parse actually produced any calls.
+#[tokio::test]
+async fn test_muse_unified_batch_guided_json_zero_calls_preserves_original_text() {
+    let raw = "[]";
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty),
+        "guided JSON with zero calls must not produce any tool_calls: {:?}",
+        choice.message.tool_calls
+    );
+    assert_eq!(
+        get_text(choice.message.content.as_ref().expect("content")),
+        raw,
+        "a guided-JSON parse that returns zero calls must preserve the original raw \
+         text instead of blanking choice.text to empty"
+    );
+}
+
+/// Devin Review finding (PR #12576): the muse batch finalize's zero-calls guard
+/// must only preserve raw text for the guided-JSON placeholder-content case
+/// (Fix A). A plain muse turn with NO tool call at all is the common case for
+/// muse responses and must have its markup stripped just like the sibling
+/// Qwen3 block does unconditionally — before this fix, ANY zero-calls result
+/// (not just the guided-JSON placeholder) skipped `choice.text = content`,
+/// leaking raw `<|start|>...<|message|>` control tokens to the client.
+#[tokio::test]
+async fn test_muse_unified_batch_toolless_response_strips_markup() {
+    let raw = "<|start|>assistant to=user<|message|>Hello there.<|eot|>";
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty),
+        "a plain toolless muse turn must not produce any tool_calls: {:?}",
+        choice.message.tool_calls
+    );
+    assert_eq!(
+        get_text(choice.message.content.as_ref().expect("content")),
+        "Hello there.",
+        "a toolless muse response must have its markup stripped, not leak raw \
+         control tokens as content"
+    );
+}
+
+/// Build a stream delta that carries ONLY `reasoning_content`, no visible text —
+/// used to pre-populate `choice.reasoning_content` via the normal per-delta
+/// aggregation path before the muse unified finalize block runs.
+#[allow(deprecated)]
+fn make_stream_delta_with_reasoning(
+    reasoning_content: &str,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    Annotated::from_data(NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    content: None,
+                    function_call: None,
+                    tool_calls: None,
+                    role: Some(Role::Assistant),
+                    refusal: None,
+                    reasoning_content: Some(reasoning_content.to_string()),
+                },
+                finish_reason: None,
+                logprobs: None,
+            }],
+            created: 1234567890,
+            model: "test-model".to_string(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+        },
+        nvext: None,
+        prompt_logprobs: None,
+        llm_metrics: None,
+        tool_call_completion: Vec::new(),
+    })
+}
+
+/// Fix B: the muse unified finalize's reasoning merge must APPEND newly recovered
+/// reasoning onto any `reasoning_content` the normal per-delta aggregation already
+/// populated, not overwrite-only-if-`None`. Before the fix,
+/// `if choice.reasoning_content.is_none() && !reasoning.is_empty()` meant any
+/// pre-existing `reasoning_content` silently discarded whatever the unified parse
+/// step went on to recover.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_appends_to_existing_reasoning_content() {
+    let mut deltas = vec![make_stream_delta_with_reasoning("Pre-populated. ")];
+    deltas.extend(muse_raw_batch_deltas());
+    let stream = futures::stream::iter(deltas);
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Pre-populated. Look it up."),
+        "the unified finalize must APPEND its recovered reasoning onto any \
+         reasoning_content already aggregated from prior deltas, not overwrite it \
+         only when None"
+    );
+}
+
+/// Fix C: a COMPLETE `<tool_call>...</tool_call>` span that only appears inside a
+/// quoted parameter value must not be misclassified as real native tool-call
+/// markup by the guided-JSON failure fallback. Before the fix,
+/// `parse_complete_tool_output` used
+/// `dynamo_parsers::tool_calling::detect_tool_call_start`, which does a naive
+/// substring search: it would false-positive on `<tool_call>` appearing only as
+/// quoted illustrative text, misrouting prose that never contained a real
+/// tool-call request into the native hermes parser, which would then actually
+/// extract and execute the quoted example as a bogus tool call.
+#[tokio::test]
+async fn test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring() {
+    let raw = "Please literally output the example call \
+               '<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}</tool_call>' \
+               verbatim and nothing else.";
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("hermes".to_string()), None)
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty),
+        "a complete <tool_call>...</tool_call> span that only appears inside a \
+         quoted illustrative example must not be extracted as a real tool call: {:?}",
+        choice.message.tool_calls
+    );
+    assert_eq!(
+        get_text(choice.message.content.as_ref().expect("content")),
+        raw,
+        "content whose only marker-looking span is quoted illustrative prose must \
+         pass through unparsed rather than be misclassified as native tool-call markup"
+    );
+}
+
+#[tokio::test]
+async fn test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser"
+        ),
+        &[(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")],
+    ) {
+        return;
+    }
+
+    let error = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some("answer"), None)]),
+        ParsingOptions::new(Some("hermes".to_string()), None)
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("DYN_PARSER_VERSION=2"));
+}
+
+/// CodeRabbit finding (PR #12576, Major): the native-fallback-after-guided-error
+/// path can recover real reasoning/content while finding zero tool calls (e.g. a
+/// guided-JSON-required request whose model output isn't valid JSON at all, but
+/// carries recognizable native muse markup). Before the fix this shared the same
+/// `!calls_is_empty` gate as the guided-JSON placeholder case, so the recovered
+/// content was discarded and raw markup stayed in `choice.text` even though this
+/// branch's `content` is real stripped text, not a synthetic placeholder.
+#[tokio::test]
+async fn test_muse_unified_batch_native_fallback_zero_calls_still_strips_markup() {
+    let raw = "<|start|>assistant to=self<|message|>Look it up.<|eom|>\
+               <|start|>assistant to=user<|message|>It's 18C.<|eot|>";
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty),
+        "no tool call is present in this fixture: {:?}",
+        choice.message.tool_calls
+    );
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up."),
+        "the native fallback must still recover reasoning"
+    );
+    assert_eq!(
+        get_text(choice.message.content.as_ref().expect("content")),
+        "It's 18C.",
+        "the native fallback's real recovered content must replace choice.text \
+         even when zero tool calls were found, not be discarded as if it were the \
+         guided-JSON synthetic placeholder"
+    );
+}
+
+#[tokio::test]
+async fn test_responses_tool_parsing_is_owned_by_the_aggregator() {
+    use dynamo_llm::protocols::openai::responses::{ResponseParams, chat_completion_to_response};
+    use dynamo_protocols::types::responses::{OutputItem, OutputMessageContent};
+
+    let raw = r#"<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>"#;
+    let params = ResponseParams {
+        tools: Some(
+            serde_json::from_value(serde_json::json!([{
+                "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+            }]))
+            .unwrap(),
+        ),
+        ..Default::default()
+    };
+    for parser in [None, Some("hermes".to_string())] {
+        let parses_tools = parser.is_some();
+        let chat = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(raw), None)]),
+            ParsingOptions::new(parser, None),
+        )
+        .await
+        .unwrap();
+        let response = chat_completion_to_response(chat, &params, None).unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        if parses_tools {
+            let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+                panic!("expected an upstream-parsed call");
+            };
+            assert_eq!(call.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                serde_json::json!({"city":"Paris"})
+            );
+        } else {
+            let OutputItem::Message(message) = &response.inner.output[0] else {
+                panic!("no-parser output must remain text");
+            };
+            let OutputMessageContent::OutputText(content) = &message.content[0] else {
+                panic!("expected output text");
+            };
+            assert_eq!(content.text, raw);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_all_unified_batch_request_policies_for_each_selector_shape() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_all_unified_batch_request_policies_for_each_selector_shape"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    assert_eq!(
+        std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
+        Ok("2")
+    );
+    for (family, raw) in [
+        ("deepseek_v4", "<think>private</think>answer"),
+        ("deepseek_v41", "<think>private</think>answer"),
+        ("qwen3", "<think>private</think>answer"),
+        ("glm47", "<think>private</think>answer"),
+        ("kimi_k2", "<think>private</think>answer"),
+        ("gemma4", "<|channel>thought\nprivate<channel|>answer"),
+        (
+            "kimi_k3",
+            "<|open|>think<|sep|>private<|close|>think<|sep|><|open|>response<|sep|>answer<|close|>response<|sep|>",
+        ),
+        (
+            "muse_glimmer",
+            "<|start|>assistant to=self<|message|>private<|eom|><|start|>assistant to=user<|message|>answer<|eot|>",
+        ),
+    ] {
+        for (tool, reasoning) in [
+            (Some(family), None),
+            (None, Some(family)),
+            (Some(family), Some(family)),
+        ] {
+            for thinking in [None, Some(false), Some(true)] {
+                let disabled = if family == "gemma4" {
+                    thinking != Some(true)
+                } else {
+                    thinking == Some(false)
+                };
+                let mut options =
+                    ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned));
+                options.reasoning_disabled = disabled;
+                for split in 0..=raw.len() {
+                    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+                        futures::stream::iter([
+                            make_stream_delta(Some(&raw[..split]), None),
+                            make_stream_delta(Some(&raw[split..]), None),
+                        ]),
+                        options.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    let message = &result.inner.choices[0].message;
+                    assert_eq!(
+                        message.reasoning_content.as_deref().unwrap_or(""),
+                        if disabled { "" } else { "private" },
+                        "{family} {tool:?} {reasoning:?} {thinking:?} split{split}"
+                    );
+                    assert_eq!(
+                        message.content.as_ref().map(get_text).unwrap_or(""),
+                        if disabled && family == "gemma4" {
+                            raw
+                        } else if disabled {
+                            "privateanswer"
+                        } else {
+                            "answer"
+                        },
+                        "{family} {tool:?} {reasoning:?} {thinking:?} split{split}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_v2_rejects_unconfigured_forced_tool_batch() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::explicit_v2_rejects_unconfigured_forced_tool_batch"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let options = ParsingOptions::new(None, None)
+        .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired);
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some("<tool_call>raw</tool_call>"), None)]),
+        options,
+    )
+    .await;
+
+    let error = result.expect_err("explicit v2 must reject a forced tool without a parser");
+    assert!(error.to_string().contains("requires the v1 tool-call jail"));
+}
+
+#[tokio::test]
+async fn explicit_v2_rejects_unsupported_batch_parser_for_every_tool_choice() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::explicit_v2_rejects_unsupported_batch_parser_for_every_tool_choice"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    for constraint in [
+        GuidedToolConstraint::None,
+        GuidedToolConstraint::GuidedJsonRequired,
+        GuidedToolConstraint::GuidedJsonNamed {
+            tool_name: "weather".to_string(),
+        },
+    ] {
+        let options = ParsingOptions::new(Some("hermes".to_string()), None)
+            .with_guided_tool_constraint(constraint);
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some("raw output"), None)]),
+            options,
+        )
+        .await;
+        let error = result.expect_err("explicit v2 must reject an unsupported batch parser");
+        assert!(
+            error
+                .to_string()
+                .contains("no compatible unified v2 implementation")
+        );
+    }
 }

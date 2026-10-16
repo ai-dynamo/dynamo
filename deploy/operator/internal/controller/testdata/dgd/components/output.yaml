@@ -14,7 +14,7 @@ spec:
             annotations:
                 nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
             labels:
-                nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+                nvidia.com/dynamo-worker-hash: $var:worker-hash
         spec:
             containers:
                 - image: registry.example/dynamo-worker:1.4.0-test
@@ -72,7 +72,7 @@ spec:
                 nvidia.com/dynamo-graph-deployment-name: component-manifests
                 nvidia.com/dynamo-namespace: $glob:clusterenv-*-component-manifests
                 nvidia.com/dynamo-sub-component-type: decode
-                nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+                nvidia.com/dynamo-worker-hash: $var:worker-hash
                 nvidia.com/metrics-enabled: "true"
                 nvidia.com/selector: $glob:component-manifests-decode-*
         spec:
@@ -92,7 +92,7 @@ spec:
                     - name: DYN_NAMESPACE
                       value: $glob:clusterenv-*-component-manifests
                     - name: DYN_NAMESPACE_WORKER_SUFFIX
-                      value: $pattern:[0-9a-f]{8}
+                      value: $var:worker-hash
                     - name: DYN_PARENT_DGD_K8S_NAME
                       value: component-manifests
                     - name: DYN_PARENT_DGD_K8S_NAMESPACE

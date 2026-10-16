@@ -5,11 +5,6 @@ title: Sweeper Architecture
 subtitle: Backend-neutral search, provider materialization, and replay execution
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/architecture.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper's API, configuration schema, search results, and deployment output may
 > change without a standard deprecation period.

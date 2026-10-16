@@ -177,7 +177,7 @@ pub enum TokenBlockError {
 /// Represents a partially filled block of tokens within a sequence.
 ///
 /// This structure accumulates tokens until it reaches the specified `block_size`,
-/// at which point it can be [`commit`](PartialTokenBlock::commit)ted into a full [`TokenBlock`].
+/// at which point it can be `commit`ted into a full [`TokenBlock`].
 #[derive(Debug, PartialEq)] // No Clone: intended to be unique within a sequence
 pub struct PartialTokenBlock {
     tokens: Tokens,
@@ -624,7 +624,7 @@ impl TokenBlockSequence {
     /// If adding this token completes the current partial block, the block is committed,
     /// and the index of the newly completed block is returned.
     ///
-    /// This method is equivalent to calling [`extend`] with a single-token [`Tokens`] object.
+    /// This method is equivalent to calling `extend` with a single-token [`Tokens`] object.
     ///
     /// # Arguments
     ///
@@ -745,7 +745,7 @@ impl TokenBlockSequence {
 
     /// Removes the last `count` tokens from the sequence.
     ///
-    /// This is a convenience method that calculates the required length and calls [`truncate`].
+    /// This is a convenience method that calculates the required length and calls `truncate`.
     ///
     /// # Arguments
     ///

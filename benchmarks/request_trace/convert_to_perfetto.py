@@ -121,6 +121,9 @@ def _flatten_args(
         "parent_session_id": agent_context.get("parent_session_id"),
         "event_time_unix_ms": event.get("event_time_unix_ms"),
     }
+    if isinstance(event.get("agent_context"), dict):
+        # Keep unknown fields and opaque header values intact for trace consumers.
+        args["agent_context"] = agent_context
 
     for key in (
         "request_id",
@@ -187,6 +190,7 @@ def _flatten_tool_args(
     tool: dict[str, Any],
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
+        "agent_context": agent_context,
         "session_id": agent_context.get("session_id"),
         "parent_session_id": agent_context.get("parent_session_id"),
         "event_type": event.get("event_type"),

@@ -18,7 +18,7 @@ import threading
 import pytest
 
 from dynamo._core import run_mocker_synthetic_trace_replay
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .replay_utils import _vllm_args, _write_trace_and_args
@@ -48,7 +48,9 @@ def test_synthetic_agg_load_modes(load_controller):
         64,
         16,
         8,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        extra_engine_args=normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+        ),
         num_workers=2,
         replay_mode="offline",
         **load_controller,
@@ -76,7 +78,9 @@ def test_synthetic_shared_prefix_closed_loop():
         128,
         8,
         8,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        extra_engine_args=normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+        ),
         num_workers=2,
         replay_concurrency=4,
         replay_mode="offline",
@@ -100,26 +104,29 @@ def test_trace_closed_loop(tmp_path):
     assert report.summary["completed_requests"] == 2
 
 
-def test_planner_callback_error_preserves_python_exception_type():
+@pytest.mark.parametrize("callback_method", ["initial_tick_ms", "on_tick"])
+def test_planner_callback_error_preserves_python_exception_type(callback_method):
     # A raising planner callback must propagate its original Python exception
     # type (here ValueError) out of replay — not a generic Exception — so
     # callback failures stay diagnosable (type + traceback preserved across the
     # Rust seam).
     class _RaisingPlanner:
         def initial_tick_ms(self):
+            if callback_method == "initial_tick_ms":
+                raise ValueError("boom from initial_tick_ms")
             return 0.0  # Run the callback before the replay can finish.
 
         def on_tick(self, metrics):
+            assert callback_method == "on_tick"
             raise ValueError("boom from on_tick")
 
-    with pytest.raises(ValueError, match="boom from on_tick"):
+    with pytest.raises(ValueError, match=f"boom from {callback_method}"):
         run_mocker_synthetic_trace_replay(
             64,
             16,
             8,
-            extra_engine_args=MockEngineArgs(
-                block_size=64,
-                speedup_ratio=1000.0,
+            extra_engine_args=normalize_mocker_config(
+                {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
             ),
             num_workers=1,
             replay_concurrency=2,
@@ -156,21 +163,28 @@ def test_disabled_policy_is_semantically_identical_to_normal_replay(disagg):
     }
     if disagg:
         kwargs.update(
-            prefill_engine_args=MockEngineArgs(
-                block_size=64,
-                speedup_ratio=1000.0,
-                worker_type="prefill",
+            prefill_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 64,
+                        "speedup_ratio": 1000.0,
+                        "worker_type": "prefill",
+                    }
+                }
             ),
-            decode_engine_args=MockEngineArgs(
-                block_size=64,
-                speedup_ratio=1000.0,
-                worker_type="decode",
+            decode_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 64,
+                        "speedup_ratio": 1000.0,
+                        "worker_type": "decode",
+                    }
+                }
             ),
         )
     else:
-        kwargs["extra_engine_args"] = MockEngineArgs(
-            block_size=64,
-            speedup_ratio=1000.0,
+        kwargs["extra_engine_args"] = normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
         )
 
     normal = run_mocker_synthetic_trace_replay(**kwargs)
@@ -196,7 +210,7 @@ def test_scaling_policy_rejects_online_replay_before_dispatch():
             64,
             16,
             8,
-            extra_engine_args=MockEngineArgs(block_size=64),
+            extra_engine_args=normalize_mocker_config({"engine": {"block_size": 64}}),
             replay_mode="online",
             scaling_policy=_DisabledScalingPolicy(),
         )
@@ -223,7 +237,9 @@ def test_normal_replay_releases_gil_for_background_python_thread():
             64,
             16,
             50_000,
-            extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+            extra_engine_args=normalize_mocker_config(
+                {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+            ),
             num_workers=2,
             replay_concurrency=16,
             scaling_policy=None,

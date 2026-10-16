@@ -233,6 +233,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -247,6 +248,7 @@ mod test_event_processing {
             None,
             Some("tenant-a"),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
             None,
             None,
@@ -286,6 +288,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -313,6 +316,8 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            ownership: None,
+            session_id: None,
         };
 
         let out = convert_event(
@@ -321,6 +326,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -346,6 +352,8 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            ownership: None,
+            session_id: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -361,6 +369,8 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            ownership: None,
+            session_id: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -371,6 +381,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -379,6 +390,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -417,6 +429,8 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            ownership: None,
+            session_id: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -432,6 +446,8 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            ownership: None,
+            session_id: None,
         };
 
         let out1 = convert_event(
@@ -441,6 +457,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -449,6 +466,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -533,6 +551,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            ownership: None,
         };
         let out = convert_event(
             raw_evt,
@@ -540,6 +559,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -550,13 +570,14 @@ mod test_event_processing {
     #[test]
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
-        let raw_evt = RawKvEvent::AllBlocksCleared;
+        let raw_evt = RawKvEvent::AllBlocksCleared { ownership: None };
         let out = convert_event(
             raw_evt,
             1,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -568,9 +589,15 @@ mod test_event_processing {
     fn test_parse_mm_hash_from_extra_key() {
         assert_eq!(
             parse_mm_hash_from_extra_key(
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+                "0123456789abcdef000000000000000000000000000000000000000000000000"
             ),
             Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            None
         );
         assert_eq!(parse_mm_hash_from_extra_key("123"), None);
         assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
@@ -579,7 +606,7 @@ mod test_event_processing {
     #[test]
     fn test_extra_keys_to_block_mm_infos() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
             Some(vec![ExtraKeyItem::Hash(mm_hash.clone())]),
             None,
@@ -605,7 +632,7 @@ mod test_event_processing {
     #[test]
     fn test_seq_block_stored_field8_supports_extra_keys() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -637,7 +664,7 @@ mod test_event_processing {
     #[test]
     fn test_seq_block_stored_field8_supports_tuple_extra_keys() {
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -686,7 +713,7 @@ mod test_event_processing {
             medium: Some("GPU".to_string()),
             lora_name: None,
             extra_keys: Some(vec![Some(vec![
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
+                "0123456789abcdef000000000000000000000000000000000000000000000000".to_string(),
             ])]),
         })
         .unwrap();
@@ -720,7 +747,7 @@ mod test_event_processing {
         }
 
         let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+            "0123456789abcdef000000000000000000000000000000000000000000000000".to_string();
         let payload = rmps::to_vec(&MapBlockStoredEvent {
             event_type: "BlockStored",
             block_hashes: vec![10],
@@ -788,7 +815,7 @@ mod tests_startup_helpers {
             &self,
             event: &RouterEvent,
         ) -> impl Future<Output = anyhow::Result<()>> + Send {
-            let bytes = rmp_serde::to_vec(event).unwrap();
+            let bytes = rmp_serde::to_vec_named(event).unwrap();
             self.published
                 .lock()
                 .unwrap()
@@ -1273,6 +1300,7 @@ mod tests_startup_helpers {
                 4,
                 next_event_id,
                 None,
+                None,
             )
         });
 
@@ -1403,6 +1431,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1501,6 +1530,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1583,7 +1613,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1604,6 +1634,8 @@ mod tests_startup_helpers {
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
                 locality: None,
+                ownership: None,
+                session_id: None,
             }],
             data_parallel_rank: Some(0),
         };
@@ -1918,6 +1950,91 @@ mod test_event_dedup_filter {
     }
 
     #[test]
+    fn cache_owner_policy_controls_refcounting() {
+        let mut filter = EventDedupFilter::new();
+        let data = store_data(&[1, 2, 3]);
+
+        filter.track_store_in_domain(
+            0,
+            StorageTier::HostPinned,
+            ResidencyDomain::CacheOwner,
+            EventDedupPolicy::SetLike,
+            &data,
+        );
+        filter.track_store_in_domain(
+            0,
+            StorageTier::HostPinned,
+            ResidencyDomain::CacheOwner,
+            EventDedupPolicy::SetLike,
+            &data,
+        );
+
+        let result = filter
+            .filter_remove_in_domain(
+                0,
+                StorageTier::HostPinned,
+                ResidencyDomain::CacheOwner,
+                EventDedupPolicy::SetLike,
+                remove_data(&[1, 2, 3]),
+            )
+            .expect("CacheOwner removes bypass Worker refcounting");
+        assert_eq!(
+            result.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(1),
+                ExternalSequenceBlockHash(2),
+                ExternalSequenceBlockHash(3),
+            ]
+        );
+        assert!(
+            filter
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::SetLike,
+                    remove_data(&[]),
+                )
+                .is_none()
+        );
+
+        let mut refcounted = EventDedupFilter::new();
+        for _ in 0..2 {
+            refcounted.track_store_in_domain(
+                0,
+                StorageTier::HostPinned,
+                ResidencyDomain::CacheOwner,
+                EventDedupPolicy::RefCounted,
+                &data,
+            );
+        }
+        assert!(
+            refcounted
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::RefCounted,
+                    remove_data(&[1, 2, 3]),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            refcounted
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::RefCounted,
+                    remove_data(&[1, 2, 3]),
+                )
+                .expect("refcounted CacheOwner removes pass only at zero")
+                .block_hashes,
+            result.block_hashes
+        );
+    }
+
+    #[test]
     fn duplicate_removes_are_filtered() {
         let mut filter = EventDedupFilter::new();
 
@@ -2021,6 +2138,63 @@ mod test_event_dedup_filter {
     }
 }
 
+#[cfg(test)]
+mod worker_metrics_tests {
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use dynamo_kv_router::protocols::ActiveLoad;
+
+    use super::super::worker_metrics::{WorkerMetricsPublisher, WorkerMetricsSink};
+
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<ActiveLoad>);
+
+    #[async_trait::async_trait]
+    impl WorkerMetricsSink for ChannelSink {
+        async fn publish(&self, active_load: ActiveLoad) -> Result<()> {
+            self.0
+                .send(active_load)
+                .map_err(|_| anyhow::anyhow!("metrics test channel closed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_debounces_updates_independently_per_rank() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+
+        publisher.publish(Some(0), None, Some(100)).unwrap();
+        publisher.publish(Some(1), None, Some(200)).unwrap();
+        publisher.publish(Some(0), None, Some(300)).unwrap();
+
+        let mut published = Vec::new();
+        for _ in 0..2 {
+            published.push(
+                tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                    .await
+                    .expect("timed out waiting for rank metrics")
+                    .expect("metrics publishing task stopped"),
+            );
+        }
+        published.sort_unstable_by_key(|load| load.dp_rank);
+
+        assert_eq!(published[0].worker_id, 42);
+        assert_eq!(published[0].dp_rank, 0);
+        assert_eq!(published[0].kv_used_blocks, Some(300));
+        assert_eq!(published[1].worker_id, 42);
+        assert_eq!(published[1].dp_rank, 1);
+        assert_eq!(published[1].kv_used_blocks, Some(200));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), rx.recv())
+                .await
+                .is_err(),
+            "same-rank updates should be coalesced"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
@@ -2104,181 +2278,6 @@ mod test_integration_publisher {
         drt.shutdown();
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod batching_state_tests {
-    use super::*;
-
-    #[test]
-    fn test_batching_state_default() {
-        let state = BatchingState::new();
-        assert!(!state.has_pending(), "Default state should have no pending");
-        assert!(
-            state.pending_removed.is_none(),
-            "Default pending_removed should be None"
-        );
-        assert!(
-            state.pending_stored.is_none(),
-            "Default pending_stored should be None"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_new() {
-        let state = BatchingState::new();
-        // last_flush_time should be set to approximately now
-        let elapsed = state.last_flush_time.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "new() should create state with flush time set to approximately now"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_pending_removed() {
-        let mut state = BatchingState::new();
-        assert!(!state.has_pending(), "Should not have pending initially");
-
-        state.pending_removed = Some(KvCacheRemoveData {
-            block_hashes: vec![],
-        });
-        assert!(
-            state.has_pending(),
-            "Should have pending after setting pending_removed"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_pending_stored() {
-        let mut state = BatchingState::new();
-        assert!(!state.has_pending(), "Should not have pending initially");
-
-        state.pending_stored = Some(KvCacheStoreData {
-            parent_hash: None,
-            start_position: None,
-            blocks: vec![],
-        });
-        assert!(
-            state.has_pending(),
-            "Should have pending after setting pending_stored"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_timeout() {
-        let mut state = BatchingState::new();
-
-        // Reset flush time to now so we can test timeout behavior
-        state.record_flush_time();
-
-        // Test that remaining returns positive initially (10ms timeout)
-        let remaining_before = state.remaining_timeout(10);
-        assert!(
-            remaining_before.as_millis() > 0,
-            "Should have remaining time initially"
-        );
-
-        // Test zero timeout returns zero
-        let remaining_zero = state.remaining_timeout(0);
-        assert_eq!(
-            remaining_zero.as_millis(),
-            0,
-            "0 timeout should return zero"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_record_flush_time() {
-        let mut state = BatchingState::new();
-
-        let initial_time = state.last_flush_time;
-
-        state.record_flush_time();
-
-        assert!(
-            state.last_flush_time >= initial_time,
-            "record_flush_time should update the time"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_remaining_timeout() {
-        let mut state = BatchingState::new();
-
-        // Reset flush time to now so we can test timeout behavior
-        state.record_flush_time();
-
-        // Test that remaining returns positive initially (10ms timeout)
-        let remaining = state.remaining_timeout(10);
-        assert!(
-            remaining.as_millis() > 0,
-            "Should have remaining time initially"
-        );
-
-        // Test that with 0 timeout, returns zero
-        let remaining_zero = state.remaining_timeout(0);
-        assert_eq!(
-            remaining_zero,
-            Duration::ZERO,
-            "0 timeout should return zero"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_accumulate_removed() {
-        let mut state = BatchingState::new();
-
-        let first = KvCacheRemoveData {
-            block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
-        };
-
-        state.pending_removed = Some(first);
-
-        if let Some(ref mut pending) = state.pending_removed {
-            pending
-                .block_hashes
-                .extend(vec![ExternalSequenceBlockHash(3)]);
-        }
-
-        let pending = state.pending_removed.as_ref().unwrap();
-        assert_eq!(
-            pending.block_hashes.len(),
-            3,
-            "Should have accumulated 3 block hashes"
-        );
-    }
-
-    #[test]
-    fn test_batching_state_accumulate_stored() {
-        let mut state = BatchingState::new();
-
-        let block1 = KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(1),
-            tokens_hash: LocalBlockHash(100),
-            mm_extra_info: None,
-        };
-        let first = KvCacheStoreData {
-            parent_hash: Some(ExternalSequenceBlockHash(0)),
-            start_position: None,
-            blocks: vec![block1],
-        };
-
-        state.pending_stored = Some(first);
-
-        let block2 = KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(2),
-            tokens_hash: LocalBlockHash(200),
-            mm_extra_info: None,
-        };
-
-        if let Some(ref mut pending) = state.pending_stored {
-            pending.blocks.extend(vec![block2]);
-        }
-
-        let pending = state.pending_stored.as_ref().unwrap();
-        assert_eq!(pending.blocks.len(), 2, "Should have accumulated 2 blocks");
     }
 }
 

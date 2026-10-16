@@ -65,6 +65,120 @@ data:
 	}
 }
 
+func TestEventuallyMatchManifestsResolvesVariables(t *testing.T) {
+	t.Log("Create a manifest that binds its expected value through a golden variable")
+	expectedPath := filepath.Join(t.TempDir(), "expected.yaml")
+	if err := os.WriteFile(expectedPath, []byte(`
+$strict: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  $strict: false
+  name: generated
+data:
+  worker-hash: $var:worker-hash
+`), 0o600); err != nil {
+		t.Fatalf("write expected manifests: %v", err)
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core types to scheme: %v", err)
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "generated", Namespace: "test"}, Data: map[string]string{"worker-hash": "aabbccdd"}},
+	).Build()
+
+	t.Log("Match the value exactly after resolving the worker-hash variable")
+	EventuallyMatchManifestsWithVariables(t, k8sClient, "test", expectedPath, Variables{"worker-hash": "aabbccdd"})
+}
+
+func TestResolveVariablesRejectsUnknownVariable(t *testing.T) {
+	t.Log("Declare an expected manifest with a variable that has no bound value")
+	expected := readTestDocuments(t, `
+$strict: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  $strict: false
+  name: generated
+data:
+  worker-hash: $var:worker-hash
+`)
+
+	t.Log("Reject the unresolved variable before the matcher attempts an API comparison")
+	err := resolveVariables(expected, Variables{})
+	if err == nil || !strings.Contains(err.Error(), `unknown variable "worker-hash"`) {
+		t.Fatalf("resolveVariables() error = %v, want unknown worker-hash variable", err)
+	}
+}
+
+func TestResolveVariablesMatchExactStrings(t *testing.T) {
+	t.Log("Resolve a variable whose value resembles a golden pattern directive")
+	expected := readTestDocuments(t, `
+$strict: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  $strict: false
+  name: generated
+data:
+  value: $var:value
+`)
+	if err := resolveVariables(expected, Variables{"value": "$pattern:.*"}); err != nil {
+		t.Fatalf("resolveVariables() error = %v", err)
+	}
+
+	t.Log("Require the substituted value literally rather than treating it as a matcher directive")
+	actual := readTestDocuments(t, `
+$strict: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  $strict: false
+  name: generated
+data:
+  value: any-value
+`)
+	if err := matchNode(documentRoot(&expected[0].node), documentRoot(&actual[0].node), "$"); err == nil {
+		t.Fatal("matchNode() succeeded, want exact variable-value mismatch")
+	}
+}
+
+func TestDocumentDiffPreservesVariableDirectives(t *testing.T) {
+	t.Log("Resolve a worker-hash variable in a contract with an unrelated mismatch")
+	expected := readTestDocuments(t, `
+$strict: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  $strict: false
+  name: generated
+data:
+  worker-hash: $var:worker-hash
+  other: expected
+`)
+	if err := resolveVariables(expected, Variables{"worker-hash": "aabbccdd"}); err != nil {
+		t.Fatalf("resolveVariables() error = %v", err)
+	}
+	actual := readTestDocuments(t, `
+$strict: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  $strict: false
+  name: generated
+data:
+  worker-hash: aabbccdd
+  other: actual
+`)
+
+	t.Log("Keep the stable variable directive in the human-readable mismatch diff")
+	diff := documentDiff(&expected[0].node, &actual[0].node)
+	if !strings.Contains(diff, "$var:worker-hash") || strings.Contains(diff, variableValueTagPrefix) {
+		t.Fatalf("documentDiff() = %q, want stable worker-hash directive without internal tag", diff)
+	}
+}
+
 func TestCompareDescribesMissingObject(t *testing.T) {
 	t.Log("Create an expected named object with no actual object")
 	scheme := runtime.NewScheme()

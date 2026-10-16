@@ -54,7 +54,11 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use educe::Educe;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, OnceLock},
+};
 use validator::{Validate, ValidationError};
 
 mod client;
@@ -67,8 +71,6 @@ pub mod service;
 
 pub(crate) use client::EndpointDiscoverySource;
 pub(crate) use client::RoutingInstances;
-pub(crate) use client::RoutingOccupancyState;
-pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use client::{Client, RoutingInstanceCounts};
 pub use endpoint::{StartedEndpoint, build_transport_type};
 
@@ -282,6 +284,7 @@ impl Component {
             name: endpoint.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
+            lifecycle_operation_role: Arc::new(OnceLock::new()),
         };
         // Attach endpoint registry so scrapes traverse separate registries (avoids collisions).
         self.get_metrics_registry()
@@ -370,6 +373,9 @@ pub struct Endpoint {
 
     /// This hierarchy's own metrics registry
     metrics_registry: crate::MetricsRegistry,
+
+    /// Topology role shared by all clones of this endpoint.
+    lifecycle_operation_role: Arc<OnceLock<crate::telemetry::LifecycleOperationRole>>,
 }
 
 impl Hash for Endpoint {
@@ -442,8 +448,42 @@ impl Endpoint {
         &self.component
     }
 
+    /// Record the topology role already advertised for this serving endpoint.
+    pub fn set_lifecycle_operation_role(
+        &self,
+        role: crate::telemetry::LifecycleOperationRole,
+    ) -> anyhow::Result<()> {
+        let existing = *self.lifecycle_operation_role.get_or_init(|| role);
+        anyhow::ensure!(
+            existing == role,
+            "endpoint {} lifecycle role is already {existing:?}, cannot set it to {role:?}",
+            self.id()
+        );
+        Ok(())
+    }
+
+    pub(crate) fn lifecycle_operation_role(
+        &self,
+    ) -> Arc<OnceLock<crate::telemetry::LifecycleOperationRole>> {
+        self.lifecycle_operation_role.clone()
+    }
+
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
+    }
+
+    /// Like [`Self::client`], but the returned `Client`'s background
+    /// instance-reconciliation task is bound to `cancel_token` rather than
+    /// the process-wide primary token. Use this when the `Client` itself is
+    /// scoped to something narrower than the process — a monitor bound to
+    /// one `WorkerSet`'s lifecycle, say — since dropping every handle to a
+    /// `Client` built through [`Self::client`] does not stop that task, and
+    /// it otherwise runs, and leaks, until process shutdown.
+    pub async fn client_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<client::Client> {
+        client::Client::with_cancellation(self.clone(), cancel_token).await
     }
 
     pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {

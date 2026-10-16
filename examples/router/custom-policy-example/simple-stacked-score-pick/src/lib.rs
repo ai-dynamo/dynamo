@@ -30,7 +30,7 @@ fn provider(
         |config: &KvRouterConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
-                worker_type,
+                worker_type.as_str(),
                 vec![
                     Box::new(ActiveRequestsScorer),
                     Box::new(UncachedBlocksScorer),
@@ -41,6 +41,7 @@ fn provider(
     ))
 }
 
+/// Register the `simple-stacked-score-pick` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {

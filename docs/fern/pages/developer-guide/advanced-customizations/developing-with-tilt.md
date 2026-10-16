@@ -191,10 +191,9 @@ built-in cert controller (based on OPA cert-controller). On startup it:
 3. Injects the CA bundle into `ValidatingWebhookConfiguration` and
    `MutatingWebhookConfiguration` resources.
 
-This matches production behavior and requires no external tooling. For
-alternative certificate management (cert-manager or external certs), see the
-[webhook documentation](../knowledge-base/kubernetes/kubernetes-operator/webhooks.md) and configure via
-`helm_values` in `tilt-settings.yaml`.
+This matches production behavior and requires no external tooling. Configure alternative certificate
+management, such as cert-manager or external certificates, through `helm_values` in
+`tilt-settings.yaml`.
 
 ## Typical Workflows
 

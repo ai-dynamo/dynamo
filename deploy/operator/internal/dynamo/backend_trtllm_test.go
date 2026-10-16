@@ -7,6 +7,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -14,6 +15,43 @@ import (
 const (
 	mpiRunSecretName = "mpi-run-ssh-secret"
 )
+
+func TestTRTLLMBackend_RoleTemplatePreservesLaunchAndRetainsPodWiring(t *testing.T) {
+	backend := &TRTLLMBackend{
+		MpiRunSecretName:    mpiRunSecretName,
+		roleLaunchOwnership: roleLaunchOwnedByPodTemplate,
+	}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.trtllm", "--user-owned-multinode"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+
+	containerGPUCount := func() (int64, error) {
+		t.Fatal("role-authored TRT-LLM launch must not derive MPI ranks from a role GPU count")
+		return 0, nil
+	}
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, containerGPUCount))
+	require.Equal(t, wantCommand, container.Command)
+	require.Equal(t, wantArgs, container.Args)
+	require.Nil(t, container.LivenessProbe)
+	require.NotNil(t, container.ReadinessProbe)
+	require.Nil(t, container.StartupProbe)
+	require.Len(t, container.VolumeMounts, 1)
+	require.Equal(t, mpiRunSecretName, container.VolumeMounts[0].Name)
+
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
+	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+	require.Len(t, podSpec.Volumes, 1)
+	require.Equal(t, mpiRunSecretName, podSpec.Volumes[0].Name)
+}
 
 func TestShellQuoteForBashC(t *testing.T) {
 	tests := []struct {
@@ -89,7 +127,7 @@ func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
 		},
 	}
 
-	backend.setupLeaderContainer(container, 2, "dec", betaComponent(t, component), &GroveMultinodeDeployer{})
+	backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, resolveTestContainerGPUs(t, betaComponent(t, component)))
 
 	if len(container.Args) != 1 {
 		t.Fatalf("expected 1 arg, got %d", len(container.Args))
@@ -238,7 +276,16 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				StartupProbe:   &corev1.Probe{},
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
+			component := betaComponent(t, tt.component)
+			require.NoError(t, backend.UpdateContainer(
+				container,
+				tt.numberOfNodes,
+				tt.role,
+				component,
+				"test-service",
+				tt.multinodeDeployer,
+				staticContainerGPUCount(resolveTestContainerGPUs(t, component)),
+			))
 
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
 			validateCommand(t, container, tt.expectedCommand)
@@ -769,7 +816,14 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				}
 			}
 
-			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.serviceName, betaComponent(t, tt.component), tt.multinodeDeployer)
+			component := betaComponent(t, tt.component)
+			backend.setupLeaderContainer(
+				container,
+				tt.numberOfNodes,
+				tt.serviceName,
+				tt.multinodeDeployer,
+				resolveTestContainerGPUs(t, component),
+			)
 
 			// Check that command is set correctly
 			expectedCommand := []string{"/bin/sh", "-c"}
@@ -852,82 +906,6 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 	}
 }
 
-func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
-	tests := []struct {
-		name      string
-		resources *v1alpha1.Resources
-		expected  int32
-	}{
-		{
-			name:      "No resources - default to 0",
-			resources: nil,
-			expected:  0,
-		},
-		{
-			name:      "Empty resources - default to 0",
-			resources: &v1alpha1.Resources{},
-			expected:  0,
-		},
-		{
-			name: "GPU in requests",
-			resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{
-					GPU: "2",
-				},
-			},
-			expected: 2,
-		},
-		{
-			name: "GPU in limits",
-			resources: &v1alpha1.Resources{
-				Limits: &v1alpha1.ResourceItem{
-					GPU: "4",
-				},
-			},
-			expected: 4,
-		},
-		{
-			name: "GPU in both requests and limits - requests takes precedence",
-			resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{
-					GPU: "3",
-				},
-				Limits: &v1alpha1.ResourceItem{
-					GPU: "8",
-				},
-			},
-			expected: 3,
-		},
-		{
-			name: "Invalid GPU value - default to 0",
-			resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{
-					GPU: "invalid",
-				},
-			},
-			expected: 0,
-		},
-		{
-			name: "Empty GPU string - default to 0",
-			resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{
-					GPU: "",
-				},
-			},
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := getGPUsPerNode(betaResourceRequirements(t, tt.resources))
-			if result != tt.expected {
-				t.Errorf("getGPUsPerNode() = %d, want %d", result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	backend := &TRTLLMBackend{}
 
@@ -1005,7 +983,7 @@ func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
+			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added

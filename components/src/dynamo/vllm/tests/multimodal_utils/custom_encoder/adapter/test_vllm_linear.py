@@ -127,8 +127,14 @@ class _Backend(VisionEncoderBackend):
         raise NotImplementedError
 
 
-def _model_config(*, multimodal: bool = False, callable_flag: bool = False):
+def _model_config(
+    *,
+    multimodal: bool = False,
+    callable_flag: bool = False,
+    architecture: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
+        architectures=[architecture] if architecture is not None else [],
         dtype=torch.bfloat16,
         get_hidden_size=lambda: 4,
         is_multimodal_model=(lambda: multimodal) if callable_flag else multimodal,
@@ -155,6 +161,16 @@ def test_text_decoder_selects_linear_adapter_and_builds_final_prompt():
         2,
     ]
     assert prompt["prompt_is_token_ids"] == [True, False, False, True]
+
+
+def test_text_only_qwen_decoder_selects_linear_adapter():
+    adapter = create_custom_encoder_adapter(
+        _Backend(),
+        _model_config(architecture="Qwen2ForCausalLM"),
+        _engine_args(),
+    )
+
+    assert type(adapter).__name__ == "LinearEmbedsAdapter"
 
 
 def test_linear_adapter_requires_prompt_embeds_flag():

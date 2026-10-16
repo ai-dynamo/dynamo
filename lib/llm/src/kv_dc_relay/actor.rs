@@ -20,11 +20,12 @@ use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
 use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
     CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
-    DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
+    DcCkfPublisher, DcCkfRankReplacement, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
+#[cfg(test)]
+use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
 use dynamo_kv_router::protocols::{
-    DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
-    StorageTier, WorkerId, WorkerWithDpRank,
+    DpRank, KvCacheEventData, KvCacheEventError, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
@@ -45,9 +46,7 @@ const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
 const RECOVERY_REBUILD_BATCH_WINDOW: Duration = Duration::from_millis(5);
 
 #[derive(Debug)]
-// NOTE: This is the intentional producer snapshot/delta seam for the future non-local adapter.
-// It remains crate-private until that transport has delivery cursors and recovery semantics.
-#[allow(dead_code)]
+// Keep actor subscriptions crate-private because delivery cursors and recovery belong above it.
 pub(crate) struct DcCkfSubscription {
     pub(crate) snapshot: DcCkfSnapshot,
     pub(crate) deltas: broadcast::Receiver<DcCkfDelta>,
@@ -462,16 +461,12 @@ impl KvDcRelayHandle {
         Ok(())
     }
 
-    async fn replace_ranks(
+    async fn replace_rank_states(
         &self,
-        replacements: Vec<RankReplacement>,
+        states: HashMap<WorkerWithDpRank, DcCkfRankReplacement>,
+        payload_weight: usize,
     ) -> Result<(), KvDcRelayError> {
-        let weight = replacements
-            .iter()
-            .flat_map(|replacement| &replacement.events)
-            .map(event_payload_weight)
-            .fold(0usize, usize::saturating_add)
-            .min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
+        let weight = payload_weight.min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
         let permit = self
             .payload_permits
             .clone()
@@ -479,7 +474,7 @@ impl KvDcRelayHandle {
             .await
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
         self.submit(|response| ActorCommand::ReplaceRanks {
-            replacements,
+            states,
             _payload_permit: permit,
             response,
         })
@@ -489,17 +484,20 @@ impl KvDcRelayHandle {
     #[cfg(test)]
     async fn replace_rank(
         &self,
-        publisher_id: PublisherId,
+        _publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> Result<(), KvDcRelayError> {
-        self.replace_ranks(vec![RankReplacement {
-            publisher_id,
-            worker_id,
-            dp_rank,
-            events,
-        }])
+        let weight = events
+            .iter()
+            .map(event_payload_weight)
+            .fold(0usize, usize::saturating_add);
+        let state = replacement_state(worker_id, dp_rank, events)?;
+        self.replace_rank_states(
+            HashMap::from([(WorkerWithDpRank::new(worker_id, dp_rank), state)]),
+            weight,
+        )
         .await
     }
 
@@ -539,19 +537,30 @@ impl KvDcRelayHandle {
             .await
     }
 
-    // Kept with `DcCkfSubscription` as the crate-private producer boundary described above.
-    #[allow(dead_code)]
     pub(crate) async fn subscribe(
         &self,
         lease: LaneLease,
     ) -> Result<DcCkfSubscription, KvDcRelayError> {
         let subscription = self
-            .submit(|response| ActorCommand::Subscribe { lease, response })
+            .submit(|response| ActorCommand::Subscribe {
+                lease,
+                response,
+                #[cfg(test)]
+                test_work: None,
+            })
             .await?;
         Ok(DcCkfSubscription {
             snapshot: subscription.snapshot,
             deltas: subscription.deltas,
         })
+    }
+
+    pub(super) async fn retire_publication_lease(
+        &self,
+        lease: LaneLease,
+    ) -> Result<(), KvDcRelayError> {
+        self.submit(|response| ActorCommand::RetirePublicationLease { lease, response })
+            .await
     }
 
     pub(super) async fn shutdown(&self) -> Result<(), KvDcRelayError> {
@@ -643,19 +652,88 @@ impl KvDcRelayRecoveryTarget {
             state.flush_scheduled = false;
             std::mem::take(&mut state.pending)
         };
-        let (replacements, responses): (Vec<_>, Vec<_>) = pending
-            .into_iter()
-            .map(|pending| (pending.replacement, pending.response))
-            .unzip();
+        // Replacement states are built off the actor, and a malformed dump stays local to
+        // its rank: only pool-wide failures (allocation, actor invariants) reject the batch.
+        let mut states: HashMap<WorkerWithDpRank, DcCkfRankReplacement> = HashMap::new();
+        let mut waiters = Vec::new();
+        let mut payload_weight = 0usize;
+        let mut pending = pending.into_iter();
+        let mut batch_error: Option<String> = None;
+        if states.try_reserve(pending.len()).is_err() || waiters.try_reserve(pending.len()).is_err()
+        {
+            batch_error = Some(
+                KvDcRelayError::Build(
+                    dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+                )
+                .to_string(),
+            );
+        }
+        for item in pending.by_ref() {
+            if batch_error.is_some() {
+                break;
+            }
+            let replacement = item.replacement;
+            let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
+            if states.contains_key(&member) {
+                // A duplicate rank in one window means the earlier entry is already being
+                // installed; failing only the later waiter keeps the anomaly rank-local.
+                let _ = item.response.send(Err(KvDcRelayError::InvalidTreeDump {
+                    worker_id: replacement.worker_id,
+                    dp_rank: replacement.dp_rank,
+                    message: format!(
+                        "replacement batch contains the same rank more than once (publisher {})",
+                        replacement.publisher_id
+                    ),
+                }
+                .to_string()));
+                continue;
+            }
+            let weight = replacement
+                .events
+                .iter()
+                .map(event_payload_weight)
+                .fold(0usize, usize::saturating_add);
+            match replacement_state(
+                replacement.worker_id,
+                replacement.dp_rank,
+                replacement.events,
+            ) {
+                Ok(state) => {
+                    states.insert(member, state);
+                    payload_weight = payload_weight.saturating_add(weight);
+                    waiters.push(item.response);
+                }
+                Err(error @ KvDcRelayError::Build(_)) => {
+                    let error = error.to_string();
+                    let _ = item.response.send(Err(error.clone()));
+                    batch_error = Some(error);
+                }
+                Err(error) => {
+                    let _ = item.response.send(Err(error.to_string()));
+                }
+            }
+        }
+        if let Some(error) = batch_error {
+            for item in pending {
+                let _ = item.response.send(Err(error.clone()));
+            }
+            for response_tx in waiters {
+                let _ = response_tx.send(Err(error.clone()));
+            }
+            return;
+        }
+        if states.is_empty() {
+            return;
+        }
         let batch_result = match self.rebuild_permit.acquire().await {
             Ok(_permit) => self
                 .handle
-                .replace_ranks(replacements)
+                .replace_rank_states(states, payload_weight)
                 .await
                 .map_err(|error| error.to_string()),
             Err(_) => Err(KvDcRelayError::ShuttingDown.to_string()),
         };
-        for response_tx in responses {
+        for response_tx in waiters {
             let response = match &batch_result {
                 Ok(()) => Ok(()),
                 Err(error) => Err(error.clone()),
@@ -834,7 +912,7 @@ enum ActorCommand {
         _payload_permit: OwnedSemaphorePermit,
     },
     ReplaceRanks {
-        replacements: Vec<RankReplacement>,
+        states: HashMap<WorkerWithDpRank, DcCkfRankReplacement>,
         _payload_permit: OwnedSemaphorePermit,
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
@@ -855,6 +933,12 @@ enum ActorCommand {
     Subscribe {
         lease: LaneLease,
         response: oneshot::Sender<Result<ActorSubscription, KvDcRelayError>>,
+        #[cfg(test)]
+        test_work: Option<TestSnapshotWork>,
+    },
+    RetirePublicationLease {
+        lease: LaneLease,
+        response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
     #[cfg(any(test, feature = "ckf-diagnostics"))]
     Stats {
@@ -885,6 +969,33 @@ struct ActorSubscription {
     deltas: broadcast::Receiver<DcCkfDelta>,
 }
 
+struct ActorCore {
+    state: DcCkfState,
+    publisher: DcCkfPublisher<BroadcastDeltaSink>,
+}
+
+#[cfg(test)]
+enum TestSnapshotWork {
+    Gate {
+        entered: oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
+    Panic,
+}
+
+#[cfg(test)]
+impl TestSnapshotWork {
+    fn run(self) {
+        match self {
+            Self::Gate { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+            Self::Panic => panic!("injected snapshot worker failure"),
+        }
+    }
+}
+
 impl ActorCommand {
     #[cfg(feature = "ckf-diagnostics")]
     fn kind(&self) -> &'static str {
@@ -895,6 +1006,7 @@ impl ActorCommand {
             Self::Flush { .. } => "flush",
             Self::Snapshot { .. } => "snapshot",
             Self::Subscribe { .. } => "subscribe",
+            Self::RetirePublicationLease { .. } => "retire_publication_lease",
             #[cfg(any(test, feature = "ckf-diagnostics"))]
             Self::Stats { .. } => "stats",
             Self::Shutdown { .. } => "shutdown",
@@ -906,10 +1018,50 @@ impl ActorCommand {
     }
 }
 
+async fn snapshot_after_barrier_blocking(
+    core: ActorCore,
+    lease: LaneLease,
+    #[cfg(test)] test_work: Option<TestSnapshotWork>,
+) -> Result<(ActorCore, Result<ActorSubscription, KvDcRelayError>), tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(work) = test_work {
+            work.run();
+        }
+
+        let ActorCore {
+            mut state,
+            mut publisher,
+        } = core;
+        let result = publisher
+            .snapshot_after_barrier(&mut state, lease)
+            .map_err(|error| KvDcRelayError::Publisher(format!("{error:?}")))
+            .map(|snapshot| {
+                // Prevent a gap after snapshot sequence N by subscribing before the actor can
+                // resume mutations.
+                let deltas = publisher.sink().sender.subscribe();
+                ActorSubscription { snapshot, deltas }
+            });
+        (ActorCore { state, publisher }, result)
+    })
+    .await
+}
+
+fn send_subscription_response(
+    core: &mut ActorCore,
+    response: oneshot::Sender<Result<ActorSubscription, KvDcRelayError>>,
+    result: Result<ActorSubscription, KvDcRelayError>,
+) {
+    if let Err(Ok(subscription)) = response.send(result) {
+        drop(subscription);
+        core.publisher.retire_lease();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_actor(
-    mut state: DcCkfState,
-    mut publisher: DcCkfPublisher<BroadcastDeltaSink>,
+    state: DcCkfState,
+    publisher: DcCkfPublisher<BroadcastDeltaSink>,
     mut receiver: mpsc::Receiver<ActorCommand>,
     publication_delay: Duration,
     fault_tx: mpsc::Sender<ActorFault>,
@@ -917,6 +1069,7 @@ async fn run_actor(
     fence: CancellationToken,
     stopped: CancellationToken,
 ) {
+    let mut core = ActorCore { state, publisher };
     let _stopped_guard = CancelOnDrop(stopped);
     let mut unknown_removal_events = 0u64;
     let mut capacity_omission_events = 0u64;
@@ -935,8 +1088,12 @@ async fn run_actor(
             command = receiver.recv() => command,
             _ = &mut publication_timer, if publication_timer_armed => {
                 publication_timer_armed = false;
-                if state.has_pending_publication()
-                    && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
+                if core.state.has_pending_publication()
+                    && let Err(error) = publish_pending(
+                        &mut core.state,
+                        &mut core.publisher,
+                        &diagnostics,
+                    )
                 {
                     diagnostics.record_error(&error);
                 }
@@ -947,6 +1104,7 @@ async fn run_actor(
             break;
         };
         diagnostics.start_command(&command);
+        let ActorCore { state, publisher } = &mut core;
         match command {
             ActorCommand::Apply {
                 publisher_id,
@@ -956,9 +1114,6 @@ async fn run_actor(
                 let worker_id = event.worker_id;
                 let dp_rank = event.event.dp_rank;
                 let event_id = event.event.event_id;
-                // NOTE: Subscriber-free Relay operation is transitional or diagnostic, not an
-                // optimized steady-state mode. Keep one publication path until an unsubscribed
-                // deployment is measured; a useful Relay is expected to have a consumer.
                 let outcome = state.apply_event(event);
                 let first_error = outcome.first_error().copied();
                 let publication_boundary = outcome.publication_boundary();
@@ -985,7 +1140,7 @@ async fn run_actor(
                     }
                 }
                 if let Some(batch) = outcome.into_publication() {
-                    if let Err(error) = publish_batch(batch, &mut publisher, &diagnostics) {
+                    if let Err(error) = publish_batch(batch, publisher, &diagnostics) {
                         diagnostics.record_error(&error);
                     }
                 } else if publication_boundary {
@@ -1002,10 +1157,11 @@ async fn run_actor(
                 if let Some(error) = first_error {
                     let disposition = event_failure_point(error).disposition();
                     if disposition.action == CkfFailureAction::ContinueCapacityOmission {
-                        // NOTE: A bounded relocation miss is a pre-commit lossy-index omission.
-                        // Do not turn it into a lifecycle fault: the affected block is unchanged,
-                        // successful sibling blocks remain committed, a later Store may retry, and
-                        // an omitted hash's Remove remains a safe no-op.
+                        // NOTE: A bounded relocation miss is a deterministic physical-index
+                        // omission. Exact source lineage and ownership remain committed, while the
+                        // failed fingerprint is non-resident. Do not turn it into a lifecycle
+                        // fault: successful siblings remain committed, a new owner may retry
+                        // admission, and removal still resolves through source lineage.
                         capacity_omission_events = capacity_omission_events.saturating_add(1);
                         if capacity_omission_events == 1 {
                             tracing::warn!(
@@ -1051,26 +1207,38 @@ async fn run_actor(
                 }
             }
             ActorCommand::ReplaceRanks {
-                replacements,
+                states,
                 _payload_permit: _,
                 response,
             } => {
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let result = replacement_batch_hashes(replacements)
-                    .and_then(|hashes| state.replace_ranks(hashes).map_err(Into::into))
-                    .and_then(|publication| {
-                        if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &diagnostics)?;
-                        } else {
-                            diagnostics.record_no_publication();
-                        }
-                        Ok(())
-                    });
+                let omissions_before = state.lifetime_capacity_omissions();
+                let result =
+                    state
+                        .replace_ranks(states)
+                        .map_err(Into::into)
+                        .and_then(|publication| {
+                            if let Some(batch) = publication {
+                                publish_batch(batch, publisher, &diagnostics)?;
+                            } else {
+                                diagnostics.record_no_publication();
+                            }
+                            Ok(())
+                        });
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics.record_rebuild(rebuild_started);
                 // The whole cold-start batch is built off-side. A pre-swap failure leaves every
                 // prior rank unchanged; the strong responses all observe the same atomic result.
+                let replacement_omissions = state
+                    .lifetime_capacity_omissions()
+                    .saturating_sub(omissions_before);
+                if replacement_omissions > 0 {
+                    tracing::warn!(
+                        replacement_omissions,
+                        "KV DC Relay omitted capacity-exhausted blocks while installing rank replacements; service continues"
+                    );
+                }
                 let _ = response.send(result);
             }
             ActorCommand::ResetRank {
@@ -1102,7 +1270,7 @@ async fn run_actor(
                             diagnostics.record_degraded_reset();
                         }
                         if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &diagnostics)?;
+                            publish_batch(batch, publisher, &diagnostics)?;
                         } else {
                             diagnostics.record_no_publication();
                         }
@@ -1111,26 +1279,58 @@ async fn run_actor(
                 let _ = response.send(result);
             }
             ActorCommand::Flush { response } => {
-                let result = publish_pending(&mut state, &mut publisher, &diagnostics);
+                let result = publish_pending(state, publisher, &diagnostics);
                 let _ = response.send(result);
             }
             #[cfg(feature = "ckf-diagnostics")]
             ActorCommand::Snapshot { response } => {
-                let result = diagnostic_barrier_snapshot(&mut state, &mut publisher, &diagnostics);
+                let result = diagnostic_barrier_snapshot(state, publisher, &diagnostics);
                 let _ = response.send(result);
             }
-            ActorCommand::Subscribe { lease, response } => {
-                let result = publisher
-                    .snapshot_after_barrier(&mut state, lease)
-                    .map_err(|error| KvDcRelayError::Publisher(format!("{error:?}")))
-                    .map(|snapshot| {
-                        // The actor cannot process a continuation mutation until this command
-                        // returns. Subscribe after any old-lease tail so the new receiver starts
-                        // exactly after snapshot sequence N.
-                        let deltas = publisher.sink().sender.subscribe();
-                        ActorSubscription { snapshot, deltas }
-                    });
-                let _ = response.send(result);
+            ActorCommand::Subscribe {
+                lease,
+                response,
+                #[cfg(test)]
+                test_work,
+            } => {
+                match snapshot_after_barrier_blocking(
+                    core,
+                    lease,
+                    #[cfg(test)]
+                    test_work,
+                )
+                .await
+                {
+                    Ok((returned_core, result)) => {
+                        core = returned_core;
+                        if fence.is_cancelled() {
+                            let _ = response.send(Err(KvDcRelayError::ShuttingDown));
+                            diagnostics.finish_command();
+                            discard_tail = true;
+                            break;
+                        }
+                        send_subscription_response(&mut core, response, result);
+                    }
+                    Err(join_error) => {
+                        tracing::error!(
+                            error = %join_error,
+                            "KV DC Relay snapshot worker failed"
+                        );
+                        let error = KvDcRelayError::Publisher(format!(
+                            "snapshot blocking task failed: {join_error}"
+                        ));
+                        diagnostics.record_error(&error);
+                        let _ = response.send(Err(error));
+                        diagnostics.finish_command();
+                        return;
+                    }
+                }
+            }
+            ActorCommand::RetirePublicationLease { lease, response } => {
+                if publisher.lease() == Some(lease) {
+                    publisher.retire_lease();
+                }
+                let _ = response.send(Ok(()));
             }
             #[cfg(any(test, feature = "ckf-diagnostics"))]
             ActorCommand::Stats { response } => {
@@ -1162,28 +1362,30 @@ async fn run_actor(
                 }
             }
         }
-        if !state.has_pending_publication() {
+        if !core.state.has_pending_publication() {
             publication_timer_armed = false;
         }
         diagnostics.finish_command();
     }
 
-    if !discard_tail && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics) {
+    if !discard_tail
+        && let Err(error) = publish_pending(&mut core.state, &mut core.publisher, &diagnostics)
+    {
         diagnostics.record_error(&error);
     }
-    publisher.retire_lease();
+    core.publisher.retire_lease();
     drop(fault_tx);
     if let Some(response) = shutdown_response {
         let _ = response.send(Ok(()));
     }
 }
 
-fn replacement_hashes(
+fn replacement_state(
     worker_id: WorkerId,
     dp_rank: DpRank,
     events: Vec<RouterEvent>,
-) -> Result<HashSet<ExternalSequenceBlockHash>, KvDcRelayError> {
-    let mut hashes = HashSet::new();
+) -> Result<DcCkfRankReplacement, KvDcRelayError> {
+    let mut replacement = DcCkfRankReplacement::new();
     for event in events {
         if event.worker_id != worker_id || event.event.dp_rank != dp_rank {
             return Err(KvDcRelayError::InvalidTreeDump {
@@ -1192,50 +1394,18 @@ fn replacement_hashes(
                 message: "event identity does not match replacement rank".to_string(),
             });
         }
-        if event.storage_tier != StorageTier::Device {
-            continue;
-        }
-        let KvCacheEventData::Stored(store) = event.event.data else {
-            return Err(KvDcRelayError::InvalidTreeDump {
+        replacement.push_event(event).map_err(|error| match error {
+            KvCacheEventError::AllocationFailed => KvDcRelayError::Build(
+                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+            ),
+            _ => KvDcRelayError::InvalidTreeDump {
                 worker_id,
                 dp_rank,
-                message: "tree dump contains a non-Stored event".to_string(),
-            });
-        };
-        hashes.try_reserve(store.blocks.len()).map_err(|_| {
-            KvDcRelayError::Build(
-                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-            )
+                message: format!("tree dump is not canonical replay order: {error}"),
+            },
         })?;
-        hashes.extend(store.blocks.into_iter().map(|block| block.block_hash));
     }
-    Ok(hashes)
-}
-
-fn replacement_batch_hashes(
-    replacements: Vec<RankReplacement>,
-) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
-    let mut hashes_by_rank = HashMap::new();
-    for replacement in replacements {
-        let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
-        if hashes_by_rank.contains_key(&member) {
-            return Err(KvDcRelayError::InvalidTreeDump {
-                worker_id: replacement.worker_id,
-                dp_rank: replacement.dp_rank,
-                message: format!(
-                    "replacement batch contains the same rank more than once (publisher {})",
-                    replacement.publisher_id
-                ),
-            });
-        }
-        let hashes = replacement_hashes(
-            replacement.worker_id,
-            replacement.dp_rank,
-            replacement.events,
-        )?;
-        hashes_by_rank.insert(member, hashes);
-    }
-    Ok(hashes_by_rank)
+    Ok(replacement)
 }
 
 fn publish_batch(
@@ -1329,6 +1499,8 @@ mod tests {
         }
     }
 
+    const EXTERNAL_MASK: u64 = 0xBADC_0FFE_E0DD_F00D;
+
     fn scope(_name: &str) -> StreamScope {
         let dc_id = DcId::new(2);
         let domain = IndexerDomainId::new(
@@ -1358,7 +1530,7 @@ mod tests {
                         .iter()
                         .copied()
                         .map(|hash| KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(hash),
+                            block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
                             tokens_hash: LocalBlockHash(hash),
                             mm_extra_info: None,
                         })
@@ -1382,6 +1554,175 @@ mod tests {
             .unwrap();
         entered_rx.await.unwrap();
         release_tx
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_subscribe_snapshot_keeps_runtime_responsive_and_shutdown_ordered() {
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("blocking-snapshot")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (safety_tx, safety_rx) = std::sync::mpsc::channel();
+        let safety_release = release_tx.clone();
+        let safety = std::thread::spawn(move || {
+            if safety_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                let _ = safety_release.send(());
+            }
+        });
+
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Gate {
+                    entered: entered_tx,
+                    release: release_rx,
+                }),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(250), async {
+            entered_rx.await.unwrap();
+            tokio::task::yield_now().await;
+        })
+        .await
+        .expect("snapshot work must not block the current-thread Tokio runtime");
+
+        let shutdown_handle = handle.clone();
+        let mut shutdown = tokio::spawn(async move { shutdown_handle.shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown queued after subscribe must not overtake its snapshot"
+        );
+
+        release_tx.send(()).unwrap();
+        let _ = safety_tx.send(());
+        safety.join().unwrap();
+        let subscription = tokio::time::timeout(Duration::from_secs(1), response_rx)
+            .await
+            .expect("snapshot worker did not rejoin the actor")
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscription.snapshot.sequence(), 0);
+        tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("ordered shutdown did not complete")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fence_during_subscribe_snapshot_rejects_the_inflight_subscription() {
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("fenced-snapshot")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Gate {
+                    entered: entered_tx,
+                    release: release_rx,
+                }),
+            })
+            .await
+            .unwrap();
+        entered_rx.await.unwrap();
+
+        let fence_handle = handle.clone();
+        let mut fence = tokio::spawn(async move { fence_handle.fence().await });
+        tokio::task::yield_now().await;
+        assert!(!fence.is_finished());
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvDcRelayError::ShuttingDown)
+        ));
+        tokio::time::timeout(Duration::from_secs(1), &mut fence)
+            .await
+            .expect("actor did not stop after the snapshot worker rejoined")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_subscribe_response_retires_the_unobserved_lease() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("dropped-snapshot")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Gate {
+                    entered: entered_tx,
+                    release: release_rx,
+                }),
+            })
+            .await
+            .unwrap();
+        entered_rx.await.unwrap();
+        drop(response_rx);
+        release_tx.send(()).unwrap();
+
+        handle
+            .admit_event(0, stored(worker, 1, &[1]))
+            .await
+            .unwrap();
+        handle
+            .flush()
+            .await
+            .expect("a cancelled subscriber must not leave a delivery-uncertain lease");
+        assert_eq!(
+            handle
+                .state_stats()
+                .await
+                .unwrap()
+                .0
+                .aggregation()
+                .unique_block_count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_snapshot_worker_failure_is_reported_and_stops_the_actor() {
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("snapshot-panic")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Panic),
+            })
+            .await
+            .unwrap();
+
+        let error = match response_rx.await.unwrap() {
+            Ok(_) => panic!("failed snapshot worker returned a subscription"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("snapshot blocking task failed"));
+        tokio::time::timeout(Duration::from_secs(1), handle.stopped.cancelled())
+            .await
+            .expect("actor must stop after losing its state to a failed worker");
+        assert!(matches!(
+            handle.flush().await,
+            Err(KvDcRelayError::ShuttingDown)
+        ));
     }
 
     #[cfg(feature = "ckf-diagnostics")]
@@ -1745,7 +2086,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(20), faults.recv())
                 .await
                 .is_err(),
-            "a pre-commit capacity omission must not enter lifecycle fault handling"
+            "a capacity omission commits exact state and must not enter lifecycle fault handling"
         );
 
         handle
@@ -1792,7 +2133,10 @@ mod tests {
         let capacity = event_failure_point(KvCacheEventError::CapacityExhausted).disposition();
         assert_eq!(capacity.action, CkfFailureAction::ContinueCapacityOmission);
         assert_eq!(capacity.domain, CkfFailureDomain::ProducerCore);
-        assert_eq!(capacity.commit, CkfCommitState::KnownUnchanged);
+        assert_eq!(
+            capacity.commit,
+            CkfCommitState::ExactCommittedPhysicalOmitted
+        );
         assert_eq!(capacity.recovery_domain, None);
 
         let allocation = event_failure_point(KvCacheEventError::AllocationFailed).disposition();
@@ -1802,6 +2146,12 @@ mod tests {
         let source = event_failure_point(KvCacheEventError::OwnershipDegreeOverflow).disposition();
         assert_eq!(source.action, CkfFailureAction::RejectSource);
         assert_eq!(source.commit, CkfCommitState::KnownUnchanged);
+
+        let missing_parent =
+            event_failure_point(KvCacheEventError::ParentBlockNotFound).disposition();
+        assert_eq!(missing_parent.action, CkfFailureAction::RejectSource);
+        assert_eq!(missing_parent.domain, CkfFailureDomain::ProducerCore);
+        assert_eq!(missing_parent.commit, CkfCommitState::KnownUnchanged);
 
         let invariant =
             event_failure_point(KvCacheEventError::IndexerInvariantViolation).disposition();
@@ -1829,6 +2179,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
             sources: HashMap::from([(worker, KvSourceStatus::ActiveLiveOnly(source))]),
             kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::new(),
         };
 

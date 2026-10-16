@@ -3,6 +3,8 @@
 
 """Unit tests for the GMS snapshot saver CLI."""
 
+import sys
+
 import pytest
 
 try:
@@ -58,3 +60,48 @@ def test_save_device_sets_cuda_context_before_storage_client(monkeypatch):
     assert calls[2][2]["socket_path"] == "/tmp/gms-3"
     assert calls[2][2]["device"] == 3
     assert calls[3] == ("save", {"max_workers": 8})
+
+
+def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
+    forwarded = []
+
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["saver.py", "--checkpoint-dir", "/tmp/cp", "--max-workers", "1"],
+    )
+    monkeypatch.setattr(
+        saver,
+        "run_per_device",
+        lambda module, argv: forwarded.append((module, argv)),
+    )
+
+    saver.main()
+
+    # These base arguments are forwarded to each per-device child, so an empty
+    # list here would make each child fail on a missing --checkpoint-dir.
+    assert forwarded == [
+        (
+            "gpu_memory_service.v1.snapshot.saver",
+            ["--checkpoint-dir", "/tmp/cp", "--max-workers", "1"],
+        )
+    ]
+
+
+def test_main_forwards_explicit_argv_unchanged(monkeypatch):
+    forwarded = []
+
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(sys, "argv", ["saver.py", "--max-workers", "4"])
+    monkeypatch.setattr(
+        saver,
+        "run_per_device",
+        lambda module, argv: forwarded.append((module, argv)),
+    )
+
+    saver.main(argv=["--checkpoint-dir", "/tmp/cp"])
+
+    assert forwarded == [
+        ("gpu_memory_service.v1.snapshot.saver", ["--checkpoint-dir", "/tmp/cp"])
+    ]

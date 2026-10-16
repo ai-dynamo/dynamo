@@ -19,6 +19,7 @@ package validation
 
 import (
 	"net/url"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -111,6 +112,87 @@ func validateInfrastructure(infra *configv1alpha1.InfrastructureConfiguration, f
 	if infra.ModelExpressURL != "" {
 		if _, err := url.Parse(infra.ModelExpressURL); err != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("modelExpressURL"), infra.ModelExpressURL, "must be a valid URL"))
+		}
+	}
+
+	// TLS client identity pairs must be set together (both or neither).
+	if (infra.TCPTLSClientCertPath != "") != (infra.TCPTLSClientKeyPath != "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSClientCertPath"), infra.TCPTLSClientCertPath,
+			"tcpTLSClientCertPath and tcpTLSClientKeyPath must be set together"))
+	}
+	if (infra.NATSTLSClientCertPath != "") != (infra.NATSTLSClientKeyPath != "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("natsTLSClientCertPath"), infra.NATSTLSClientCertPath,
+			"natsTLSClientCertPath and natsTLSClientKeyPath must be set together"))
+	}
+
+	// TCP server certificate and key must be set together (both or neither).
+	if (infra.TCPTLSCertPath != "") != (infra.TCPTLSKeyPath != "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSCertPath"), infra.TCPTLSCertPath,
+			"tcpTLSCertPath and tcpTLSKeyPath must be set together"))
+	}
+
+	// TCP server cert/key require a server CA so the client side also uses TLS.
+	// The operator does not expose DYN_TCP_TLS_INSECURE, so without a CA the
+	// TCP client stays plaintext while the server is TLS, and connections fail.
+	if infra.TCPTLSCertPath != "" && infra.TCPTLSKeyPath != "" && infra.TCPTLSCAPath == "" {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("tcpTLSCAPath"),
+			"tcpTLSCAPath is required when tcpTLSCertPath and tcpTLSKeyPath are set"))
+	}
+
+	// TCP client-side TLS (CA or client identity) requires the server certificate
+	// and key. The operator injects the same config into every DGD pod, each of
+	// which is both a TCP client and server, so enabling client-side TLS without
+	// server-side TLS leaves peer servers plaintext and handshakes fail.
+	tcpClientTLS := infra.TCPTLSCAPath != "" || infra.TCPTLSClientCertPath != "" || infra.TCPTLSClientKeyPath != ""
+	if tcpClientTLS && (infra.TCPTLSCertPath == "" || infra.TCPTLSKeyPath == "") {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("tcpTLSCertPath"),
+			"tcpTLSCertPath and tcpTLSKeyPath are required when any client-side TCP TLS field is set"))
+	}
+
+	// TCP client-CA (mTLS) requires the server certificate and key.
+	if infra.TCPTLSClientCAPath != "" && (infra.TCPTLSCertPath == "" || infra.TCPTLSKeyPath == "") {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSClientCAPath"), infra.TCPTLSClientCAPath,
+			"tcpTLSClientCAPath requires tcpTLSCertPath and tcpTLSKeyPath to also be set"))
+	}
+
+	// TCP client identity requires a server CA (the operator does not expose insecure mode).
+	if infra.TCPTLSClientCertPath != "" && infra.TCPTLSCAPath == "" {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSClientCertPath"), infra.TCPTLSClientCertPath,
+			"tcpTLSClientCertPath requires tcpTLSCAPath to also be set"))
+	}
+
+	// NATS client identity requires a server CA.
+	if infra.NATSTLSClientCertPath != "" && infra.NATSTLSCAPath == "" {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("natsTLSClientCertPath"), infra.NATSTLSClientCertPath,
+			"natsTLSClientCertPath requires natsTLSCAPath to also be set"))
+	}
+
+	// tcpTLSServerName is inert without a TLS connector (which requires a CA).
+	if infra.TCPTLSServerName != "" && infra.TCPTLSCAPath == "" {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("tcpTLSServerName"), infra.TCPTLSServerName,
+			"tcpTLSServerName requires tcpTLSCAPath to also be set"))
+	}
+
+	// NATS TLS requires a tls:// server address (the runtime fails closed otherwise).
+	natsTLS := infra.NATSTLSCAPath != "" || infra.NATSTLSClientCertPath != "" || infra.NATSTLSClientKeyPath != ""
+	if natsTLS {
+		if infra.NATSAddress == "" {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("natsAddress"),
+				"natsAddress is required when NATS TLS is configured"))
+		} else if !strings.HasPrefix(infra.NATSAddress, "tls://") {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("natsAddress"), infra.NATSAddress,
+				"natsAddress must use the tls:// scheme when NATS TLS is configured"))
 		}
 	}
 

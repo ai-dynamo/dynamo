@@ -65,7 +65,7 @@ pub const CHAIN_XXH3_SEED: u64 = 1337;
 ///
 /// This is the single source of truth for the chain recurrence used by:
 /// - [`PositionalLineageHash::extend`]
-/// - [`TokenBlock::from_chunk`]
+/// - `TokenBlock::from_chunk`
 /// - `dynamo_kv_router::protocols::compute_next_seq_hash` (request side)
 /// - `dynamo_kv_router::indexer::PositionalIndexer` (chain re-validation)
 ///
@@ -1358,7 +1358,7 @@ impl TokenBlockSequence {
     /// If adding this token completes the current partial block, the block is committed,
     /// and the index of the newly completed block is returned.
     ///
-    /// This method is equivalent to calling [`extend`] with a single-token [`Tokens`] object.
+    /// This method is equivalent to calling `extend` with a single-token [`Tokens`] object.
     ///
     /// # Arguments
     ///
@@ -1471,7 +1471,7 @@ impl TokenBlockSequence {
 
     /// Removes the last `count` tokens from the sequence.
     ///
-    /// This is a convenience method that calculates the required length and calls [`truncate`].
+    /// This is a convenience method that calculates the required length and calls `truncate`.
     ///
     /// # Arguments
     ///

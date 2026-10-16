@@ -19,7 +19,7 @@ each cached prefix. This guide covers direct publishing and relaying an engine's
 
 The KV Router relies on real-time events from backend workers to track which KV cache blocks are stored on each worker. When your custom engine allocates or evicts KV cache blocks, it should publish these events so the router can make optimal routing decisions.
 
-Events are published over the **Dynamo event plane**, a transport-agnostic pub/sub layer that supports both NATS and ZMQ backends (see [Event Plane](../../knowledge-base/concepts/communication-planes/event-plane.md) for details). The `KvEventPublisher` binding handles all transport concerns — your engine code does not interact with the event plane directly.
+Events are published over the **Dynamo event plane**, a transport-agnostic pub/sub layer that supports both NATS and ZMQ backends (see [Event Plane](../../knowledge-base/concepts/system-architecture/architecture.md#event-plane) for details). The `KvEventPublisher` binding handles all transport concerns — your engine code does not interact with the event plane directly.
 
 `KvEventPublisher` supports two publishing modes:
 
@@ -301,6 +301,6 @@ Stop background tasks (ZMQ listener, event forwarding).
 
 ## See Also
 
-- **[Event Plane](../../knowledge-base/concepts/communication-planes/event-plane.md)**: Transport options (NATS, ZMQ) and configuration
+- **[Event Plane](../../knowledge-base/concepts/system-architecture/architecture.md#event-plane)**: Transport options (NATS, ZMQ) and configuration
 - **[Configuration and Tuning](../../knowledge-base/modular-components/router/configuration-and-tuning.md)**: Router flags, tuning, and production setup
 - **[Router Design](../../knowledge-base/modular-components/router/router-design.md)**: Architecture details and event transport modes

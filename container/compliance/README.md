@@ -49,7 +49,8 @@ stages expose `/sboms` and `/legal` for CI extraction; the final runtime stage d
 `BASELINE_SBOM_FILE` is rendered from `container/context.yaml`'s per-(framework, device)
 `baseline_sbom` key (see `render.py:_resolve_compliance_inputs`). When set, the generators
 subtract the baseline's components so NOTICES attribute only what Dynamo adds on top of the
-upstream base. When empty, NOTICES cover the full image (correct but unfiltered).
+upstream base. When empty, nothing is subtracted and the policy gate fails on any denied
+license the base image carries, so an image is either baselined or skips these stages.
 
 ## Base SBOM corpus & drift
 
@@ -59,6 +60,15 @@ invariant, syft-scans the baseline, and writes the slim SBOM. `check_drift.py` r
 PR and on a daily cron (`.github/workflows/compliance-base-drift.yml`); it fails if a recorded
 digest moved or the layer-prefix invariant no longer holds, which means a vendor silently
 switched a base image and the corpus must be re-captured.
+
+A tag bump is the other way a baseline goes stale, and the upsert key includes `from_tag`, so
+re-capturing on a new tag appends rather than replaces. Pass `--prune-superseded` to drop the
+old tag's rows and the SBOM files nothing references any more; leaving them behind eventually
+fails the drift check, which re-resolves every row against the registry.
+
+For TRT-LLM this is automated: `.github/workflows/auto-dep-upgrade-trigger.yml` re-captures both
+architectures against the new tag and commits the refreshed corpus alongside the version bump, so
+`runtime_image_tag` and `baseline_sbom` never diverge. A capture that fails pushes nothing.
 
 ## CI integration
 

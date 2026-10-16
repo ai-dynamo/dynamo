@@ -5,11 +5,6 @@ title: Sweeper Configuration
 subtitle: Core fields and optional adapter-owned search spaces
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/configuration.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper's configuration schema may change without a standard deprecation period.
 
@@ -104,9 +99,10 @@ Providers](sweep-config-provider.md) for the complete ABI.
 The experimental `AISIMULATE_SWEEPER_VIZIER_ALGO` environment variable overrides the Vizier
 algorithm. For example, set it to `RANDOM_SEARCH` to bypass the default GP-bandit designer.
 `SPICA_VIZIER_ALGO` remains a deprecated fallback during migration; when both are set, the
-AI Simulate variable takes precedence.
+AISimulate variable takes precedence.
 
 ## Removed KVBM Fields
 
 Sweeper rejects the old KVBM block-count, transfer-bandwidth, offload-batch-size, and cache-hit
-fields. Native G2 replaces KVBM, so these fields have no adapter migration.
+fields. The AISimulate engine and replay path do not support them, and they have no adapter
+migration.

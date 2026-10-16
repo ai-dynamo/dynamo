@@ -50,6 +50,8 @@ fn bs_event_with_cache_namespace(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        ownership: None,
+        session_id: None,
     }
 }
 
@@ -288,7 +290,12 @@ async fn zmq_multipart_parsing() {
             .expect("send 1-frame");
 
         // 4-frame (bad).
-        let good_payload = TestBatch(0.0, vec![RawKvEvent::AllBlocksCleared], None).encode();
+        let good_payload = TestBatch(
+            0.0,
+            vec![RawKvEvent::AllBlocksCleared { ownership: None }],
+            None,
+        )
+        .encode();
         pub_handle
             .send_frames(vec![vec![], vec![0u8; 8], good_payload.clone(), vec![0u8]])
             .await

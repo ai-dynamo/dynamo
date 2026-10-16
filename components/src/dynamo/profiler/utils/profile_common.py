@@ -19,6 +19,7 @@ import copy
 import logging
 import os
 from dataclasses import dataclass, field
+from stat import S_ISREG
 
 import pandas as pd
 
@@ -164,8 +165,19 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
             dgdr.modelCache.pvcMountPath,
             dgdr.modelCache.pvcModelPath,
         )
-        if os.path.isfile(os.path.join(local_path, "config.json")):
-            return local_path
+        config_path = os.path.join(local_path, "config.json")
+        try:
+            if S_ISREG(os.stat(config_path).st_mode):
+                return local_path
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as e:
+            raise RuntimeError(
+                f"Cannot inspect PVC model config {config_path!r}: {e}. "
+                "Check directory permissions and symlink ownership for the "
+                "profiler user, or set modelCache.pvcModelPath to an accessible "
+                "snapshot directory."
+            ) from e
     return dgdr.model
 
 
@@ -202,7 +214,16 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
-def needs_mocker_aic_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+def is_kv_router_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec explicitly enables KV-cache-aware routing."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.kvRouter is not None
+        and dgdr.features.kvRouter.enabled is True
+    )
+
+
+def needs_mocker_ais_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when mocker workers should load performance data from AIC.
 
     Requests with Planner configuration use its pre-deployment sweep mode. For
@@ -228,15 +249,15 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
       Requests with Planner configuration use its sweep mode; mocker-only
       requests use the DGDR search strategy. In rapid mode the mocker pulls
       latency data directly from the AIConfigurator SDK via
-      ``--aic-perf-model`` flags injected by the profiler, so no NPZ is
+      ``--ais-perf-model`` flags injected by the profiler, so no NPZ is
       emitted.
     * **Planner** when thorough-mode bootstrap data is requested. In rapid
-      mode the planner receives ``aic_perf_model`` and can also run AIC
+      mode the planner receives ``ais_perf_model`` and can also run AIC
       interpolation in-process at bootstrap; in none mode it starts from
       native AIC or live FPM regression warmup.
     """
     if is_mocker_enabled(dgdr):
-        return not needs_mocker_aic_perf_model(dgdr)
+        return not needs_mocker_ais_perf_model(dgdr)
     sweep_mode = (
         dgdr.features.planner.pre_deployment_sweeping_mode
         if dgdr.features is not None and dgdr.features.planner is not None

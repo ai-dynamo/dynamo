@@ -2,74 +2,41 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Router
-subtitle: KV cache-aware router that picks workers by combined prefill and decode cost to maximize throughput and minimize latency.
+subtitle: Choose a request path, understand worker selection, and operate KV-aware routing.
 ---
 
-The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
+The Dynamo KV router selects an eligible worker using reusable KV cache state and projected active load. Use it when prefix reuse should influence placement; use a non-KV routing mode when your deployment needs only load balancing or an externally selected worker.
 
-## Quick Start
+## Start With Your Request Path
 
-To launch the Dynamo frontend with the KV Router:
+Choose the page that matches where requests enter Dynamo:
 
-```bash
-python -m dynamo.frontend --router-mode kv --http-port 8000
-```
+| Request path | Start here |
+| --- | --- |
+| Local Dynamo Frontend | [KV-Aware Routing for the CLI](../../../../cli/kv-aware-routing/overview.mdx) |
+| Dynamo Frontend on Kubernetes | [Dynamo Frontend Routing](../../../../kubernetes/kv-aware-routing/dynamo-frontend.md) |
+| Kubernetes Gateway API | [KV-Aware Routing on Kubernetes](../../../../kubernetes/kv-aware-routing/overview.md) |
+| Custom or multi-tier request path | [Standalone Router](../../../../cli/kv-aware-routing/standalone-router.md) |
 
-The [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) is the
-canonical reference for embedded-router flags, environment variables, defaults, and
-boolean forms. See [Configuration and Tuning](configuration-and-tuning.md) for behavioral
-guidance.
+For a topology comparison and the configuration boundary between the Frontend and workers, see the [Router Guide](router-guide.md).
 
-> [!IMPORTANT]
-> `--router-mode kv` (or `DYN_ROUTER_MODE=kv`) enables KV routing on the
-> frontend, but it does not enable KV event publishing on backend workers. With
-> the default `--router-kv-events` setting, missing publishers leave the router
-> in event-driven mode without real cache state; the router does not
-> automatically switch to approximate prediction. Configure the backend-specific
-> publishing flags in [Router Operations](router-operations.md#additional-notes).
-> If workers will not publish events, use `--no-router-kv-events` for approximate
-> cache prediction or `--load-aware` for load-only routing.
+## Follow a Request Through the Router
 
-For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service.
+1. The request host tokenizes and normalizes the request.
+2. The router filters workers that cannot serve it.
+3. The router scores eligible workers using cache overlap and projected load.
+4. Aggregated deployments run on the selected worker, while disaggregated deployments select separate prefill and decode workers. Workers publish KV lifecycle events when available; set `--no-router-kv-events` to predict cache state when the router cannot consume them.
 
-### Standalone Router
+Read [KV-Aware Routing](../../concepts/system-architecture/kv-aware-routing.md) for the architecture-level flow. Read [Routing Concepts](routing-concepts.md) for the cost model, [Router Filtering](worker-filtering.md) for eligibility, and [Deficit Round Robin Queue Scheduling](deficit-round-robin.md) for policy-class arbitration.
 
-You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
+## Continue by Task
 
-For deployment modes and quick start steps, see the [Router Guide](router-guide.md). For tuning guidelines, see [Configuration and Tuning](configuration-and-tuning.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../../../recipes/feature-benchmarks/kv-router-a-b-testing.md).
+| Need | Use |
+| --- | --- |
+| Tune cache and load tradeoffs | [Configuration and Tuning](configuration-and-tuning.md) |
+| Run separate prefill and decode pools | [Disaggregated Serving](disaggregated-serving.md) |
+| Recover router state or run replicas | [Router Operations](router-operations.md) |
+| Run router primitives outside the Frontend | [Standalone Services](standalone-indexer.md) |
+| Change or test router behavior | [Develop the Router](router-design.md) |
 
-## Prerequisites and Limitations
-
-**Requirements:**
-- **Dynamic endpoints only**: KV router requires `register_model()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
-- Backend workers must call `register_model()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../../advanced-customizations/writing-custom-backends/writing-python-workers.md))
-- Use dynamic discovery with KV routing so the router can track worker instances and KV cache state
-
-**Multimodal Support:**
-- **Image routing via multimodal hashes**: Supported in the documented SGLang, TRT-LLM, and vLLM router paths. SGLang needs the hash-forwarding patch that Dynamo's own image ships; a custom build without it serves the request but routes on the text prefix alone.
-- **Other backend or modality combinations**: Check the backend-specific multimodal docs before relying on multimodal hash routing.
-
-**Limitations:**
-- Static endpoints are not supported with KV routing; use dynamic discovery so the router can track worker instances and KV cache state
-- With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware. Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup. Session affinity is supported with LoRA only in KV mode; LoRA plus random or round-robin affinity is rejected.
-
-For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode power-of-two`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
-
-## Next Steps
-
-- **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
-- **[Routing Concepts](routing-concepts.md)**: Cost model and worker-selection behavior
-- **[Router Filtering](worker-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
-- **[Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router)**: Canonical embedded-router flags and environment variables
-- **[Configuration and Tuning](configuration-and-tuning.md)**: Router behavior, transport modes, and tuning guidance
-- **[Deficit Round Robin Queue Scheduling](deficit-round-robin.md)**: Weighted policy-class arbitration, cursor movement, and bulk virtual rounds
-- **[Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md)**: Router queue, backend engine, and cache priority behavior
-- **[Disaggregated Serving](disaggregated-serving.md)**: Prefill and decode routing setups
-- **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
-- **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
-- **[Router Testing](router-testing.md)**: Test layers from Rust unit tests to fixture-backed replay and full process E2E
-- **[Multi-DC KV Routing](multi-dc-kv-routing.md)**: Cross-datacenter KV routing and the DC Relay (experimental)
-- **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service for independent scaling
-- **[Standalone Selection Service](standalone-selection.md)**: Expose KV-aware selection and reservation accounting over HTTP
-- **[Standalone Slot Tracker](standalone-slot-tracker.md)**: Run active-request load accounting as a separate HTTP service
-- **[Router Design](router-design.md)**: Architecture details, algorithms, and event transport modes
+The [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) is the canonical source for embedded-router flags, environment variables, defaults, and boolean forms.

@@ -209,7 +209,7 @@ pub fn create_buffer<S: MemoryDescriptor + 'static>(memory: S) -> Buffer {
 }
 
 impl Buffer {
-    /// Create a Buffer from an existing Arc<dyn MemoryDescriptor>.
+    /// Create a Buffer from an existing `Arc<dyn MemoryDescriptor>`.
     pub fn from_arc(arc: Arc<dyn MemoryDescriptor>) -> Self {
         Buffer(arc)
     }

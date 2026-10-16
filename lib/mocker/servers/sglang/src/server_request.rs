@@ -5,27 +5,26 @@ use std::collections::HashMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
 use dynamo_mocker::live::{deterministic_output_tokens, stable_request_uuid};
+use dynamo_mocker::sglang::{LogprobOptions, ResponseMetadata};
 use dynamo_sglang_sidecar::proto as pb;
-use serde_json::{Value, json};
+use serde_json::json;
 use tonic::Status;
 use uuid::Uuid;
 
 use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 
-const DEFAULT_MAX_NEW_TOKENS: i32 = 20;
+const DEFAULT_MAX_NEW_TOKENS: i32 = 128;
 const MAX_NEW_TOKENS: i32 = 1_000_000;
-const MAX_TOP_LOGPROBS: i32 = 20;
 
 #[derive(Debug)]
 pub(super) struct PreparedRequest {
     uuid: Uuid,
-    request_id: String,
     prompt_tokens: Vec<u32>,
     pub(super) max_output_tokens: usize,
+    pub(super) has_decode_handoff: bool,
     output_token_ids: Vec<u32>,
-    return_logprob: bool,
-    top_logprobs_num: usize,
-    logprob_start_len: i32,
+    stop_token: Option<u32>,
+    response_metadata: ResponseMetadata,
 }
 
 impl PreparedRequest {
@@ -65,6 +64,17 @@ impl PreparedRequest {
             ))
             .into());
         }
+        let min_new_tokens = request
+            .sampling_params
+            .as_ref()
+            .and_then(|params| params.min_new_tokens)
+            .unwrap_or(0);
+        if !(0..=requested_max).contains(&min_new_tokens) {
+            return Err(Status::invalid_argument(
+                "min_new_tokens must be between 0 and max_new_tokens",
+            )
+            .into());
+        }
         let max_output_tokens = if config.mode == ServerMode::Prefill {
             1
         } else {
@@ -85,34 +95,46 @@ impl PreparedRequest {
 
         validate_role(config, request.disaggregated_params.as_ref())?;
 
-        let top_logprobs_num = request.top_logprobs_num.unwrap_or(0);
-        if !(0..=MAX_TOP_LOGPROBS).contains(&top_logprobs_num) {
-            return Err(Status::invalid_argument(format!(
-                "top_logprobs_num must be between 0 and {MAX_TOP_LOGPROBS}"
-            ))
-            .into());
-        }
-        let logprob_start_len = request.logprob_start_len.unwrap_or(-1);
-        if logprob_start_len < -1 {
-            return Err(Status::invalid_argument("logprob_start_len must be -1 or greater").into());
-        }
+        let logprob_options = LogprobOptions::new(
+            request.return_logprob.unwrap_or(false),
+            i64::from(request.top_logprobs_num.unwrap_or(0)),
+            i64::from(request.logprob_start_len.unwrap_or(-1)),
+        )
+        .map_err(|message| Box::new(Status::invalid_argument(message)))?;
 
         let request_id = request
             .rid
             .filter(|request_id| !request_id.trim().is_empty())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let uuid = stable_request_uuid(config.seed, &request_id);
-        let output_token_ids =
+        let mut output_token_ids =
             deterministic_output_tokens(config.seed, &request_id, max_output_tokens);
+        let stop_position = request.sampling_params.as_ref().and_then(|params| {
+            if params.stop_token_ids.is_empty() || params.ignore_eos.unwrap_or(false) {
+                return None;
+            }
+            output_token_ids
+                .iter()
+                .enumerate()
+                .skip(min_new_tokens as usize)
+                .find(|(_, token)| params.stop_token_ids.contains(&(**token as i32)))
+                .map(|(position, _)| position)
+        });
+        let stop_token = stop_position.map(|position| {
+            output_token_ids.truncate(position + 1);
+            output_token_ids[position]
+        });
+        let max_output_tokens = output_token_ids.len();
+        let response_metadata = ResponseMetadata::new(request_id, &prompt_tokens, logprob_options);
         Ok(Self {
             uuid,
-            request_id,
             prompt_tokens,
             max_output_tokens,
+            has_decode_handoff: config.mode == ServerMode::Decode
+                && request.disaggregated_params.is_some(),
             output_token_ids,
-            return_logprob: request.return_logprob.unwrap_or(false),
-            top_logprobs_num: top_logprobs_num as usize,
-            logprob_start_len,
+            stop_token,
+            response_metadata,
         })
     }
 
@@ -130,78 +152,27 @@ impl PreparedRequest {
     pub(super) fn meta_info(
         &self,
         output_tokens: &[u32],
+        completion_tokens: usize,
         terminal: bool,
     ) -> HashMap<String, String> {
-        let mut meta = HashMap::from([
-            (
-                "prompt_tokens".to_string(),
-                Value::from(self.prompt_tokens.len()).to_string(),
-            ),
-            (
-                "mocker_request_id".to_string(),
-                Value::String(self.request_id.clone()).to_string(),
-            ),
-        ]);
-        if self.return_logprob {
-            insert_json(
-                &mut meta,
-                "output_token_logprobs",
-                Value::Array(
-                    output_tokens
-                        .iter()
-                        .map(|token| logprob_entry(*token))
-                        .collect(),
-                ),
-            );
-            if self.top_logprobs_num > 0 {
-                insert_json(
-                    &mut meta,
-                    "output_top_logprobs",
-                    Value::Array(
-                        output_tokens
-                            .iter()
-                            .map(|token| top_logprob_entries(*token, self.top_logprobs_num))
-                            .collect(),
-                    ),
-                );
-            }
-        }
-        if terminal {
-            insert_json(&mut meta, "finish_reason", json!({"type": "length"}));
-            if self.return_logprob && self.logprob_start_len >= 0 {
-                let start = (self.logprob_start_len as usize).min(self.prompt_tokens.len());
-                let prompt_tokens = &self.prompt_tokens[start..];
-                let mut input_token_logprobs = Vec::with_capacity(prompt_tokens.len());
-                let mut input_top_logprobs = Vec::with_capacity(prompt_tokens.len());
-                if let Some((first, remaining)) = prompt_tokens.split_first() {
-                    // Native SGLang retains the first token ID but uses a null
-                    // logprob because no preceding token predicts it.
-                    input_token_logprobs.push(json!([null, first, null]));
-                    input_token_logprobs
-                        .extend(remaining.iter().map(|token| logprob_entry(*token)));
-                    if self.top_logprobs_num > 0 {
-                        input_top_logprobs.push(Value::Null);
-                        input_top_logprobs.extend(
-                            remaining
-                                .iter()
-                                .map(|token| top_logprob_entries(*token, self.top_logprobs_num)),
-                        );
-                    }
-                }
-                insert_json(
-                    &mut meta,
-                    "input_token_logprobs",
-                    Value::Array(input_token_logprobs),
-                );
-                if self.top_logprobs_num > 0 {
-                    insert_json(
-                        &mut meta,
-                        "input_top_logprobs",
-                        Value::Array(input_top_logprobs),
-                    );
-                }
-            }
-        }
+        let mut meta = self
+            .response_metadata
+            .meta_info(
+                output_tokens,
+                completion_tokens,
+                terminal.then(|| match self.stop_token {
+                    Some(token) => json!({"type": "stop", "matched": token}),
+                    None => json!({"type": "length", "length": self.max_output_tokens}),
+                }),
+            )
+            .into_iter()
+            .map(|(key, value)| (key, value.to_string()))
+            .collect::<HashMap<_, _>>();
+        // Alias only this mock server emits; the rest of the fields are shared.
+        meta.insert(
+            "mocker_request_id".to_string(),
+            json!(self.response_metadata.request_id()).to_string(),
+        );
         meta
     }
 }
@@ -244,35 +215,4 @@ fn validate_role(
             Ok(())
         }
     }
-}
-
-fn selected_logprob(token_id: u32) -> f64 {
-    -0.1 * f64::from((token_id % 10) + 1)
-}
-
-fn logprob_entry(token_id: u32) -> Value {
-    json!([
-        selected_logprob(token_id),
-        token_id,
-        format!("<token:{token_id}>")
-    ])
-}
-
-fn top_logprob_entries(token_id: u32, count: usize) -> Value {
-    Value::Array(
-        (0..count)
-            .map(|offset| {
-                let candidate = token_id.saturating_add(offset as u32);
-                json!([
-                    selected_logprob(candidate) - (offset as f64 * 0.01),
-                    candidate,
-                    format!("<token:{candidate}>")
-                ])
-            })
-            .collect(),
-    )
-}
-
-fn insert_json(meta: &mut HashMap<String, String>, key: &str, value: Value) {
-    meta.insert(key.to_string(), value.to_string());
 }

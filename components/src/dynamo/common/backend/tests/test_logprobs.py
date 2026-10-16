@@ -405,9 +405,7 @@ def test_sglang_extract_supports_incremental_streaming_metadata():
         "output_token_logprobs": [(-0.2, 2, "b")],
         "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
     }
-    log_probs, top_logprobs = extract_from_sglang_meta(
-        meta, num_output_tokens_in_chunk=1
-    )
+    log_probs, top_logprobs = extract_from_sglang_meta(meta)
     assert log_probs == [-0.2]
     assert top_logprobs == [
         [
@@ -456,14 +454,6 @@ def test_sglang_extract_none_top_position_becomes_empty_list():
     ]
 
 
-def test_sglang_extract_clamps_metadata_to_output_chunk():
-    meta = {
-        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b")],
-    }
-    log_probs, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
-    assert log_probs == [-0.1]
-
-
 # ---------------------------------------------------------------------------
 # Active handler adapters. These tests import the static methods on each
 # backend's handler class and compare them with the shared helper. They catch
@@ -498,28 +488,10 @@ def test_vllm_handler_matches_shared():
     assert wrapper_top == direct_top
 
 
-@pytest.mark.trtllm
-def test_trtllm_handler_matches_shared():
-    pytest.importorskip(
-        "tensorrt_llm", reason="TRT-LLM not installed", exc_type=ImportError
-    )
-    from dynamo.trtllm.request_handlers.handler_base import HandlerBase
-
-    output = SimpleNamespace(
-        token_ids=[11, 12],
-        logprobs=[
-            {11: _logprob(-0.1), 110: _logprob(-1.1)},
-            # Selected token missing — exercises the fallback flag.
-            {99: _logprob(-9.9)},
-        ],
-    )
-
-    wrapper_lp, wrapper_top = HandlerBase._extract_logprobs(output, 0)
-    direct_lp, direct_top = extract_from_completion_output(
-        output, 0, fallback_to_first_on_missing=True, include_bytes=False
-    )
-    assert wrapper_lp == direct_lp
-    assert wrapper_top == direct_top
+# The TRT-LLM parity test lives in
+# components/src/dynamo/trtllm/tests/test_trtllm_handler_base.py: importing
+# HandlerBase pulls in the native TRT-LLM bindings, which need a GPU, and this
+# module is gpu_0.
 
 
 @pytest.mark.sglang

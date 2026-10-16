@@ -13,13 +13,14 @@ from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
-from dynamo.sglang.args import Config
+from dynamo.sglang.args import Config, _diffusion_generator_kwargs
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     VideoGenerationHealthCheckPayload,
 )
 from dynamo.sglang.publisher import (
+    finish_worker_teardown,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
@@ -63,6 +64,7 @@ async def init_llm_diffusion(
     set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     shutdown_endpoints[:] = [generate_endpoint]
 
@@ -92,6 +94,7 @@ async def init_llm_diffusion(
         f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
     )
 
+    body_failed = True
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -114,17 +117,15 @@ async def init_llm_diffusion(
     except Exception as e:
         logging.error(f"Failed to serve diffusion endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )
 
 
 async def init_image_diffusion(
@@ -141,18 +142,8 @@ async def init_image_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
     generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
+        **_diffusion_generator_kwargs(server_args)
     )
 
     fs_url = dynamo_args.media_output_fs_url
@@ -228,18 +219,8 @@ async def init_video_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for video generation workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
     generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
+        **_diffusion_generator_kwargs(server_args)
     )
 
     fs_url = dynamo_args.media_output_fs_url

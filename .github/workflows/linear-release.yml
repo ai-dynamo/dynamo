@@ -80,7 +80,7 @@ jobs:
       - name: Run Linear Release
         # Pinned to an audited commit SHA (not a mutable @v0 tag) since this step
         # receives LINEAR_ACCESS_KEY. Bump deliberately after reviewing upstream.
-        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f # v0.14.5
+        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f  # v0.14.5
         with:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: ${{ steps.params.outputs.command }}

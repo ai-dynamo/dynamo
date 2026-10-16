@@ -1,0 +1,163 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package dynamo
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// GPUShape separates inference-engine width from the unique GPU allocation
+// added when the component scales by one replica.
+type GPUShape struct {
+	GPUsPerEngine  int64
+	GPUsPerReplica int64
+}
+
+// ResolveGroveGPUShapes computes one GPU shape per Grove-managed component.
+// Structural role multiplicities are used so checkpoint gating to zero does
+// not erase the future cost of one component replica.
+func ResolveGroveGPUShapes(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *v1beta1.DynamoGraphDeployment,
+	isDelegated func(*v1beta1.DynamoComponentDeploymentSharedSpec) bool,
+	pcs *grovev1alpha1.PodCliqueSet,
+) (map[string]GPUShape, error) {
+	shapes := make(map[string]GPUShape)
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if isDelegatedComponent(component, isDelegated) {
+			continue
+		}
+		roleCounts := make(map[string]int32)
+		for _, role := range expandRolesForComponent(
+			component.ComponentName,
+			component.Replicas,
+			component.GetNumberOfNodes(),
+			component,
+		) {
+			roleCounts[strings.ToLower(role.Name)] = role.Replicas
+		}
+
+		pods := make([]PodSpecMultiplicity, 0)
+		for cliqueIndex := range pcs.Spec.Template.Cliques {
+			clique := pcs.Spec.Template.Cliques[cliqueIndex]
+			if clique == nil {
+				continue
+			}
+			if clique.Labels[commonconsts.KubeLabelDynamoComponent] != component.ComponentName {
+				continue
+			}
+			multiplicity := int32(1)
+			if component.UsesPCSG() {
+				multiplicity = roleCounts[clique.Name]
+			}
+			pods = append(pods, PodSpecMultiplicity{
+				PodSpec: &clique.Spec.PodSpec,
+				Count:   multiplicity,
+			})
+		}
+		if len(pods) == 0 {
+			continue
+		}
+
+		shape, err := ResolveGPUShape(ctx, reader, dgd.Namespace, component, pods)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Grove GPU shape for component %q: %w", component.ComponentName, err)
+		}
+		if component.IsInterPodGMSEnabled() {
+			shape.GPUsPerReplica += shape.GPUsPerEngine
+		}
+		shapes[component.ComponentName] = shape
+	}
+	return shapes, nil
+}
+
+type PodSpecMultiplicity = dra.PodSpecMultiplicity
+
+// ResolveGPUShape computes the engine width from the component's main
+// containers and the replica cost from rendered Pod specs.
+func ResolveGPUShape(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	pods []PodSpecMultiplicity,
+) (GPUShape, error) {
+	if component == nil {
+		return GPUShape{}, fmt.Errorf("component is nil")
+	}
+	enginePods, err := engineMainContainerPods(component)
+	if err != nil {
+		return GPUShape{}, err
+	}
+	engineGPUs, err := dra.ResolvePodSetGPUCount(ctx, reader, namespace, enginePods)
+	if err != nil {
+		return GPUShape{}, err
+	}
+	shape := GPUShape{GPUsPerEngine: int64(engineGPUs)}
+	replicaGPUs, err := dra.ResolvePodSetGPUCount(ctx, reader, namespace, pods)
+	if err != nil {
+		return GPUShape{}, err
+	}
+	shape.GPUsPerReplica = int64(replicaGPUs)
+	return shape, nil
+}
+
+// engineMainContainerPods returns only the engine containers and their
+// structural role multiplicities. Sidecar GPUs contribute to replica cost but
+// are not part of the inference-engine width.
+func engineMainContainerPods(component *v1beta1.DynamoComponentDeploymentSharedSpec) ([]dra.PodSpecMultiplicity, error) {
+	if !HasRolePodTemplates(component) {
+		return []dra.PodSpecMultiplicity{{
+			PodSpec: mainContainerPodSpec(component),
+			Count:   component.GetNumberOfNodes(),
+		}}, nil
+	}
+
+	roleCounts := []struct {
+		role  Role
+		count int32
+	}{
+		{role: RoleLeader, count: 1},
+		{role: RoleWorker, count: component.GetNumberOfNodes() - 1},
+	}
+	enginePods := make([]dra.PodSpecMultiplicity, 0, len(roleCounts))
+	for _, roleCount := range roleCounts {
+		effective, err := EffectiveComponentForRole(component, roleCount.role)
+		if err != nil {
+			return nil, err
+		}
+		enginePods = append(enginePods, dra.PodSpecMultiplicity{
+			PodSpec: mainContainerPodSpec(effective),
+			Count:   roleCount.count,
+		})
+	}
+	return enginePods, nil
+}
+
+func mainContainerPodSpec(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.PodSpec {
+	podSpec := &corev1.PodSpec{}
+	if component.PodTemplate == nil {
+		return podSpec
+	}
+	podSpec = component.PodTemplate.Spec.DeepCopy()
+	podSpec.Containers = nil
+	podSpec.InitContainers = nil
+	if main := GetMainContainer(component); main != nil {
+		podSpec.Containers = []corev1.Container{*main.DeepCopy()}
+	}
+	return podSpec
+}

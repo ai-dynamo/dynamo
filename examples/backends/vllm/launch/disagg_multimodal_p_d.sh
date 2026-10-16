@@ -38,6 +38,10 @@ while [[ $# -gt 0 ]]; do
             echo "Disaggregated multimodal serving with Prefill/Decode workers (no encoder)"
             echo "Prefill loads images via PIL and computes grid metadata for decode."
             echo ""
+            echo "Single-GPU mode uses the first CUDA_VISIBLE_DEVICES entry; missing or empty is an error."
+            echo "Explicit DYN_PREFILL_WORKER_GPU and DYN_DECODE_WORKER_GPU values override it."
+            echo "Set CUDA_VISIBLE_DEVICES unless every worker has an explicit GPU override."
+            echo ""
             echo "Options:"
             echo "  --model <model_name>   Specify the VLM model (default: $MODEL_NAME)"
             echo "  --single-gpu           Pack both workers on 1 GPU (for small models)"
@@ -63,24 +67,29 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal P/D ($GPU_L
 
 # Start frontend
 echo "Starting frontend..."
-python -m dynamo.frontend &
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 \
+    python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
 PREFILL_GPU_MEM_ARGS=""
 DECODE_GPU_MEM_ARGS=""
 
-# GPU assignments
-DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
-DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-1}
+# GPU assignments (override via environment variables)
+# In single-GPU mode both workers share the inherited GPU (see inherited_gpu_id).
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-$(inherited_gpu_id)}
+else
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-1}
+fi
 
 # GPU memory utilization
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_PREFILL_WORKER_GPU=0
-    DYN_DECODE_WORKER_GPU=0
     DYN_PREFILL_GPU_MEM=0.45
     DYN_DECODE_GPU_MEM=0.45
     EXTRA_ARGS="--enforce-eager"
@@ -101,9 +110,15 @@ else
 fi
 
 # Start prefill worker (handles image loading internally, no --route-to-encoder)
+SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 1 "${DYN_SYSTEM_PORT:-8081}")
+SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+NIXL_PORT_PREFILL=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL:-20098}")
+NIXL_PORT_DECODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}")
+KV_PORT_PREFILL=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_PREFILL:-20081}")
+KV_PORT_DECODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_DECODE:-20082}")
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
 python -m "$WORKER_MODULE" \
   --disaggregation-mode prefill \
@@ -112,13 +127,13 @@ python -m "$WORKER_MODULE" \
   $PREFILL_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
 python -m "$WORKER_MODULE" \
   --disaggregation-mode decode \
@@ -128,8 +143,8 @@ python -m "$WORKER_MODULE" \
   $DECODE_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."

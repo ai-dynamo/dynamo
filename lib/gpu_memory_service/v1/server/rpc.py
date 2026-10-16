@@ -336,11 +336,18 @@ class GMSServerMemoryManager:
         return self._sessions.acquire(requested, is_cancelled=is_cancelled)
 
     def handle_request(
-        self, session: ServerSession, request: Request
+        self,
+        session: ServerSession,
+        request: Request,
+        is_connected: Callable[[], bool] | None = None,
     ) -> tuple[Response, int]:
         if isinstance(request, AllocateRequest):
             self._require_rw(session)
-            self._allocations.allocate(request.allocation_id, request.aligned_size)
+            self._allocations.allocate(
+                request.allocation_id,
+                request.aligned_size,
+                is_connected,
+            )
             self._allocation_sizes[request.allocation_id] = request.aligned_size
             return SuccessResponse(), -1
         if isinstance(request, ExportRequest):
@@ -449,7 +456,13 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                         raise RuntimeError(  # noqa: TRY004
                             "handshake is valid only as the first message"
                         )
-                    response, export_fd = manager.handle_request(session, request)
+                    response, export_fd = manager.handle_request(
+                        session,
+                        request,
+                        lambda: _socket_is_alive(self.request),
+                    )
+                except ConnectionAbortedError:
+                    return
                 except Exception as exc:
                     if isinstance(exc, (MemoryError, RuntimeError)):
                         logger.log(
