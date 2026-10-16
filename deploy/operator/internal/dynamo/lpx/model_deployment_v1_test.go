@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
-
 	"capnproto.org/go/capnp/v3"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
@@ -294,19 +292,19 @@ func TestDeploymentContractReadsRemoteBytesOnce(t *testing.T) {
 	payload, err := newDeploymentV1ContractFixture(t).Message().Marshal()
 	require.NoError(t, err)
 	client := &fakeModelServiceClient{
-		list:        &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildDeploymentV1CapnpFile}}},
-		fileStreams: []*fakeModelFileStream{{chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, string(payload))}},
+		files: map[string]*fakeModelFileStream{
+			gbuildDeploymentV1CapnpFile: {chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, string(payload))},
+		},
 	}
 	registry, err := NewModelRegistry("gs://bucket/registry", client)
 	require.NoError(t, err)
 	snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
 	require.NoError(t, err)
 	require.Equal(t, buildContractDeploymentV1, snapshot.contractFormat)
-	require.Len(t, client.listRequests, 2)
-	require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.listRequests[0].GetFileSelector().GetPaths())
-	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.listRequests[1].GetFileSelector().GetPaths())
-	require.Len(t, client.filesRequests, 1)
-	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
+	require.Empty(t, client.listRequests)
+	require.Len(t, client.filesRequests, 2)
+	require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
+	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.filesRequests[1].GetFileSelector().GetPaths())
 }
 
 func TestDeploymentContractBoundsAcquisition(t *testing.T) {

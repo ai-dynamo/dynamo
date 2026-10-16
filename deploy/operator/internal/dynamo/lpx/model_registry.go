@@ -197,17 +197,13 @@ func parseBuildRef(ref string) (*url.URL, error) {
 
 // readBuildFileBounded reads one relative file. The receiver and buildURL must
 // be non-nil, and maxBytes must be non-negative.
+// A missing remote file wraps os.ErrNotExist only before any chunks arrive.
 func (r *defaultModelRegistry) readBuildFileBounded(
 	ctx context.Context,
 	buildURL *url.URL,
 	relativePath string,
 	maxBytes int,
 ) ([]byte, error) {
-	// Honor cancellation before starting either a local read or a metadata RPC.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
 	switch buildURL.Scheme {
 	case BuildSchemeFile:
 		// Open nonblocking so a FIFO cannot stall before file-type validation.
@@ -268,6 +264,9 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 			},
 		})
 		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				err = fmt.Errorf("%w: %w", os.ErrNotExist, err)
+			}
 			return nil, fmt.Errorf("streaming %s from %q with Model Express: %w", relativePath, modelName, err)
 		}
 
@@ -281,6 +280,9 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 				break
 			}
 			if err != nil {
+				if !receivedChunk && status.Code(err) == codes.NotFound {
+					err = fmt.Errorf("%w: %w", os.ErrNotExist, err)
+				}
 				return nil, fmt.Errorf("receiving %s from %q with Model Express: %w", relativePath, modelName, err)
 			}
 			if completedFile {
@@ -349,23 +351,12 @@ func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Bu
 		return nil, err
 	}
 
-	// Discover only the two supported entry points; never inventory payload files.
-	entries, err := r.buildContractFiles(ctx, refURL)
+	// Acquire the sole supported contract without inventorying payload files.
+	format, manifestData, err := r.readBuildContract(ctx, refURL)
 	if err != nil {
 		return nil, err
-	}
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("%w: missing build contract: require %s or %s", os.ErrNotExist, gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	}
-	format, err := selectBuildContract(entries)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errInvalidBuildManifest, err)
 	}
 	manifestPath, err := format.filename()
-	if err != nil {
-		return nil, err
-	}
-	manifestData, err := r.readBuildFileBounded(ctx, refURL, manifestPath, maxBuildSnapshotMetadataBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -402,56 +393,52 @@ func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Bu
 	return build, nil
 }
 
-// buildContractFiles discovers supported entry points without scanning local payload trees.
+// readBuildContract selects one supported entry point and returns its bounded bytes.
 // The receiver and buildURL must be non-nil.
-func (r *defaultModelRegistry) buildContractFiles(ctx context.Context, buildURL *url.URL) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+func (r *defaultModelRegistry) readBuildContract(ctx context.Context, buildURL *url.URL) (buildContractFormat, []byte, error) {
 	candidates := []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}
-	if buildURL.Scheme == BuildSchemeFile {
-		var paths []string
-		for _, name := range candidates {
+	paths := make([]string, 0, len(candidates))
+	var manifestData []byte
+	for _, name := range candidates {
+		if buildURL.Scheme == BuildSchemeFile {
+			// Inspect local entries first so broken symlinks still count as published contracts.
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return buildContractUnknown, nil, err
 			}
 			_, err := os.Lstat(buildURL.JoinPath(name).Path)
-			if isDefinitiveBuildMemberAbsence(err) {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return buildContractUnknown, nil, err
 			}
-			paths = append(paths, name)
+		} else {
+			// Read alternatives separately because Model Express requires every selected path to exist.
+			data, err := r.readBuildFileBounded(ctx, buildURL, name, maxBuildSnapshotMetadataBytes)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return buildContractUnknown, nil, err
+			}
+			manifestData = data
 		}
-		return paths, nil
-	}
-	if r.mxClient == nil {
-		return nil, fmt.Errorf("Model Express client is required for GCS model registry reads of %q", buildURL.String())
+		paths = append(paths, name)
 	}
 
-	// Probe alternatives separately because Model Express requires every selected path to exist.
-	var paths []string
-	for _, name := range candidates {
-		listed, err := r.mxClient.ListModelFiles(ctx, &modelpb.ModelFilesRequest{
-			ModelName: buildURL.String(), Provider: modelpb.ModelProvider_GCS,
-			FileSelector: &modelpb.ModelFileSelector{Paths: []string{name}},
-		})
-		if status.Code(err) == codes.NotFound {
-			continue
-		}
+	// Reject missing or ambiguous contracts before decoding either format.
+	if len(paths) == 0 {
+		return buildContractUnknown, nil, fmt.Errorf("%w: missing build contract: require %s or %s", os.ErrNotExist, gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
+	}
+	format, err := selectBuildContract(paths)
+	if err != nil {
+		return buildContractUnknown, nil, fmt.Errorf("%w: %w", errInvalidBuildManifest, err)
+	}
+	if buildURL.Scheme == BuildSchemeFile {
+		manifestData, err = r.readBuildFileBounded(ctx, buildURL, paths[0], maxBuildSnapshotMetadataBytes)
 		if err != nil {
-			return nil, err
-		}
-		for _, file := range listed.GetFiles() {
-			if file.GetRelativePath() == name {
-				paths = append(paths, name)
-			}
+			return buildContractUnknown, nil, err
 		}
 	}
-	return paths, nil
-}
-
-func isDefinitiveBuildMemberAbsence(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || status.Code(err) == codes.NotFound
+	return format, manifestData, nil
 }

@@ -39,10 +39,9 @@ type fakeModelServiceClient struct {
 	filesRequests []*modelpb.ModelFilesRequest
 	filesContext  context.Context
 	fileStreams   []*fakeModelFileStream
+	files         map[string]*fakeModelFileStream
 	filesErr      error
 	listRequests  []*modelpb.ModelFilesRequest
-	list          *modelpb.ModelFileList
-	listErrors    map[string]error
 
 	metadataContexts []context.Context
 }
@@ -70,47 +69,30 @@ func (c *fakeModelServiceClient) StreamModelFiles(
 	if c.filesErr != nil {
 		return nil, c.filesErr
 	}
+	if c.files != nil {
+		// Each acquisition must request one candidate; missing paths fail before streaming.
+		paths := request.GetFileSelector().GetPaths()
+		if len(paths) != 1 {
+			return nil, status.Error(codes.InvalidArgument, "expected exactly one selected path")
+		}
+		stream, exists := c.files[paths[0]]
+		if !exists {
+			return nil, status.Errorf(codes.NotFound, "Selected file not found in model directory: %s", paths[0])
+		}
+		return stream, nil
+	}
 	stream := c.fileStreams[0]
 	c.fileStreams = c.fileStreams[1:]
 	return stream, nil
 }
 
 func (c *fakeModelServiceClient) ListModelFiles(
-	ctx context.Context,
+	_ context.Context,
 	request *modelpb.ModelFilesRequest,
 	_ ...grpc.CallOption,
 ) (*modelpb.ModelFileList, error) {
 	c.listRequests = append(c.listRequests, request)
-	c.metadataContexts = append(c.metadataContexts, ctx)
-
-	// Use a manifest-only build unless the test supplies another file inventory.
-	listed := c.list
-	if listed == nil {
-		listed = &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}}
-	}
-	if len(request.GetFileSelector().GetPaths()) == 0 {
-		return listed, nil
-	}
-
-	// Model Express requires every explicitly selected path to exist.
-	selected := &modelpb.ModelFileList{}
-	for _, path := range request.GetFileSelector().GetPaths() {
-		if err := c.listErrors[path]; err != nil {
-			return nil, err
-		}
-		var match *modelpb.ModelFileInfo
-		for _, file := range listed.GetFiles() {
-			if file.GetRelativePath() == path {
-				match = file
-				break
-			}
-		}
-		if match == nil {
-			return nil, status.Errorf(codes.NotFound, "Selected file not found in model directory: %s", path)
-		}
-		selected.Files = append(selected.Files, match)
-	}
-	return selected, nil
+	return nil, status.Error(codes.Unimplemented, "unexpected ListModelFiles call")
 }
 
 type fakeModelDownloadStream struct {
