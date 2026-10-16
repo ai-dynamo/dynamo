@@ -9,7 +9,9 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
+use super::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::RequestClassifierConfig;
 use crate::plugins::worker_selection::RawWorkerSelectionConfig;
@@ -50,7 +52,7 @@ pub struct PolicyClassConfig {
 
 impl PolicyClassConfig {
     pub fn queueing_enabled(&self) -> bool {
-        self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+        self.busy_thresholds().is_configured()
     }
 
     /// Any zero per-worker limit means `queue_rejection` rejects every queued
@@ -62,14 +64,44 @@ impl PolicyClassConfig {
             || self.cached_token_queue_limit_per_worker == Some(0)
     }
 
-    pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
-        let absolute_busy = self
+    /// The limits this class waits on.
+    pub fn busy_thresholds(&self) -> BusyThresholds {
+        BusyThresholds {
+            prefill_busy_threshold: self.prefill_busy_threshold,
+            prefill_busy_threshold_frac: self.prefill_busy_threshold_frac,
+        }
+    }
+}
+
+/// Per-rank load limits. A rank is full once its booked load passes any configured limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BusyThresholds {
+    /// Booked prefill tokens above which a rank is full.
+    pub prefill_busy_threshold: Option<usize>,
+    /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
+    /// rank does not report it, the fraction is taken of [`DEFAULT_MAX_BATCHED_TOKENS`].
+    pub prefill_busy_threshold_frac: Option<f64>,
+}
+
+impl BusyThresholds {
+    /// Whether any limit is set.
+    pub fn is_configured(&self) -> bool {
+        self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+    }
+
+    /// Whether a rank with this `LOAD` row and capacity is within every configured limit.
+    pub fn has_room(&self, load: &WorkerLoadInput, capacity: WorkerCapacity) -> bool {
+        let tokens = load.active_prefill_tokens();
+        let prefill_budget = capacity
+            .max_num_batched_tokens()
+            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+        let absolute_full = self
             .prefill_busy_threshold
-            .is_some_and(|threshold| active_tokens > threshold);
-        let fractional_busy = self.prefill_busy_threshold_frac.is_some_and(|threshold| {
-            (active_tokens as f64) > threshold * (max_batched_tokens as f64)
-        });
-        absolute_busy || fractional_busy
+            .is_some_and(|threshold| tokens > threshold);
+        let fractional_full = self
+            .prefill_busy_threshold_frac
+            .is_some_and(|threshold| (tokens as f64) > threshold * (prefill_budget as f64));
+        !(absolute_full || fractional_full)
     }
 }
 
@@ -706,6 +738,14 @@ pub(crate) fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequences::WorkerLoadProjection;
+
+    fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
+        WorkerLoadInput::from_projection(WorkerLoadProjection {
+            active_prefill_tokens,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn worker_selection_only_config_preserves_parameter_mapping() {
@@ -939,6 +979,19 @@ models:
     }
 
     #[test]
+    fn has_room_without_limits_or_reported_budget() {
+        let mut limits = BusyThresholds::default();
+        assert!(!limits.is_configured());
+        assert!(limits.has_room(&prefill_load(usize::MAX), WorkerCapacity::default()));
+
+        // An unreported budget is taken as DEFAULT_MAX_BATCHED_TOKENS.
+        limits.prefill_busy_threshold_frac = Some(0.5);
+        let half_default = (DEFAULT_MAX_BATCHED_TOKENS / 2) as usize;
+        assert!(limits.has_room(&prefill_load(half_default), WorkerCapacity::default()));
+        assert!(!limits.has_room(&prefill_load(half_default + 1), WorkerCapacity::default()));
+    }
+
+    #[test]
     fn rootless_model_config_falls_back_for_unmatched_model() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
@@ -960,9 +1013,11 @@ models:
         .unwrap();
 
         let exact = config.resolve_profile(Some("exact-model"), Some(7.0), RouterQueuePolicy::Wspt);
-        assert!(exact.default_class().worker_is_busy(11, 10_000_000));
-        assert!(exact.default_class().worker_is_busy(6, 10));
-        assert!(!exact.default_class().worker_is_busy(5, 10));
+        let limits = exact.default_class().busy_thresholds();
+        let budget = |tokens| WorkerCapacity::new(Some(tokens), None);
+        assert!(!limits.has_room(&prefill_load(11), budget(10_000_000)));
+        assert!(!limits.has_room(&prefill_load(6), budget(10)));
+        assert!(limits.has_room(&prefill_load(5), budget(10)));
 
         let fallback = config.resolve_profile(Some("other"), Some(7.0), RouterQueuePolicy::Wspt);
         assert_eq!(fallback.default_class().name, SYNTHETIC_POLICY_CLASS);

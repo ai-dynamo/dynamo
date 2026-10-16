@@ -16,11 +16,11 @@ use dynamo_kv_router::indexer::{
     KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails,
     query_lower_tiers_with_options,
 };
+use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
 use dynamo_kv_router::protocols::{
     BlockHashOptions, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerConfigLike, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
-use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
     ScheduleMode, WorkerPlacement,
@@ -1134,14 +1134,14 @@ impl OfflineReplayRouter {
         let mut admissions = Vec::new();
         loop {
             // Most completions find an empty queue, which never consults the
-            // predicate, so only snapshot active tokens once one is needed.
-            let mut active_tokens = None;
+            // predicate, so only snapshot worker loads once one is needed.
+            let mut worker_loads = None;
             let slots = &self.slots;
             let workers = &self.workers_with_configs;
             let Some(popped) = self.pending.pop_next(|_, class, _| {
-                let active_tokens =
-                    active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
-                !Self::all_workers_busy_with(active_tokens, workers, class)
+                let worker_loads =
+                    worker_loads.get_or_insert_with(|| slots.project_worker_loads(None, decay_now));
+                !Self::all_workers_busy_with(worker_loads, workers, class)
             }) else {
                 break;
             };
@@ -1161,25 +1161,27 @@ impl OfflineReplayRouter {
     }
 
     fn all_workers_busy(&self, class: &PolicyClassConfig, decay_now: Instant) -> bool {
-        let active_tokens = self.slots.active_tokens(decay_now);
-        Self::all_workers_busy_with(&active_tokens, &self.workers_with_configs, class)
+        let worker_loads = self.slots.project_worker_loads(None, decay_now);
+        Self::all_workers_busy_with(&worker_loads, &self.workers_with_configs, class)
     }
 
     fn all_workers_busy_with(
-        active_tokens: &HashMap<WorkerWithDpRank, usize>,
+        worker_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
         class: &PolicyClassConfig,
     ) -> bool {
+        let limits = class.busy_thresholds();
         workers_with_configs.iter().all(|(&worker_id, config)| {
+            let capacity = WorkerCapacity::of(config);
             let start = config.data_parallel_start_rank();
             let end = start.saturating_add(config.data_parallel_size());
             (start..end).all(|dp_rank| {
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                let max_batched = config
-                    .max_num_batched_tokens()
-                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-                class.worker_is_busy(tokens, max_batched)
+                let load = worker_loads
+                    .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                    .copied()
+                    .map(WorkerLoadInput::from_projection)
+                    .unwrap_or_default();
+                !limits.has_room(&load, capacity)
             })
         })
     }
