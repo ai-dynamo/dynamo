@@ -91,11 +91,7 @@ pub fn run(
 
 fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Result<Outcome, String> {
     let truth = &scenario.truth;
-    let Opened {
-        mut request,
-        mut exchange,
-        ..
-    } = match format.open(ClientRequest {
+    let Opened { mut exchange, .. } = match format.open(ClientRequest {
         body,
         headers: &Default::default(),
         default_request_id: "dynamo-request",
@@ -103,9 +99,10 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
         Ok(opened) => opened,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
     };
-    if let Err(error) = exchange.bind(&mut request, &super::worker(&scenario.engine_info)) {
-        return Ok(Outcome::Rejected(error.message));
-    }
+    let mut request = match exchange.bind(&super::worker(&scenario.engine_info)) {
+        Ok(bound) => bound.request,
+        Err(error) => return Ok(Outcome::Rejected(error.message)),
+    };
     if *request.token_ids != truth.prompt {
         return Err("the routed request does not carry the client's prompt".into());
     }

@@ -282,10 +282,10 @@ impl Harness {
             })
             .is_ok_and(|mut opened| {
                 let worker = super::worker(&scenario.engine_info);
-                matches!(
-                    opened.exchange.bind(&mut opened.request, &worker),
-                    Ok(Ok(()))
-                )
+                opened
+                    .exchange
+                    .bind(&worker)
+                    .is_ok_and(|bound| bound.migration.is_ok())
             })
     }
 
@@ -436,19 +436,17 @@ impl Harness {
                 let Some(body) = self.shape.body(&scenario.request) else {
                     return Ok(());
                 };
-                let Ok(Opened {
-                    mut exchange,
-                    mut request,
-                    ..
-                }) = self.format.open(ClientRequest {
+                let Ok(Opened { mut exchange, .. }) = self.format.open(ClientRequest {
                     body: &body,
                     headers: &Default::default(),
                     default_request_id: "dynamo-request",
-                })
-                else {
+                }) else {
                     return Ok(());
                 };
-                let _ = exchange.bind(&mut request, &super::worker(&scenario.engine_info));
+                let Ok(bound) = exchange.bind(&super::worker(&scenario.engine_info)) else {
+                    return Ok(());
+                };
+                let mut request = bound.request;
                 for value in values {
                     let output = LLMEngineOutput {
                         engine_data: Some(json!({ crate::protocols::sglang::RESPONSE_KEY: value })),

@@ -10,6 +10,9 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
+  - lib/generate-format-catalog/
+  - lib/llm/src/generate_format.rs
+  - lib/llm/src/generate_format/
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs

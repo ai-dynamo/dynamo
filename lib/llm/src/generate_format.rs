@@ -62,6 +62,7 @@ impl ClientError {
 
 /// The worker set chosen to serve a request.
 pub struct Worker<'a> {
+    pub model: &'a str,
     /// What it advertises under [`ENGINE_INFO_KEY`]; `Null` when nothing.
     pub engine_info: &'a Value,
     pub kv_cache_block_size: u32,
@@ -71,8 +72,6 @@ pub struct Worker<'a> {
 
 /// A started client request.
 pub struct Opened {
-    /// The routed request, carrying the engine's request opaquely.
-    pub request: PreprocessedRequest,
     pub request_id: String,
     pub stream: bool,
     /// The model the client names; the frontend's only one when `None`.
@@ -80,17 +79,18 @@ pub struct Opened {
     pub exchange: Box<dyn GenerateExchange>,
 }
 
+/// A request ready for dispatch and its migration admission decision.
+pub struct Bound {
+    pub request: PreprocessedRequest,
+    pub migration: Result<(), String>,
+}
+
 /// One client request across every attempt. Dynamo calls these in stream
 /// order and never concurrently; [`Self::migrate`] runs only after every
 /// delivered output has passed through [`Self::chunk`].
 pub trait GenerateExchange: Send {
-    /// Finish `request` for the worker set that serves it. The inner `Err`
-    /// says why a failed attempt cannot continue on another worker.
-    fn bind(
-        &mut self,
-        request: &mut PreprocessedRequest,
-        worker: &Worker<'_>,
-    ) -> Result<Result<(), String>, ClientError>;
+    /// Build the routed request once the serving worker set is known.
+    fn bind(&mut self, worker: &Worker<'_>) -> Result<Bound, ClientError>;
 
     /// One item of the worker stream; `prefill` marks prefill's final output
     /// in P/D. Streaming passes each client chunk to `emit`, which serializes
@@ -226,4 +226,69 @@ pub fn selected() -> anyhow::Result<SharedFormat> {
 /// A linked format by name.
 pub fn named(name: &str) -> anyhow::Result<SharedFormat> {
     INSTALLED.get_or_init(Registry::default).get(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::sglang::{ClientCodec, Encoded, SglangFormat};
+
+    struct Wrapped;
+    impl ClientCodec for Wrapped {
+        fn decode_request(&self, body: &[u8]) -> Result<Option<Value>, ClientError> {
+            let value: Value = serde_json::from_slice(body)
+                .map_err(|error| ClientError::new(error.to_string()))?;
+            Ok(Some(value["request"].clone()))
+        }
+        fn encode_response(&self, response: &Value) -> Encoded {
+            Encoded::Replace(json!({"response": response}))
+        }
+        fn error_body(&self, message: &str) -> Value {
+            json!({"failure": message})
+        }
+    }
+
+    #[test]
+    fn catalog_format_owns_client_shape_and_reuses_native_exchange() {
+        let mut registry = Registry::default();
+        registry
+            .register(Arc::new(SglangFormat::with_codec("wrapped", Wrapped)))
+            .unwrap();
+        assert!(registry.register(Arc::new(SglangFormat::native())).is_err());
+        assert!(registry.get("missing").is_err());
+        let format = registry.get("wrapped").unwrap();
+        assert_eq!(format.capability(), crate::protocols::sglang::CAPABILITY);
+        assert_eq!(
+            format.error_body(StatusCode::BAD_REQUEST, "bad"),
+            json!({"failure": "bad"})
+        );
+        let mut opened = format
+            .open(ClientRequest {
+                body: br#"{"request":{"input_ids":[1],"sampling_params":{"max_new_tokens":2}}}"#,
+                headers: &HeaderMap::new(),
+                default_request_id: "public",
+            })
+            .unwrap();
+        let bound = opened.exchange.bind(&testkit::worker(&json!({}))).unwrap();
+        assert_eq!(bound.request.token_ids.as_slice(), &[1]);
+        assert!(bound.migration.is_ok());
+        for (ids, finish) in [
+            (json!([2]), Value::Null),
+            (json!([3]), json!({"type":"length"})),
+        ] {
+            let output = format
+                .inspect(
+                    json!({"output_ids": ids, "meta_info": {
+                        "id": "private", "finish_reason": finish,
+                    }}),
+                    Phase::Aggregated,
+                )
+                .unwrap()
+                .output;
+            opened.exchange.chunk(output, false, &mut |_| {}).unwrap();
+        }
+        let response = opened.exchange.finish().unwrap().unwrap();
+        assert_eq!(response["response"]["output_ids"], json!([2, 3]));
+        assert_eq!(response["response"]["meta_info"]["id"], "public");
+    }
 }

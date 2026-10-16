@@ -33,12 +33,12 @@ use super::disconnect::{
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
 use super::openai::{
-    check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
-    get_or_create_request_id, preprocessed_context_from_headers,
+    check_model_serving_ready, check_ready, get_body_limit, get_or_create_request_id,
+    preprocessed_context_from_headers,
 };
 use super::{RouteDoc, service_v2};
 use crate::generate_format::{
-    ClientError, ClientRequest, GenerateExchange, Opened, SharedFormat, Worker,
+    Bound, ClientError, ClientRequest, GenerateExchange, Opened, SharedFormat, Worker,
 };
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
@@ -121,9 +121,6 @@ fn classify(error: &(dyn std::error::Error + 'static)) -> (ErrorType, StatusCode
             StatusCode::SERVICE_UNAVAILABLE,
             message,
         )
-    } else if let Some(error) = find_invalid_argument_in_chain(error) {
-        let message = error.message().to_string();
-        (ErrorType::Validation, StatusCode::BAD_REQUEST, message)
     } else if let Some(error) = super::error::find_canonical_error_in_chain(error)
         .filter(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
     {
@@ -148,27 +145,12 @@ fn classify(error: &(dyn std::error::Error + 'static)) -> (ErrorType, StatusCode
     }
 }
 
-/// A stream error already rendered in the request's format.
-#[derive(Debug, thiserror::Error)]
-#[error("{body}")]
-struct RenderedError {
-    error_type: ErrorType,
-    body: String,
-}
-
-/// The stream monitor's formatter: stream errors arrive rendered; the
-/// monitor's own get the default shape.
-fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
-    let mut current = Some(error);
-    while let Some(source) = current {
-        if let Some(rendered) = source.downcast_ref::<RenderedError>() {
-            return (rendered.error_type.clone(), rendered.body.clone());
-        }
-        current = source.source();
-    }
-    let (error_type, _, message) = classify(error);
-    let body = serde_json::json!({"error": {"message": message}});
-    (error_type, body.to_string())
+fn stream_error(
+    format: &SharedFormat,
+    error: &(dyn std::error::Error + 'static),
+) -> (ErrorType, String) {
+    let (error_type, status, message) = classify(error);
+    (error_type, format.error_body(status, &message).to_string())
 }
 
 fn adapt_openai_error(format: &SharedFormat, response: super::openai::ErrorResponse) -> Response {
@@ -307,7 +289,6 @@ async fn handler(
         return adapt_openai_error(format, response);
     }
     let Opened {
-        mut request,
         request_id,
         stream: streaming,
         model,
@@ -361,16 +342,19 @@ async fn handler(
             return error_response(format, status, &error.to_string());
         }
     };
-    request.model = model.clone();
     let mut exchange = exchange;
     let worker = Worker {
+        model: &model,
         engine_info: &selection.engine_info,
         kv_cache_block_size: selection.kv_cache_block_size,
         lora_name: selection.lora_name.as_deref(),
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
     };
-    let migration = match exchange.bind(&mut request, &worker) {
-        Ok(migration) => migration,
+    let Bound {
+        mut request,
+        migration,
+    } = match exchange.bind(&worker) {
+        Ok(bound) => bound,
         Err(error) => return client_error(format, error),
     };
     // The router records TTFT and ITL into the request's tracker.
@@ -587,15 +571,10 @@ impl Dispatch {
                 _ => cancelled(&mut inflight_guard),
             };
         }
-        let rendering = format.clone();
-        let stream = events(stream, exchange).flat_map(move |result| {
+        let stream = events(stream, exchange).flat_map(|result| {
             futures::stream::iter(match result {
                 Ok(events) => events.into_iter().map(Ok).collect(),
-                Err(error) => {
-                    let (error_type, status, message) = classify(&error);
-                    let body = rendering.error_body(status, &message).to_string();
-                    vec![Err(axum::Error::new(RenderedError { error_type, body }))]
-                }
+                Err(error) => vec![Err(axum::Error::new(error))],
             })
         });
         let stream = monitor_for_disconnects_with_error(
@@ -603,7 +582,7 @@ impl Dispatch {
             engine_context,
             inflight_guard,
             stream_handle,
-            stream_error,
+            move |error| stream_error(&format, error),
         );
         let mut response = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
@@ -617,29 +596,26 @@ impl Dispatch {
 mod tests {
     use super::*;
 
-    /// Fails dispatch the way an addressed worker that no longer serves the instance does.
-    struct WorkerUnavailableEngine;
+    use dynamo_runtime::engine::{AsyncEngine, ResponseStream};
+    use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+    type Input = SingleIn<PreprocessedRequest>;
+    type Output = ManyOut<Annotated<LLMEngineOutput>>;
+
+    struct FailingEngine(dynamo_runtime::error::ErrorType);
 
     #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > for WorkerUnavailableEngine
-    {
-        async fn generate(
-            &self,
-            _request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > {
-            Err(DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
-                .message("Server unavailable: unknown endpoint a/generate")
-                .build()
-                .into())
+    impl AsyncEngine<Input, Output, Error> for FailingEngine {
+        async fn generate(&self, _request: Input) -> Result<Output, Error> {
+            let mut error = DynamoError::builder()
+                .error_type(self.0)
+                .message("private worker details");
+            if self.0 == dynamo_runtime::error::ErrorType::DeadlineExceeded {
+                error = error.reason(
+                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                        .unwrap(),
+                );
+            }
+            Err(error.build().into())
         }
     }
 
@@ -694,33 +670,6 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    #[tokio::test]
-    async fn worker_unavailable_dispatch_returns_503() {
-        let state = service_v2::HttpService::builder()
-            .build()
-            .unwrap()
-            .state_clone();
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let response = dispatch(state.clone(), true, ConnectionHandle::create_disabled(tx))
-            .run(Arc::new(WorkerUnavailableEngine), dispatch_test_context())
-            .await;
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = json(response).await;
-        assert_eq!(body["error"]["message"], "Service temporarily unavailable");
-        assert!(!body.to_string().contains("unknown endpoint"));
-        assert_eq!(
-            state.metrics_clone().get_request_counter(
-                state.manager().metric_model_for("test-model"),
-                &Endpoint::Generate,
-                &RequestType::Stream,
-                &Status::Error,
-                &ErrorType::Unavailable,
-            ),
-            1
-        );
-    }
-
     #[test]
     fn model_aliases_are_deduplicated_before_implicit_selection() {
         let manager = crate::discovery::ModelManager::new();
@@ -757,7 +706,7 @@ mod tests {
             (
                 typed(DynamoErrorType::InvalidArgument, "bad params"),
                 ErrorType::Validation,
-                "bad params",
+                "Invalid request",
             ),
             (
                 typed(DynamoErrorType::Unavailable, "x"),
@@ -782,7 +731,7 @@ mod tests {
             // Deadline wins over overload.
             (deadline, ErrorType::Cancelled, "request deadline exceeded"),
         ] {
-            let (error_type, body) = stream_error(&axum::Error::new(error));
+            let (error_type, body) = stream_error(&sglang(), &axum::Error::new(error));
             let body: Value = serde_json::from_str(&body).unwrap();
             assert_eq!(error_type, expected_type);
             assert_eq!(
@@ -792,96 +741,64 @@ mod tests {
         }
     }
 
-    struct DeadlineEngine;
-
-    #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > for DeadlineEngine
-    {
-        async fn generate(
-            &self,
-            _request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > {
-            Err(DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
-                .reason(
-                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
-                        .unwrap(),
-                )
-                .message("router deadline exceeded before stream start")
-                .build()
-                .into())
-        }
-    }
-
     #[tokio::test]
-    async fn pre_stream_deadline_maps_to_http_429_with_cancelled_metric() {
-        let state = service_v2::HttpService::builder()
-            .build()
-            .unwrap()
-            .state_clone();
-        let context = dispatch_test_context();
-        let (mut connection_handle, stream_handle) = create_connection_monitor(
-            context.context(),
-            None,
-            CancellationLabels {
-                model: "test-model".to_string(),
-                endpoint: Endpoint::Generate.to_string(),
-                request_type: "streaming".to_string(),
-            },
-        )
-        .await;
-        let response = dispatch(state.clone(), true, stream_handle)
-            .run(Arc::new(DeadlineEngine), context)
-            .await;
-        connection_handle.disarm();
-
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            json(response).await["error"]["message"],
-            "request deadline exceeded"
-        );
-        assert_eq!(
-            state.metrics_clone().get_request_counter(
-                state.manager().metric_model_for("test-model"),
-                &Endpoint::Generate,
-                &RequestType::Stream,
-                &Status::Error,
-                &ErrorType::Cancelled,
+    async fn dispatch_errors_preserve_status_shape_and_metrics() {
+        use dynamo_runtime::error::ErrorType as Backend;
+        for (kind, status, metric, message) in [
+            (
+                Backend::WorkerUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorType::Unavailable,
+                "Service temporarily unavailable",
             ),
-            1
-        );
+            (
+                Backend::DeadlineExceeded,
+                StatusCode::TOO_MANY_REQUESTS,
+                ErrorType::Cancelled,
+                "request deadline exceeded",
+            ),
+        ] {
+            for streaming in [false, true] {
+                let state = service_v2::HttpService::builder()
+                    .build()
+                    .unwrap()
+                    .state_clone();
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                let response = dispatch(
+                    state.clone(),
+                    streaming,
+                    ConnectionHandle::create_disabled(tx),
+                )
+                .run(Arc::new(FailingEngine(kind)), dispatch_test_context())
+                .await;
+                assert_eq!(response.status(), status);
+                assert_eq!(json(response).await["error"]["message"], message);
+                let request_type = if streaming {
+                    RequestType::Stream
+                } else {
+                    RequestType::Unary
+                };
+                assert_eq!(
+                    state.metrics_clone().get_request_counter(
+                        state.manager().metric_model_for("test-model"),
+                        &Endpoint::Generate,
+                        &request_type,
+                        &Status::Error,
+                        &metric
+                    ),
+                    1
+                );
+            }
+        }
     }
 
     struct ReplayEngine(Vec<Annotated<LLMEngineOutput>>);
 
     #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > for ReplayEngine
-    {
-        async fn generate(
-            &self,
-            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > {
+    impl AsyncEngine<Input, Output, Error> for ReplayEngine {
+        async fn generate(&self, request: Input) -> Result<Output, Error> {
             let stream = Box::pin(futures::stream::iter(self.0.clone()));
-            Ok(dynamo_runtime::engine::ResponseStream::new(
-                stream,
-                request.context(),
-            ))
+            Ok(ResponseStream::new(stream, request.context()))
         }
     }
 
@@ -894,20 +811,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > for FlakyWorker
-    {
-        async fn generate(
-            &self,
-            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > {
+    impl AsyncEngine<Input, Output, Error> for FlakyWorker {
+        async fn generate(&self, request: Input) -> Result<Output, Error> {
             use crate::generate_format::{GenerateFormat, Phase, testkit::sim};
             let call = self
                 .calls
@@ -940,10 +845,7 @@ mod tests {
                 ));
             }
             let stream = Box::pin(futures::stream::iter(items));
-            Ok(dynamo_runtime::engine::ResponseStream::new(
-                stream,
-                context.context(),
-            ))
+            Ok(ResponseStream::new(stream, context.context()))
         }
     }
 
@@ -951,20 +853,8 @@ mod tests {
     struct Migrating(Arc<crate::migration::Migration>, Arc<FlakyWorker>);
 
     #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > for Migrating
-    {
-        async fn generate(
-            &self,
-            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > {
+    impl AsyncEngine<Input, Output, Error> for Migrating {
+        async fn generate(&self, request: Input) -> Result<Output, Error> {
             use dynamo_runtime::pipeline::Operator;
             self.0.generate(request, self.1.clone()).await
         }
@@ -990,11 +880,7 @@ mod tests {
                     "logprob_start_len": 0, "sampling_params": {"max_new_tokens": 5},
                 })
                 .to_string();
-                let Opened {
-                    mut request,
-                    mut exchange,
-                    ..
-                } = sglang()
+                let Opened { mut exchange, .. } = sglang()
                     .open(ClientRequest {
                         body: body.as_bytes(),
                         headers: &HeaderMap::new(),
@@ -1002,7 +888,11 @@ mod tests {
                     })
                     .unwrap();
                 let worker = crate::generate_format::testkit::worker(&Value::Null);
-                assert!(matches!(exchange.bind(&mut request, &worker), Ok(Ok(()))));
+                let Bound {
+                    mut request,
+                    migration,
+                } = exchange.bind(&worker).unwrap();
+                assert!(migration.is_ok());
                 let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
                 request.continuation = Some(exchange.clone());
                 let worker = Arc::new(FlakyWorker {
@@ -1044,6 +934,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
+        use crate::protocols::common::FinishReason;
+        for (finish, status) in [
+            (FinishReason::Length, StatusCode::OK),
+            (FinishReason::Cancelled, CANCELLED),
+            (
+                FinishReason::Error("private engine detail".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let format = crate::generate_format::named("vllm").unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-request-id", "header-id".parse().unwrap());
+            headers.insert("x-data-parallel-rank", "3".parse().unwrap());
+            let mut opened = format.open(ClientRequest {
+                body: br#"{"token_ids":[1],"sampling_params":{},"request_id":"body-id","priority":-7}"#,
+                headers: &headers, default_request_id: "default-id",
+            }).unwrap();
+            assert_eq!(opened.request_id, "header-id");
+            let bound = opened
+                .exchange
+                .bind(&crate::generate_format::testkit::worker(&Value::Null))
+                .unwrap();
+            assert!(bound.migration.is_err());
+            let hints = bound.request.routing.as_ref().unwrap();
+            assert_eq!(hints.dp_rank, Some(3));
+            assert_eq!(hints.priority, Some(7));
+            let state = service_v2::HttpService::builder()
+                .build()
+                .unwrap()
+                .state_clone();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let mut dispatch = dispatch(state, false, ConnectionHandle::create_disabled(tx));
+            dispatch.exchange = Arc::new(Mutex::new(opened.exchange));
+            dispatch.format = format;
+            let output = LLMEngineOutput {
+                token_ids: vec![2, 3],
+                finish_reason: Some(finish),
+                ..Default::default()
+            };
+            let response = dispatch
+                .run(
+                    Arc::new(ReplayEngine(vec![Annotated::from_data(output)])),
+                    Context::new(bound.request),
+                )
+                .await;
+            assert_eq!(response.status(), status);
+            let body = json(response).await;
+            if status == StatusCode::OK {
+                assert_eq!(body["request_id"], "header-id");
+                assert_eq!(body["choices"][0]["token_ids"], serde_json::json!([2, 3]));
+                assert_eq!(body["choices"][0]["finish_reason"], "length");
+            } else {
+                assert_eq!(body["error"]["code"], status.as_u16());
+                assert!(!body.to_string().contains("private engine detail"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
         let chunk = |ids: Value| {
             Annotated::from_data(LLMEngineOutput {
@@ -1064,7 +1014,7 @@ mod tests {
             (
                 vec![chunk(serde_json::json!([5])), Annotated::from_err(invalid)],
                 StatusCode::BAD_REQUEST,
-                serde_json::json!({"error": {"message": "bad sampling params"}}),
+                serde_json::json!({"error": {"message": "Invalid request"}}),
             ),
             (
                 vec![Annotated::from_data(LLMEngineOutput::default())],

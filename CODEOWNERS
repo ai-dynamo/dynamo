@@ -66,6 +66,7 @@
 
 # === frontend  (@ai-dynamo/dynamo-frontend-codeowners) ===
 /examples/chat_templates/                                                                               @ai-dynamo/dynamo-frontend-codeowners
+/lib/generate-format-catalog/                                                                           @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
@@ -509,6 +510,7 @@ requirements.txt                                                                
 /lib/llm/src/preprocessor.rs                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/block_manager.md                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager.rs                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/generate_format/                                                                           @ai-dynamo/dynamo-frontend-codeowners
 /tests/benchmarks/multimodal/                                                                           @ai-dynamo/dynamo-multimodal-codeowners
 /tests/serve/test_vllm_xpu.py                                                                           @ai-dynamo/dynamo-xpu-codeowners
 /.github/codeowners/areas.yaml                                                                          @ai-dynamo/dynamo-process-codeowners
@@ -520,6 +522,7 @@ requirements.txt                                                                
 /lib/llm/src/protocols/common/                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/protocols/openai/                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/deploy/                                                                          @ai-dynamo/dynamo-fault-tolerance-codeowners
+/lib/llm/src/generate_format.rs                                                                         @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/kv_router/indexer/                                                                         @ai-dynamo/dynamo-router-codeowners
 /tests/fault_tolerance/etcd_ha/                                                                         @ai-dynamo/dynamo-fault-tolerance-codeowners
 /lib/llm/src/block_manager/pool/                                                                        @ai-dynamo/dynamo-kv-memory-codeowners

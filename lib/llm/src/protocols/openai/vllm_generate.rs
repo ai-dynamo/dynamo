@@ -8,25 +8,20 @@
 //! unary response is assembled from the worker's typed outputs. Streaming and
 //! migration are not supported yet.
 
-use std::sync::Arc;
-
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::error::DynamoError;
-use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::generate::{
-    GenerateAggregator, GenerateRequest, GenerateResponseOptions, SamplingParams, StreamOptions,
-};
+use super::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
 use crate::generate_format::{
-    ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase, Worker,
+    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase,
+    Worker,
 };
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::preprocessed_mm_identifier;
 use crate::protocols::common::preprocessor::MmRoutingInfo;
-use crate::protocols::common::timing::RequestTracker;
 
 pub const NAME: &str = "vllm";
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -35,57 +30,6 @@ const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
 /// Convert vLLM's lower-is-higher priority to Dynamo's higher-is-higher scale.
 fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
-}
-
-/// Borrowed worker envelope for vLLM-specific request fields.
-///
-/// `token_ids` are intentionally absent: `PreprocessedRequest.token_ids` is
-/// the canonical routing and wire representation, and the worker reconstructs
-/// the vLLM request from that field.
-#[derive(Serialize)]
-struct VllmTitoEnvelope<'a> {
-    request_id: &'a str,
-    sampling_params: &'a SamplingParams,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'a str>,
-    stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_options: Option<&'a StreamOptions>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_salt: Option<&'a str>,
-    priority: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kv_transfer_params: Option<&'a serde_json::Map<String, serde_json::Value>>,
-    #[serde(flatten)]
-    passthrough: &'a serde_json::Map<String, serde_json::Value>,
-}
-
-impl<'a> VllmTitoEnvelope<'a> {
-    fn new(request: &'a GenerateRequest, request_id: &'a str) -> Self {
-        let GenerateRequest {
-            request_id: _,
-            token_ids: _,
-            sampling_params,
-            model,
-            stream,
-            stream_options,
-            cache_salt,
-            priority,
-            kv_transfer_params,
-            passthrough,
-        } = request;
-        Self {
-            request_id,
-            sampling_params,
-            model: model.as_deref(),
-            stream: *stream,
-            stream_options: stream_options.as_ref(),
-            cache_salt: cache_salt.as_deref(),
-            priority: *priority,
-            kv_transfer_params: kv_transfer_params.as_ref(),
-            passthrough,
-        }
-    }
 }
 
 type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
@@ -97,12 +41,6 @@ struct GenerateMmRoutingProjection {
     /// decoder. The worker applies these only to the vLLM prompt it builds;
     /// the caller's opaque `features` payload remains unchanged.
     marked_image_hashes: Vec<String>,
-}
-
-struct GenerateRoutingMetadata {
-    kv_cache_block_size: u32,
-    tower_connector_lora_enabled: bool,
-    lora_name: Option<String>,
 }
 
 #[inline]
@@ -396,19 +334,13 @@ fn generate_mm_routing_info(
     }))
 }
 
-fn preprocessed_from_generate_with_tracker(
-    request: GenerateRequest,
+fn preprocessed_from_generate(
+    mut request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
-    routing_metadata: GenerateRoutingMetadata,
-    tracker: Arc<RequestTracker>,
+    worker: &Worker<'_>,
 ) -> anyhow::Result<PreprocessedRequest> {
-    let GenerateRoutingMetadata {
-        kv_cache_block_size,
-        tower_connector_lora_enabled,
-        lora_name,
-    } = routing_metadata;
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let stop_conditions = sampling.project_stop_conditions();
@@ -421,15 +353,15 @@ fn preprocessed_from_generate_with_tracker(
     let routing_priority = dynamo_routing_priority(request.priority);
     // The sidecar protocol does not expose whether tower/connector LoRA is
     // active, so conservatively treat every adapter's MM identity as scoped.
-    let mm_routing = if lora_name.is_some() {
+    let mm_routing = if worker.lora_name.is_some() {
         tracing::debug!(
             target: "mm_routing",
-            tower_connector_lora_enabled,
+            tower_connector_lora_enabled = worker.tower_connector_lora_enabled,
             "LoRA request uses token-only multimodal routing"
         );
         None
     } else {
-        match generate_mm_routing_info(&request, kv_cache_block_size) {
+        match generate_mm_routing_info(&request, worker.kv_cache_block_size) {
             Ok(info) => info,
             Err(reason) => {
                 tracing::debug!(
@@ -441,7 +373,14 @@ fn preprocessed_from_generate_with_tracker(
             }
         }
     };
-    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let skip_reading_prefix_cache = sampling.skip_reading_prefix_cache();
+    // Keep the token buffer only in the routed request; workers reconstruct it.
+    let token_ids = std::mem::take(&mut request.token_ids);
+    request.request_id = Some(request_id.to_string());
+    let mut vllm_tito = serde_json::to_value(&request)?;
+    if let Some(body) = vllm_tito.as_object_mut() {
+        body.remove("token_ids");
+    }
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("vllm_tito".to_string(), vllm_tito);
     if let Some(kv_transfer_params) = request.kv_transfer_params.as_ref() {
@@ -450,7 +389,7 @@ fn preprocessed_from_generate_with_tracker(
             serde_json::Value::Object(kv_transfer_params.clone()),
         );
     }
-    if let Some(skip_reading_prefix_cache) = sampling.skip_reading_prefix_cache() {
+    if let Some(skip_reading_prefix_cache) = skip_reading_prefix_cache {
         extra_args.insert(
             "skip_reading_prefix_cache".to_string(),
             serde_json::Value::Bool(skip_reading_prefix_cache),
@@ -463,11 +402,7 @@ fn preprocessed_from_generate_with_tracker(
         );
     }
     let mm_routing_info = mm_routing.map(|projection| projection.info);
-    let GenerateRequest {
-        token_ids,
-        cache_salt,
-        ..
-    } = request;
+    let cache_salt = request.cache_salt;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
@@ -479,7 +414,7 @@ fn preprocessed_from_generate_with_tracker(
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
-            lora_name,
+            lora_name: worker.lora_name.map(str::to_owned),
             cache_namespace: cache_salt,
             // `priority_jump` is a boost-only scheduler input. Preserve penalties
             // in signed `priority`, matching the standard preprocessor projection.
@@ -487,10 +422,7 @@ fn preprocessed_from_generate_with_tracker(
             priority: Some(routing_priority),
             ..Default::default()
         }))
-        // Do not copy token_ids into this envelope. The worker must rebuild
-        // that field from PreprocessedRequest.token_ids after routing.
         .extra_args(Some(serde_json::Value::Object(extra_args)))
-        .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -545,17 +477,8 @@ impl GenerateFormat for VllmFormat {
             .unwrap_or_else(|| client.default_request_id.to_string());
         let data_parallel_rank =
             header(X_DATA_PARALLEL_RANK_HEADER).and_then(|v| v.trim().parse().ok());
-        let placeholder = PreprocessedRequest::builder()
-            .model(String::new())
-            .token_ids(Vec::new())
-            .stop_conditions(Default::default())
-            .sampling_options(Default::default())
-            .output_options(Default::default())
-            .build()
-            .map_err(|error| ClientError::new(error.to_string()))?;
         Ok(Opened {
             model: request.model.clone(),
-            request: placeholder,
             request_id: request_id.clone(),
             stream: false,
             exchange: Box::new(VllmExchange {
@@ -587,29 +510,23 @@ struct VllmExchange {
 }
 
 impl GenerateExchange for VllmExchange {
-    fn bind(
-        &mut self,
-        request: &mut PreprocessedRequest,
-        worker: &Worker<'_>,
-    ) -> Result<Result<(), String>, ClientError> {
-        if let Some(generate) = self.request.take() {
-            let metadata = GenerateRoutingMetadata {
-                kv_cache_block_size: worker.kv_cache_block_size,
-                tower_connector_lora_enabled: worker.tower_connector_lora_enabled,
-                lora_name: worker.lora_name.map(ToOwned::to_owned),
-            };
-            let tracker = Arc::new(RequestTracker::new());
-            *request = preprocessed_from_generate_with_tracker(
-                generate,
-                &request.model,
-                self.data_parallel_rank,
-                &self.request_id,
-                metadata,
-                tracker,
-            )
-            .map_err(|error| ClientError::new(error.to_string()))?;
-        }
-        Ok(Err("vLLM generate requests do not migrate yet".to_string()))
+    fn bind(&mut self, worker: &Worker<'_>) -> Result<Bound, ClientError> {
+        let generate = self
+            .request
+            .take()
+            .ok_or_else(|| ClientError::new("generate request already bound"))?;
+        let request = preprocessed_from_generate(
+            generate,
+            worker.model,
+            self.data_parallel_rank,
+            &self.request_id,
+            worker,
+        )
+        .map_err(|error| ClientError::new(error.to_string()))?;
+        Ok(Bound {
+            request,
+            migration: Err("vLLM generate requests do not migrate yet".to_string()),
+        })
     }
 
     fn chunk(
@@ -620,7 +537,7 @@ impl GenerateExchange for VllmExchange {
     ) -> Result<(), DynamoError> {
         self.aggregator
             .apply_output(output, self.options)
-            .map_err(|error| DynamoError::msg(error.to_string()))
+            .map_err(|error| DynamoError::from(error.as_ref()))
     }
 
     fn migrate(
@@ -636,7 +553,7 @@ impl GenerateExchange for VllmExchange {
             std::mem::replace(&mut self.aggregator, GenerateAggregator::new(String::new()));
         let response = aggregator
             .finish(self.options)
-            .map_err(|error| DynamoError::msg(error.to_string()))?;
+            .map_err(|error| DynamoError::from(error.as_ref()))?;
         if !response.is_complete_unary() {
             return Err(DynamoError::msg(
                 "generate stream ended without a complete choice",
@@ -652,36 +569,29 @@ impl GenerateExchange for VllmExchange {
 mod tests {
     use super::*;
 
-    #[cfg(test)]
-    fn preprocessed_from_generate(
-        request: GenerateRequest,
-        model: &str,
-        data_parallel_rank: Option<u32>,
-        request_id: &str,
-        routing_metadata: GenerateRoutingMetadata,
-    ) -> anyhow::Result<PreprocessedRequest> {
-        let tracker = Arc::new(RequestTracker::new());
-        tracker.record_isl(request.token_ids.len(), None);
-        preprocessed_from_generate_with_tracker(
-            request,
-            model,
-            data_parallel_rank,
-            request_id,
-            routing_metadata,
-            tracker,
-        )
-    }
-
     fn routing_metadata(
         kv_cache_block_size: u32,
         tower_connector_lora_enabled: bool,
         lora_name: Option<&str>,
-    ) -> GenerateRoutingMetadata {
-        GenerateRoutingMetadata {
+    ) -> Worker<'_> {
+        Worker {
+            model: "test-model",
+            engine_info: &Value::Null,
             kv_cache_block_size,
             tower_connector_lora_enabled,
-            lora_name: lora_name.map(str::to_string),
+            lora_name,
         }
+    }
+
+    fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
+        preprocessed_from_generate(
+            serde_json::from_value(raw.clone()).unwrap(),
+            worker.model,
+            None,
+            "resolved-request",
+            worker,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -702,52 +612,40 @@ mod tests {
             "kv_transfer_params": {"remote": "worker-a"},
             "future_top_level_field": {"anything": "works"}
         });
-        let request: GenerateRequest =
-            serde_json::from_value(raw.clone()).expect("deserialize request");
-
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            routing_metadata(16, false, None),
-        )
-        .expect("build request");
+        let preprocessed = project(&raw, &routing_metadata(16, false, None));
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
             preprocessed
                 .routing
                 .as_ref()
-                .and_then(|routing| routing.expected_output_tokens),
+                .unwrap()
+                .expected_output_tokens,
             Some(8)
         );
         assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.priority),
+            preprocessed.routing.as_ref().unwrap().priority,
             Some(-7),
             "vLLM lower-is-higher priority must be inverted for Dynamo routing"
         );
         assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.priority_jump),
+            preprocessed.routing.as_ref().unwrap().priority_jump,
             Some(0.0)
         );
         assert_eq!(
             preprocessed
                 .routing
                 .as_ref()
-                .and_then(|routing| routing.cache_namespace.as_deref()),
+                .unwrap()
+                .cache_namespace
+                .as_deref(),
             Some("tenant-a")
         );
         let envelope = preprocessed
             .extra_args
             .as_ref()
-            .and_then(|extra| extra.get("vllm_tito"))
+            .unwrap()
+            .get("vllm_tito")
             .expect("vllm_tito envelope");
 
         let mut expected_envelope = raw;
@@ -757,13 +655,6 @@ mod tests {
             .and_then(|object| object.remove("token_ids"))
             .expect("token_ids in client request");
         assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2]);
-        assert_eq!(
-            preprocessed
-                .tracker
-                .as_ref()
-                .and_then(|tracker| tracker.isl_tokens()),
-            Some(2)
-        );
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
@@ -785,17 +676,7 @@ mod tests {
                 "kwargs_data": {"image": ["b3BhcXVlLWE=", "b3BhcXVlLWI="]}
             }
         });
-        let request: GenerateRequest =
-            serde_json::from_value(raw.clone()).expect("deserialize request");
-
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            routing_metadata(4, false, None),
-        )
-        .expect("build request");
+        let preprocessed = project(&raw, &routing_metadata(4, false, None));
 
         let hash_a = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
             "image",
@@ -827,14 +708,16 @@ mod tests {
         let envelope = preprocessed
             .extra_args
             .as_ref()
-            .and_then(|extra| extra.get("vllm_tito"))
+            .unwrap()
+            .get("vllm_tito")
             .expect("vllm_tito envelope");
         assert_eq!(envelope["features"], raw["features"]);
         assert_eq!(
             preprocessed
                 .extra_args
                 .as_ref()
-                .and_then(|extra| extra.get("dynamo_mm_routing_hashes")),
+                .unwrap()
+                .get("dynamo_mm_routing_hashes"),
             Some(&serde_json::json!([
                 crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
                 crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
@@ -859,7 +742,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, false, None),
+            &routing_metadata(4, false, None),
         )
         .expect("build request");
         let routing = preprocessed
@@ -874,7 +757,8 @@ mod tests {
         let marked_identifier = preprocessed
             .extra_args
             .as_ref()
-            .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+            .unwrap()
+            .get("dynamo_mm_routing_hashes")
             .and_then(serde_json::Value::as_array)
             .and_then(|hashes| hashes.first())
             .and_then(serde_json::Value::as_str)
@@ -1067,7 +951,7 @@ mod tests {
                 "test-model",
                 None,
                 "resolved-request",
-                routing_metadata(4, false, None),
+                &routing_metadata(4, false, None),
             )
             .expect("invalid routing metadata must not reject execution");
 
@@ -1080,14 +964,16 @@ mod tests {
             let envelope = preprocessed
                 .extra_args
                 .as_ref()
-                .and_then(|extra| extra.get("vllm_tito"))
+                .unwrap()
+                .get("vllm_tito")
                 .expect("vllm_tito envelope");
             assert_eq!(envelope["features"], raw["features"], "{name}");
             assert!(
                 preprocessed
                     .extra_args
                     .as_ref()
-                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .unwrap()
+                    .get("dynamo_mm_routing_hashes")
                     .is_none(),
                 "{name}"
             );
@@ -1109,7 +995,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, true, None),
+            &routing_metadata(4, true, None),
         )
         .expect("build base request");
         assert!(
@@ -1125,79 +1011,61 @@ mod tests {
                 "adapter-a",
                 None,
                 "resolved-request",
-                routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
+                &routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
             )
             .expect("build adapter request");
             assert!(adapter.mm_routing_info.is_none());
             assert_eq!(
-                adapter
-                    .routing
-                    .as_ref()
-                    .and_then(|routing| routing.lora_name.as_deref()),
+                adapter.routing.as_ref().unwrap().lora_name.as_deref(),
                 Some("adapter-a")
             );
             assert!(
                 adapter
                     .extra_args
                     .as_ref()
-                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .unwrap()
+                    .get("dynamo_mm_routing_hashes")
                     .is_none()
             );
             let envelope = adapter
                 .extra_args
                 .as_ref()
-                .and_then(|extra| extra.get("vllm_tito"))
+                .unwrap()
+                .get("vllm_tito")
                 .expect("vllm_tito envelope");
             assert_eq!(envelope["features"], raw["features"]);
         }
     }
 
     #[test]
-    fn omitted_max_tokens_stays_omitted_in_control_shadow() {
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [1, 2],
-            "sampling_params": {},
-            "model": "test-model"
-        }))
-        .expect("deserialize request");
-
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            routing_metadata(16, false, None),
-        )
-        .expect("build request");
-        assert_eq!(preprocessed.stop_conditions.max_tokens, None);
-        assert_eq!(preprocessed.stop_conditions.min_tokens, None);
-        assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.expected_output_tokens),
-            None
-        );
-    }
-
-    #[test]
-    fn explicit_zero_min_tokens_stays_explicit_in_control_shadow() {
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [1, 2],
-            "sampling_params": {"min_tokens": 0},
-            "model": "test-model"
-        }))
-        .expect("deserialize request");
-
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            routing_metadata(16, false, None),
-        )
-        .expect("build request");
-        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
+    fn routing_preserves_bounds_rank_and_priority() {
+        for (sampling, max, min) in [
+            (json!({}), None, None),
+            (json!({"min_tokens": 0}), None, Some(0)),
+            (json!({"max_tokens": 8, "min_tokens": 2}), Some(8), Some(2)),
+        ] {
+            for (priority, expected) in [(7, -7), (-7, 7), (i32::MIN, i32::MAX)] {
+                let request = serde_json::from_value(json!({
+                    "token_ids": [1, 2], "sampling_params": sampling, "priority": priority,
+                }))
+                .unwrap();
+                let request = preprocessed_from_generate(
+                    request,
+                    "test-model",
+                    Some(3),
+                    "req",
+                    &routing_metadata(16, false, None),
+                )
+                .unwrap();
+                assert_eq!(request.stop_conditions.max_tokens, max);
+                assert_eq!(request.stop_conditions.min_tokens, min);
+                let routing = request.routing.unwrap();
+                assert_eq!(routing.expected_output_tokens, max);
+                assert_eq!(routing.dp_rank, Some(3));
+                assert_eq!(routing.priority, Some(expected));
+                assert_eq!(routing.priority_jump, Some(expected.max(0) as f64));
+            }
+        }
     }
 
     #[test]
@@ -1234,7 +1102,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(16, false, None),
+            &routing_metadata(16, false, None),
         )
         .expect("build request");
 
@@ -1259,57 +1127,28 @@ mod tests {
             preprocessed
                 .extra_args
                 .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .and_then(|extra| extra.get("skip_reading_prefix_cache")),
+                .unwrap()
+                .get("skip_reading_prefix_cache"),
             Some(&serde_json::Value::Bool(false))
         );
         assert_eq!(
             preprocessed
                 .extra_args
                 .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .and_then(|extra| extra.get("kv_transfer_params")),
+                .unwrap()
+                .get("kv_transfer_params"),
             Some(&serde_json::json!({"connector_data": {"block_ids": [1, 2]}}))
         );
         assert_eq!(
             preprocessed
                 .extra_args
                 .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .and_then(|extra| extra.get("vllm_tito"))
+                .unwrap()
+                .get("vllm_tito")
                 .and_then(|tito| tito.get("sampling_params"))
                 .and_then(|sampling| sampling.get("top_k")),
             Some(&serde_json::json!(-1))
         );
         assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
-    }
-
-    #[test]
-    fn generate_control_shadow_carries_dp_rank_and_inverted_priority() {
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [1, 2],
-            "sampling_params": {},
-            "priority": -7
-        }))
-        .expect("deserialize request");
-
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            Some(3),
-            "resolved-request",
-            routing_metadata(16, false, None),
-        )
-        .expect("build request");
-        let routing = preprocessed.routing.as_ref().expect("routing hints");
-
-        assert_eq!(routing.dp_rank, Some(3));
-        assert_eq!(routing.priority, Some(7));
-        assert_eq!(routing.priority_jump, Some(7.0));
-    }
-
-    #[test]
-    fn priority_inversion_saturates_at_i32_min() {
-        assert_eq!(dynamo_routing_priority(i32::MIN), i32::MAX);
     }
 }

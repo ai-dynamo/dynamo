@@ -24,6 +24,7 @@ use crate::protocols::response_merge::RuleSet;
 /// A worker set advertising `engine_info`.
 pub fn worker(engine_info: &Value) -> Worker<'_> {
     Worker {
+        model: "test-model",
         engine_info,
         kv_cache_block_size: 16,
         lora_name: None,

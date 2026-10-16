@@ -41,10 +41,10 @@ use super::generate::SglangGenerateRequest;
 use super::migrate::{Continuation, RequestRules};
 use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
 use axum::http::StatusCode;
-use serde_json::Map;
 
 use crate::generate_format::{
-    ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase, Worker,
+    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase,
+    Worker,
 };
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::preprocessor::RoutingHints;
@@ -169,7 +169,6 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let stream = request.stream;
         let (input_ids, body) = request.into_worker_envelope(&request_id);
         let body = body.as_object().expect("the envelope is an object");
-        let budget = (limits.max_tokens, limits.min_tokens);
         let prefill_need = RULES.prefill_need(body);
         let prompt_tokens = input_ids.len();
         let routed = PreprocessedRequest::builder()
@@ -197,8 +196,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             .map_err(|error| ClientError::new(error.to_string()))?;
         let exchange = Box::new(Exchange {
             assembler: Assembler::new(RULES.clone(), false),
-            unbound: Some(body.clone()),
-            budget,
+            unbound: Some(routed),
             continuation: Err("the request is not bound to a worker".to_string()),
             codec: self.codec.clone(),
             delivered: 0,
@@ -208,7 +206,6 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         });
         Ok(Opened {
             model: None,
-            request: routed,
             request_id,
             stream,
             exchange,
@@ -227,9 +224,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
 struct Exchange<C> {
     codec: Arc<C>,
     assembler: Assembler,
-    /// The engine body and budget, until the request is bound to a worker.
-    unbound: Option<Map<String, Value>>,
-    budget: (Option<u32>, Option<u32>),
+    unbound: Option<PreprocessedRequest>,
     continuation: Result<Continuation, String>,
     /// Generated tokens seen across attempts.
     delivered: usize,
@@ -239,17 +234,27 @@ struct Exchange<C> {
 }
 
 impl<C: ClientCodec> GenerateExchange for Exchange<C> {
-    fn bind(
-        &mut self,
-        _request: &mut PreprocessedRequest,
-        worker: &Worker<'_>,
-    ) -> Result<Result<(), String>, ClientError> {
-        if let Some(body) = self.unbound.take() {
-            self.continuation =
-                Continuation::new(&REQUEST_RULES, &body, self.budget, worker.engine_info);
-            self.assembler.set_capture(self.continuation.is_ok());
-        }
-        Ok(self.continuation.as_ref().map(|_| ()).map_err(Clone::clone))
+    fn bind(&mut self, worker: &Worker<'_>) -> Result<Bound, ClientError> {
+        let mut request = self
+            .unbound
+            .take()
+            .ok_or_else(|| ClientError::new("generate request already bound"))?;
+        request.model = worker.model.to_string();
+        let body = request
+            .extra_args
+            .as_ref()
+            .and_then(|args| args[PAYLOAD_KEY].as_object())
+            .ok_or_else(|| ClientError::new("missing SGLang request envelope"))?;
+        let budget = (
+            request.stop_conditions.max_tokens,
+            request.stop_conditions.min_tokens,
+        );
+        self.continuation = Continuation::new(&REQUEST_RULES, body, budget, worker.engine_info);
+        self.assembler.set_capture(self.continuation.is_ok());
+        Ok(Bound {
+            request,
+            migration: self.continuation.as_ref().map(|_| ()).map_err(Clone::clone),
+        })
     }
 
     fn chunk(

@@ -208,16 +208,15 @@ impl Drop for AbortGuard<'_> {
                                 return false;
                             }
                         };
-                        let has_output = response_has_output(&response);
-                        if has_output && let Some(first_token) = &first_token {
+                        let inspected = match native_http.format.inspect(response, Phase::Decode) {
+                            Ok(inspected) => inspected,
+                            Err(_) => return false,
+                        };
+                        if inspected.has_output && let Some(first_token) = &first_token {
                             first_token.notify();
                         }
-                        if response_is_terminal(&response) {
-                            return false;
-                        }
-                        if has_output {
-                            return true;
-                        }
+                        if inspected.terminal { return false; }
+                        if inspected.has_output { return true; }
                     }
                 };
                 match tokio::time::timeout(native_http.decode_drain_timeout, drain).await {
@@ -242,14 +241,18 @@ impl Drop for AbortGuard<'_> {
 }
 
 /// Forgets a dispatch's SGLang request ID when its stream ends.
-struct Dispatched(Arc<Mutex<HashMap<String, String>>>, String);
+struct Dispatched {
+    rids: Arc<Mutex<HashMap<String, String>>>,
+    request_id: String,
+    rid: String,
+}
 
 impl Drop for Dispatched {
     fn drop(&mut self) {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.1);
+        let mut rids = self.rids.lock().unwrap_or_else(|e| e.into_inner());
+        if rids.get(&self.request_id) == Some(&self.rid) {
+            rids.remove(&self.request_id);
+        }
     }
 }
 
@@ -396,7 +399,7 @@ impl NativeHttp {
             let _dispatched = {
                 let mut rids = self.rids.lock().unwrap_or_else(|e| e.into_inner());
                 rids.insert(ctx.id().to_string(), request.rid.clone());
-                Dispatched(self.rids.clone(), ctx.id().to_string())
+                Dispatched { rids: self.rids.clone(), request_id: ctx.id().to_string(), rid: request.rid.clone() }
             };
             let is_prefill = request.is_prefill;
             let keep_prefill_output = request.keep_prefill_output;
@@ -571,24 +574,6 @@ async fn next_response(
             client::protocol_error(format!("SGLang /generate returned invalid JSON: {error}"))
         });
     }
-}
-
-fn response_has_output(response: &Value) -> bool {
-    [response.get("output_ids"), response.get("text")]
-        .into_iter()
-        .flatten()
-        .any(|value| match value {
-            Value::Array(values) => !values.is_empty(),
-            Value::String(value) => !value.is_empty(),
-            _ => false,
-        })
-}
-
-fn response_is_terminal(response: &Value) -> bool {
-    response.get("error").is_some()
-        || response
-            .pointer("/meta_info/finish_reason")
-            .is_some_and(|reason| !reason.is_null())
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
@@ -1401,6 +1386,29 @@ mod tests {
             .expect("abort was not sent after the drain deadline")
             .unwrap();
         assert!(abort.starts_with("POST /abort_request"), "{abort}");
+        assert!(abort.contains(r#""rid":"rid""#), "{abort}");
+    }
+
+    #[test]
+    fn old_dispatch_cleanup_preserves_the_retry_abort_target() {
+        let native = native_http(1234);
+        native
+            .rids
+            .lock()
+            .unwrap()
+            .insert("request".into(), "retry".into());
+        drop(super::Dispatched {
+            rids: native.rids.clone(),
+            request_id: "request".into(),
+            rid: "first".into(),
+        });
+        assert_eq!(native.rids.lock().unwrap().get("request").unwrap(), "retry");
+        drop(super::Dispatched {
+            rids: native.rids.clone(),
+            request_id: "request".into(),
+            rid: "retry".into(),
+        });
+        assert!(native.rids.lock().unwrap().is_empty());
     }
 
     #[test]
