@@ -426,6 +426,10 @@ def test_sidecar_kv_routing(
     namespace = f"sidecar-kv-{generate_random_suffix()}"
     block_size = 64
     worker_count = len(dynamo_dynamic_ports.system_ports)
+    system_ports = dynamo_dynamic_ports.system_ports
+    if is_disaggregated:
+        # Prefill sidecars are managed workers 3-4 for vLLM and 1-2 for SGLang.
+        system_ports = system_ports[2:] if backend == "vllm" else system_ports[:2]
     config = EngineConfig(
         name=f"{backend}_{mode}_routing",
         directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
@@ -468,9 +472,7 @@ def test_sidecar_kv_routing(
             "DYN_ROUTER_USE_KV_EVENTS": "true",
             "DYN_ROUTER_MODE": "kv",
             "DYN_ROUTER_TEMPERATURE": "0",
-            "DYN_ROUTER_MIN_INITIAL_WORKERS": "2"
-            if is_disaggregated
-            else str(worker_count),
+            "DYN_ROUTER_MIN_INITIAL_WORKERS": str(len(system_ports)),
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
             "VLLM_BLOCK_SIZE": str(block_size),
@@ -539,30 +541,13 @@ def test_sidecar_kv_routing(
                 str(dep_ports[-1]),
             ]
     elif is_disaggregated:
-        roles = (
-            ("DECODE1", "DECODE2", "PREFILL1", "PREFILL2")
-            if backend == "vllm"
-            else ("PREFILL1", "PREFILL2", "DECODE1", "DECODE2")
-        )
         device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
         assert device != "-1", "One visible GPU is required"
-        engine_env = {}
-        for index, role in enumerate(roles):
-            prefix = f"{backend.upper()}_{role}"
-            engine_env[f"{prefix}_GPU"] = device
-            engine_env[f"{prefix}_HTTP_PORT"] = str(
-                dynamo_dynamic_ports.engine_http_ports[index]
-            )
-            engine_env[f"{prefix}_GRPC_PORT"] = str(
-                dynamo_dynamic_ports.engine_grpc_ports[index]
-            )
-            engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
-                dynamo_dynamic_ports.kv_event_ports[index]
-            )
-            if backend == "vllm":
-                engine_env[f"{prefix}_NIXL_SIDE_CHANNEL_PORT"] = str(
-                    dynamo_dynamic_ports.nixl_side_channel_ports[index]
-                )
+        engine_env = {
+            f"{backend.upper()}_{role}{index}_GPU": device
+            for role in ("PREFILL", "DECODE")
+            for index in (1, 2)
+        }
         if backend == "sglang":
             bootstrap_ports = allocate_ports(2, DynamoPortRange.BOOTSTRAP.value)
             request.addfinalizer(lambda: deallocate_ports(bootstrap_ports))
@@ -577,21 +562,20 @@ def test_sidecar_kv_routing(
         }
     transfer_metrics: list[EngineMetrics] = []
     if is_disaggregated:
+        engine_ports = {
+            f"DYN_ENGINE_HTTP_PORT{index}": str(port)
+            for index, port in enumerate(dynamo_dynamic_ports.engine_http_ports, 1)
+        }
+        checker = VllmMetricsChecker if backend == "vllm" else SGLangMetricsChecker
+        # Transfers are counted by vLLM decode and SGLang prefill, managed workers 1-2.
         for index in (1, 2):
-            metrics = (
-                VllmMetricsChecker(port_env=f"VLLM_DECODE{index}_HTTP_PORT")
-                if backend == "vllm"
-                else SGLangMetricsChecker(port_env=f"SGLANG_PREFILL{index}_HTTP_PORT")
-            )
-            metrics.bind_environment(engine_env)
+            metrics = checker(port_env=f"DYN_ENGINE_HTTP_PORT{index}")
+            metrics.bind_environment(engine_ports)
             transfer_metrics.append(metrics)
 
     def transfer_total() -> float:
         return sum(metrics.transfer_progress() for metrics in transfer_metrics)
 
-    system_ports = dynamo_dynamic_ports.system_ports
-    if is_disaggregated:
-        system_ports = system_ports[2:] if backend == "vllm" else system_ports[:2]
     run_serve_deployment(
         config,
         request,
