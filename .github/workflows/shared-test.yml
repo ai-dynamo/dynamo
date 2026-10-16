@@ -60,7 +60,7 @@ on:
         type: boolean
         default: true
       minio_service:
-        description: 'Whether the amd64 runner pool starts the `minio` service (its k8s hook template supplies the `minio server` args). The CPU pool prod-tester-amd-v2 does not (OPS-8947).'
+        description: 'Whether the amd64 runner pool starts the `minio` service (its k8s hook template supplies the `minio server` args). The CPU pool prod-tester-amd-v2 does not.'
         required: false
         type: boolean
         default: true
