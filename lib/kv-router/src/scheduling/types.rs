@@ -488,6 +488,14 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self
     }
 
+    pub(crate) fn with_worker_loads(
+        mut self,
+        loads: &'a FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> Self {
+        self.eligibility = self.eligibility.with_worker_loads(loads);
+        self
+    }
+
     pub fn best_effective_prefill_tokens(&self) -> usize {
         effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
@@ -504,9 +512,9 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .effective_cached_tokens
                 .iter()
                 .filter(|(worker, _)| {
-                    self.workers.get(&worker.worker_id).is_some_and(|config| {
-                        self.eligibility.allows_worker(worker.worker_id, config)
-                    })
+                    self.eligibility
+                        .validate_worker_rank(self.workers, **worker)
+                        .is_ok()
                 })
                 .map(|(_, cached_tokens)| *cached_tokens)
                 .max()
