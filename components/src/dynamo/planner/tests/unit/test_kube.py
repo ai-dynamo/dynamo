@@ -203,6 +203,40 @@ def test_list_graph_deployments_restarts_expired_pagination(k8s_api, mock_custom
     ] == [None, "expired-page", None, "fresh-page"]
 
 
+def test_list_scaling_adapters_follows_continue_tokens(k8s_api, mock_custom_api):
+    first = {"metadata": {"name": "first"}}
+    second = {"metadata": {"name": "second"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [first], "metadata": {"continue": "next-page"}},
+        {"items": [second], "metadata": {}},
+    ]
+
+    assert k8s_api.list_scaling_adapters() == [first, second]
+    assert [
+        (call.kwargs["plural"], call.kwargs["_continue"])
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [
+        ("dynamographdeploymentscalingadapters", None),
+        ("dynamographdeploymentscalingadapters", "next-page"),
+    ]
+
+
+def test_list_scaling_adapters_restarts_expired_pagination(k8s_api, mock_custom_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh = {"metadata": {"name": "fresh"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [stale], "metadata": {"continue": "expired-page"}},
+        client.ApiException(status=410, reason="ResourceExpired"),
+        {"items": [fresh], "metadata": {}},
+    ]
+
+    assert k8s_api.list_scaling_adapters() == [fresh]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [None, "expired-page", None]
+
+
 def _dgd_merge_patch_bodies(mock_custom_api):
     calls = mock_custom_api.patch_namespaced_custom_object.call_args_list
     for api_call in calls:
@@ -785,6 +819,88 @@ def test_fetch_authoritative_targets_allows_cold_restart_at_dgdsa_zero(
     assert authoritative["spec"]["components"][0]["replicas"] == 0
     assert k8s_api.non_planner_components_stable(authoritative) == (True, [])
     assert deployment["spec"]["components"][0]["replicas"] == 1
+
+
+def test_fetch_authoritative_targets_uses_validated_inventory_snapshot(k8s_api):
+    deployment = {
+        "metadata": {"name": "graph", "uid": "dgd-uid"},
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                }
+            ]
+        },
+    }
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "uid": "adapter-uid",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 3,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+
+    authoritative = k8s_api.fetch_authoritative_replica_targets(
+        deployment,
+        scaling_adapters={"graph-worker": adapter},
+    )
+
+    assert authoritative["spec"]["components"][0]["replicas"] == 3
+
+
+def test_fetch_authoritative_targets_rejects_wrong_inventory_owner(k8s_api):
+    deployment = {
+        "metadata": {"name": "graph", "uid": "dgd-uid"},
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                }
+            ]
+        },
+    }
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "other-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 3,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+
+    with pytest.raises(ValueError, match="not controller-owned"):
+        k8s_api.fetch_authoritative_replica_targets(
+            deployment,
+            scaling_adapters={"graph-worker": adapter},
+        )
 
 
 def test_scaling_adapter_identity_requires_resource_version_only_for_mutation(
@@ -1438,6 +1554,32 @@ async def test_wait_for_replica_targets_requires_current_workload_ready(
 
     assert got is settled
     assert get_dgd.call_count == 2
+    mock_core_api.list_namespaced_pod.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_excludes_planner_readiness(
+    k8s_api, mock_core_api
+):
+    settled_workers = _stable_worker_dgd(generation=2, observed_generation=2)
+    settled_workers["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("decode-0"), _make_pod("decode-1")],
+    )
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=settled_workers):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 2},
+            expected_replica_authorities={"decode": (False, None)},
+            max_attempts=1,
+            delay_seconds=0,
+        )
+
+    assert got is settled_workers
     mock_core_api.list_namespaced_pod.assert_called_once()
 
 
@@ -2208,6 +2350,52 @@ def test_list_graph_pods_uses_untyped_metadata_request(k8s_api):
         field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
         continue_token=None,
     )
+
+
+def test_partial_metadata_pods_work_with_settlement_helpers(k8s_api):
+    serving = {
+        "metadata": {
+            "name": "decode-0",
+            "deletionTimestamp": "2026-10-16T12:00:00Z",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "my-dgd",
+                "nvidia.com/dynamo-component": "decode",
+                "grove.io/podcliquescalinggroup-replica-index": "0",
+            },
+        }
+    }
+    capture = {
+        "metadata": {
+            "name": "capture-0",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "my-dgd",
+                "nvidia.com/dynamo-component": "decode",
+                "nvidia.com/snapshot-job-uid": "snapshot-uid",
+                "nvidia.com/snapshot-job": "capture-job",
+            },
+            "ownerReferences": [
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": "capture-job",
+                    "controller": True,
+                }
+            ],
+        }
+    }
+
+    assert k8s_api.partition_pods_by_graph([serving, capture]) == {
+        "my-dgd": [serving, capture]
+    }
+    assert k8s_api.partition_pods_by_component([serving]) == {"decode": [serving]}
+    assert k8s_api.exclude_checkpoint_capture_pods([serving, capture]) == [serving]
+    assert k8s_api.has_terminating_pods([serving]) is True
+
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["status"]["components"]["decode"][
+        "componentKind"
+    ] = "PodCliqueScalingGroup"
+    assert k8s_api.pcsg_pods_within_desired_replicas(deployment, [serving])
 
 
 def test_read_core_pod_metadata_page_uses_public_untyped_api_client(k8s_api):

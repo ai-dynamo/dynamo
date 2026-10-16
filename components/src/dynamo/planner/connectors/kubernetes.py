@@ -2283,6 +2283,8 @@ class KubernetesConnector(PlannerConnector):
                 replicas,
                 resource_version=scaling_adapter["metadata"]["resourceVersion"],
             )
+        except AmbiguousKubernetesWriteError:
+            raise
         except ApiException as error:
             if error.status != 404:
                 raise

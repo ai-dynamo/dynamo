@@ -6,6 +6,7 @@
 Pool state is read from the v1beta1 DGD component model (``spec.components[]``).
 """
 
+import asyncio
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ from dynamo.global_planner.capacity_manager import PoolSpec
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
+from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.kubernetes import (
     ReplicaUpdateAttempt,
     ReplicaUpdateFailure,
@@ -54,10 +56,16 @@ def _with_operator_gpu_status(components):
     for component in components:
         main = component["podTemplate"]["spec"]["containers"][0]
         gpu = main.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
-        status = {}
+        replicas = component.get("replicas", 1)
+        status = {
+            "replicas": replicas,
+            "updatedReplicas": replicas,
+            "readyReplicas": replicas,
+            "availableReplicas": replicas,
+        }
         if gpu is not None:
             total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
-            status = {"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu}
+            status.update({"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu})
         statuses[component["name"]] = status
     return {
         "metadata": {"generation": 1, "uid": "dgd-uid"},
@@ -107,6 +115,7 @@ def _install_connector(
     *,
     seed_identity=True,
 ):
+    spec.setdefault("metadata", {}).setdefault("name", parent_dgd_name)
     connector = MagicMock()
     connector.parent_dgd_name = parent_dgd_name
     connector.set_component_replicas = AsyncMock(return_value=None)
@@ -119,9 +128,44 @@ def _install_connector(
     connector.kube_api.current_namespace = key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
     connector.kube_api.fetch_authoritative_replica_targets = MagicMock(
-        side_effect=lambda deployment: deployment
+        side_effect=lambda deployment, **_kwargs: deployment
     )
     connector.kube_api.list_pods_for_graph = MagicMock(return_value=[])
+    connector.kube_api.list_nonterminal_pods_for_graph = MagicMock(return_value=[])
+    connector.kube_api.list_graph_pods = MagicMock(return_value=[])
+    connector.kube_api.list_scaling_adapters = MagicMock(return_value=[])
+    connector.kube_api.partition_pods_by_graph = MagicMock(
+        side_effect=KubernetesAPI.partition_pods_by_graph
+    )
+    connector.kube_api.replica_targets_stable = MagicMock(
+        side_effect=lambda deployment, targets: KubernetesAPI.replica_targets_stable(
+            connector.kube_api,
+            deployment,
+            targets,
+        )
+    )
+    connector.kube_api.adapter_targets_projected = MagicMock(
+        side_effect=KubernetesAPI.adapter_targets_projected
+    )
+    connector.kube_api.is_spec_generation_observed = MagicMock(
+        side_effect=KubernetesAPI.is_spec_generation_observed
+    )
+    connector.kube_api.is_rolling_update_blocking_settlement = MagicMock(
+        side_effect=KubernetesAPI.is_rolling_update_blocking_settlement
+    )
+    connector.kube_api.exclude_checkpoint_capture_pods = MagicMock(
+        side_effect=KubernetesAPI.exclude_checkpoint_capture_pods
+    )
+    connector.kube_api.has_terminating_pods = MagicMock(
+        side_effect=KubernetesAPI.has_terminating_pods
+    )
+    connector.kube_api.pcsg_pods_within_desired_replicas = MagicMock(
+        side_effect=lambda deployment, pods: KubernetesAPI.pcsg_pods_within_desired_replicas(
+            connector.kube_api,
+            deployment,
+            pods,
+        )
+    )
     connector._test_deployment = spec
 
     def list_deployments():
@@ -449,6 +493,88 @@ async def test_scale_preserves_public_none_return():
 
 
 @pytest.mark.asyncio
+async def test_compatibility_scale_joins_committed_write_after_cancellation():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def accept_after_release(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        started.set()
+        await release.wait()
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = accept_after_release
+    task = asyncio.create_task(
+        cm.scale(
+            "default/my-dgd",
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    desired_replicas=2,
+                )
+            ],
+            blocking=True,
+        )
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    connector.wait_for_replica_targets.assert_awaited_once()
+    assert "default/my-dgd" not in cm._replica_settlements
+
+
+@pytest.mark.asyncio
+async def test_cancelled_scale_with_result_protects_recorded_settlement():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def accept_after_release(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        started.set()
+        await release.wait()
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = accept_after_release
+    target = TargetReplica(
+        sub_component_type=SubComponentType.PREFILL,
+        desired_replicas=2,
+    )
+    task = asyncio.create_task(
+        cm.scale_with_result("default/my-dgd", [target], blocking=False)
+    )
+    await started.wait()
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cm._replica_settlements["default/my-dgd"].protected
+    with pytest.raises(RuntimeError, match="awaiting settlement"):
+        await cm.scale_with_result("default/my-dgd", [target], blocking=False)
+
+
+@pytest.mark.asyncio
 async def test_run_with_conflict_retry_restarts_complete_operation():
     cm = KubernetesCapacityManager("default")
     attempts = 0
@@ -539,6 +665,48 @@ async def test_wait_for_ready_uses_accepted_replica_transaction():
         expected_targets={"prefill-svc": 2},
         expected_authorities={"prefill-svc": (False, None)},
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_wait_for_ready_protects_settlement():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+
+    async def accept(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    waiting = asyncio.Event()
+
+    async def wait_for_target(**_kwargs):
+        waiting.set()
+        await asyncio.Event().wait()
+
+    connector.set_component_replicas_with_result.side_effect = accept
+    connector.wait_for_replica_targets.side_effect = wait_for_target
+    await cm.scale_with_result(
+        "default/my-dgd",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                desired_replicas=2,
+            )
+        ],
+        blocking=False,
+    )
+    task = asyncio.create_task(cm.wait_for_ready("default/my-dgd"))
+    await waiting.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cm._replica_settlements["default/my-dgd"].protected
 
 
 @pytest.mark.asyncio
@@ -724,12 +892,93 @@ def test_observe_uses_authoritative_adapter_target(implicit_inventory):
             _listed_dgd(deployment, "model")
         ]
 
-    pools = cm.observe(require_complete=True)["default/model"]
+    pools = cm.observe()["default/model"]
 
     assert pools["prefill"].current_replicas == 3
     connector.kube_api.fetch_authoritative_replica_targets.assert_called_once()
     observed = connector.kube_api.fetch_authoritative_replica_targets.call_args.args[0]
     assert observed["spec"]["components"][0]["replicas"] == 1
+
+
+def test_complete_implicit_observation_batches_authorities_and_fails_closed():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    deployment = _listed_dgd(_dgd_spec(1, 1), "model")
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    prefill_status = deployment["status"]["components"]["prefill-svc"]
+    prefill_status.update(
+        {
+            "replicas": 2,
+            "updatedReplicas": 2,
+            "readyReplicas": 2,
+            "availableReplicas": 2,
+        }
+    )
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+    )
+    cm._inventory_api = connector.kube_api
+    connector.kube_api.list_graph_deployments.return_value = [deployment]
+    connector.kube_api.list_scaling_adapters.return_value = [
+        {"metadata": {"name": "model-prefill-svc"}}
+    ]
+    terminating = MagicMock()
+    terminating.metadata.labels = {
+        "nvidia.com/dynamo-graph-deployment-name": "model",
+        "nvidia.com/dynamo-component": "prefill-svc",
+    }
+    terminating.metadata.owner_references = []
+    terminating.metadata.deletion_timestamp = object()
+    terminating.status = None
+    connector.kube_api.list_graph_pods.return_value = [terminating]
+
+    with pytest.raises(RuntimeError, match="still converging"):
+        cm.observe(require_complete=True)
+
+    prefill_status.update(
+        {
+            "replicas": 1,
+            "updatedReplicas": 1,
+            "readyReplicas": 1,
+            "availableReplicas": 1,
+        }
+    )
+    with pytest.raises(RuntimeError, match="still draining"):
+        cm.observe(require_complete=True)
+
+    connector.kube_api.list_graph_pods.return_value = []
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
+    assert connector.kube_api.list_graph_deployments.call_count == 3
+    assert connector.kube_api.list_scaling_adapters.call_count == 3
+    assert connector.kube_api.list_graph_pods.call_count == 3
+    connector.kube_api.get_graph_deployment.assert_not_called()
+
+
+def test_complete_implicit_observation_rejects_duplicate_adapter_inventory():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    deployment = _listed_dgd(_dgd_spec(1, 1), "model")
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+    )
+    cm._inventory_api = connector.kube_api
+    connector.kube_api.list_graph_deployments.return_value = [deployment]
+    connector.kube_api.list_scaling_adapters.return_value = [
+        {"metadata": {"name": "model-prefill-svc"}},
+        {"metadata": {"name": "model-prefill-svc"}},
+    ]
+
+    with pytest.raises(RuntimeError, match="duplicate DGDSA"):
+        cm.observe(require_complete=True)
 
 
 def test_observe_multinode_scales_gpu_count():
@@ -754,7 +1003,16 @@ def test_observe_dra_worker_uses_operator_resolved_gpu_count():
         },
         "status": {
             "observedGeneration": 2,
-            "components": {"decode-svc": {"gpusPerEngine": 4, "gpusPerReplica": 5}},
+            "components": {
+                "decode-svc": {
+                    "replicas": 1,
+                    "updatedReplicas": 1,
+                    "readyReplicas": 1,
+                    "availableReplicas": 1,
+                    "gpusPerEngine": 4,
+                    "gpusPerReplica": 5,
+                }
+            },
         },
     }
     _install_connector(cm, "default/my-dgd", deployment)
@@ -809,7 +1067,16 @@ def test_observe_skips_explicit_zero_gpu_dra_component():
         "spec": {"components": [component]},
         "status": {
             "observedGeneration": 2,
-            "components": {"frontend": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+            "components": {
+                "frontend": {
+                    "replicas": 1,
+                    "updatedReplicas": 1,
+                    "readyReplicas": 1,
+                    "availableReplicas": 1,
+                    "gpusPerEngine": 0,
+                    "gpusPerReplica": 0,
+                }
+            },
         },
     }
     _install_connector(cm, "default/frontend", deployment)
@@ -827,7 +1094,17 @@ def test_observe_untyped_dra_worker_missing_shape_fails_closed():
     deployment = {
         "metadata": {"generation": 2},
         "spec": {"components": [component]},
-        "status": {"observedGeneration": 2, "components": {"worker": {}}},
+        "status": {
+            "observedGeneration": 2,
+            "components": {
+                "worker": {
+                    "replicas": 1,
+                    "updatedReplicas": 1,
+                    "readyReplicas": 1,
+                    "availableReplicas": 1,
+                }
+            },
+        },
     }
     _install_connector(cm, "default/worker", deployment)
 
@@ -1197,6 +1474,7 @@ def test_observe_implicit_mode_discovers_previously_missing_deployment():
     ) as mock_connector_cls:
         new = MagicMock()
         new.parent_dgd_name = "model"
+        new.kube_api = old.kube_api
         mock_connector_cls.return_value = new
 
         snapshot = cm.observe(require_complete=True)
@@ -1211,6 +1489,23 @@ def test_current_replicas():
         cm, "default/my-dgd", _dgd_spec(prefill_replicas=2, decode_replicas=5)
     )
     assert cm.current_replicas("default/my-dgd") == {"prefill": 2, "decode": 5}
+
+
+def test_captured_current_replicas_uses_authoritative_adapter_target():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(prefill_replicas=1, decode_replicas=2)
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    connector = _install_connector(cm, "default/my-dgd", deployment)
+    authoritative = deepcopy(deployment)
+    authoritative["spec"]["components"][0]["replicas"] = 3
+    connector.kube_api.fetch_authoritative_replica_targets.return_value = authoritative
+
+    readback = cm.capture_current_replicas("default/my-dgd")
+
+    assert readback() == {"prefill": 3, "decode": 2}
+    connector.kube_api.fetch_authoritative_replica_targets.assert_called_once_with(
+        deployment
+    )
 
 
 def test_capture_current_replicas_freezes_connector_and_role_hints():

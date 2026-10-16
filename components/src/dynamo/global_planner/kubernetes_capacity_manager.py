@@ -16,6 +16,7 @@ a generic ``worker`` — the role hinted by its Planner's
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
@@ -26,7 +27,7 @@ from typing import Optional, TypeVar
 from kubernetes import client
 from kubernetes.aio.utils.retry import retry_on_conflict
 
-from dynamo.common.async_utils import run_sync_in_thread
+from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
@@ -359,6 +360,7 @@ class KubernetesCapacityManager(CapacityManager):
                         key,
                         connector,
                         self._component_roles.get(key),
+                        require_settled=require_complete,
                     )
                     if self.connectors.get(key) is connector:
                         self._missing_participants.discard(key)
@@ -398,6 +400,38 @@ class KubernetesCapacityManager(CapacityManager):
                 if key in deployments_by_key:
                     raise ValueError(f"duplicate DGD {name!r} in list response")
                 deployments_by_key[key] = deployment
+
+            scaling_adapters_by_name: dict[str, dict] = {}
+            if any(
+                "scalingAdapter" in component
+                for deployment in deployments_by_key.values()
+                for component in get_components_by_name(deployment).values()
+            ):
+                for index, adapter in enumerate(inventory_api.list_scaling_adapters()):
+                    metadata = adapter.get("metadata")
+                    if not isinstance(metadata, Mapping):
+                        raise ValueError(
+                            f"DGDSA list item {index} has malformed metadata"
+                        )
+                    name = metadata.get("name")
+                    if not isinstance(name, str) or not name:
+                        raise ValueError(f"DGDSA list item {index} has no usable name")
+                    if name in scaling_adapters_by_name:
+                        raise ValueError(f"duplicate DGDSA {name!r} in list response")
+                    scaling_adapters_by_name[name] = adapter
+
+            pods_by_graph: dict[str, list] = {}
+            if require_complete and deployments_by_key:
+                pods_by_graph = inventory_api.partition_pods_by_graph(
+                    inventory_api.list_graph_pods()
+                )
+                deployment_names = {key.split("/", 1)[1] for key in deployments_by_key}
+                unknown_graphs = set(pods_by_graph) - deployment_names
+                if unknown_graphs:
+                    raise RuntimeError(
+                        "nonterminal Pods reference DGDs absent from the namespace "
+                        f"inventory: {sorted(unknown_graphs)}"
+                    )
 
         except Exception as error:
             if require_complete:
@@ -439,6 +473,7 @@ class KubernetesCapacityManager(CapacityManager):
                     key,
                     connector,
                     self._component_roles.get(key),
+                    require_settled=require_complete,
                 )
                 if self.connectors.get(key) is connector:
                     self._missing_participants.discard(key)
@@ -470,6 +505,9 @@ class KubernetesCapacityManager(CapacityManager):
                         connector,
                         deployment,
                         self._component_roles.get(key),
+                        scaling_adapters=scaling_adapters_by_name,
+                        require_settled=require_complete,
+                        pods=pods_by_graph.get(key.split("/", 1)[1], []),
                     ),
                 )
                 if self.connectors.get(key) is connector:
@@ -541,11 +579,18 @@ class KubernetesCapacityManager(CapacityManager):
         participant_id: str,
         connector: KubernetesConnector,
         role_hints: Optional[dict[str, str]] = None,
+        *,
+        require_settled: bool = False,
     ) -> dict[str, PoolSpec]:
         """Read and parse the current pool state for one deployment."""
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
         self._record_observed_identity(participant_id, deployment)
-        pools = self._pools_from_deployment(connector, deployment, role_hints)
+        pools = self._pools_from_deployment(
+            connector,
+            deployment,
+            role_hints,
+            require_settled=require_settled,
+        )
         return self._record_observed_pools(participant_id, pools)
 
     def _pools_from_deployment(
@@ -553,9 +598,29 @@ class KubernetesCapacityManager(CapacityManager):
         connector: KubernetesConnector,
         deployment: dict,
         role_hints: Optional[dict[str, str]] = None,
+        *,
+        scaling_adapters: Mapping[str, dict] | None = None,
+        require_settled: bool = False,
+        pods: list | None = None,
     ) -> dict[str, PoolSpec]:
         """Build pools from a DGD after resolving live replica authorities."""
-        deployment = connector.kube_api.fetch_authoritative_replica_targets(deployment)
+        declared_deployment = deployment
+        if scaling_adapters is None:
+            deployment = connector.kube_api.fetch_authoritative_replica_targets(
+                deployment
+            )
+        else:
+            deployment = connector.kube_api.fetch_authoritative_replica_targets(
+                deployment,
+                scaling_adapters=scaling_adapters,
+            )
+        if require_settled:
+            self._require_capacity_snapshot_settled(
+                connector,
+                declared_deployment,
+                deployment,
+                pods,
+            )
         pools: dict[str, PoolSpec] = {}
         components_by_pool: dict[str, str] = {}
         role_hints = role_hints or {}
@@ -605,6 +670,75 @@ class KubernetesCapacityManager(CapacityManager):
             )
         return pools
 
+    @staticmethod
+    def _require_capacity_snapshot_settled(
+        connector: KubernetesConnector,
+        declared_deployment: dict,
+        authoritative_deployment: dict,
+        pods: list | None,
+    ) -> None:
+        """Fail closed while a budget snapshot can still undercount live GPUs."""
+        api = connector.kube_api
+        declared_components = get_components_by_name(declared_deployment)
+        expected_targets: dict[str, int] = {}
+        expected_authorities: dict[str, tuple[bool, str | None]] = {}
+        for component_name, component in get_components_by_name(
+            authoritative_deployment
+        ).items():
+            if get_component_type(component) == "planner":
+                continue
+            expected_targets[component_name] = Service(
+                name=component_name,
+                service=component,
+            ).number_replicas()
+            expected_authorities[component_name] = (
+                "scalingAdapter" in declared_components.get(component_name, {}),
+                None,
+            )
+
+        targets_stable, unsettled = api.replica_targets_stable(
+            authoritative_deployment,
+            expected_targets,
+        )
+        targets_projected, unprojected = api.adapter_targets_projected(
+            declared_deployment,
+            expected_targets,
+            expected_authorities,
+        )
+        generation_observed = api.is_spec_generation_observed(declared_deployment)
+        blocking_rollout, rollout_reason = api.is_rolling_update_blocking_settlement(
+            declared_deployment
+        )
+        rolling = declared_deployment.get("status", {}).get("rollingUpdate") or {}
+        if rolling.get("phase") == "Failed":
+            raise RuntimeError(
+                f"DGD rollout failed while observing capacity: {rolling.get('message', '')}"
+            )
+        if (
+            not targets_stable
+            or not targets_projected
+            or not generation_observed
+            or blocking_rollout
+        ):
+            raise RuntimeError(
+                "replica capacity is still converging: "
+                f"unsettled={unsettled}, unprojected={unprojected}, "
+                f"observed={generation_observed}, "
+                f"rollout={rollout_reason or 'settled'}"
+            )
+
+        if pods is None:
+            dgd_name = declared_deployment.get("metadata", {}).get("name")
+            if not isinstance(dgd_name, str) or not dgd_name:
+                raise ValueError("DGD metadata.name is unavailable")
+            pods = api.list_nonterminal_pods_for_graph(dgd_name)
+        pods = api.exclude_checkpoint_capture_pods(pods)
+        if api.has_terminating_pods(pods) or not api.pcsg_pods_within_desired_replicas(
+            authoritative_deployment,
+            pods,
+        ):
+            raise RuntimeError("replica Pods are still draining")
+
     # ------------------------------------------------------------------ #
     # Scale                                                              #
     # ------------------------------------------------------------------ #
@@ -616,9 +750,18 @@ class KubernetesCapacityManager(CapacityManager):
         blocking: bool,
     ) -> None:
         """Apply desired targets while preserving the CapacityManager contract."""
-        result = await self.scale_with_result(participant_id, targets, blocking)
-        if result.accepted and (blocking or result.requires_settlement):
-            await self.wait_for_ready(participant_id)
+
+        async def operation() -> None:
+            await self.reconcile_pending_settlements(participant_id)
+            result = await self.scale_with_result(participant_id, targets, blocking)
+            if result.accepted and (blocking or result.requires_settlement):
+                await self.wait_for_ready(participant_id)
+
+        try:
+            await run_async_to_completion(operation())
+        except asyncio.CancelledError:
+            self._protect_replica_settlement(participant_id)
+            raise
 
     async def scale_with_result(
         self,
@@ -632,13 +775,26 @@ class KubernetesCapacityManager(CapacityManager):
         in a state that can accept scaling; the orchestrator maps that to a soft
         rejection.
         """
+        try:
+            return await run_async_to_completion(
+                self._scale_with_result(participant_id, targets, blocking)
+            )
+        except asyncio.CancelledError:
+            self._protect_replica_settlement(participant_id)
+            raise
+
+    async def _scale_with_result(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
+    ) -> ReplicaUpdateResult:
         connector = self.connectors[participant_id]
         previous_settlement = self._replica_settlements.get(participant_id)
-        if previous_settlement is not None and previous_settlement.protected:
+        if previous_settlement is not None:
             raise RuntimeError(
-                f"participant {participant_id!r} has an unresolved replica write"
+                f"participant {participant_id!r} has a replica write awaiting settlement"
             )
-        self._replica_settlements.pop(participant_id, None)
         observed_uid = self._observed_uids.get(participant_id)
         retry_states = self._replica_retry_states.get()
         if retry_states is None:
@@ -729,6 +885,14 @@ class KubernetesCapacityManager(CapacityManager):
             )
         return result
 
+    def _protect_replica_settlement(self, participant_id: str) -> None:
+        settlement = self._replica_settlements.get(participant_id)
+        if settlement is not None and not settlement.protected:
+            self._replica_settlements[participant_id] = replace(
+                settlement,
+                protected=True,
+            )
+
     @staticmethod
     def _attempt_settlement_maps(
         attempts: tuple[ReplicaUpdateAttempt, ...],
@@ -782,7 +946,7 @@ class KubernetesCapacityManager(CapacityManager):
                     expected_targets=settlement.targets,
                     expected_authorities=settlement.authorities,
                 )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             current = self._replica_settlements.get(participant_id)
             if current is settlement and not current.protected:
                 self._replica_settlements[participant_id] = replace(
@@ -851,6 +1015,7 @@ class KubernetesCapacityManager(CapacityManager):
             current_uid = (deployment.get("metadata", {}) or {}).get("uid")
             if current_uid != expected_uid:
                 raise RuntimeError("DGD identity changed before replica readback")
+        deployment = connector.kube_api.fetch_authoritative_replica_targets(deployment)
         for component_name, component in get_components_by_name(deployment).items():
             sub_type = self._component_role(component_name, component, role_hints)
             if sub_type:

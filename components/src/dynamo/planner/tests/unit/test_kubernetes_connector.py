@@ -2346,6 +2346,37 @@ async def test_ambiguous_replica_batch_reports_only_dispatched_stage(
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_404_replica_write_remains_uncertain(
+    kubernetes_connector, mock_kube_api
+):
+    initial = _deployment(_adapter_component("worker", "decode", replicas=1))
+    transitioned = _deployment(_component("worker", "decode", replicas=1))
+    mock_kube_api.get_graph_deployment.side_effect = [initial, transitioned]
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=1
+    )
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = (
+        AmbiguousKubernetesWriteError(client.ApiException(status=404))
+    )
+    target = TargetReplica(
+        sub_component_type=SubComponentType.DECODE,
+        component_name="worker",
+        desired_replicas=2,
+    )
+
+    with pytest.raises(ReplicaUpdateFailure) as raised:
+        await kubernetes_connector.set_component_replicas_with_result(
+            [target],
+            blocking=False,
+        )
+
+    assert raised.value.committed == ()
+    assert [attempt.component_name for attempt in raised.value.uncertain] == ["worker"]
+    assert mock_kube_api.get_graph_deployment.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_direct_batch_reports_atomic_stage(
     kubernetes_connector, mock_kube_api
 ):

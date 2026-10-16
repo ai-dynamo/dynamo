@@ -82,6 +82,27 @@ def _is_resource_expired(error: Exception) -> bool:
     return isinstance(error, client.ApiException) and error.status == 410
 
 
+def _object_field(value: object, key: str, attribute: str | None = None) -> object:
+    """Read a field from an untyped Kubernetes object or generated model."""
+    if isinstance(value, Mapping):
+        return value.get(key)
+    return getattr(value, attribute or key, None)
+
+
+def _pod_metadata(pod: object) -> object:
+    return _object_field(pod, "metadata") or {}
+
+
+def _pod_labels(pod: object) -> Mapping:
+    labels = _object_field(_pod_metadata(pod), "labels") or {}
+    return labels if isinstance(labels, Mapping) else {}
+
+
+def _pod_phase(pod: object) -> object:
+    status = _object_field(pod, "status") or {}
+    return _object_field(status, "phase")
+
+
 def get_current_k8s_namespace() -> str:
     """Get the current namespace if running inside a k8s cluster"""
     try:
@@ -124,15 +145,30 @@ class KubernetesAPI:
 
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
+        return self._list_namespaced_custom_objects(
+            DGD_PLURAL,
+            "DynamoGraphDeployment",
+        )
+
+    def list_scaling_adapters(self) -> list[dict]:
+        """List all DGDSAs in the current namespace."""
+        return self._list_namespaced_custom_objects(
+            DGDSA_PLURAL,
+            "DynamoGraphDeploymentScalingAdapter",
+        )
+
+    def _list_namespaced_custom_objects(self, plural: str, resource: str) -> list[dict]:
         return on_error(
             DEFAULT_BACKOFF,
             _is_resource_expired,
-            self._list_graph_deployments_once,
+            lambda: self._list_namespaced_custom_objects_once(plural, resource),
         )
 
-    def _list_graph_deployments_once(self) -> list[dict]:
-        """Read one internally consistent paginated DGD snapshot."""
-        deployments: list[dict] = []
+    def _list_namespaced_custom_objects_once(
+        self, plural: str, resource: str
+    ) -> list[dict]:
+        """Read one internally consistent paginated custom-resource snapshot."""
+        objects: list[dict] = []
         continue_token: str | None = None
         seen_tokens: set[str] = set()
         while True:
@@ -141,39 +177,44 @@ class KubernetesAPI:
                     group=NVIDIA_API_GROUP,
                     version=DYNAMO_API_VERSION,
                     namespace=self.current_namespace,
-                    plural=DGD_PLURAL,
+                    plural=plural,
                     limit=KUBERNETES_LIST_PAGE_SIZE,
                     _continue=continue_token,
                 ),
-                "DynamoGraphDeployment list",
+                f"{resource} list",
             )
             items = result.get("items")
             if not isinstance(items, list):
                 raise TypeError(
-                    "Kubernetes API returned a malformed DGD list: items is not a list"
+                    f"Kubernetes API returned a malformed {resource} list: "
+                    "items is not a list"
                 )
             for item in items:
                 if not isinstance(item, dict):
                     raise TypeError(
-                        "Kubernetes API returned a malformed DGD list: "
-                        f"items[{len(deployments)}] is not an object"
+                        f"Kubernetes API returned a malformed {resource} list: "
+                        f"items[{len(objects)}] is not an object"
                     )
-                deployments.append(item)
+                objects.append(item)
 
             metadata = result.get("metadata") or {}
             if not isinstance(metadata, Mapping):
                 raise TypeError(
-                    "Kubernetes API returned a malformed DGD list: metadata is not an object"
+                    f"Kubernetes API returned a malformed {resource} list: "
+                    "metadata is not an object"
                 )
             raw_token = metadata.get("continue")
             if raw_token in (None, ""):
-                return deployments
+                return objects
             if not isinstance(raw_token, str):
                 raise TypeError(
-                    "Kubernetes API returned a malformed DGD list: continue is not a string"
+                    f"Kubernetes API returned a malformed {resource} list: "
+                    "continue is not a string"
                 )
             if raw_token in seen_tokens:
-                raise RuntimeError("Kubernetes API repeated a DGD list continue token")
+                raise RuntimeError(
+                    f"Kubernetes API repeated a {resource} list continue token"
+                )
             seen_tokens.add(raw_token)
             continue_token = raw_token
 
@@ -756,21 +797,24 @@ class KubernetesAPI:
     @staticmethod
     def exclude_checkpoint_capture_pods(pods: list) -> list:
         """Capture Jobs inherit worker labels but do not serve inference traffic."""
-        return [
-            pod
-            for pod in pods
-            if not (
-                (pod.metadata.labels or {}).get("nvidia.com/snapshot-job-uid")
-                and any(
-                    owner.controller
-                    and owner.api_version == "batch/v1"
-                    and owner.kind == "Job"
-                    and owner.name
-                    == (pod.metadata.labels or {}).get("nvidia.com/snapshot-job")
-                    for owner in (pod.metadata.owner_references or [])
-                )
+        serving_pods = []
+        for pod in pods:
+            metadata = _pod_metadata(pod)
+            labels = _pod_labels(pod)
+            owners = (
+                _object_field(metadata, "ownerReferences", "owner_references") or []
             )
-        ]
+            is_capture_pod = labels.get("nvidia.com/snapshot-job-uid") and any(
+                _object_field(owner, "controller")
+                and _object_field(owner, "apiVersion", "api_version") == "batch/v1"
+                and _object_field(owner, "kind") == "Job"
+                and _object_field(owner, "name")
+                == labels.get("nvidia.com/snapshot-job")
+                for owner in owners
+            )
+            if not is_capture_pod:
+                serving_pods.append(pod)
+        return serving_pods
 
     def pcsg_pods_within_desired_replicas(self, deployment: dict, pods: list) -> bool:
         """Reject excess PCSG groups hidden by its spec-derived replica count."""
@@ -784,14 +828,9 @@ class KubernetesAPI:
             ).number_replicas()
             for pod in pods_by_component.get(name, []):
                 # Terminal Pods no longer belong to the active replica range.
-                if pod.status is not None and pod.status.phase in (
-                    "Succeeded",
-                    "Failed",
-                ):
+                if _pod_phase(pod) in ("Succeeded", "Failed"):
                     continue
-                replica_index = (pod.metadata.labels or {}).get(
-                    GROVE_PCSG_REPLICA_INDEX_LABEL
-                )
+                replica_index = _pod_labels(pod).get(GROVE_PCSG_REPLICA_INDEX_LABEL)
                 if replica_index is None:
                     return False
                 try:
@@ -817,6 +856,7 @@ class KubernetesAPI:
         self,
         deployment: dict,
         expected_authorities: Mapping[str, tuple[bool, str | None]] | None = None,
+        scaling_adapters: Mapping[str, dict] | None = None,
     ) -> dict:
         """Overlay declared DGDSA targets onto a DGD settlement snapshot.
 
@@ -860,7 +900,15 @@ class KubernetesAPI:
         authoritative = copy.deepcopy(deployment)
         authoritative_components = get_components_by_name(authoritative)
         for component_name in adapter_components:
-            adapter = self.get_service_scaling_adapter(dgd_name, component_name)
+            adapter_name = self.scaling_adapter_name(dgd_name, component_name)
+            if scaling_adapters is None:
+                adapter = self.get_service_scaling_adapter(dgd_name, component_name)
+            else:
+                adapter = scaling_adapters.get(adapter_name)
+                if adapter is None:
+                    raise ValueError(
+                        f"DGDSA {adapter_name!r} is absent from the namespace inventory"
+                    )
             rejection = self.scaling_adapter_identity_rejection(
                 deployment, component_name, adapter
             )
@@ -1065,9 +1113,10 @@ class KubernetesAPI:
     def has_terminating_pods(pods: list) -> bool:
         """True if any non-terminal pod in ``pods`` has a deletionTimestamp."""
         return any(
-            p.metadata.deletion_timestamp is not None
-            and (p.status is None or p.status.phase not in ("Succeeded", "Failed"))
-            for p in pods
+            _object_field(_pod_metadata(pod), "deletionTimestamp", "deletion_timestamp")
+            is not None
+            and _pod_phase(pod) not in ("Succeeded", "Failed")
+            for pod in pods
         )
 
     def list_pods_for_graph(self, dgd_name: str) -> list:
@@ -1205,10 +1254,20 @@ class KubernetesAPI:
         """Partition Pods by the stable Dynamo component label."""
         by_component: dict[str, list] = {}
         for pod in pods:
-            component_name = (pod.metadata.labels or {}).get(DYNAMO_COMPONENT_LABEL)
+            component_name = _pod_labels(pod).get(DYNAMO_COMPONENT_LABEL)
             if component_name:
                 by_component.setdefault(component_name, []).append(pod)
         return by_component
+
+    @staticmethod
+    def partition_pods_by_graph(pods: list) -> dict[str, list]:
+        """Partition Pods by the stable Dynamo graph label."""
+        by_graph: dict[str, list] = {}
+        for pod in pods:
+            graph_name = _pod_labels(pod).get(DYNAMO_DGD_NAME_LABEL)
+            if graph_name:
+                by_graph.setdefault(graph_name, []).append(pod)
+        return by_graph
 
     def worker_pods_settled(
         self,
@@ -1382,7 +1441,9 @@ class KubernetesAPI:
                     expected_replica_authorities,
                 )
                 generation_observed = self.is_spec_generation_observed(graph_deployment)
-                deployment_ready = self.is_deployment_ready(graph_deployment)
+                deployment_ready = not include_planner or self.is_deployment_ready(
+                    graph_deployment
+                )
                 (
                     blocking_rollout,
                     rollout_reason,
