@@ -62,6 +62,11 @@ impl HarnessService {
         .await
     }
 
+    #[allow(dead_code)]
+    pub async fn start_with_generate_error(error: DynamoError) -> Self {
+        Self::start_with_engine(Arc::new(ScriptedChatEngine::with_generate_error(error))).await
+    }
+
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -72,7 +77,7 @@ impl HarnessService {
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(false)
+            .enable_cmpl_endpoints(true)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()

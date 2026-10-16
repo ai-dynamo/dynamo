@@ -132,13 +132,20 @@ def _load_decision(
     state: PlannerScalingState,
     proposed_p: Optional[int],
     proposed_d: Optional[int],
+    *,
+    unchanged_reason: Optional[str] = None,
 ):
     state.begin_tick()
 
+    # Like the real sub-decisions, a None proposal may record why it held.
     def _prefill(_self, _stats, _workers):
+        if proposed_p is None and unchanged_reason is not None:
+            _self._diag_load_reason = unchanged_reason
         return proposed_p
 
     def _decode(_self, _stats, _workers):
+        if proposed_d is None and unchanged_reason is not None:
+            _self._diag_load_reason = unchanged_reason
         return proposed_d
 
     state._prefill_easy_decision = MethodType(_prefill, state)
@@ -372,6 +379,83 @@ def test_load_only_endpoint_recovery_can_select_budget_donor():
     assert state.diagnostics().load_decision_reason == "gpu_budget_reconcile"
 
 
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_single_load_only_endpoint_recovery_when_load_is_unchanged(mode):
+    state = _disagg_state(
+        1,
+        1,
+        None,
+        None,
+        enable_load_scaling=True,
+        min_gpus=-1,
+        prefill_min_endpoint=3,
+        decode_min_endpoint=3,
+    )
+    state._config.mode = mode
+    state._config.enable_throughput_scaling = False
+
+    decision = _load_decision(state, None, None)
+
+    assert decision is not None
+    assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 3
+    assert state.diagnostics().load_decision_reason == "scale_up"
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_single_mixed_scaling_applies_throughput_floor_when_load_is_unchanged(mode):
+    state = _disagg_state(2, 2, 4, 4, enable_load_scaling=True, min_gpus=-1)
+    state._config.mode = mode
+    assert state._throughput_single(1.0, 1.0, 1.0, mode) is None
+
+    decision = _load_decision(state, None, None)
+
+    assert decision is not None
+    assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 4
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_single_unchanged_load_holds_when_floors_are_met(mode):
+    state = _disagg_state(1, 1, None, None, enable_load_scaling=True, min_gpus=-1)
+    state._config.mode = mode
+    state._config.enable_throughput_scaling = False
+    state.observe_worker_counts(
+        WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=1,
+            pending_num_prefill=1,
+            pending_num_decode=1,
+        )
+    )
+
+    # A ready-equal decision would cancel the pending replica.
+    assert (
+        _load_decision(state, None, None, unchanged_reason="insufficient_data") is None
+    )
+    assert state.diagnostics().load_decision_reason == "insufficient_data"
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_single_endpoint_floor_lift_is_not_reported_as_throughput_capped(mode):
+    state = _disagg_state(
+        5,
+        5,
+        None,
+        None,
+        enable_load_scaling=True,
+        min_gpus=-1,
+        prefill_min_endpoint=4,
+        decode_min_endpoint=4,
+    )
+    state._config.mode = mode
+    state._config.enable_throughput_scaling = False
+
+    decision = _load_decision(state, 2, 2)
+
+    assert decision is not None
+    assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 4
+    assert state.diagnostics().load_decision_reason == "scale_down"
+
+
 def test_single_endpoint_recovery_overrides_cap_without_minimum_gpu_budget():
     state = _disagg_state(
         1,
@@ -544,3 +628,57 @@ def test_engine_rps_recommendation_is_independent_of_sidecar_cost(
     )
 
     assert replicas == 3
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
+@pytest.mark.parametrize("model_ready", [False, True])
+def test_startup_cancellation_requires_a_throughput_estimate(mode, model_ready):
+    estimate = 1 if model_ready else None
+    state = _disagg_state(
+        1,
+        1,
+        estimate,
+        estimate,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        max_gpus=-1,
+    )
+    state._config.mode = mode
+    state.observe_worker_counts(
+        WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=1,
+            prefill_scaling_in_progress=mode in ("prefill", "disagg"),
+            decode_scaling_in_progress=mode != "prefill",
+            pending_num_prefill=1 if mode in ("prefill", "disagg") else 0,
+            pending_num_decode=1 if mode != "prefill" else 0,
+        )
+    )
+    if mode == "agg":
+        state.update_capabilities(
+            WorkerCapabilities(
+                decode=EngineCapabilities(
+                    gpu_cost_per_replica=1,
+                    max_num_batched_tokens=4096,
+                )
+            )
+        )
+        state._agg_regression = SimpleNamespace(
+            find_engine_capacity_rps=lambda **_kwargs: (
+                SimpleNamespace(rps=1.0, ttft_ms=1.0, itl_ms=1.0, eligible=True)
+                if model_ready
+                else None
+            )
+        )
+        decision = state._throughput_agg(1.0, 1.0, 1.0)
+    elif mode == "disagg":
+        decision = state._throughput_disagg(1.0, 1.0, 1.0)
+    else:
+        decision = state._throughput_single(1.0, 1.0, 1.0, mode)
+
+    if model_ready:
+        assert decision is not None
+        assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 1
+    else:
+        assert decision is None
+        assert state.diagnostics().throughput_decision_reason == "model_not_ready"

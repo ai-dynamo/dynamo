@@ -24,8 +24,8 @@ import pytest
 import requests
 
 from tests.utils.gpu_args import build_gpu_mem_args
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_port, deallocate_port
-from tests.utils.test_output import resolve_test_output_path
 
 # ============================================================================
 # Module Availability Checks
@@ -541,10 +541,8 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         if env_max_model_len is not None:
             max_model_len = int(env_max_model_len)
         elif gpu_blocks is not None:
-            # Since ver 0.20.1 vLLM validates max_model_len against explicit KV block
-            # overrides during engine init. These tests intentionally use tiny
-            # GPU caches, so default the sequence limit to that cache budget.
-            max_model_len = int(gpu_blocks) * block_size
+            # vLLM reserves one null block from the GPU cache budget.
+            max_model_len = (int(gpu_blocks) - 1) * block_size
         else:
             max_model_len = 8000
     model = params.get(

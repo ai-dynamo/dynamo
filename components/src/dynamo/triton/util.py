@@ -24,6 +24,7 @@ TRITON_TO_DYNAMO_DTYPE = {
     "INT32": "Int32",
     "INT64": "Int64",
     "FP16": "Float16",
+    "BF16": "BFloat16",
     "FP32": "Float32",
     "FP64": "Float64",
     "BYTES": "Bytes",
@@ -106,6 +107,11 @@ def dynamo_tensor_to_numpy(tensor: dict) -> np.ndarray:
     np_dtype = triton_to_np_dtype(triton_dtype)
     if np_dtype is None:
         raise ValueError(f"Unsupported tensor data type '{data_type}'")
+
+    if data_type in ("Float16", "BFloat16"):
+        # Rust `half::f16` / `half::bf16` serialize as raw u16 bit patterns, so
+        # reinterpret the bits, not cast them (0x3e00 is 1.5, not 15872.0).
+        return np.asarray(values, dtype=np.uint16).view(np_dtype).reshape(shape)
 
     return np.array(values, dtype=np_dtype).reshape(shape)
 

@@ -75,6 +75,7 @@ class ThroughputScalingMixin:
         # Endpoint recovery is a hard invariant, not an ordinary throughput
         # movement, so it may exceed the per-observation delta cap.
         desired = max(desired, resolve_min_endpoint(self._config, component))
+        requested = desired
         desired, _ceiling_reason = self._fit_single_throughput_ceiling(
             desired,
             component,
@@ -99,11 +100,17 @@ class ThroughputScalingMixin:
             )
             return None
 
+        if (self._pending_num_p or self._pending_num_d) and (
+            model_not_ready or requested > current
+        ):
+            if model_not_ready:
+                self._diag_throughput_reason = "model_not_ready"
+            return None
         desired, _budget_reason = self._apply_single_scaling_budget(
             desired,
             component,
         )
-        if desired == current:
+        if desired == current and not self._pending_startup(component):
             self._diag_throughput_reason = (
                 "model_not_ready"
                 if model_not_ready
@@ -151,6 +158,15 @@ class ThroughputScalingMixin:
         num_p = max(num_p, resolve_min_endpoint(self._config, "prefill"))
         num_d = max(num_d, resolve_min_endpoint(self._config, "decode"))
         bounded_p, bounded_d = num_p, num_d
+        if (
+            self._pending_num_p or self._pending_num_d
+        ) and not self._config.enable_load_scaling:
+            if model_not_ready:
+                # A current-count fallback repairs floors after settlement; it
+                # is not demand evidence for cancelling pending capacity.
+                self._diag_throughput_reason = "model_not_ready"
+                return None
+            return self._startup_disagg_decision(num_p, num_d, source="throughput")
         num_p, num_d = self._fit_disagg_throughput_ceiling(num_p, num_d)
         budget_held = (num_p, num_d) == (self._num_p_workers, self._num_d_workers) and (
             bounded_p,
@@ -262,6 +278,7 @@ class ThroughputScalingMixin:
             desired, self._num_d_workers, "aggregated"
         )
         desired = max(desired, resolve_min_endpoint(self._config, "decode"))
+        requested = desired
         desired, _ceiling_reason = self._fit_single_throughput_ceiling(
             desired,
             "decode",
@@ -279,11 +296,15 @@ class ThroughputScalingMixin:
             )
             return None
 
+        if self._pending_num_d and (model_not_ready or requested > self._num_d_workers):
+            if model_not_ready:
+                self._diag_throughput_reason = "model_not_ready"
+            return None
         desired, _budget_reason = self._apply_single_scaling_budget(
             desired,
             "decode",
         )
-        if desired == self._num_d_workers:
+        if desired == self._num_d_workers and not self._pending_num_d:
             self._diag_throughput_reason = (
                 "model_not_ready"
                 if model_not_ready

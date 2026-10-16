@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -36,6 +37,8 @@ impl KvDcRelay {
         expected_unique_blocks=1_048_576,
         bind=None,
         tuning=None,
+        sources_file=None,
+        connection_revision=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -52,6 +55,8 @@ impl KvDcRelay {
         expected_unique_blocks: usize,
         bind: Option<String>,
         tuning: Option<std::collections::HashMap<String, u64>>,
+        sources_file: Option<String>,
+        connection_revision: Option<String>,
     ) -> PyResult<Self> {
         if namespace_filter.is_some() && namespaces.is_some() {
             return Err(PyValueError::new_err(
@@ -67,13 +72,43 @@ impl KvDcRelay {
         let namespaces = namespaces.unwrap_or_else(|| namespace_filter.into_iter().collect());
         let endpoint_prefixes =
             endpoint_prefixes.unwrap_or_else(|| endpoint_prefix.into_iter().collect());
-        let watch_all = watch_all.unwrap_or(namespaces.is_empty());
+        if connection_revision
+            .as_ref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(PyValueError::new_err(
+                "connection_revision must not be empty",
+            ));
+        }
+        let sources_file = match sources_file {
+            Some(path) if !path.trim().is_empty() => {
+                Some(llm_rs::kv_dc_relay::KvDcRelaySourcesFile {
+                    path: path.into(),
+                    connection_revision,
+                })
+            }
+            Some(_) => return Err(PyValueError::new_err("sources_file must not be empty")),
+            None if connection_revision.is_some() => {
+                return Err(PyValueError::new_err(
+                    "connection_revision requires sources_file",
+                ));
+            }
+            None => None,
+        };
+        let watch_all = watch_all.unwrap_or(namespaces.is_empty() && sources_file.is_none());
+        if sources_file.is_some()
+            && (watch_all || !namespaces.is_empty() || !endpoint_prefixes.is_empty())
+        {
+            return Err(PyValueError::new_err(
+                "sources_file cannot be combined with discovery filters",
+            ));
+        }
         if watch_all && !namespaces.is_empty() {
             return Err(PyValueError::new_err(
                 "watch_all cannot be combined with discovery namespaces",
             ));
         }
-        if !watch_all && namespaces.is_empty() {
+        if sources_file.is_none() && !watch_all && namespaces.is_empty() {
             return Err(PyValueError::new_err(
                 "at least one discovery namespace or watch_all=True is required",
             ));
@@ -181,10 +216,15 @@ impl KvDcRelay {
             endpoint: endpoint.inner,
             dc_id,
             config: llm_rs::kv_dc_relay::KvDcRelayConfig {
-                discovery: llm_rs::kv_dc_relay::KvDcRelayDiscoveryConfig {
-                    namespaces,
-                    endpoint_prefixes,
-                    watch_all,
+                sources: match sources_file {
+                    Some(file) => llm_rs::kv_dc_relay::KvDcRelaySources::File(file),
+                    None => llm_rs::kv_dc_relay::KvDcRelaySources::Discovery(
+                        llm_rs::kv_dc_relay::KvDcRelayDiscoveryConfig {
+                            namespaces,
+                            endpoint_prefixes,
+                            watch_all,
+                        },
+                    ),
                 },
                 producer,
                 transport,
@@ -198,16 +238,59 @@ impl KvDcRelay {
         let dc_id = self.dc_id.clone();
         let config = self.config.clone();
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
-                    llm_rs::kv_dc_relay::KvDcRelay::start(
-                        endpoint.component().clone(),
-                        dc_id,
-                        config,
-                    )
-                    .await
-                    .map(Arc::new)
+                    let (mode, connection_revision) = match &config.sources {
+                        llm_rs::kv_dc_relay::KvDcRelaySources::Discovery(_) => ("discovery", None),
+                        llm_rs::kv_dc_relay::KvDcRelaySources::File(file) => {
+                            ("from-file", file.connection_revision.clone())
+                        }
+                    };
+                    let pod_uid = std::env::var("POD_UID").ok();
+                    anyhow::ensure!(
+                        pod_uid.is_none()
+                            || connection_revision.is_none()
+                            || endpoint.drt().system_status_server_info().is_some(),
+                        "operator-managed Relay requires the system HTTP server"
+                    );
+                    let relay = Arc::new(
+                        llm_rs::kv_dc_relay::KvDcRelay::start(
+                            endpoint.component().clone(),
+                            dc_id,
+                            config,
+                        )
+                        .await?,
+                    );
+                    if endpoint.drt().system_status_server_info().is_some() {
+                        let weak = Arc::downgrade(&relay);
+                        endpoint.drt().engine_routes().register(
+                            "state",
+                            Arc::new(move |_| {
+                                let weak = weak.clone();
+                                let pod_uid = pod_uid.clone();
+                                let connection_revision = connection_revision.clone();
+                                Box::pin(async move {
+                                    let relay = weak
+                                        .upgrade()
+                                        .ok_or_else(|| anyhow::anyhow!("Relay stopped"))?;
+                                    let health = relay.health().await;
+                                    let ready = (!health.wan_enabled || health.wan_serving)
+                                        && !health.shutting_down
+                                        && health.host_last_error.is_none()
+                                        && health.wan_last_error.is_none();
+                                    Ok(serde_json::json!({
+                                        "podUID": pod_uid,
+                                        "mode": mode,
+                                        "connectionRevision": connection_revision,
+                                        "ready": ready,
+                                        "sources": health.sources,
+                                    }))
+                                })
+                            }),
+                        );
+                    }
+                    Ok::<_, anyhow::Error>(relay)
                 })
                 .await
                 .map_err(to_pyerr)?;
@@ -218,7 +301,7 @@ impl KvDcRelay {
     #[cfg(feature = "ckf-diagnostics")]
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stats = inner.stats().await.map_err(to_pyerr)?;
             Python::with_gil(|py| {
                 pythonize::pythonize(py, &stats)
@@ -230,7 +313,7 @@ impl KvDcRelay {
 
     fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let health = inner.health().await;
             Python::with_gil(|py| {
                 pythonize::pythonize(py, &health)
@@ -242,9 +325,7 @@ impl KvDcRelay {
 
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.flush().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.flush().await.map_err(to_pyerr) })
     }
 
     #[cfg(feature = "ckf-diagnostics")]
@@ -254,7 +335,7 @@ impl KvDcRelay {
         serving_endpoint: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let endpoint = dynamo_runtime::protocols::EndpointId::from(serving_endpoint.as_str());
             let diagnostic = inner
                 .diagnostic_snapshot(&endpoint)
@@ -270,14 +351,12 @@ impl KvDcRelay {
 
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.shutdown().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.shutdown().await.map_err(to_pyerr) })
     }
 
     fn wait_for_shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner.wait_for_shutdown().await;
             Ok(())
         })

@@ -33,7 +33,7 @@ pub use dynamo_llm::protocols::common::preprocessor::{
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
-pub use dynamo_protocols::types::{CompletionUsage, StopReason};
+pub use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
@@ -141,6 +141,8 @@ pub struct LlmRegistration {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Maximum number of LoRA adapters the engine can keep resident on GPU.
+    pub max_gpu_lora_count: Option<u32>,
     /// DP ranks this worker hosts (default 1); the router enumerates per-rank
     /// load from it.
     pub data_parallel_size: Option<u32>,
@@ -503,6 +505,8 @@ pub enum KvEventSource {
         endpoint: String,
         topic: String,
         dp_rank: u32,
+        /// Model image-placeholder token used to normalize multimodal events.
+        image_token_id: Option<u32>,
     },
     Push {
         on_ready: OnPublisherReady,

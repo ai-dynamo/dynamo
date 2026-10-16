@@ -65,6 +65,7 @@ pub struct LocalModelBuilder {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
@@ -91,6 +92,7 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
+            batch_gateway_url: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
@@ -126,7 +128,7 @@ impl LocalModelBuilder {
         self
     }
 
-    /// The HF name of the model before we downloaded it, or a local path if
+    /// The HF name or NGC URI before we downloaded the model, or a local path if
     /// that was given on the cmd line. We need this because `model_path` is always
     /// a local path.
     pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
@@ -167,6 +169,11 @@ impl LocalModelBuilder {
 
     pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
         self.http_metrics_port = port;
+        self
+    }
+
+    pub fn batch_gateway_url(&mut self, url: Option<String>) -> &mut Self {
+        self.batch_gateway_url = url;
         self
     }
 
@@ -313,7 +320,7 @@ impl LocalModelBuilder {
     }
 
     /// Make an LLM ready for use:
-    /// - Download it from Hugging Face (and NGC in future) if necessary
+    /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
     /// - Load it's ModelDeploymentCard card
     /// - Name it correctly
@@ -368,6 +375,7 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
+                batch_gateway_url: self.batch_gateway_url.take(),
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
@@ -391,7 +399,8 @@ impl LocalModelBuilder {
                 model_path.display(),
             );
         }
-        let model_path = fs::canonicalize(model_path)?;
+        let original_model_path = model_path;
+        let model_path = fs::canonicalize(&original_model_path)?;
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
@@ -399,6 +408,11 @@ impl LocalModelBuilder {
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
+        } else if self.model_name.as_deref().is_some_and(|name| {
+            name != original_model_path.to_string_lossy() && name != card.display_name
+        }) {
+            // A served name must not replace the local metadata source during registration.
+            card.set_source_path(model_path.clone());
         }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
@@ -425,6 +439,7 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
+            batch_gateway_url: self.batch_gateway_url.take(),
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
@@ -450,6 +465,7 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
@@ -525,7 +541,7 @@ pub async fn update_model_taints(
 
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
-    /// Downloads the model from Hugging Face if necessary.
+    /// Downloads the model from Hugging Face, or from NGC for `ngc://` names, if necessary.
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
@@ -566,6 +582,10 @@ impl LocalModel {
 
     pub fn http_metrics_port(&self) -> Option<u16> {
         self.http_metrics_port
+    }
+
+    pub fn batch_gateway_url(&self) -> Option<&str> {
+        self.batch_gateway_url.as_deref()
     }
 
     pub fn metrics_prefix(&self) -> Option<String> {
@@ -697,7 +717,9 @@ impl LocalModel {
         }
 
         let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
+        // NGC retains worker HTTP/file locations; the frontend can fall back to NGC
+        // when a worker's local metadata files are not accessible there.
+        if !source_path.exists() && !self.card.source_path().starts_with("ngc://") {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
             //
@@ -888,15 +910,11 @@ pub(crate) fn self_host_base_url(
         return Ok(None);
     };
 
-    let configured = dynamo_runtime::RuntimeConfig::from_settings()
-        .unwrap_or_default()
-        .system_host;
-    let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
-        _ => configured,
-    };
+    Ok(Some(system_status_base_url(&info)))
+}
 
-    Ok(Some(format!("http://{host}:{}", info.port())))
+fn system_status_base_url(info: &dynamo_runtime::SystemStatusServerInfo) -> String {
+    format!("http://{}", info.advertised_socket_addr())
 }
 
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
@@ -938,6 +956,102 @@ fn harvest_extra_files(
 }
 
 #[cfg(test)]
+mod local_source_tests {
+    use super::*;
+
+    fn model_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
+
+    #[tokio::test]
+    async fn renamed_local_model_publishes_local_metadata() {
+        let canonical = fs::canonicalize(model_dir()).unwrap();
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("local-source")
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let mut model = LocalModelBuilder::default()
+            .model_path(model_dir())
+            .model_name(Some("local-qwen".to_string()))
+            .self_host_metadata(false)
+            .build()
+            .await
+            .unwrap();
+
+        model
+            .attach(
+                &endpoint,
+                ModelType::Chat,
+                ModelInput::Tokens,
+                None,
+                Some(crate::worker_type::WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let instances = drt
+            .discovery()
+            .list(dynamo_runtime::discovery::DiscoveryQuery::AllModels)
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        let card: ModelDeploymentCard = instances[0].deserialize_model().unwrap();
+        assert_eq!(card.display_name, "local-qwen");
+        assert_eq!(card.source_path(), canonical.to_str().unwrap());
+        let files = card.iter_metadata_files();
+        assert!(!files.is_empty());
+        for (file, _) in files {
+            assert!(file.url().is_none(), "unexpected remote metadata: {file:?}");
+            assert!(file.path().unwrap().starts_with(&canonical));
+        }
+        drt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn default_names_keep_their_representation() {
+        let canonical = fs::canonicalize(model_dir()).unwrap();
+        let path_name = canonical.to_str().unwrap().to_string();
+        let relative = model_dir()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        let symlink = dir.path().join("model");
+        std::os::unix::fs::symlink(&canonical, &symlink).unwrap();
+        for (path, name) in [
+            (model_dir(), None),
+            (model_dir(), Some(path_name.clone())),
+            (relative.clone(), Some(relative.display().to_string())),
+            (symlink.clone(), Some(symlink.display().to_string())),
+        ] {
+            let mut builder = LocalModelBuilder::default();
+            builder.model_path(path).model_name(name.clone());
+            let model = builder.build().await.unwrap();
+            assert_eq!(model.display_name(), name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().source_path, None);
+            let mut original = LocalModelBuilder::default()
+                .model_path(model_dir())
+                .build()
+                .await
+                .unwrap()
+                .card()
+                .clone();
+            original.set_name(name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().mdcsum(), original.mdcsum());
+        }
+    }
+}
+
+#[cfg(test)]
 mod self_host_metadata_default_tests {
     use super::*;
 
@@ -950,6 +1064,13 @@ mod self_host_metadata_default_tests {
         assert!(self_host_metadata_default(Some(""))); // empty
         assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
         assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
+    }
+
+    #[test]
+    fn self_host_url_uses_the_bound_status_address() {
+        let info = dynamo_runtime::SystemStatusServerInfo::new("[::1]:8080".parse().unwrap(), None);
+
+        assert_eq!(system_status_base_url(&info), "http://[::1]:8080");
     }
 }
 

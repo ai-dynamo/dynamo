@@ -515,7 +515,9 @@ before relying on cache overlap, subject to the limits in
 [Gap Detection and Replay](#gap-detection-and-replay).
 
 The [standalone selector](standalone-selection.md#worker-restarts) has a different
-registration API: updating a schedulable worker reconciles its indexer registration.
+registration API: updating a schedulable worker reconciles its indexer registration
+per rank, keeping listeners whose endpoints did not change, and a restart at the same
+address needs `DELETE /workers/{worker_id}` before the new `POST /workers`.
 
 ## Limitations
 

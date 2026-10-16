@@ -329,10 +329,29 @@ func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfigura
 	return injector, nil
 }
 
-// InjectAll reads the CA bundle from the cert secret and injects it into all
+// Inject applies the CA bundle only to resources owned by this operator scope.
+func (i *CABundleInjector) Inject(ctx context.Context) error {
+	// Automatic certificate management owns admission CA injection in every scope.
+	if i.cfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+		if i.cfg.Namespace.Restricted != "" {
+			return i.injectAdmissionCA(ctx)
+		}
+		return i.injectAll(ctx)
+	}
+
+	// Namespace-restricted operators never own shared CRD conversion configuration.
+	if i.cfg.Namespace.Restricted != "" {
+		return nil
+	}
+
+	// Cluster-wide manual mode receives admission CAs out-of-band but owns conversion CA injection.
+	return i.injectCRDConversionCA(ctx)
+}
+
+// injectAll reads the CA bundle from the cert secret and injects it into all
 // webhook configurations owned by this operator instance (scoped by namespace
 // label), and into the multi-version CRD conversion webhooks.
-func (i *CABundleInjector) InjectAll(ctx context.Context) error {
+func (i *CABundleInjector) injectAll(ctx context.Context) error {
 	caBundle, err := i.readCABundle(ctx)
 	if err != nil {
 		return fmt.Errorf("reading CA bundle from secret %s/%s: %w", i.namespace, i.cfg.Server.Webhook.SecretName, err)
@@ -349,9 +368,9 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	return nil
 }
 
-// InjectAdmission reads the CA bundle from the cert secret and injects it only
+// injectAdmissionCA reads the CA bundle from the cert secret and injects it only
 // into admission webhook configurations owned by this operator instance.
-func (i *CABundleInjector) InjectAdmission(ctx context.Context) error {
+func (i *CABundleInjector) injectAdmissionCA(ctx context.Context) error {
 	caBundle, err := i.readCABundle(ctx)
 	if err != nil {
 		return fmt.Errorf("reading CA bundle from secret %s/%s: %w", i.namespace, i.cfg.Server.Webhook.SecretName, err)
@@ -372,9 +391,9 @@ func (i *CABundleInjector) injectAdmission(ctx context.Context, caBundle []byte)
 	return i.injectIntoMutatingWebhooks(ctx, caBundle)
 }
 
-// InjectCRDConversionCA reads the CA bundle from the cert secret and patches it
+// injectCRDConversionCA reads the CA bundle from the cert secret and patches it
 // into the CRD conversion webhook configurations.
-func (i *CABundleInjector) InjectCRDConversionCA(ctx context.Context) error {
+func (i *CABundleInjector) injectCRDConversionCA(ctx context.Context) error {
 	caBundle, err := i.waitForCABundle(ctx)
 	if err != nil {
 		return err

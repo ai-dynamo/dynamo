@@ -6,6 +6,7 @@
 import pytest
 
 from dynamo.common.utils.nixl_telemetry import (
+    DEFAULT_NIXL_PROMETHEUS_PORT,
     MAX_COLOCATED_NIXL_EXPORTERS,
     MAX_PORT,
     derive_nixl_prometheus_port,
@@ -95,16 +96,72 @@ class TestDeriveNixlPrometheusPort:
 
 
 class TestNixlPrometheusBasePort:
-    def test_operator_defaults_are_recognized(self):
-        assert nixl_prometheus_base_port(OPERATOR_ENV) == 19090
+    @pytest.mark.parametrize(
+        "enabled_value", ["y", "1", "yes", "on", "true", "enable", "TRUE"]
+    )
+    def test_nixl_truthy_token_is_recognized(self, enabled_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
+        assert nixl_prometheus_base_port(env) == 19090
+
+    @pytest.mark.parametrize(
+        "enabled_value", ["n", "0", "no", "off", "false", "disable", "FALSE"]
+    )
+    def test_nixl_false_token_disables_telemetry(self, enabled_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
+        assert nixl_prometheus_base_port(env) is None
+
+    @pytest.mark.parametrize("enabled_value", ["", "maybe", " y", "y "])
+    def test_invalid_enable_value_is_rejected(self, enabled_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
+        with pytest.raises(ValueError, match="NIXL_TELEMETRY_ENABLE"):
+            nixl_prometheus_base_port(env)
+
+    @pytest.mark.parametrize(
+        ("removed_name", "expected"),
+        [
+            ("NIXL_TELEMETRY_EXPORTER", None),
+            ("NIXL_TELEMETRY_PROMETHEUS_PORT", DEFAULT_NIXL_PROMETHEUS_PORT),
+        ],
+    )
+    def test_unset_value(self, removed_name, expected):
+        env = dict(OPERATOR_ENV)
+        del env[removed_name]
+        assert nixl_prometheus_base_port(env) == expected
+
+    def test_hexadecimal_port_is_recognized(self):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "0x4A92"}
+        assert nixl_prometheus_base_port(env) == 19090
+
+    @pytest.mark.parametrize("port_value", ["abc", "99999", " 9090", "+9090"])
+    def test_invalid_port_is_rejected(self, port_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": port_value}
+        with pytest.raises(ValueError, match="NIXL_TELEMETRY_PROMETHEUS_PORT"):
+            nixl_prometheus_base_port(env)
+
+    def test_oversized_port_is_reported_as_out_of_range(self):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "9" * 5000}
+        with pytest.raises(ValueError, match="outside the range"):
+            nixl_prometheus_base_port(env)
+
+    def test_many_leading_zeroes_do_not_trigger_python_integer_limit(self):
+        env = {
+            **OPERATOR_ENV,
+            "NIXL_TELEMETRY_PROMETHEUS_PORT": "0" * 5000 + "19090",
+        }
+        assert nixl_prometheus_base_port(env) == 19090
+
+    def test_ephemeral_port_is_rejected_by_dynamo(self):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "0"}
+        with pytest.raises(ValueError, match="ephemeral"):
+            nixl_prometheus_base_port(env)
 
     @pytest.mark.parametrize(
         "override",
         [
-            {"NIXL_TELEMETRY_ENABLE": "n"},
-            {"NIXL_TELEMETRY_ENABLE": ""},
-            {"NIXL_TELEMETRY_EXPORTER": "file"},
+            {"NIXL_TELEMETRY_EXPORTER": "doca"},
+            {"NIXL_TELEMETRY_EXPORTER": "PROMETHEUS"},
+            {"NIXL_TELEMETRY_EXPORTER": "prometheus "},
         ],
     )
-    def test_disabled_telemetry_has_no_base_port(self, override):
+    def test_inactive_configuration_has_no_base_port(self, override):
         assert nixl_prometheus_base_port({**OPERATOR_ENV, **override}) is None

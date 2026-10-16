@@ -8,12 +8,16 @@ import logging
 import random
 import time
 import uuid
+from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Optional
 
 import torch
 from PIL import Image
 
 from dynamo._core import Context
+from dynamo.common.http.base import HttpStatusError
+from dynamo.common.http.media_reference import local_media_reference
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
@@ -27,6 +31,12 @@ logger = logging.getLogger(__name__)
 MAX_NUM_INFERENCE_STEPS = 50
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 7.5
+# Bounds for the OpenAI `n` request field, matching the TRT-LLM image
+# handler (num_images_per_prompt in [1, 10]) and the OpenAI API limit. The
+# engine generates one image per call, so `n` is served as sequential
+# generations; the bound keeps a single request from monopolizing the
+# worker.
+MAX_IMAGES_PER_REQUEST = 10
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -119,29 +129,60 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         width, height = self._parse_size(req.size)
 
-        images = await self._generate_images(
-            prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt,
-            width=width,
-            height=height,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            seed=nvext.seed,
-            input_reference=req.input_reference,
-        )
+        num_images = req.n
+        if not 1 <= num_images <= MAX_IMAGES_PER_REQUEST:
+            raise InvalidArgument(
+                f"n must be in [1, {MAX_IMAGES_PER_REQUEST}], got {num_images}"
+            )
+
+        # The engine produces one image per call, so serve OpenAI `n`
+        # semantics as n sequential generations. With an explicit seed use
+        # seed+i: deterministic overall, yet each sample is distinct.
+        # Without a seed, each generation draws its own random seed.
+        images: list[bytes] = []
+        for i in range(num_images):
+            # Stop between generations if the request has gone away: a
+            # cancelled n=10 request must not keep occupying the GPU.
+            if context.is_stopped() or context.is_killed():
+                logger.info(
+                    "Request cancelled after %d of %d generations", i, num_images
+                )
+                return
+            images.extend(
+                await self._generate_images(
+                    prompt=req.prompt,
+                    negative_prompt=nvext.negative_prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    seed=nvext.seed + i if nvext.seed is not None else None,
+                    input_reference=req.input_reference,
+                )
+            )
 
         context_id = context.id()
         assert context_id is not None
         user_id = req.user or context_id
         image_data = []
-        for img in images:
-            # uploading or encoding the image
-            if req.response_format == "url":
-                url = await self._upload_to_fs(img, user_id, context_id)
-                image_data.append(ImageData(url=url))
-            else:
-                b64 = self._encode_base64(img)
-                image_data.append(ImageData(b64_json=b64))
+        uploaded_paths: list[str] = []
+        try:
+            for img in images:
+                # uploading or encoding the image
+                if req.response_format == "url":
+                    url, storage_path = await self._upload_to_fs(
+                        img, user_id, context_id
+                    )
+                    uploaded_paths.append(storage_path)
+                    image_data.append(ImageData(url=url))
+                else:
+                    b64 = self._encode_base64(img)
+                    image_data.append(ImageData(b64_json=b64))
+        except Exception:
+            # The whole batch fails: remove files already uploaded so a
+            # failed request leaves no orphaned media behind.
+            await self._cleanup_uploads(uploaded_paths)
+            raise
 
         response = ImagesResponse(created=int(time.time()), data=image_data)
 
@@ -170,16 +211,43 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
-        # Add image_path for I2I/TI2I if provided
-        if input_reference is not None:
-            if not input_reference.strip():
-                raise InvalidArgument("input_reference must be a non-empty string")
-            args["image_path"] = input_reference
+        # Add image_path for I2I/TI2I if provided. A URL is fetched through the
+        # SSRF-safe client (revalidating each redirect hop) into a temp file, so
+        # the generator only ever opens a trusted local path — never a URL it
+        # would fetch and redirect itself.
+        async with AsyncExitStack() as stack:
+            if input_reference is not None:
+                if not input_reference.strip():
+                    raise InvalidArgument("input_reference must be a non-empty string")
+                try:
+                    args["image_path"] = await stack.enter_async_context(
+                        local_media_reference(
+                            input_reference, UrlValidationPolicy.from_env()
+                        )
+                    )
+                except UrlValidationError as exc:
+                    # A policy verdict on a client-supplied reference is a bad
+                    # request. UrlValidationError is a ValueError, which the
+                    # binding already maps to InvalidArgument
+                    # (backend.rs py_err_to_dynamo) — this says so at the call
+                    # site rather than relying on that fallback.
+                    raise InvalidArgument(str(exc)) from exc
+                except HttpStatusError as exc:
+                    if not 400 <= exc.status < 500:
+                        raise
+                    # The origin the client picked answered 4xx. image_loader
+                    # takes the same line for an unreachable user-supplied URL
+                    # ("a client error (400) rather than an internal server
+                    # fault"). The URL is not echoed back: the client sent it,
+                    # and it has no length limit.
+                    raise InvalidArgument(
+                        f"input_reference could not be fetched (HTTP {exc.status})"
+                    ) from exc
 
-        result = await asyncio.to_thread(
-            self.generator.generate,
-            sampling_params_kwargs=args,
-        )
+            result = await asyncio.to_thread(
+                self.generator.generate,
+                sampling_params_kwargs=args,
+            )
 
         # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
@@ -237,7 +305,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
     async def _upload_to_fs(
         self, image_bytes: bytes, user_id: str, request_id: str
-    ) -> str:
+    ) -> tuple[str, str]:
         """Upload image to filesystem and return URL.
 
         Uses per-user storage path:
@@ -249,7 +317,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             request_id: Request context ID.
 
         Returns:
-            Public URL for the uploaded image.
+            (public URL, storage path) for the uploaded image.
         """
         image_uuid = str(uuid.uuid4())
         image_filename = f"{image_uuid}.png"
@@ -257,7 +325,16 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
-        return await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
+        url = await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
+        return url, storage_path
+
+    async def _cleanup_uploads(self, storage_paths: list[str]) -> None:
+        """Best-effort removal of uploaded files after a failed batch."""
+        for path in storage_paths:
+            try:
+                await asyncio.to_thread(self.fs.rm, path)
+            except Exception:
+                logger.warning("Failed to clean up uploaded file %s", path)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

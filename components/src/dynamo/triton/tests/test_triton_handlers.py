@@ -5,6 +5,7 @@
 tensor conversion, streaming responses, request validation, and dtype caching."""
 
 import asyncio
+import ctypes
 import types
 from collections.abc import AsyncIterator
 from typing import Any
@@ -12,6 +13,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
+from tritonserver import DataType, MemoryType, Tensor
 
 from dynamo.triton import handlers
 
@@ -27,10 +30,16 @@ class _MockModel:
     """Records the request it builds and replays a fixed response stream."""
 
     def __init__(
-        self, output_metadata: list[dict[str, Any]], responses: list[Any]
+        self,
+        output_metadata: list[dict[str, Any]],
+        responses: list[Any],
+        max_batch_size: int = 0,
+        name: str = "mock-model",
     ) -> None:
         self._output_metadata = output_metadata
         self._responses = responses
+        self._max_batch_size = max_batch_size
+        self.name = name
         self.last_request: types.SimpleNamespace | None = None
 
     def create_request(self) -> types.SimpleNamespace:
@@ -39,6 +48,9 @@ class _MockModel:
 
     def metadata(self) -> dict[str, Any]:
         return {"outputs": self._output_metadata}
+
+    def config(self) -> dict[str, Any]:
+        return {"max_batch_size": self._max_batch_size}
 
     def async_infer(self, _inference_request: Any) -> AsyncIterator[Any]:
         async def _stream() -> AsyncIterator[Any]:
@@ -49,7 +61,7 @@ class _MockModel:
 
 
 def build_dynamo_request(
-    *tensor_specs: tuple[str, str, list[int], list[Any]]
+    *tensor_specs: tuple[str, str, list[int], list[Any]],
 ) -> dict[str, Any]:
     """Build a Dynamo request envelope from (name, data_type, shape, values) tensor specs."""
     return {
@@ -78,10 +90,15 @@ def run_handler_generate(
     triton_output_metadata: list[dict[str, Any]],
     triton_responses: list[Any],
     dynamo_request: dict[str, Any],
+    max_batch_size: int = 0,
 ) -> tuple[_MockModel, list[dict[str, Any]]]:
     """Build a RequestHandler over a _MockModel and drive generate to completion."""
-    model = _MockModel(triton_output_metadata, triton_responses)
-    handler = handlers.RequestHandler(MagicMock(), model)
+    model = _MockModel(triton_output_metadata, triton_responses, max_batch_size)
+    handler = handlers.RequestHandler(
+        MagicMock(),
+        model,
+        TritonModelConfigPb.ModelConfig(max_batch_size=max_batch_size),
+    )
 
     async def _collect() -> list[dict[str, Any]]:
         return [
@@ -292,11 +309,14 @@ def _make_handler(
     model.ready = _readiness(model_ready)
     model.name = model_name
     model.metadata = MagicMock(return_value={"outputs": output_metadata})
+    model.config = MagicMock(return_value={})
     model.async_infer = MagicMock(
         side_effect=AssertionError("async_infer must not be called")
     )
 
-    return handlers.RequestHandler(server, model)
+    return handlers.RequestHandler(
+        server, model, TritonModelConfigPb.ModelConfig(max_batch_size=0)
+    )
 
 
 def _run_generate(
@@ -319,26 +339,54 @@ def test_generate_rejects_request_missing_tensors_key():
         _run_generate(handler, {"prompt": "hello"})
 
 
-@pytest.mark.parametrize("bad_dtype", ["Float16", "BFloat16"])
-def test_generate_rejects_unsupported_input_dtype(bad_dtype):
-    """Half-precision input tensors are rejected upfront."""
-    handler = _make_handler()
-    request = build_dynamo_request(("IN", bad_dtype, [1], [0.0]))
+def _run_half_precision_input(
+    dynamo_dtype: str, shape: list[int], values: list[int]
+) -> Any:
+    """Run one half-precision input through generate and return what Triton got."""
+    # Use an int32 output so the response path (np.from_dlpack) stays out of
+    # scope: these tests cover the input side only.
+    model, _ = run_handler_generate(
+        [{"name": "OUT", "datatype": "INT32"}],
+        [build_triton_response("req-id", "identity", {"OUT": np.array([0], np.int32)})],
+        build_dynamo_request(("IN", dynamo_dtype, shape, values)),
+    )
+    assert model.last_request is not None
+    return model.last_request.inputs["IN"]
 
-    with pytest.raises(ValueError, match=f"does not support {bad_dtype}"):
-        _run_generate(handler, request)
 
+def test_generate_passes_fp16_input_as_numpy():
+    """FP16 inputs reach tritonserver as a float16 ndarray, which its
+    NUMPY_TO_TRITON_DTYPE mapping accepts."""
+    # Rust half values arrive as u16 bit patterns, not numeric floats.
+    bits = [0x3E00, 0xC080, 0x4240]
+    triton_input = _run_half_precision_input("Float16", [3], bits)
 
-def test_generate_error_message_lists_all_unsupported_dtypes():
-    """When multiple unsupported dtypes are present they're all named in the error."""
-    handler = _make_handler()
-    request = build_dynamo_request(
-        ("IN0", "Float16", [1], [0.0]),
-        ("IN1", "BFloat16", [1], [0.0]),
+    assert isinstance(triton_input, np.ndarray)
+    assert triton_input.dtype == np.float16
+    np.testing.assert_array_equal(
+        triton_input, np.array([1.5, -2.25, 3.125], dtype=np.float16)
     )
 
-    with pytest.raises(ValueError, match="BFloat16 / Float16"):
-        _run_generate(handler, request)
+
+# Little-endian BF16 bytes for [1.5, -2.25, 3.125, -4.0].
+_BF16_ROW_BYTES = bytes.fromhex("c03f10c0484080c0")
+
+
+@pytest.mark.parametrize("batch", [1, 4], ids=["batch1", "batch4"])
+def test_generate_passes_bf16_input_as_triton_tensor(batch):
+    """BF16 inputs reach tritonserver as a Tensor(DataType.BF16) over the raw
+    bytes. tritonserver cannot convert an ml_dtypes.bfloat16 ndarray itself."""
+    bits = [0x3FC0, 0xC010, 0x4048, 0xC080]
+    shape = [batch, len(bits)]
+    triton_input = _run_half_precision_input("BFloat16", shape, bits * batch)
+
+    assert isinstance(triton_input, Tensor)
+    assert triton_input.data_type == DataType.BF16
+    assert list(triton_input.shape) == shape
+    buffer = triton_input.memory_buffer
+    assert buffer.memory_type == MemoryType.CPU
+    assert buffer.size == len(_BF16_ROW_BYTES) * batch
+    assert ctypes.string_at(buffer.data_ptr, buffer.size) == _BF16_ROW_BYTES * batch
 
 
 # --- Dtype cache ---
@@ -364,7 +412,9 @@ def test_generate_does_not_call_model_metadata_per_response():
             for idx in range(3)
         ],
     )
-    handler = handlers.RequestHandler(MagicMock(), model)
+    handler = handlers.RequestHandler(
+        MagicMock(), model, TritonModelConfigPb.ModelConfig(max_batch_size=0)
+    )
 
     # Wrap metadata *after* __init__ so we only observe generate()-time calls.
     metadata_calls_during_generate = 0

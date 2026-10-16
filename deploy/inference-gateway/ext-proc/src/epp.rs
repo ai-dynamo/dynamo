@@ -28,6 +28,7 @@ use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
 };
+use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
@@ -143,7 +144,11 @@ impl Router {
     ///
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
-    pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
+    pub(crate) async fn from_discovery(
+        namespace_filter: NamespaceFilter,
+        namespace_prefix_mode: NamespacePrefixMode,
+        component: &str,
+    ) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
 
         let runtime = Runtime::from_settings()?;
@@ -152,7 +157,7 @@ impl Router {
         // Wait for workers
         wait_for_discovery_sync(&drt).await;
 
-        let bootstrap = init_preprocessor(&drt, namespace).await?;
+        let bootstrap = init_preprocessor(&drt, &namespace_filter, namespace_prefix_mode).await?;
         let block_size = bootstrap.card.kv_cache_block_size;
         let model_name = bootstrap.card.display_name.clone();
         let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
@@ -224,14 +229,14 @@ impl Router {
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
 
-        // Use the BASE namespace (without rolling-update suffix) for the pod
+        // Namespace-scoped pod selectors use the BASE namespace for the pod
         // selector. Workers register in discovery under the suffixed namespace
         // (e.g. "atchernych-qwen-9f792849"), but the K8s pod label
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
         let (worker_index, pod_store_ready) =
-            spawn_pod_reflector(namespace, container_discovery).await?;
+            spawn_pod_reflector(&namespace_filter, container_discovery).await?;
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -483,10 +488,6 @@ impl Router {
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.prefill_router.register_workers(ids);
-        }
-
         self.prefill_router
             .reserve_prefill_worker(
                 reservation_id,
@@ -527,10 +528,6 @@ impl Router {
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32)> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.decode_router.register_workers(ids);
-        }
-
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -776,15 +773,18 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) {
 
 async fn init_preprocessor(
     drt: &DistributedRuntime,
-    target_namespace: &str,
+    namespace_filter: &NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
 ) -> Result<DiscoveredModelBootstrap> {
     loop {
-        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+        match fetch_preprocessor_from_discovery(drt, namespace_filter, namespace_prefix_mode).await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    target_namespace,
+                    ?namespace_filter,
+                    ?namespace_prefix_mode,
                     "Model card not available yet, retrying in 5s..."
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -795,7 +795,8 @@ async fn init_preprocessor(
 
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
-    target_namespace: &str,
+    namespace_filter: &NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
 ) -> Result<DiscoveredModelBootstrap> {
     let discovery = drt.discovery();
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
@@ -815,14 +816,14 @@ async fn fetch_preprocessor_from_discovery(
 
     tracing::debug!(
         ?discovered_namespaces,
-        target_namespace,
+        ?namespace_filter,
         "Discovery returned {} model instances",
         discovered_namespaces.len()
     );
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !namespace.starts_with(target_namespace) {
+            if !namespace_filter.matches_with_prefix_mode(namespace, namespace_prefix_mode) {
                 continue;
             }
 
@@ -848,10 +849,10 @@ async fn fetch_preprocessor_from_discovery(
 
     let (mut card, actual_namespace) = model_card.ok_or_else(|| {
         anyhow::anyhow!(
-            "No model found in namespace '{}' via discovery. \
+            "No model found in namespace scope '{:?}' via discovery. \
              Found {} instances in namespaces: {:?}. \
              Set DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' registration namespace.",
-            target_namespace,
+            namespace_filter,
             discovered_namespaces.len(),
             discovered_namespaces,
         )
@@ -934,8 +935,9 @@ fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
 /// The mode is exclusive, and so are the identities. A worker process picks one
 /// `KubeDiscoveryTarget` from its own mode, so under container discovery
 /// nothing registers under the bare pod identity — emitting it there would
-/// invent a worker that `register_workers` upserts at zero load and zero KV
-/// overlap, making it the most attractive candidate the scheduler sees.
+/// put a worker id in `allowed_worker_ids` that no backend registered. The
+/// scheduler filters unknown ids out, so the pod contributes nothing, and a
+/// subset made only of such ids selects no worker at all.
 /// `"main"` hashes to the pod identity (`hash_container_name`), so a pod whose
 /// main container is Ready still contributes that id through the container
 /// path; one whose main container is *not* Ready correctly contributes nothing
@@ -1167,12 +1169,21 @@ async fn run_pod_reflector(
     }
 }
 
+fn worker_pod_selector(namespace_filter: &NamespaceFilter) -> String {
+    match namespace_filter {
+        NamespaceFilter::Global => "nvidia.com/dynamo-component-class=worker".to_string(),
+        NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => format!(
+            "nvidia.com/dynamo-namespace={namespace},nvidia.com/dynamo-component-class=worker"
+        ),
+    }
+}
+
 /// Start a background pod reflector that watches worker pods matching the
 /// InferencePool selector and incrementally maintains a [`WorkerEndpointIndex`]
 /// from its per-object events — O(1) request-path lookups, no K8s API calls
 /// and no pod rescans on the hot path.
 async fn spawn_pod_reflector(
-    dynamo_namespace: &str,
+    namespace_filter: &NamespaceFilter,
     container_discovery: bool,
 ) -> Result<(Arc<RwLock<WorkerEndpointIndex>>, Arc<AtomicBool>)> {
     use k8s_openapi::api::core::v1::Pod;
@@ -1190,10 +1201,7 @@ async fn spawn_pod_reflector(
 
     let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
 
-    let selector = format!(
-        "nvidia.com/dynamo-namespace={},nvidia.com/dynamo-component-class=worker",
-        dynamo_namespace
-    );
+    let selector = worker_pod_selector(namespace_filter);
 
     let writer = reflector::store::Writer::default();
     let store = writer.as_reader();
@@ -1392,11 +1400,9 @@ impl EndpointPicker for Router {
             // Only pod discovery registers a worker under its pod identity.
             // Under container discovery each engine container registers under
             // its own (`KubeDiscoveryTarget::Container`), so a hand-built pod
-            // hash names a worker present in no registry: `register_workers`
-            // would upsert it at zero load and zero KV overlap, making it the
-            // scheduler's most attractive candidate, and the reverse lookup
-            // below would then fail to match and silently forward to
-            // `endpoints[0]`. The index is the one place that knows which
+            // hash names a worker present in no registry, which the scheduler
+            // filters out, leaving the subset short one candidate or empty.
+            // The index is the one place that knows which
             // identity scheme is in effect (see `pod_worker_ids`), so ask it.
             let wm: Vec<(u64, &Endpoint)> = {
                 let index = read_index(&self.worker_index);
@@ -1667,10 +1673,113 @@ impl EndpointPicker for Router {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, atomic::Ordering};
+
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
 
-    use std::sync::{Arc, atomic::Ordering};
+    #[test]
+    fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
+        let global = worker_pod_selector(&NamespaceFilter::Global);
+        assert_eq!(global, "nvidia.com/dynamo-component-class=worker");
+        for filter in [
+            NamespaceFilter::Exact("default-foo".into()),
+            NamespaceFilter::Prefix("default-foo".into()),
+        ] {
+            assert_eq!(
+                worker_pod_selector(&filter),
+                "nvidia.com/dynamo-namespace=default-foo,nvidia.com/dynamo-component-class=worker"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_namespace_scope_excludes_sibling_deployments() {
+        use dynamo_runtime::distributed::DistributedConfig;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .unwrap();
+        let sibling = drt
+            .namespace("default-foo-bar")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        sibling.register_endpoint_instance().await.unwrap();
+        dynamo_llm::local_model::register_model_card(&sibling, &card)
+            .await
+            .unwrap();
+
+        let manual = fetch_preprocessor_from_discovery(
+            &drt,
+            &NamespaceFilter::Prefix("default-foo".into()),
+            NamespacePrefixMode::Literal,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manual.actual_namespace, "default-foo-bar");
+
+        let global = fetch_preprocessor_from_discovery(
+            &drt,
+            &NamespaceFilter::Global,
+            NamespacePrefixMode::WorkerGeneration,
+        )
+        .await
+        .unwrap();
+        assert_eq!(global.actual_namespace, "default-foo-bar");
+
+        let filter = NamespaceFilter::Prefix("default-foo".into());
+        let rejected =
+            fetch_preprocessor_from_discovery(&drt, &filter, NamespacePrefixMode::WorkerGeneration)
+                .await
+                .err()
+                .expect("sibling model must be excluded");
+        assert!(
+            rejected
+                .to_string()
+                .contains("No model found in namespace scope")
+        );
+
+        let generation = drt
+            .namespace("default-foo-1a2b3c4d")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        generation.register_endpoint_instance().await.unwrap();
+        dynamo_llm::local_model::register_model_card(&generation, &card)
+            .await
+            .unwrap();
+        let selected =
+            fetch_preprocessor_from_discovery(&drt, &filter, NamespacePrefixMode::WorkerGeneration)
+                .await
+                .unwrap();
+        assert_eq!(selected.actual_namespace, "default-foo-1a2b3c4d");
+        let exact = fetch_preprocessor_from_discovery(
+            &drt,
+            &NamespaceFilter::Exact("default-foo".into()),
+            NamespacePrefixMode::WorkerGeneration,
+        )
+        .await
+        .err()
+        .expect("exact scope must exclude worker generations");
+        assert!(
+            exact
+                .to_string()
+                .contains("No model found in namespace scope")
+        );
+        runtime.shutdown();
+    }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this
@@ -2146,10 +2255,7 @@ mod tests {
     }
 
     /// Under pod discovery a worker registers under its pod identity alone, so
-    /// a pod's ready sidecars must contribute no worker ids. Emitting them
-    /// would invent workers no backend registered under: they miss
-    /// `register_workers`' discovery lookup, default to `(0, 1)` with no load
-    /// and no KV overlap, and so look maximally attractive to the scheduler.
+    /// a pod's ready sidecars must contribute no worker ids.
     #[test]
     fn pod_worker_ids_ignores_containers_under_pod_discovery() {
         let pod = pod_mode_worker_pod();
@@ -2215,7 +2321,7 @@ mod tests {
     }
 
     /// End of the chain that made this matter: the index feeds
-    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> `register_workers`,
+    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> the scheduler,
     /// so one backend pod must contribute exactly one worker id under pod
     /// discovery rather than one per ready container.
     #[test]
@@ -2450,8 +2556,7 @@ mod tests {
     /// An externally supplied endpoint must resolve to the identity the
     /// reflector actually holds. Under container discovery that is the engine
     /// container's id, never `hash_pod_name` -- deriving the latter names a
-    /// worker no registry contains, which `register_workers` then upserts at
-    /// zero load as the scheduler's most attractive candidate.
+    /// worker no registry contains.
     #[test]
     fn external_endpoint_resolves_to_the_indexed_container_identity() {
         let mut index = WorkerEndpointIndex::new(true);
