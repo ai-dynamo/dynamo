@@ -218,9 +218,28 @@ declares one is rejected at startup rather than silently treated as
 always-matching. The structure is in place so adding them does not change the
 declaration surface or any caller.
 
-> **Not consumed yet.** This release only declares and resolves priorities;
-> budget arbitration does not read them. Setting them changes nothing about
-> scaling decisions today.
+### How priorities affect scaling
+
+Priorities order **pair-partner selection**, which is how the Global Planner
+moves capacity between pools when one alone would breach the budget band. The
+ordering inverts with the direction of the transfer:
+
+| Request | Partners are | Served first |
+|---------|--------------|--------------|
+| Scale-up (needs GPUs) | donors giving GPUs up | the **least** important pool (lowest number) |
+| Scale-down below the floor (frees GPUs) | recipients taking GPUs on | the **most** important pool (highest number) |
+
+Priority is the leading term, followed by the size of the GPU change. Among
+equal-priority pools, smaller changes come first; transfers inside one DGD
+are preferred only when those changes also tie. A candidate that cannot fit
+even one replica is skipped so a finer-grained partner can still satisfy the
+budget.
+
+Priority does **not** add new denials. Pairing only ever consumes a scale
+*intent a pool already published*, so a high-priority pool never has capacity
+taken from it against its will — it is only paired when it had already decided
+to scale down. Taking capacity from a pool that did not ask to give it up is
+proactive reclaim, which is not implemented.
 
 ## Behavior
 
