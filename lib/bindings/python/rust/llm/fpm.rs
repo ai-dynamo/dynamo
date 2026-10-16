@@ -827,7 +827,6 @@ impl FpmEventSubscriber {
         self.max_age = max_age;
         let workers = self.workers.clone();
 
-        // Task 1: event consumption and periodic cleanup of inactive workers.
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
@@ -888,7 +887,6 @@ impl FpmEventSubscriber {
             }
         });
 
-        // Task 2: MDC discovery watch.
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();

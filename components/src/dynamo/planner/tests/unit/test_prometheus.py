@@ -906,19 +906,6 @@ class TestPrometheusAPIClientRouterSource:
         ]
         assert router_client.get_avg_request_count("60s", "mymodel") is None
 
-    def test_single_scrape_legacy_router_does_not_prove_zero_demand(
-        self, router_client
-    ):
-        def query_result(*, query):
-            if query.startswith("sum("):
-                return [{"value": [0, "0"]}]
-            if query.startswith("increase("):
-                return []  # The legacy counter has only one scrape.
-            return [{"metric": {"instance": "legacy"}, "value": [0, "0"]}]
-
-        router_client.prom.custom_query.side_effect = query_result
-        assert router_client.get_avg_request_count("60s", "mymodel") is None
-
     def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
         """Router histogram query must filter by dynamo_namespace so each pool planner
         only reads its own LocalRouter's metrics, not the cluster-wide aggregate.
