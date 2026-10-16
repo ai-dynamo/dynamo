@@ -25,6 +25,7 @@ from kubernetes import client
 
 from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
 from dynamo.planner.connectors.clients.kubernetes_api import (
+    KUBERNETES_LABEL_SELECTOR_MAX_LENGTH,
     KUBERNETES_LIST_PAGE_SIZE,
     NONTERMINAL_POD_FIELD_SELECTOR,
     PARTIAL_OBJECT_METADATA_ACCEPT,
@@ -1407,6 +1408,17 @@ def test_pcsg_replica_range_ignores_terminal_pods(k8s_api, phase):
     assert k8s_api.pcsg_pods_within_desired_replicas(deployment, [terminal])
 
 
+def test_deployment_pod_count_rejects_surge_and_ignores_terminal_pods(k8s_api):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["status"]["components"]["decode"]["componentKind"] = "Deployment"
+    serving = [_make_pod(f"decode-{index}") for index in range(3)]
+
+    assert not k8s_api.deployment_pods_within_desired_replicas(deployment, serving)
+
+    serving[-1].status.phase = "Succeeded"
+    assert k8s_api.deployment_pods_within_desired_replicas(deployment, serving)
+
+
 @pytest.mark.asyncio
 async def test_wait_exclude_planner_rejects_unobserved_generation(
     k8s_api, mock_custom_api
@@ -1714,6 +1726,29 @@ async def test_wait_for_replica_targets_rejects_removed_component_pods(
     deployment = _stable_worker_dgd(generation=2, observed_generation=2)
     stale_pod = _make_pod("removed-worker-0", component="removed-worker")
     _mock_pod_list(mock_core_api, [stale_pod], component="removed-worker")
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_deployment_surge_pods(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["status"]["components"]["decode"]["componentKind"] = "Deployment"
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod(f"decode-{index}") for index in range(3)],
+    )
 
     with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
         with pytest.raises(TimeoutError):
@@ -2482,6 +2517,42 @@ def test_list_graph_pods_filters_selected_deployments(k8s_api):
         assert k8s_api.list_graph_pods({"model-b", "model-a"}) == []
     read_page.assert_called_once_with(
         label_selector=("nvidia.com/dynamo-graph-deployment-name in (model-a,model-b)"),
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token=None,
+    )
+
+
+def test_list_graph_pods_falls_back_before_selector_exceeds_uri_bound(k8s_api):
+    names = {f"model-{index:04d}-{'a' * 48}" for index in range(100)}
+    selected_name = min(names)
+    selected = {
+        "metadata": {
+            "name": "selected-pod",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": selected_name,
+            },
+        }
+    }
+    unrelated = {
+        "metadata": {
+            "name": "unrelated-pod",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "other-model",
+            },
+        }
+    }
+    selector = f"nvidia.com/dynamo-graph-deployment-name in ({','.join(sorted(names))})"
+    assert len(selector) > KUBERNETES_LABEL_SELECTOR_MAX_LENGTH
+
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [selected, unrelated], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_graph_pods(names) == [selected]
+
+    read_page.assert_called_once_with(
+        label_selector="nvidia.com/dynamo-graph-deployment-name",
         field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
         continue_token=None,
     )

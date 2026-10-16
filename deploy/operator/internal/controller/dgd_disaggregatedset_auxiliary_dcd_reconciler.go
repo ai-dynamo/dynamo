@@ -32,15 +32,18 @@ import (
 
 type disaggregatedSetAuxiliaryDCDReconciler struct {
 	client   client.Client
+	reader   client.Reader
 	recorder events.EventRecorder
 }
 
 func newDisaggregatedSetAuxiliaryDCDReconciler(
 	k8sClient client.Client,
+	apiReader client.Reader,
 	recorder events.EventRecorder,
 ) *disaggregatedSetAuxiliaryDCDReconciler {
 	return &disaggregatedSetAuxiliaryDCDReconciler{
 		client:   k8sClient,
+		reader:   apiReader,
 		recorder: recorder,
 	}
 }
@@ -59,7 +62,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 		if _, selected := selection.componentToRole[componentName]; selected {
 			continue
 		}
-		if err := preserveExistingDCDState(ctx, r.client, dgd, dcd); err != nil {
+		if err := preserveExistingDCDState(ctx, r.reader, r.client, dgd, dcd); err != nil {
 			return nil, false, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
 		wasModified, syncedDCD, err := commoncontroller.SyncResource(ctx, &syncer, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {

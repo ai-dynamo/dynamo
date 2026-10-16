@@ -29,6 +29,7 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler
 ) *disaggregatedSetWorkloadsReconciler {
 	return newDisaggregatedSetWorkloadsReconciler(
 		r.Client,
+		r.apiReader(),
 		r.Recorder,
 		r.Config,
 		r.RuntimeConfig,
@@ -39,6 +40,7 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler
 
 func newDisaggregatedSetWorkloadsReconciler(
 	k8sClient client.Client,
+	apiReader client.Reader,
 	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
@@ -54,7 +56,7 @@ func newDisaggregatedSetWorkloadsReconciler(
 		renderer:        newDisaggregatedSetWorkloadRenderer(componentRenderer),
 		resources:       newDisaggregatedSetResourceReconciler(k8sClient),
 		stableResources: newDisaggregatedSetStableResourcesReconciler(k8sClient, componentRenderer),
-		auxiliaryDCDs:   newDisaggregatedSetAuxiliaryDCDReconciler(k8sClient, recorder),
+		auxiliaryDCDs:   newDisaggregatedSetAuxiliaryDCDReconciler(k8sClient, apiReader, recorder),
 		readiness:       readiness,
 		restartProgress: newDisaggregatedSetRestartProgressResolver(k8sClient, readiness, componentRestartProgress),
 	}

@@ -60,6 +60,28 @@ func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.
 	}
 }
 
+func TestDCDPrimaryPredicateObservesOnlyGraphUIDLabelChanges(t *testing.T) {
+	old := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Generation: 1,
+			Labels:     map[string]string{"example.com/existing": "value"},
+		},
+	}
+	filter := dcdPrimaryPredicate()
+
+	graphUIDChanged := old.DeepCopy()
+	graphUIDChanged.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = "new-uid"
+	assert.True(t, filter.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: graphUIDChanged}))
+
+	unrelatedLabelChanged := old.DeepCopy()
+	unrelatedLabelChanged.Labels["example.com/noise"] = "changed"
+	assert.False(t, filter.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: unrelatedLabelChanged}))
+
+	statusChanged := old.DeepCopy()
+	statusChanged.ResourceVersion = "2"
+	assert.False(t, filter.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: statusChanged}))
+}
+
 func TestGenerationOrDeletionChangedPredicate(t *testing.T) {
 	pred := commoncontroller.GenerationOrDeletionChangedPredicate()
 	oldObject := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Generation: 1}}

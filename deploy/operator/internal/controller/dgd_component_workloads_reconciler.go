@@ -41,16 +41,19 @@ import (
 // reconciliation without depending on the top-level DGD reconciler.
 type componentWorkloadsReconciler struct {
 	syncer  dgdResourceSyncer
+	reader  client.Reader
 	rollout *dgdWorkerRolloutReconciler
 }
 
 func newComponentWorkloadsReconciler(
 	kubeClient client.Client,
+	apiReader client.Reader,
 	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
 	return &componentWorkloadsReconciler{
 		syncer:  newDGDResourceSyncer(kubeClient, recorder),
+		reader:  apiReader,
 		rollout: rollout,
 	}
 }
@@ -264,19 +267,30 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
-	return preserveExistingDCDState(ctx, r.syncer, dgd, desired)
+	reader := r.reader
+	if reader == nil {
+		reader = r.syncer
+	}
+	return preserveExistingDCDState(ctx, reader, r.syncer, dgd, desired)
 }
 
 func preserveExistingDCDState(
 	ctx context.Context,
+	apiReader client.Reader,
 	kubeClient client.Client,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
 	var backendFramework string
+	if apiReader == nil {
+		apiReader = kubeClient
+	}
+
+	// Use the cache normally and bypass it only after a conflict proves the object stale.
+	reader := client.Reader(kubeClient)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		err := kubeClient.Get(
+		err := reader.Get(
 			ctx,
 			types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace},
 			existing,
@@ -310,7 +324,7 @@ func preserveExistingDCDState(
 			existing.Labels = make(map[string]string)
 		}
 		existing.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
-		return kubeClient.Patch(
+		err = kubeClient.Patch(
 			ctx,
 			existing,
 			client.MergeFromWithOptions(
@@ -318,6 +332,10 @@ func preserveExistingDCDState(
 				client.MergeFromWithOptimisticLock{},
 			),
 		)
+		if apierrors.IsConflict(err) {
+			reader = apiReader
+		}
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf(

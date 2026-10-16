@@ -274,19 +274,6 @@ class KubernetesCapacityManager(CapacityManager):
         self._replica_uids.pop(participant_id, None)
         self._replica_settlements.pop(participant_id, None)
 
-    def _accept_drained_missing_deployment(
-        self,
-        participant_id: str,
-        connector: KubernetesConnector,
-        pods: list,
-    ) -> None:
-        """Forget an absent DGD only after its bracketed Pod set is empty."""
-        self._require_missing_deployment_drained(connector, pods)
-        self._clear_uid_bound_state(participant_id)
-        self._observed_uids.pop(participant_id, None)
-        if self.connectors.get(participant_id) is connector:
-            self._missing_participants.add(participant_id)
-
     def _record_observed_pools(
         self, participant_id: str, pools: dict[str, PoolSpec]
     ) -> dict[str, PoolSpec]:
@@ -388,9 +375,7 @@ class KubernetesCapacityManager(CapacityManager):
             if old is None and current is None:
                 continue
             if old is None or current is None:
-                raise RuntimeError(
-                    f"{resource} {name!r} appeared or disappeared during Pod inventory"
-                )
+                raise _SnapshotConflict(resource, name)
             old_metadata = old.get("metadata") or {}
             current_metadata = current.get("metadata") or {}
             if not isinstance(old_metadata, Mapping) or not isinstance(
@@ -404,9 +389,7 @@ class KubernetesCapacityManager(CapacityManager):
             if not isinstance(current_uid, str) or not current_uid:
                 raise ValueError(f"{resource} {name!r} metadata.uid is unavailable")
             if old_uid != current_uid:
-                raise RuntimeError(
-                    f"{resource} {name!r} identity changed during Pod inventory"
-                )
+                raise _SnapshotConflict(resource, name)
             old_version = old_metadata.get("resourceVersion")
             current_version = current_metadata.get("resourceVersion")
             if not isinstance(old_version, str) or not old_version:
@@ -587,9 +570,13 @@ class KubernetesCapacityManager(CapacityManager):
             if initial is None:
                 try:
                     connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
-                except DynamoGraphDeploymentNotFoundError:
-                    self._accept_drained_missing_deployment(
-                        key,
+                except DynamoGraphDeploymentNotFoundError as error:
+                    if not self._mark_missing_deployment(key, connector):
+                        raise RuntimeError(
+                            f"observed DGD disappeared: {error}; capacity drain "
+                            "cannot be proven"
+                        ) from error
+                    self._require_missing_deployment_drained(
                         connector,
                         pods_by_graph.get(connector.parent_dgd_name, []),
                     )
@@ -597,18 +584,16 @@ class KubernetesCapacityManager(CapacityManager):
                     continue
                 except Exception as error:
                     self._record_observation_failure(all_pools, key, error, True)
-                self._record_observation_failure(
-                    all_pools,
-                    key,
-                    RuntimeError("DGD appeared during Pod inventory"),
-                    True,
-                )
+                raise _SnapshotConflict("DGD", connector.parent_dgd_name)
 
             try:
                 deployment_before, adapters_before, authoritative_before = initial
-                deployment = connector.kube_api.get_graph_deployment(
-                    connector.parent_dgd_name
-                )
+                try:
+                    deployment = connector.kube_api.get_graph_deployment(
+                        connector.parent_dgd_name
+                    )
+                except DynamoGraphDeploymentNotFoundError as error:
+                    raise _SnapshotConflict("DGD", connector.parent_dgd_name) from error
                 self._require_inventory_unchanged(
                     {connector.parent_dgd_name: deployment_before},
                     {connector.parent_dgd_name: deployment},
@@ -647,11 +632,7 @@ class KubernetesCapacityManager(CapacityManager):
                     pods=pods_by_graph.get(connector.parent_dgd_name, []),
                     authoritative_deployment=authoritative,
                 )
-                self._record_observed_identity(
-                    key,
-                    deployment,
-                    allow_replacement=True,
-                )
+                self._record_observed_identity(key, deployment)
                 all_pools[key] = self._record_observed_pools(key, pools)
                 if self.connectors.get(key) is connector:
                     self._missing_participants.discard(key)
@@ -679,14 +660,15 @@ class KubernetesCapacityManager(CapacityManager):
             )
             try:
                 connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
-            except DynamoGraphDeploymentNotFoundError:
-                self._accept_drained_missing_deployment(
-                    participant_id,
-                    connector,
-                    pods,
-                )
+            except DynamoGraphDeploymentNotFoundError as missing_error:
+                if not self._mark_missing_deployment(participant_id, connector):
+                    raise RuntimeError(
+                        f"observed DGD disappeared: {missing_error}; capacity drain "
+                        "cannot be proven"
+                    ) from missing_error
+                self._require_missing_deployment_drained(connector, pods)
                 return {}
-            raise RuntimeError("DGD appeared during Pod inventory") from error
+            raise _SnapshotConflict("DGD", connector.parent_dgd_name) from error
 
         if self.connectors.get(participant_id) is connector:
             self._missing_participants.discard(participant_id)
@@ -800,8 +782,17 @@ class KubernetesCapacityManager(CapacityManager):
             connector_namespace = key.partition("/")[0]
             if connector_namespace == self.namespace:
                 if require_complete:
-                    self._accept_drained_missing_deployment(
-                        key,
+                    if not self._mark_missing_deployment(key, connector):
+                        self._record_observation_failure(
+                            all_pools,
+                            key,
+                            RuntimeError(
+                                "observed DGD is absent from the namespace inventory; "
+                                "capacity drain cannot be proven"
+                            ),
+                            True,
+                        )
+                    self._require_missing_deployment_drained(
                         connector,
                         pods_by_graph.get(connector.parent_dgd_name, []),
                     )
@@ -868,7 +859,6 @@ class KubernetesCapacityManager(CapacityManager):
                 self._record_observed_identity(
                     key,
                     deployment,
-                    allow_replacement=require_complete,
                 )
                 all_pools[key] = self._record_observed_pools(key, pools)
                 if self.connectors.get(key) is connector:
@@ -979,7 +969,12 @@ class KubernetesCapacityManager(CapacityManager):
             pods = connector.kube_api.list_nonterminal_pods_for_graph(
                 connector.parent_dgd_name
             )
-            current = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+            try:
+                current = connector.kube_api.get_graph_deployment(
+                    connector.parent_dgd_name
+                )
+            except DynamoGraphDeploymentNotFoundError as error:
+                raise _SnapshotConflict("DGD", connector.parent_dgd_name) from error
             self._require_inventory_unchanged(
                 {connector.parent_dgd_name: deployment},
                 {connector.parent_dgd_name: current},
@@ -1024,7 +1019,6 @@ class KubernetesCapacityManager(CapacityManager):
         self._record_observed_identity(
             participant_id,
             deployment,
-            allow_replacement=require_settled,
         )
         return self._record_observed_pools(participant_id, pools)
 
@@ -1195,6 +1189,10 @@ class KubernetesCapacityManager(CapacityManager):
             or component_mismatches
             or api.has_terminating_pods(pods)
             or not api.pcsg_pods_within_desired_replicas(
+                authoritative_deployment,
+                pods,
+            )
+            or not api.deployment_pods_within_desired_replicas(
                 authoritative_deployment,
                 pods,
             )

@@ -18,6 +18,7 @@ import copy
 import logging
 from collections.abc import Callable, Collection, Mapping
 from typing import Optional
+from urllib.parse import quote
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
@@ -64,6 +65,7 @@ GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
 REPLICA_WRITE_FENCE_ANNOTATION = "dynamo.nvidia.com/replica-write-fence"
 KUBERNETES_LIST_PAGE_SIZE = 500
+KUBERNETES_LABEL_SELECTOR_MAX_LENGTH = 4096
 NONTERMINAL_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
 PARTIAL_OBJECT_METADATA_ACCEPT = (
     "application/json;as=PartialObjectMetadataList;v=v1;g=meta.k8s.io"
@@ -926,6 +928,28 @@ class KubernetesAPI:
                     return False
         return True
 
+    def deployment_pods_within_desired_replicas(
+        self, deployment: dict, pods: list
+    ) -> bool:
+        """Reject Deployment surge Pods not yet reflected in DGD status."""
+        components = get_components_by_name(deployment)
+        pods_by_component = self.partition_pods_by_component(pods)
+        for name, status in deployment.get("status", {}).get("components", {}).items():
+            component = components.get(name, {})
+            if (
+                status.get("componentKind") != "Deployment"
+                or get_component_type(component) == "planner"
+            ):
+                continue
+            desired = Service(name=name, service=component).number_replicas()
+            active = sum(
+                _pod_phase(pod) not in ("Succeeded", "Failed")
+                for pod in pods_by_component.get(name, [])
+            )
+            if active > desired:
+                return False
+        return True
+
     def non_planner_components_stable(self, deployment: dict) -> tuple[bool, list[str]]:
         """Return ``(all_stable, unstable_names)`` for non-planner components."""
         components = get_components_by_name(deployment)
@@ -1219,18 +1243,34 @@ class KubernetesAPI:
 
     def list_graph_pods(self, dgd_names: Collection[str] | None = None) -> list:
         """List nonterminal DGD Pods, optionally scoped to selected graphs."""
+        selected_names: set[str] | None = None
+        filter_locally = False
         if dgd_names is None:
             label_selector = DYNAMO_DGD_NAME_LABEL
         else:
             names = sorted(set(dgd_names))
             if not names:
                 return []
+            selected_names = set(names)
             label_selector = f"{DYNAMO_DGD_NAME_LABEL} in ({','.join(names)})"
-        return self._list_graph_pods(
+            if (
+                len(quote(label_selector, safe=""))
+                > KUBERNETES_LABEL_SELECTOR_MAX_LENGTH
+            ):
+                label_selector = DYNAMO_DGD_NAME_LABEL
+                filter_locally = True
+        pods = self._list_graph_pods(
             label_selector,
             field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
             metadata_only=True,
         )
+        if not filter_locally:
+            return pods
+        return [
+            pod
+            for pod in pods
+            if _pod_labels(pod).get(DYNAMO_DGD_NAME_LABEL) in selected_names
+        ]
 
     def _list_graph_pods(
         self,
@@ -1610,6 +1650,9 @@ class KubernetesAPI:
                     or component_mismatches
                     or self.has_terminating_pods(pods)
                     or not self.pcsg_pods_within_desired_replicas(
+                        settlement_deployment, pods
+                    )
+                    or not self.deployment_pods_within_desired_replicas(
                         settlement_deployment, pods
                     )
                 ):

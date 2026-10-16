@@ -904,32 +904,55 @@ func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
 		},
 	}
 	existing := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm", ResourceVersion: "stale"},
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 		},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(dgd, existing, scheme))
-	patchCalls := 0
+	apiReaderCalls := 0
+	apiReader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+				apiReaderCalls++
+				if err := delegated.Get(ctx, key, object, opts...); err != nil {
+					return err
+				}
+				object.SetResourceVersion("fresh")
+				return nil
+			},
+		}).
+		Build()
+	patchVersions := []string{}
+	cachedReaderCalls := 0
+	var patched *nvidiacomv1beta1.DynamoComponentDeployment
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(existing).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				patchCalls++
-				if patchCalls == 1 {
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+				cachedReaderCalls++
+				return delegated.Get(ctx, key, object, opts...)
+			},
+			Patch: func(_ context.Context, _ client.WithWatch, object client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				patchVersions = append(patchVersions, object.GetResourceVersion())
+				if len(patchVersions) == 1 {
 					return apierrors.NewConflict(
 						schema.GroupResource{Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamocomponentdeployments"},
 						object.GetName(),
 						errors.New("stale DynamoComponentDeployment"),
 					)
 				}
-				return delegated.Patch(ctx, object, patch, opts...)
+				patched = object.DeepCopyObject().(*nvidiacomv1beta1.DynamoComponentDeployment)
+				return nil
 			},
 		}).
 		Build()
 	workloads := &componentWorkloadsReconciler{
 		syncer: newDGDResourceSyncer(kubeClient, nil),
+		reader: apiReader,
 	}
 	desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
@@ -937,10 +960,11 @@ func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
 
 	require.NoError(t, workloads.preserveExistingDCDState(context.Background(), dgd, desired))
 
-	updated := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{Name: "worker", Namespace: "jsm"}, updated))
-	assert.Equal(t, 2, patchCalls)
-	assert.Equal(t, "dgd-uid", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
+	assert.Equal(t, 1, cachedReaderCalls)
+	assert.Equal(t, 1, apiReaderCalls)
+	assert.Equal(t, []string{"stale", "fresh"}, patchVersions)
+	require.NotNil(t, patched)
+	assert.Equal(t, "dgd-uid", patched.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 	assert.Equal(t, "vllm", desired.Spec.BackendFramework)
 }
 
@@ -1130,7 +1154,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 	t.Log("Wire the component workloads reconciler backed by a fake client seeded with only the DGD")
 	r := createTestDGDReconcilerWithStatus(dgd)
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
 	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
@@ -1210,7 +1234,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")
 	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)

@@ -181,6 +181,13 @@ def _install_connector(
             pods,
         )
     )
+    connector.kube_api.deployment_pods_within_desired_replicas = MagicMock(
+        side_effect=lambda deployment, pods: KubernetesAPI.deployment_pods_within_desired_replicas(
+            connector.kube_api,
+            deployment,
+            pods,
+        )
+    )
     connector._test_deployment = spec
 
     def list_deployments():
@@ -654,19 +661,28 @@ async def test_run_with_conflict_retry_restarts_complete_operation():
 
 
 @pytest.mark.asyncio
-async def test_run_with_conflict_retry_restarts_snapshot_drift():
+@pytest.mark.parametrize("resource", ["DGD", "DGDSA"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["resource-version", "uid", "appearance", "disappearance"],
+)
+async def test_run_with_conflict_retry_restarts_snapshot_drift(resource, mutation):
     cm = KubernetesCapacityManager("default")
-    before = {
+    stable = {
         "model": {
-            "metadata": {
-                "name": "model",
-                "uid": "dgd-uid",
-                "resourceVersion": "1",
-            }
+            "metadata": {"name": "model", "uid": "object-uid", "resourceVersion": "1"}
         }
     }
-    changed = deepcopy(before)
-    changed["model"]["metadata"]["resourceVersion"] = "2"
+    before = deepcopy(stable)
+    changed = deepcopy(stable)
+    if mutation == "resource-version":
+        changed["model"]["metadata"]["resourceVersion"] = "2"
+    elif mutation == "uid":
+        changed["model"]["metadata"]["uid"] = "replacement-uid"
+    elif mutation == "appearance":
+        before = {}
+    else:
+        changed = {}
     attempts = 0
 
     async def operation():
@@ -676,7 +692,7 @@ async def test_run_with_conflict_retry_restarts_snapshot_drift():
             before,
             changed if attempts == 1 else before,
             {"model"},
-            "DGD",
+            resource,
         )
         return "stable"
 
@@ -1146,6 +1162,37 @@ def test_complete_implicit_observation_rejects_removed_component_pods():
         cm.observe(require_complete=True)
 
 
+def test_complete_implicit_observation_rejects_deployment_surge_pods():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    deployment = _listed_dgd(_dgd_spec(0, 1), "model")
+    deployment["status"]["components"]["decode-svc"]["componentKind"] = "Deployment"
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+    )
+    cm._inventory_api = connector.kube_api
+    connector.kube_api.list_graph_deployments.return_value = [deployment]
+    connector.kube_api.list_graph_pods.return_value = [
+        {
+            "metadata": {
+                "name": f"decode-{index}",
+                "labels": {
+                    "nvidia.com/dynamo-graph-deployment-name": "model",
+                    "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+                    "nvidia.com/dynamo-component": "decode-svc",
+                },
+            }
+        }
+        for index in range(2)
+    ]
+
+    with pytest.raises(RuntimeError, match="still draining"):
+        cm.observe(require_complete=True)
+
+
 def test_complete_implicit_observation_rejects_dgd_change_during_pod_inventory():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
@@ -1167,8 +1214,9 @@ def test_complete_implicit_observation_rejects_dgd_change_during_pod_inventory()
     connector.kube_api.list_graph_deployment_metadata.return_value = [replacement]
     connector.kube_api.list_graph_deployment_metadata.side_effect = None
 
-    with pytest.raises(RuntimeError, match="identity changed during Pod inventory"):
+    with pytest.raises(client.ApiException) as error:
         cm.observe(require_complete=True)
+    assert error.value.status == 409
 
 
 def test_observe_multinode_scales_gpu_count():
@@ -1432,16 +1480,16 @@ def test_observe_deleted_deployment_fails_closed_while_old_pods_remain():
     ]
 
     initial = cm.observe(require_complete=True)
-    with pytest.raises(RuntimeError, match="still has 1 nonterminal Pods"):
+    with pytest.raises(RuntimeError, match="capacity drain cannot be proven"):
         cm.observe(require_complete=True)
 
     assert initial["default/model"]["prefill"].current_replicas == 2
     assert cm._observed_uids["default/model"] == "dgd-uid"
     assert cm._last_observed_pools["default/model"]["prefill"].current_replicas == 2
-    assert cm.participant_exists("default/model")
+    assert not cm.participant_exists("default/model")
 
 
-def test_observe_deleted_deployment_is_accepted_after_pods_drain():
+def test_observe_deleted_deployment_stays_reserved_after_pods_drain():
     cm = KubernetesCapacityManager("default")
     deployment = _dgd_spec(2, 1)
     connector = _install_connector(
@@ -1457,10 +1505,12 @@ def test_observe_deleted_deployment_is_accepted_after_pods_drain():
     cm.observe(require_complete=True)
     cm._replica_uids["default/model"] = "dgd-uid"
 
-    assert cm.observe(require_complete=True) == {"default/model": {}}
-    assert "default/model" not in cm._observed_uids
-    assert "default/model" not in cm._last_observed_pools
-    assert "default/model" not in cm._replica_uids
+    with pytest.raises(RuntimeError, match="capacity drain cannot be proven"):
+        cm.observe(require_complete=True)
+
+    assert cm._observed_uids["default/model"] == "dgd-uid"
+    assert cm._last_observed_pools["default/model"]["prefill"].current_replicas == 2
+    assert cm._replica_uids["default/model"] == "dgd-uid"
     assert not cm.participant_exists("default/model")
 
 
@@ -1505,7 +1555,7 @@ def test_observe_same_name_replacement_fails_closed_and_preserves_uid_bound_stat
     assert cm.participant_exists("default/model")
 
 
-def test_observe_same_name_replacement_is_adopted_after_old_pods_drain():
+def test_observe_same_name_replacement_stays_reserved_after_old_pods_drain():
     cm = KubernetesCapacityManager("default")
     deployment = _dgd_spec(2, 1)
     replacement = deepcopy(deployment)
@@ -1523,11 +1573,12 @@ def test_observe_same_name_replacement_is_adopted_after_old_pods_drain():
     cm.observe(require_complete=True)
     cm._replica_uids["default/model"] = "dgd-uid"
 
-    snapshot = cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="capacity drain cannot be proven"):
+        cm.observe(require_complete=True)
 
-    assert snapshot["default/model"]["prefill"].current_replicas == 2
-    assert cm._observed_uids["default/model"] == "replacement-uid"
-    assert "default/model" not in cm._replica_uids
+    assert cm._observed_uids["default/model"] == "dgd-uid"
+    assert cm._last_observed_pools["default/model"]["prefill"].current_replicas == 2
+    assert cm._replica_uids["default/model"] == "dgd-uid"
     assert cm.participant_exists("default/model")
 
 
@@ -1786,7 +1837,7 @@ def test_observe_implicit_mode_rejects_residual_pods_without_dgds():
     assert cm.connectors["default/model"] is connector
 
 
-def test_observe_implicit_mode_discards_drained_missing_observed_local():
+def test_observe_implicit_mode_keeps_drained_missing_observed_local_reserved():
     cm = KubernetesCapacityManager("default")
     cm._observe_all_deployments = True
     connector = _install_connector(
@@ -1798,10 +1849,11 @@ def test_observe_implicit_mode_discards_drained_missing_observed_local():
     connector.kube_api.list_graph_deployment_metadata.return_value = []
     cm._inventory_api = connector.kube_api
 
-    assert cm.observe(require_complete=True) == {}
+    with pytest.raises(RuntimeError, match="capacity drain cannot be proven"):
+        cm.observe(require_complete=True)
 
-    assert "default/model" not in cm.connectors
-    assert "default/model" not in cm._observed_uids
+    assert cm.connectors["default/model"] is connector
+    assert cm._observed_uids["default/model"] == "dgd-uid"
     assert not cm.participant_exists("default/model")
 
 
