@@ -33,10 +33,12 @@
 //! Relay in a workload cluster:
 //!
 //! ```ignore
-//! let replicas = EndpointSliceReplicaDirectory::imported(local, &router, mcs);
-//! let mut events = replicas.list_and_watch(Some(cancel.clone())).await?;
-//! // Added(replica): broadcaster.dial(&replica, &pool_key, cancel.clone())
-//! // Removed(id): close that connection
+//! let replicas = Arc::new(EndpointSliceReplicaDirectory::imported(local, &router, mcs));
+//! StateBroadcaster::new(replicas, dialer, pool_key)
+//!     .run(cancel.clone())
+//!     .await?;
+//! // run() watches the directory. Added(replica): dialer.dial(&replica, ..).
+//! // Removed(id): close that connection.
 //! ```
 
 // Sketch: fields and parameters are unused until the bodies exist.
