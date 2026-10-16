@@ -109,6 +109,28 @@ def test_managed_preflight_and_target_are_nonmutating(runtime, managed):
     assert runtime._binding(managed) == ("approved", "artifacts/result")
 
 
+@pytest.mark.asyncio
+async def test_shutdown_rejects_new_submit_without_waiting_for_drain(
+    runtime, managed, monkeypatch
+):
+    draining = asyncio.Event()
+    finish_drain = asyncio.Event()
+
+    async def slow_drain():
+        draining.set()
+        await finish_drain.wait()
+
+    monkeypatch.setattr(runtime.service, "drain", slow_drain)
+    closing = asyncio.create_task(runtime.close())
+    try:
+        await asyncio.wait_for(draining.wait(), timeout=1)
+        with pytest.raises(ValueError, match="closed"):
+            await asyncio.wait_for(runtime.submit(b"data", [], managed), timeout=0.1)
+    finally:
+        finish_drain.set()
+        await closing
+
+
 @pytest.mark.parametrize(
     "destination,mode,match",
     [

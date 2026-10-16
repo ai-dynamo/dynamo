@@ -37,6 +37,10 @@ class ArtifactDependencyError(RuntimeError):
     """An optional artifact-delivery dependency is unavailable."""
 
 
+class ArtifactAuthorityClosed(ValueError):
+    """The delivery authority is closing and cannot admit new work."""
+
+
 class ArtifactRuntime:
     """Profiles and verifier registrations come exclusively from trusted config.
 
@@ -240,7 +244,7 @@ class ArtifactRuntime:
 
     def validate(self, settings, mode):
         if self._closing:
-            raise ValueError("artifact authority is closed")
+            raise ArtifactAuthorityClosed("artifact authority is closed")
         if mode != "object_store":
             raise ValueError(
                 "relay requests require an independently configured relay authority"
@@ -299,6 +303,8 @@ class ArtifactRuntime:
         }
 
     async def submit(self, data, contents, destination, *, mode="object_store"):
+        if self._closing:
+            raise ArtifactAuthorityClosed("artifact authority is closed")
         async with self._admission_lock:
             self.validate(destination, mode)
             return await self.service.submit(data, self.owner, contents, destination)
@@ -309,13 +315,15 @@ class ArtifactRuntime:
     async def close(self):
         """Settle owned transfers before releasing this database's authority."""
         self._closing = True
+        # Let already-admitted submissions finish creating durable operations.
         async with self._admission_lock:
-            try:
-                await self.service.drain()
-            finally:
-                if self._authority_file is not None:
-                    self._authority_file.close()
-                    self._authority_file = None
+            pass
+        try:
+            await self.service.drain()
+        finally:
+            if self._authority_file is not None:
+                self._authority_file.close()
+                self._authority_file = None
 
 
 @cache
