@@ -48,6 +48,7 @@ impl Default for Limits {
 }
 
 impl Limits {
+    /// Read strictly positive deployment budgets, using defaults only for absent keys.
     fn from_env() -> Result<Self, String> {
         fn read(name: &str, default: usize) -> Result<usize, String> {
             match std::env::var(name) {
@@ -79,6 +80,7 @@ impl Limits {
 
 static LIMITS: LazyLock<Result<Limits, String>> = LazyLock::new(Limits::from_env);
 
+/// Force limit initialization so invalid configuration fails at frontend startup.
 pub(super) fn validate_config() -> anyhow::Result<()> {
     LIMITS
         .as_ref()
@@ -86,6 +88,7 @@ pub(super) fn validate_config() -> anyhow::Result<()> {
         .map_err(|message| anyhow::anyhow!(message.clone()))
 }
 
+/// Expose cached limits or a server-configuration error, never a client error.
 fn configured_limits() -> Result<&'static Limits, ErrorResponse> {
     LIMITS.as_ref().map_err(|message| {
         ErrorMessage::internal_server_error_with_details(
@@ -121,6 +124,7 @@ fn oversized(limit: &'static str) -> ErrorResponse {
     )
 }
 
+/// Preserve body-limit failures as 413 while bounding multipart parser errors.
 fn multipart_error(failure: MultipartError) -> ErrorResponse {
     if failure.status() == StatusCode::PAYLOAD_TOO_LARGE {
         oversized("HTTP body")
@@ -129,14 +133,17 @@ fn multipart_error(failure: MultipartError) -> ErrorResponse {
     }
 }
 
+/// Normalize JSON or multipart edits using the configured resource budgets.
 pub(super) async fn parse(request: Request<Body>) -> Result<NvCreateImageRequest, ErrorResponse> {
     parse_with_limits(request, configured_limits()?).await
 }
 
+/// Apply shared edit validation to the generations endpoint's JSON extension.
 pub(super) fn prepare(request: &mut NvCreateImageRequest) -> Result<(), ErrorResponse> {
     prepare_with_limits(request, configured_limits()?)
 }
 
+/// Require edit references and apply the same admission contract to both encodings.
 async fn parse_with_limits(
     request: Request<Body>,
     limits: &Limits,
@@ -172,6 +179,7 @@ async fn parse_with_limits(
     Ok(parsed)
 }
 
+/// Reject excessive counts and mixed inputs, then bound the worker wire payload.
 fn prepare_with_limits(
     parsed: &mut NvCreateImageRequest,
     limits: &Limits,
@@ -199,6 +207,8 @@ fn prepare_with_limits(
     Ok(())
 }
 
+/// Consume ordered image parts with incremental byte and part-count budgets.
+/// File bytes determine the format; mixed aliases, duplicate scalars, and masks fail.
 async fn parse_multipart(
     mut multipart: Multipart,
     limits: &Limits,
@@ -317,6 +327,8 @@ async fn parse_multipart(
         .map_err(|_| malformed("Invalid image edit form fields"))
 }
 
+/// Inspect format and dimensions before allocating a base64 data URL.
+/// Return its pixel count for aggregate admission; full decoding remains worker-owned.
 fn encode_image(
     bytes: &[u8],
     limits: &Limits,
@@ -380,6 +392,7 @@ fn encode_image(
     Ok((encoded, pixels))
 }
 
+/// Count the complete JSON wire payload without allocating a second encoded copy.
 pub(super) fn check_serialized_size(
     request: &NvCreateImageRequest,
     limit: usize,
@@ -422,6 +435,7 @@ mod tests {
         }
     }
 
+    /// Use distinct pixels and a misleading filename to exercise byte-based detection.
     fn image_part(name: &str, red: u8) -> Part<'_> {
         let mut bytes = Cursor::new(Vec::new());
         image::RgbImage::from_pixel(2, 2, image::Rgb([red, 0, 0]))
@@ -434,6 +448,7 @@ mod tests {
         }
     }
 
+    /// Preserve arbitrary field order and duplicate names in the test request.
     fn multipart_body(parts: &[Part<'_>]) -> Vec<u8> {
         let mut body = Vec::new();
         for part in parts {
@@ -455,6 +470,7 @@ mod tests {
         body
     }
 
+    /// Exercise the Axum route and body limit with chunks and no Content-Length.
     async fn send(
         body: Vec<u8>,
         content_type: &str,
@@ -499,6 +515,7 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// Include a valid MIME parameter so tests cover multipart content-type parsing.
     async fn upload(parts: Vec<Part<'_>>, limits: Limits) -> (StatusCode, Value) {
         send(
             multipart_body(&parts),
@@ -509,6 +526,7 @@ mod tests {
         .await
     }
 
+    /// Interleaved scalar fields must not reorder images or change numeric semantics.
     #[tokio::test]
     async fn uploads_preserve_part_order_and_typed_fields() {
         for alias in ["image", "image[]"] {
@@ -551,6 +569,7 @@ mod tests {
         assert!(body["input_reference"].is_string());
     }
 
+    /// Reject incomplete or ambiguous forms without echoing their private contents.
     #[tokio::test]
     async fn ambiguous_or_unsupported_fields_fail_before_dispatch() {
         for additional in [
@@ -603,6 +622,7 @@ mod tests {
         );
     }
 
+    /// Accept each exact resource boundary and reject the first excess byte or pixel.
     #[tokio::test]
     async fn upload_limits_have_exact_boundaries() {
         let file_bytes = image_part("image", 0).data.len();
@@ -696,6 +716,7 @@ mod tests {
         );
     }
 
+    /// Both input encodings must require valid references and preserve their wire shape.
     #[tokio::test]
     async fn json_and_form_validation_keep_the_same_reference_contract() {
         for references in [
@@ -745,6 +766,7 @@ mod tests {
         );
     }
 
+    /// The worker budget includes escaped JSON and passthrough, not only image bytes.
     #[test]
     fn serialized_budget_counts_encoding_and_all_fields() {
         let mut request: NvCreateImageRequest = serde_json::from_value(serde_json::json!({"prompt":"edit", "input_reference":["first","second"], "custom":"value"})).unwrap();

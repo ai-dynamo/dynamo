@@ -82,6 +82,10 @@ class NvCreateImageRequest(BaseModel):
     @field_validator("input_reference", mode="before")
     @classmethod
     def normalize_input_reference(cls, value):
+        """Normalize supplied strings and ordered arrays to a nonempty list.
+
+        Keep reference contents out of the validation messages raised here.
+        """
         if value is None:
             return None
         references = [value] if isinstance(value, str) else value
@@ -95,7 +99,7 @@ class NvCreateImageRequest(BaseModel):
 
     @field_serializer("input_reference")
     def serialize_input_reference(self, value: Optional[list[str]]):
-        # N-2 readers accept the singleton string and reject arrays explicitly.
+        """Keep singleton strings for N-2 readers; arrays remain explicit."""
         if value is not None and len(value) == 1:
             return value[0]
         return value

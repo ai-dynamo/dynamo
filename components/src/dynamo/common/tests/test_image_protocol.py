@@ -72,6 +72,8 @@ def test_image_request_parsing_preserves_output_format_and_unsupported_controls(
 
 @pytest.mark.parametrize("reference", ["first", ["first"], ["first", "second"]])
 def test_image_reference_normalization_and_n2_serialization(reference):
+    """Singleton arrays must remain readable by scalar-only worker schemas."""
+
     class LegacyImageRequest(BaseModel):
         input_reference: str | None = None
 
@@ -89,5 +91,6 @@ def test_image_reference_normalization_and_n2_serialization(reference):
 
 @pytest.mark.parametrize("reference", [[], " ", ["first", ""], ["first", 2]])
 def test_invalid_image_reference_shape_fails_at_boundary(reference):
+    """Reject malformed references during schema validation, before worker I/O."""
     with pytest.raises(ValidationError):
         NvCreateImageRequest(prompt="edit", input_reference=reference)

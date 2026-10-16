@@ -23,6 +23,8 @@ use crate::{
 
 pub(crate) const SNAPSHOT_KEY: &str = "image_edit_admission";
 
+/// Read version-1 capability metadata, honoring explicit zero.
+/// Missing, malformed, or unknown-version records retain the legacy limit of one.
 pub(crate) fn advertised_limit(card: &ModelDeploymentCard) -> usize {
     let capability = card
         .user_data
@@ -59,6 +61,7 @@ pub(crate) struct ImageEditAdmission {
 }
 
 impl ImageEditAdmission {
+    /// Bind capability tracking to the controller-owned admission channel.
     pub(crate) fn new(admitted_ids: watch::Receiver<Vec<u64>>) -> Self {
         Self {
             limits: ArcSwap::from_pointee(HashMap::new()),
@@ -66,10 +69,13 @@ impl ImageEditAdmission {
         }
     }
 
+    /// Publish a complete capability map for the committed group membership.
     pub(crate) fn replace(&self, members: impl Iterator<Item = (u64, usize)>) {
         self.limits.store(Arc::new(members.collect()));
     }
 
+    /// Intersect capabilities with admitted IDs and take their minimum limit.
+    /// Missing records contribute one; an empty admission set contributes zero.
     pub(crate) fn snapshot(&self) -> ImageEditSnapshot {
         let ids = self.admitted_ids.borrow();
         let limits = self.limits.load();
@@ -83,6 +89,7 @@ impl ImageEditAdmission {
         }
     }
 
+    /// Reject a selected worker if either admission snapshot cannot serve the edit.
     fn validate_dispatch(
         &self,
         snapshot: &ImageEditSnapshot,
@@ -115,6 +122,7 @@ impl
     AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesResponse>>, anyhow::Error>
     for ImageEditEngine
 {
+    /// Recheck edit admission at worker selection; preserve generation-only routing.
     async fn generate(
         &self,
         request: SingleIn<NvCreateImageRequest>,
@@ -146,6 +154,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Capability metadata must not alter checksum-based cohort membership.
     #[test]
     fn capabilities_are_versioned_conservative_and_do_not_change_identity() {
         let checksum = ModelDeploymentCard::default().mdcsum().to_owned();
@@ -164,6 +173,7 @@ mod tests {
         }
     }
 
+    /// Joining, removed, and retired members must invalidate incompatible snapshots.
     #[test]
     fn snapshot_uses_only_admitted_members_and_fences_membership_changes() {
         let (tx, rx) = watch::channel(vec![1, 2]);

@@ -37,6 +37,7 @@ class ImageEditLimits:
 
     @classmethod
     def from_env(cls) -> "ImageEditLimits":
+        """Read deployment limits, rejecting empty, non-ASCII, or nonpositive values."""
         values = {}
         for field, name in (
             ("images", "DYN_IMAGE_EDIT_MAX_IMAGES"),
@@ -55,6 +56,7 @@ class ImageEditLimits:
 def image_edit_capability(
     model_class_name: str | None, limits: ImageEditLimits
 ) -> dict:
+    """Build version-1 discovery metadata from the loaded pipeline and limits."""
     return {
         "schema_version": 1,
         "max_input_images": image_edit_input_limit(

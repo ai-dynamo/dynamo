@@ -25,6 +25,10 @@ class LegacyRequest(BaseModel):
 
 
 async def generate(request, context):
+    """Report the received wire shape and ordered hashes, or await cancellation.
+
+    The legacy mode rejects array references even if discovery advertised support.
+    """
     if os.environ.get("IMAGE_EDIT_LEGACY_READER") == "1":
         try:
             LegacyRequest.model_validate(request)
@@ -55,6 +59,7 @@ async def generate(request, context):
 
 
 async def main():
+    """Serve a CPU protocol worker with optional image-edit capability metadata."""
     runtime = DistributedRuntime(
         asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
     )
