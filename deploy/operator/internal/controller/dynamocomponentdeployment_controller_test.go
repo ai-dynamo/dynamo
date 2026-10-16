@@ -2062,6 +2062,46 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 	})
 
+	t.Run("DGD explicit wait policy hands off the compatibility hash to the DCD renderer", func(t *testing.T) {
+		t.Log("Given a WaitForCheckpoint DCD whose only restore identity comes from the DGD startup policy")
+		dcd := makeDCD("worker-snapshot")
+		delete(dcd.Spec.PodTemplate.Annotations, commonconsts.SnapshotCandidateCompatibilityHashAnnotation)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
+		require.NoError(t, (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(
+			dcd,
+			&checkpoint.CheckpointInfo{
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     true,
+				CheckpointName:            "worker-snapshot",
+				StartupPolicy:             v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
+				NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
+					UID:                  snapshot.UID,
+					BoundContentName:     "content-a",
+					CompatibilityVersion: commonconsts.SnapshotCompatibilityVersion,
+					GMSMode:              commonconsts.SnapshotGMSModeDisabled,
+				},
+			},
+		))
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the DCD resolves the Ready PodSnapshot as a pinned restore candidate")
+		require.NoError(t, err)
+		assert.Equal(t, "compatibility-v1", podTemplateSpec.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation])
+		assert.Equal(t, commonconsts.KubeLabelValueTrue, podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+	})
+
 	t.Run("owning DGD can render its retained automatic checkpoint", func(t *testing.T) {
 		t.Log("Given a WaitForCheckpoint DCD and its owning DGD's retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
