@@ -246,7 +246,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar beta rejects multinode", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		}), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
@@ -269,7 +269,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar alpha rejects multinode", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		}), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`}},
 		{name: "native sidecar requires engine main", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
@@ -302,6 +302,42 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
+		{
+			name: "sglang sidecar multinode requires a leader runtime",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.InitContainers = nil
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: the leader template must declare runtime to select sidecar mode`, `spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{
+			name: "sglang sidecar multinode rejects hidden topology",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Command = []string{"/launch.sh"}
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: multinode SGLang sidecar requires an explicit python -m sglang.launch_server command; use complete leader and worker podTemplates for other launchers`},
+		},
+		{
+			name: "sglang sidecar multinode worker runtime needs version override",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).Roles[1].PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		// SGLang multinode sidecars resolve runtime compatibility independently of engine images.
+		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, false, false)},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, false, true)},
+		{name: "sglang sidecar multinode alpha=False roles=True dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, true, false)},
+		{name: "sglang sidecar multinode alpha=False roles=True dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, true, true)},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, false, false)},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, false, true)},
+		{name: "sglang sidecar multinode alpha=True roles=True dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, true, false)},
+		{name: "sglang sidecar multinode alpha=True roles=True dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -679,7 +715,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "inter-pod GMS requires vLLM backend",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.BackendFramework = "sglang"
+				dgd.Spec.BackendFramework = sglangBackendFramework
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
@@ -1687,7 +1723,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: Dynamo sidecar mode is not supported in multinode or LPX role pod templates`},
+			wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`},
 		},
 		{
 			name: "role pod templates require a 1.6 or later Planner",
@@ -4823,4 +4859,54 @@ func assertDGDAdmissionDefaults(t *testing.T, actual *unstructured.Unstructured,
 		)
 	}
 
+}
+
+// sglangMultinodeDGDForAdmission authors either complete role sources or one shared template.
+func sglangMultinodeDGDForAdmission(t *testing.T, alpha, roles, dp bool) runtime.Object {
+	t.Helper()
+	dgd := nativeDGDForAdmission(t, false, nil).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dgd.Spec.BackendFramework = sglangBackendFramework
+	component := betaWorkerComponent(dgd)
+	component.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+	main := &component.PodTemplate.Spec.Containers[0]
+	main.Command = []string{"python3", "-m", "sglang.launch_server"}
+	main.Args = []string{"--model-path", "model", "--tp-size", "2"}
+	if dp {
+		main.Args = append(main.Args, "--enable-dp-attention", "--dp-size", "2")
+	}
+	if roles {
+		for _, name := range []string{"leader", "worker"} {
+			template := component.PodTemplate.DeepCopy()
+			template.Spec.Containers[0].Command = []string{"/custom-launcher"}
+			if name == "worker" && !dp {
+				template.Spec.InitContainers = nil
+			}
+			component.Roles = append(component.Roles, nvidiacomv1beta1.ComponentRoleSpec{Name: name, PodTemplate: template})
+		}
+		component.PodTemplate = nil
+	}
+	if alpha {
+		spoke := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		if err := spoke.ConvertFrom(dgd); err != nil {
+			t.Fatal(err)
+		}
+		return spoke
+	}
+	return dgd
+}
+
+func sglangMultinodeDCDForAdmission(t *testing.T, alpha, roles, dp bool) runtime.Object {
+	t.Helper()
+	dgd := sglangMultinodeDGDForAdmission(t, false, roles, dp).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dcd := betaDCDForAdmission(nil)
+	dcd.Spec.BackendFramework = sglangBackendFramework
+	dcd.Spec.DynamoComponentDeploymentSharedSpec = *betaWorkerComponent(dgd).DeepCopy()
+	if alpha {
+		spoke := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		if err := spoke.ConvertFrom(dcd); err != nil {
+			t.Fatal(err)
+		}
+		return spoke
+	}
+	return dcd
 }
