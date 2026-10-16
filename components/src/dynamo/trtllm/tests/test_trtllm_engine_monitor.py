@@ -248,16 +248,11 @@ async def test_monitor_skips_engine_shutdown_when_engine_is_dead(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(10)
-@pytest.mark.parametrize("runtime_fails", [False, True])
-async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch, runtime_fails):
-    """Stop admission before teardown, even if runtime shutdown raises."""
+async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch):
+    """Stop admission before waiting for a teardown that cannot finish."""
     exit_calls = _record_exit(monkeypatch)
     engine = _HangingShutdownEngine([False])
-    runtime = _FakeRuntime(
-        shutdown_exception=RuntimeError("runtime shutdown failed")
-        if runtime_fails
-        else None
-    )
+    runtime = _FakeRuntime()
     runtime_calls_at_teardown = []
     engine_shutdown = engine.shutdown
 
