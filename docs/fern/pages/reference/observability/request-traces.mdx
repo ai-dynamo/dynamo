@@ -148,8 +148,33 @@ A payload row stores the client request under `payload.request`, the completed r
 }
 ```
 
-`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. DynoSim maps them to compact
-internal IDs while loading the original trace; it does not create an intermediate Mooncake file.
+`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes.
+DynoSim maps input hashes to compact internal IDs while loading the original trace;
+it does not create an intermediate Mooncake file.
+
+### Generated-Prefix Identity
+
+Eligible `request_end` records also include `output_sequence_hashes` for generated tokens.
+Enable request-end tracing; no additional setting is needed:
+
+```bash
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_RECORDS=request_end
+```
+
+Output hashes continue the existing input-hash chain, so a response can match a later request's
+input prefix. Input hashing is unchanged. When output hashes are present, append them to the input
+hashes, removing the last input hash first if the input ends mid-block.
+The output field is omitted when no output tokens were observed. Compare hashes only for the same
+model/tokenizer and block size. Existing input-only replay remains compatible; output-aware
+consumers must implement this continuation handling.
+
+<Warning>
+Hashes are not anonymization: these unkeyed identities reveal matching prefixes and can be tested
+against guessed tokens. Restrict access to traces. This feature does not serialize output text or
+token IDs, but holds tokens transiently while hashing an unfinished block. It does not redact
+separately enabled request-payload capture.
+</Warning>
 
 ## Supported Replay Requests
 
