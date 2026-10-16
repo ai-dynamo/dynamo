@@ -308,6 +308,15 @@ impl ComposedPolicyState {
     }
 }
 
+// Out of line so rows that need no fetch input keep the loop body small.
+#[inline(never)]
+fn push_transfer_target<C: WorkerConfigLike>(
+    targets: &mut Vec<Option<KvTransferTarget>>,
+    config: &C,
+) {
+    targets.push(config.kv_transfer_keys().target());
+}
+
 pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     state: &mut ComposedPolicyState,
     input: &MaterializedSelectionInput<'_>,
@@ -354,9 +363,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             input.track_kept_candidate(worker);
             state.push_candidate(candidate);
             if defer_transfer {
-                state
-                    .transfer_targets
-                    .push(config.kv_transfer_keys().target());
+                push_transfer_target(&mut state.transfer_targets, config);
             }
             false
         });
@@ -425,9 +432,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         input.track_kept_candidate(worker);
         state.push_candidate(candidate);
         if defer_transfer {
-            state
-                .transfer_targets
-                .push(config.kv_transfer_keys().target());
+            push_transfer_target(&mut state.transfer_targets, config);
         }
         false
     });
