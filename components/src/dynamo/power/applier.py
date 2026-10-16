@@ -16,8 +16,9 @@ adds the pynvml-backed pieces and ``main``:
   / ``nvmlDeviceGetPowerManagementDefaultLimit`` / limit constraints);
 * the ``nvml`` actuator (``nvmlDeviceSetPowerManagementLimit``, root only);
 * the start-up identity check: every ``--gpu-indices`` entry must be an
-  existing NVML index whose minor number equals it, or the applier would cap
-  different GPUs than the node_agent senses.
+  existing host NVML index (the key ``nvidia-smi -i``, DCGM and
+  ``NVIDIA_VISIBLE_DEVICES`` share); a ``/dev/nvidiaN`` minor number that
+  differs from the index is logged, not refused.
 
 Host requirements: Python >= 3.9 and ``nvidia-ml-py`` in the interpreter
 that runs this module; the ``ai-dynamo`` wheel itself is not needed.
@@ -189,13 +190,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("applier cannot start: NVML is unavailable on this host: %s", exc)
         return EXIT_BAD_CONFIG
     try:
-        validate_gpu_identity(
+        notes = validate_gpu_identity(
             session.device_count(), session.minor_numbers(gpu_indices), gpu_indices
         )
     except (pynvml.NVMLError, PowerControlConfigError) as exc:
         logger.error("applier cannot start: GPU identity check failed: %s", exc)
         session.close()
         return EXIT_BAD_CONFIG
+    for note in notes:
+        logger.info("GPU identity: %s", note)
 
     limits = NvmlLimitReader(session)
     actuator: PowerActuator

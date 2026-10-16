@@ -61,17 +61,24 @@ EXIT_BAD_CONFIG = 2
 def inspect_gpus(settings: NodeAgentSettings) -> float:
     """Check NVML visibility against the GPU group and return the max TGP in W.
 
-    EPD senses NVML devices ``0 .. n-1``, so the first ``n`` visible devices
-    must be this group's GPUs (compared by NVML minor number, the host's GPU
-    index). The max TGP comes from ``--max-tgp-w`` or the largest
-    power-management upper limit among the group's GPUs.
+    EPD senses NVML devices ``0 .. n-1``, so the container must see exactly
+    this group's GPUs, or every GPU with the group being the node's first
+    ``n`` indices (:func:`check_visible_gpus`). The devices' bus ids and minor
+    numbers are logged for the record. The max TGP comes from ``--max-tgp-w``
+    or the largest power-management upper limit among the group's GPUs.
     """
     pynvml.nvmlInit()
     try:
         count = pynvml.nvmlDeviceGetCount()
         handles = [pynvml.nvmlDeviceGetHandleByIndex(index) for index in range(count)]
-        minors = [pynvml.nvmlDeviceGetMinorNumber(handle) for handle in handles]
-        check_visible_gpus(minors, settings.gpu_indices)
+        for index, handle in enumerate(handles):
+            logger.info(
+                "visible NVML device %d: bus id %s, /dev/nvidia%d",
+                index,
+                pynvml.nvmlDeviceGetPciInfo(handle).busId,
+                pynvml.nvmlDeviceGetMinorNumber(handle),
+            )
+        check_visible_gpus(count, settings.gpu_indices)
         if settings.max_tgp_w is not None:
             return float(settings.max_tgp_w)
         upper_limits_w = [

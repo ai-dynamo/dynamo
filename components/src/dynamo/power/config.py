@@ -624,16 +624,18 @@ def check_stale_window(stale_after_s: float, interval_s: int) -> None:
 
 def validate_gpu_identity(
     device_count: int, minor_by_index: Mapping[int, int], gpu_indices: Sequence[int]
-) -> None:
-    """Check that the applier's GPU indices name the GPUs the node_agent senses.
+) -> list[str]:
+    """Check that the applier's GPU indices exist on this host; return notes to log.
 
-    The node_agent identifies its group by NVML *minor numbers* (it may see a
-    restricted device set), the applier by host NVML *indices* (``nvidia-smi
-    -i``, ``nvmlDeviceGetHandleByIndex``, DCGM GPU ids). The two agree only
-    when every index ``i`` of the group exists and ``/dev/nvidia<i>`` is NVML
-    device ``i``; on a host where that does not hold the two sides would
-    silently act on different GPUs, so the applier refuses to start.
+    The GPU key everywhere in this package is the host NVML *index*: it is
+    what ``nvidia-smi -i``, ``nvmlDeviceGetHandleByIndex``, DCGM GPU ids and
+    ``NVIDIA_VISIBLE_DEVICES`` mean, and the order an unrestricted container
+    enumerates the same devices in. The ``/dev/nvidia<N>`` minor number is a
+    kernel probe-order artefact that need not equal the index (on VR200 nodes
+    NVML device 0 can be ``/dev/nvidia2``), so a difference is reported for
+    the record, not treated as an error. A missing index is one.
     """
+    notes: list[str] = []
     for index in gpu_indices:
         if index >= device_count:
             raise PowerControlConfigError(
@@ -642,15 +644,13 @@ def validate_gpu_identity(
             )
         minor = minor_by_index.get(index)
         if minor is None:
-            raise PowerControlConfigError(
-                f"GPU index {index}: no NVML minor number was read for it"
+            notes.append(f"GPU index {index}: NVML reported no minor number")
+        elif minor != index:
+            notes.append(
+                f"NVML device {index} is /dev/nvidia{minor}; caps are applied by "
+                "NVML index, the minor number is informational"
             )
-        if minor != index:
-            raise PowerControlConfigError(
-                f"NVML device {index} is /dev/nvidia{minor}: GPU indices and minor "
-                "numbers disagree on this host, so the node_agent (minor numbers) "
-                "and the applier (NVML indices) would act on different GPUs"
-            )
+    return notes
 
 
 def nupd_budget_binds(budget_w_per_gpu: float, max_tgp_w: float) -> bool:
@@ -822,29 +822,28 @@ def build_pool_layouts(
     return tuple(layouts)
 
 
-def check_visible_gpus(
-    nvml_minor_numbers: Sequence[int], gpu_indices: Sequence[int]
-) -> None:
+def check_visible_gpus(visible_count: int, gpu_indices: Sequence[int]) -> None:
     """Verify that EPD will sense exactly this group's GPUs.
 
     EPD's power monitor reads NVML devices ``0 .. n-1`` where ``n`` is the
-    group size, so the first ``n`` visible devices (by NVML minor number, the
-    host's GPU index) must be the group's indices in order. That holds when
-    the container sees only the group (``NVIDIA_VISIBLE_DEVICES`` = the
-    indices) or when the group is a prefix of the node's GPUs.
+    group size. Inside a container NVML renumbers the visible devices from 0
+    in host index order, so EPD senses the group when the container sees only
+    the group (``NVIDIA_VISIBLE_DEVICES`` = its host indices; the launcher sets
+    it for a group that is only part of the node) or when it sees every GPU
+    and the group is the node's first ``n`` indices. Minor numbers play no
+    part: they need not equal the indices (see :func:`validate_gpu_identity`).
     """
     expected = tuple(sorted(gpu_indices))
-    visible = tuple(nvml_minor_numbers)
-    if len(visible) < len(expected):
+    n = len(expected)
+    if visible_count < n:
         raise PowerControlConfigError(
-            f"NVML sees {len(visible)} GPUs but the GPU group has {len(expected)}: "
-            f"{list(expected)}"
+            f"NVML sees {visible_count} GPUs but the GPU group has {n}: {list(expected)}"
         )
-    if visible[: len(expected)] != expected:
+    if visible_count > n and expected != tuple(range(n)):
         raise PowerControlConfigError(
-            f"the first {len(expected)} visible GPUs are {list(visible[: len(expected)])}"
-            f" (NVML minor numbers) but the GPU group is {list(expected)}; EPD would "
-            "sense the wrong GPUs. Launch the node_agent with "
+            f"NVML sees {visible_count} GPUs; EPD reads the first {n} (host indices "
+            f"0..{n - 1}) but the GPU group is {list(expected)}, so EPD would sense "
+            "the wrong GPUs. Launch the node_agent with "
             f"NVIDIA_VISIBLE_DEVICES={','.join(str(i) for i in expected)}"
         )
 

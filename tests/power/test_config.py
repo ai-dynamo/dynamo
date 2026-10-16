@@ -419,14 +419,18 @@ def test_stale_window_follows_the_controller_interval():
 
 
 def test_validate_gpu_identity():
-    validate_gpu_identity(4, {0: 0, 1: 1, 2: 2, 3: 3}, (0, 1, 2, 3))
-    validate_gpu_identity(8, {2: 2, 3: 3}, (2, 3))
+    assert validate_gpu_identity(4, {0: 0, 1: 1, 2: 2, 3: 3}, (0, 1, 2, 3)) == []
+    assert validate_gpu_identity(8, {2: 2, 3: 3}, (2, 3)) == []
     with pytest.raises(PowerControlConfigError, match="does not exist"):
         validate_gpu_identity(2, {0: 0, 1: 1}, (0, 1, 2))
-    with pytest.raises(PowerControlConfigError, match="/dev/nvidia1"):
-        validate_gpu_identity(4, {0: 1, 1: 0}, (0, 1))
-    with pytest.raises(PowerControlConfigError, match="no NVML minor number"):
-        validate_gpu_identity(4, {}, (0,))
+
+
+def test_validate_gpu_identity_reports_minor_numbers_without_refusing():
+    # VR200 nodes enumerate NVML device 0 as /dev/nvidia2: caps go by NVML index, so this is a note.
+    notes = validate_gpu_identity(4, {0: 2, 1: 0, 2: 3, 3: 1}, (0, 1, 2, 3))
+    assert len(notes) == 4
+    assert "NVML device 0 is /dev/nvidia2" in notes[0]
+    assert validate_gpu_identity(4, {}, (0,)) == ["GPU index 0: NVML reported no minor number"]
 
 
 def test_nupd_budget_binds_only_below_the_max_tgp():
@@ -532,21 +536,26 @@ def test_negative_gpu_index_in_placement_rejected():
 
 
 def test_check_visible_gpus_accepts_restricted_container():
-    check_visible_gpus([2, 3], (2, 3))
+    check_visible_gpus(2, (2, 3))
+
+
+def test_check_visible_gpus_accepts_the_whole_node():
+    # Minor numbers are not consulted: a node whose /dev/nvidiaN order differs from NVML order passes.
+    check_visible_gpus(4, (0, 1, 2, 3))
 
 
 def test_check_visible_gpus_accepts_prefix_of_all_gpus():
-    check_visible_gpus([0, 1, 2, 3], (0, 1))
+    check_visible_gpus(4, (0, 1))
 
 
 def test_check_visible_gpus_rejects_wrong_first_devices():
     with pytest.raises(PowerControlConfigError, match="NVIDIA_VISIBLE_DEVICES=2,3"):
-        check_visible_gpus([0, 1, 2, 3], (2, 3))
+        check_visible_gpus(4, (2, 3))
 
 
 def test_check_visible_gpus_rejects_too_few_devices():
     with pytest.raises(PowerControlConfigError, match="sees 1 GPUs"):
-        check_visible_gpus([0], (0, 1))
+        check_visible_gpus(1, (0, 1))
 
 
 # ------------------------------------------------------------- metrics URLs
