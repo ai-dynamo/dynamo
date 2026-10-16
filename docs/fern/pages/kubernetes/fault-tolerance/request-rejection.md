@@ -25,7 +25,8 @@ Use the signals that match the workers you want to protect:
 
 - Set `--active-decode-blocks-threshold` for decode workers. The value is the fraction of available
   KV cache blocks in use, from `0.0` through `1.0`.
-- Set `--active-prefill-tokens-threshold` for an absolute prefill-token limit.
+- Set `--active-prefill-tokens-threshold` for an absolute prefill-token limit. This flag is deprecated
+  and will be removed in v1.7; use `--active-prefill-tokens-threshold-frac`.
 - Set `--active-prefill-tokens-threshold-frac` when the prefill limit should scale with the worker's
   `max_num_batched_tokens` value.
 

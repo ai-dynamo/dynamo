@@ -467,6 +467,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
 
