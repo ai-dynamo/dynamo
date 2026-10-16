@@ -4,15 +4,15 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
 //! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Supports aggregated and disaggregated image generation. Video, audio, LoRA,
-//! beam search, and `n > 1` are rejected before dispatch.
+//! Supports aggregated and disaggregated image and video generation. Audio,
+//! LoRA, beam search, and `n > 1` are rejected before dispatch.
 //!
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
 //! terminal chunk, and a decode worker replays that handoff in `kv.session`.
 //! See [`crate::disagg`] for the codec.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
@@ -35,7 +35,7 @@ pub(crate) fn build_generate_request(
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request, mode)?;
-    let media = image_media(request, limits)?;
+    let media = media(request, limits)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -175,10 +175,34 @@ fn max_tokens(
 }
 
 const IMAGE_KEY: &str = "image_url";
+const VIDEO_KEY: &str = "video_url";
 
-/// Map Dynamo's image payload to OpenEngine media, rejecting other modalities.
-/// Per-modality vectors do not preserve cross-modality order.
-fn image_media(
+#[derive(Clone, Copy)]
+struct MediaKind {
+    key: &'static str,
+    name: &'static str,
+    modality: pb::Modality,
+}
+
+const MEDIA_KINDS: [MediaKind; 2] = [
+    MediaKind {
+        key: IMAGE_KEY,
+        name: "image",
+        modality: pb::Modality::Image,
+    },
+    MediaKind {
+        key: VIDEO_KEY,
+        name: "video",
+        modality: pb::Modality::Video,
+    },
+];
+
+fn media_kind(key: &str) -> Option<MediaKind> {
+    MEDIA_KINDS.iter().copied().find(|kind| kind.key == key)
+}
+
+/// Map Dynamo's grouped media payload to OpenEngine's globally ordered list.
+fn media(
     request: &PreprocessedRequest,
     limits: Option<ModelMetadata>,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
@@ -189,76 +213,139 @@ fn image_media(
     let media_map = request.multi_modal_data.as_ref();
     if let Some(media_map) = media_map {
         for (modality, items) in media_map {
-            if modality != IMAGE_KEY && !items.is_empty() {
+            if media_kind(modality).is_none() && !items.is_empty() {
                 return Err(client::invalid_argument(format!(
-                    "multimodal modality `{modality}` is not supported by the TensorRT-LLM sidecar; this image-only implementation accepts `{IMAGE_KEY}`"
+                    "multimodal modality `{modality}` is not supported by the TensorRT-LLM sidecar"
                 )));
             }
         }
     }
 
-    let images = media_map
-        .and_then(|media| media.get(IMAGE_KEY))
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-
-    let user_image_uuids = if let Some(uuid_map) = request.multi_modal_uuids.as_ref() {
+    let uuid_map = request.multi_modal_uuids.as_ref();
+    if let Some(uuid_map) = uuid_map {
         for (modality, uuids) in uuid_map {
-            if modality != IMAGE_KEY && !uuids.is_empty() {
+            if media_kind(modality).is_none() && !uuids.is_empty() {
                 return Err(client::invalid_argument(format!(
-                    "multimodal UUIDs for `{modality}` cannot be forwarded by the image-only TensorRT-LLM sidecar"
+                    "multimodal UUIDs for unsupported modality `{modality}` cannot be forwarded"
                 )));
             }
         }
-        uuid_map.get(IMAGE_KEY).map(Vec::as_slice)
-    } else {
-        None
-    };
-
-    if let Some(uuids) = user_image_uuids
-        && uuids.len() != images.len()
-    {
-        return Err(client::invalid_argument(format!(
-            "`{IMAGE_KEY}` UUID count ({}) must match its media item count ({})",
-            uuids.len(),
-            images.len()
-        )));
     }
 
-    if images.is_empty() {
+    let mut active_kinds = Vec::new();
+    let mut total_items = 0;
+    for kind in MEDIA_KINDS {
+        let items = media_map
+            .and_then(|media| media.get(kind.key))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(uuids) = uuid_map.and_then(|uuids| uuids.get(kind.key))
+            && uuids.len() != items.len()
+        {
+            return Err(client::invalid_argument(format!(
+                "`{}` UUID count ({}) must match its media item count ({})",
+                kind.key,
+                uuids.len(),
+                items.len()
+            )));
+        }
+        if !items.is_empty() {
+            if !limits.is_some_and(|limits| limits.supported_media.contains(kind.name)) {
+                return Err(client::invalid_argument(format!(
+                    "the loaded TensorRT-LLM model does not advertise {} support through Control.GetModelInfo",
+                    kind.name
+                )));
+            }
+            active_kinds.push(kind);
+            total_items += items.len();
+        }
+    }
+
+    if total_items == 0 {
         return Ok(Vec::new());
     }
-    if !limits.is_some_and(|limits| limits.supports_image) {
-        return Err(client::invalid_argument(
-            "the loaded TensorRT-LLM model does not advertise image support through Control.GetModelInfo",
-        ));
-    }
 
-    images
-        .iter()
-        .enumerate()
-        .map(|(index, image)| {
-            let source = match image {
-                MultimodalData::Url(url) => media_source(url.as_str(), index)?,
-                MultimodalData::RawUrl(url) => media_source(url, index)?,
+    let ordered_items: Vec<(MediaKind, usize)> = match request.multi_modal_order.as_ref() {
+        Some(order) => {
+            if order.len() != total_items {
+                return Err(client::invalid_argument(format!(
+                    "multi_modal_order has {} entries for {total_items} media items",
+                    order.len()
+                )));
+            }
+            let mut seen = HashSet::with_capacity(order.len());
+            order
+                .iter()
+                .map(|item| {
+                    let kind = media_kind(&item.modality).ok_or_else(|| {
+                        client::invalid_argument(format!(
+                            "multi_modal_order references unsupported modality `{}`",
+                            item.modality
+                        ))
+                    })?;
+                    let item_count = media_map
+                        .and_then(|media| media.get(kind.key))
+                        .map(Vec::len)
+                        .unwrap_or_default();
+                    if item.index >= item_count {
+                        return Err(client::invalid_argument(format!(
+                            "multi_modal_order references missing `{}` item {}",
+                            kind.key, item.index
+                        )));
+                    }
+                    if !seen.insert((kind.key, item.index)) {
+                        return Err(client::invalid_argument(format!(
+                            "multi_modal_order repeats `{}` item {}",
+                            kind.key, item.index
+                        )));
+                    }
+                    Ok((kind, item.index))
+                })
+                .collect::<Result<_, _>>()?
+        }
+        None if active_kinds.len() == 1 => {
+            let kind = active_kinds[0];
+            let item_count = media_map
+                .and_then(|media| media.get(kind.key))
+                .map(Vec::len)
+                .unwrap_or_default();
+            (0..item_count).map(|index| (kind, index)).collect()
+        }
+        None => {
+            return Err(client::invalid_argument(
+                "mixed multimodal input requires multi_modal_order to preserve prompt order",
+            ));
+        }
+    };
+
+    ordered_items
+        .into_iter()
+        .map(|(kind, index)| {
+            let item = &media_map.expect("media exists")[kind.key][index];
+            let source = match item {
+                MultimodalData::Url(url) => media_source(url.as_str(), kind.key, index)?,
+                MultimodalData::RawUrl(url) => media_source(url, kind.key, index)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(format!(
-                        "`{IMAGE_KEY}` item {index} is pre-decoded; OpenEngine requires a URL or data URI so TensorRT-LLM can own image decoding"
+                        "`{}` item {index} is pre-decoded; OpenEngine requires a URL or data URI so TensorRT-LLM can own {} decoding",
+                        kind.key, kind.name
                     )));
                 }
                 MultimodalData::UuidOnly(_) => {
                     return Err(client::invalid_argument(format!(
-                        "`{IMAGE_KEY}` item {index} contains only a cache UUID; OpenEngine requires an image source"
+                        "`{}` item {index} contains only a cache UUID; OpenEngine requires a source for {} input",
+                        kind.key, kind.name
                     )));
                 }
             };
             Ok(pb::MediaItem {
-                modality: pb::Modality::Image as i32,
+                modality: kind.modality as i32,
                 source: Some(source),
                 // MIME metadata belongs to raw_bytes, which this client does not send.
                 mime_type: String::new(),
                 // Do not substitute router-owned mm_hashes for caller cache identities.
-                uuid: user_image_uuids
+                uuid: uuid_map
+                    .and_then(|uuids| uuids.get(kind.key))
                     .and_then(|uuids| uuids[index].as_deref())
                     .unwrap_or_default()
                     .to_string(),
@@ -267,7 +354,11 @@ fn image_media(
         .collect()
 }
 
-fn media_source(value: &str, index: usize) -> Result<pb::media_item::Source, DynamoError> {
+fn media_source(
+    value: &str,
+    key: &str,
+    index: usize,
+) -> Result<pb::media_item::Source, DynamoError> {
     let scheme = value
         .split_once(':')
         .map(|(scheme, _)| scheme.to_ascii_lowercase());
@@ -275,7 +366,7 @@ fn media_source(value: &str, index: usize) -> Result<pb::media_item::Source, Dyn
         Some("http") | Some("https") => Ok(pb::media_item::Source::Url(value.to_string())),
         Some("data") => Ok(pb::media_item::Source::DataUri(value.to_string())),
         _ => Err(client::invalid_argument(format!(
-            "`{IMAGE_KEY}` item {index} must use an http, https, or data URI"
+            "`{key}` item {index} must use an http, https, or data URI"
         ))),
     }
 }
