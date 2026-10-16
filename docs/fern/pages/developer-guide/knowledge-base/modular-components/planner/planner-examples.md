@@ -19,10 +19,12 @@ examples pass the Planner configuration as inline JSON through `--config`, with
 `pre_deployment_sweeping_mode: none`. They do not create or mount a Planner
 configuration or profiling-data ConfigMap.
 
-The Planner uses worker self-benchmark results when available and otherwise
-warms its performance model from live Forward Pass Metrics (FPM). SLA scaling
-can report `model_not_ready` during live warmup. Update the inline configuration
-to tune the Planner; no placeholder profiling arrays are required. See
+The Planner bootstraps from worker self-benchmark results when available. With a
+configured `ais_perf_model`, supported deployments can use native AISimulate
+estimates before live FPM regression is ready. These examples leave that setting
+unset, so without benchmark data the model learns from live Forward Pass Metrics
+(FPM), and SLA scaling can report `model_not_ready` during warmup. Update the inline
+configuration to tune the Planner; no placeholder profiling arrays are required. See
 [Tune the Planner](../../../../kubernetes/auto-deployment/dynamo-planner.mdx)
 for the deployment prerequisites and workflow.
 
