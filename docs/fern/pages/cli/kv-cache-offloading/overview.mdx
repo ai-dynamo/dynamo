@@ -159,10 +159,6 @@ cd examples/backends/vllm
 ./launch/disagg_flexkv.sh
 ```
 
-<Note>
-Requires Dynamo 1.6.x or earlier. The prefill worker loads `PdConnector` from KVBM, which later releases no longer ship.
-</Note>
-
 The script starts the decode worker with `NixlConnector` and the prefill worker with `PdConnector`,
 which combines `FlexKVConnectorV1` for offloading with `NixlConnector` for prefill/decode transfer.
 It selects the prefill role with `--disaggregation-mode prefill`. The `--is-prefill-worker` flag
