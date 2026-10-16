@@ -251,8 +251,14 @@ a new alert. Ticks that do not request a signal do not count as missing samples.
 
 The signals distinguish missing FPM, stale FPM, worker discovery join failures,
 missing speculative accept length, and unavailable traffic observations.
-`load_inputs` and `throughput_inputs` report unavailable inputs from the scaling
-paths' own decision reasons, including insufficient model data or engine metadata.
+`load_inputs` and `throughput_inputs` report `missing_engine_metadata` from the
+scaling paths' own metadata checks, such as missing KV capacity or batching
+limits. Normal performance-model warmup (`insufficient_data` or
+`model_not_ready`) remains visible in decision diagnostics and does not trigger
+a degraded-input alert. For a pool with ready workers, metadata health changes
+only when a scaling path actually evaluates that metadata; skipped, idle, or
+zero-demand decisions do not clear an existing metadata alarm. An explicitly
+empty pool clears its metadata alarm.
 Runtime FPM samples expire after three load-adjustment
 intervals measured from local receipt. Idle heartbeats refresh that receipt
 time. Samples from workers absent from discovery are excluded and logged with

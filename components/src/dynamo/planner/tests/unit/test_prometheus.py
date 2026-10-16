@@ -43,6 +43,9 @@ class _FixedPrefillCapacity:
     def __init__(self, engine_rps: float):
         self.engine_rps = engine_rps
 
+    def has_valid_engine_limits(self):
+        return True
+
     def find_engine_capacity_rps(self, **kwargs):
         return SimpleNamespace(rps=self.engine_rps, ttft_ms=100.0, eligible=True)
 
@@ -56,6 +59,7 @@ class _ThroughputScalingHarness(ThroughputScalingMixin):
             decode_min_endpoint=None,
         )
         self._prefill_regression = _FixedPrefillCapacity(engine_rps)
+        self._diag_throughput_metadata_available = {}
         self._diag_throughput_reason = None
         self._diag_engine_rps_prefill = None
 

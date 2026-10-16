@@ -96,18 +96,16 @@ class PlannerSignalHealth:
             self._record(component, "fpm", expected and not stats)
             for rejected in ("stale_fpm", "worker_join_failure", "invalid_fpm"):
                 self._record(component, rejected, expected and reason == rejected)
-            for path, ran, unavailable_reason in (
-                ("load", scheduled.run_load_scaling, "insufficient_data"),
-                ("throughput", scheduled.run_throughput_scaling, "model_not_ready"),
+            for path, ran in (
+                ("load", scheduled.run_load_scaling),
+                ("throughput", scheduled.run_throughput_scaling),
             ):
-                decision_reason = getattr(
-                    diagnostics, f"{path}_decision_reason_{component}"
-                ) or getattr(diagnostics, f"{path}_decision_reason")
-                if ran and decision_reason is not None:
+                available = getattr(diagnostics, f"{path}_metadata_available").get(
+                    component
+                )
+                if not expected or (ran and available is not None):
                     self._record(
-                        component,
-                        f"{path}_inputs",
-                        expected and decision_reason == unavailable_reason,
+                        component, f"{path}_inputs", expected and available is False
                     )
             if component == "decode" and scheduled.need_traffic_metrics:
                 speculative = self._config.speculative_nextn or (

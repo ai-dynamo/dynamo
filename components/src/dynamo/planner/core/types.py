@@ -333,6 +333,11 @@ class TickDiagnostics:
     throughput_decision_reason_prefill: Optional[str] = None
     throughput_decision_reason_decode: Optional[str] = None
 
+    # Metadata checks actually performed by each scaling path this tick.
+    # An absent component was not evaluated (e.g. idle or missing FPM).
+    load_metadata_available: dict[str, bool] = field(default_factory=dict)
+    throughput_metadata_available: dict[str, bool] = field(default_factory=dict)
+
     # Plugin-pipeline fields below. Legacy callers that bypass the pipeline
     # may leave them empty. Downstream readers must treat "empty" as
     # "not available for this tick".

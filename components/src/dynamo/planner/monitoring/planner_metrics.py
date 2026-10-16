@@ -29,6 +29,7 @@ LOAD_DECISION_STATES = [
     "rejected_by_plugin",
     "gpu_budget_guard_hold",
     "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 THROUGHPUT_DECISION_STATES = [
@@ -48,6 +49,7 @@ THROUGHPUT_DECISION_STATES = [
     "gpu_budget_guard_hold",
     "no_change",
     "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 

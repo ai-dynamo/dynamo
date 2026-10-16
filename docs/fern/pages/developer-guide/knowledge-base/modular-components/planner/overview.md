@@ -165,7 +165,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 FPM delivery alone does not establish decode scaling support: KV-utilization
 decisions also require the worker's KV capacity metadata. TensorRT-LLM
 deployments that omit `total_kv_blocks` or `kv_cache_block_size` cannot use that
-decode scaling path. When the scaling decision reports insufficient data,
+decode scaling path. When the scaling decision reports `missing_engine_metadata`,
 `dynamo_planner_signal_unavailable{component="decode",signal="load_inputs"}`
 is set. The decision logs identify the missing capacity metadata.
 
