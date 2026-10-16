@@ -17,9 +17,11 @@ Behavior is unchanged from the pre-refactor monolithic handler.
 """
 
 import logging
+from typing import Optional
 
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.global_planner.orchestrator import Orchestrator
+from dynamo.global_planner.priority import PriorityConfig, PriorityResolver
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
@@ -54,6 +56,7 @@ class ScaleRequestHandler:
         max_total_gpus: int = -1,
         min_total_gpus: int = -1,
         intent_cache_ttl_seconds: float = 360.0,
+        priority_config: Optional[PriorityConfig] = None,
     ):
         """Initialize the scale request handler.
 
@@ -66,6 +69,8 @@ class ScaleRequestHandler:
             min_total_gpus: Minimum total GPUs across all managed pools (-1 = no floor)
             intent_cache_ttl_seconds: How long a cached scale intent from a pool
                 is considered fresh for pairing
+            priority_config: Pool priorities used to order partner selection
+                under contention (None = every pool equally important)
         """
         self.runtime = runtime
         self.no_operation = no_operation
@@ -83,6 +88,7 @@ class ScaleRequestHandler:
             min_total_gpus=min_total_gpus,
             intent_cache_ttl_seconds=intent_cache_ttl_seconds,
             use_lock=True,
+            priority_resolver=PriorityResolver(priority_config),
         )
 
         if managed_namespaces:
