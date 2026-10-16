@@ -489,8 +489,9 @@ class TestDeferredAbortGuard:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_deferred_task_skips_abort_when_first_result_finishes(self):
-        """A one-chunk response is finished by its first result; no abort after it."""
+    async def test_deferred_task_skips_abort_when_first_result_finishes(
+        self, monkeypatch
+    ):
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
@@ -505,11 +506,21 @@ class TestDeferredAbortGuard:
         generation_result.__aiter__ = MagicMock(return_value=generation_result)
         generation_result.__anext__ = lambda self: mock_anext(self)
 
+        original_create_task = asyncio.create_task
+        deferred_tasks = []
+
+        def track_deferred_task(coro):
+            task = original_create_task(coro)
+            deferred_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_deferred_task)
+
         guard = _DeferredAbort(generation_result)
         guard.abort()
 
         await result_queue.put("only_token")
-        await asyncio.sleep(0.05)
+        await deferred_tasks[0]
 
         generation_result.abort.assert_not_called()
 
@@ -531,8 +542,6 @@ class TestDeferredAbortGuard:
 
     @pytest.mark.asyncio
     async def test_finished_request_is_not_aborted(self):
-        """The frontend stops streams it considers complete and the worker sees
-        a kill; a request TRT-LLM already finished must not be cancelled."""
         handler = self._make_handler()
         generation_result = MagicMock()
         generation_result.finished = True

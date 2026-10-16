@@ -75,9 +75,18 @@ def apply_stop_conditions_to_sampling_params(
     streamed chunk (up to ``stream_interval`` tokens later) and cancelled the
     request; with a tool parser whose end token is the model EOS, every request
     with tools ended in a cancel.
+
+    TRT-LLM only holds back EOS until ``min_tokens``; stop words still fire
+    early, so visible stop tokens stay with the Dynamo decoder when a minimum
+    is requested.
     """
     visible_stop_token_ids = set(stop_conditions.get("stop_token_ids_visible") or [])
-    frontend_stops = bool(no_stop_trim or stop_conditions.get("ignore_eos"))
+    min_tokens = stop_conditions.get("min_tokens")
+    frontend_stops = bool(
+        no_stop_trim
+        or stop_conditions.get("ignore_eos")
+        or (min_tokens and visible_stop_token_ids)
+    )
     if frontend_stops:
         sampling_params.ignore_eos = True
     elif visible_stop_token_ids:
@@ -86,7 +95,6 @@ def apply_stop_conditions_to_sampling_params(
         sampling_params.stop_token_ids = list(engine_stop_token_ids)
         sampling_params.include_stop_str_in_output = True
 
-    min_tokens = stop_conditions.get("min_tokens")
     if min_tokens:
         sampling_params.min_tokens = min_tokens
 
