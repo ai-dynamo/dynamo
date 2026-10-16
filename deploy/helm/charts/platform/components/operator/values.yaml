@@ -22,6 +22,19 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# Reject Helm upgrades that skip one or more Dynamo minor releases. The check reads the
+# installed operator Deployment before Helm applies the new release. Disable only when a
+# separate process has validated the complete upgrade path.
+upgradePreflight:
+  # -- Whether to reject Helm upgrades outside the installed minor or its immediate successor.
+  enabled: true
+  # -- Image used by the upgrade preflight Job.
+  image: docker.io/library/python:3.12-slim
+  # -- Image pull secrets used by the upgrade preflight Job.
+  imagePullSecrets: []
+  # -- Maximum runtime in seconds for the upgrade preflight Job.
+  activeDeadlineSeconds: 120
+
 # The LPX scheduler and its CRDs must be installed separately.
 lpx:
   # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the

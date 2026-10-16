@@ -21,4 +21,7 @@
 .idea/
 *.tmproj
 .vscode/
+# Test and Python cache files
 tests/
+__pycache__/
+*.pyc
