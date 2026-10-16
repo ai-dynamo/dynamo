@@ -16,6 +16,14 @@ pub struct RelayIdentity(pub String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VerifiedRelayIdentity(pub(super) RelayIdentity);
 
+impl VerifiedRelayIdentity {
+    /// Read access for other crates, for example to compare with
+    /// `PoolRecord::relay_identity` or to log a denied caller.
+    pub fn identity(&self) -> &RelayIdentity {
+        &self.0
+    }
+}
+
 /// Raw credentials the transport took from a Relay's connection.
 /// No `Debug`: it can hold a secret.
 #[derive(Clone)]
