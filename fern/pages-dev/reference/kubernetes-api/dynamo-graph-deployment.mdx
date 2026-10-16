@@ -50,7 +50,7 @@ spec:
 
 ## Grove update strategy
 
-Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.
+Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. DGDs with LPX components accept only `Coherent` and `RollingRecreate`. Under `OnDelete`, running LPX Pods keep their old templates after an update; the LPX scheduler treats that drift as a lost dependency and releases the pipeline, which cannot recover until Grove replaces the Pods. Admission rejects other updates to an existing LPX DGD that still uses `OnDelete`, so remove the annotation first. Removing it changes only the strategy and does not replace Pods that already run an old template; then set a new `spec.restart.id` with `restart.strategy.type: Parallel`, or delete those Pods. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.
 
 Grove uses `RollingRecreate` unless this annotation explicitly selects another strategy. This applies to aggregated, disaggregated, and LPX deployments, regardless of operator origin version. Neither the deprecated component `minAvailable` nor a native minimum in `providerOverride` enables Coherent.
 
