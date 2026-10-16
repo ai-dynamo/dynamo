@@ -113,6 +113,7 @@ async fn main_loop(
             inner,
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,

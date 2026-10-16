@@ -94,19 +94,28 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
     )
 
 
-def test_scheduler_output_new_connector_fields_remain_optional():
-    """Dynamo constructs SchedulerOutput directly without v0.27's new fields."""
+def test_scheduler_output_connector_fields_remain_optional():
+    """Connector fields used by direct Dynamo construction remain optional."""
     from vllm.v1.core.sched.output import SchedulerOutput
 
     fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
-    for field_name in ("ec_manager_metadata", "partial_tail_offloads"):
-        assert field_name in fields, (
-            f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
-            "direct SchedulerOutput construction."
-        )
-        assert fields[field_name].default is None, (
-            f"vLLM SchedulerOutput.{field_name} became required — update every "
-            "InstrumentedScheduler constructor."
+    assert "ec_manager_metadata" in fields, (
+        "vLLM SchedulerOutput.ec_manager_metadata is gone — re-audit Dynamo's "
+        "direct SchedulerOutput construction."
+    )
+    assert fields["ec_manager_metadata"].default is None, (
+        "vLLM SchedulerOutput.ec_manager_metadata became required — update every "
+        "InstrumentedScheduler constructor."
+    )
+
+    # Public vLLM v0.27 added this optional field; Muse Spark's fork does not
+    # expose it. Dynamo never reads or sets it, so absence is compatible, but
+    # if present it must remain optional for direct SchedulerOutput construction.
+    partial_tail_offloads = fields.get("partial_tail_offloads")
+    if partial_tail_offloads is not None:
+        assert partial_tail_offloads.default is None, (
+            "vLLM SchedulerOutput.partial_tail_offloads became required — update "
+            "every InstrumentedScheduler constructor."
         )
 
 

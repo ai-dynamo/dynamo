@@ -492,6 +492,7 @@ pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
 /// request, which is what gives per-stream isolation by construction.
 pub(crate) struct ChoiceState {
     family: String,
+    message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
     /// Tool indices whose opening chunk (id + type + name) has already gone out.
     opened_calls: HashSet<usize>,
@@ -531,6 +532,7 @@ impl ChoiceState {
         })?;
         Ok(Self {
             family: family.to_string(),
+            message_boundaries: Vec::new(),
             parser,
             opened_calls: HashSet::new(),
             tool_emitted: false,
@@ -538,14 +540,33 @@ impl ChoiceState {
         })
     }
 
-    pub(crate) fn new_default(family: &str, tools: &[Tool]) -> anyhow::Result<Self> {
-        Ok(Self {
-            family: family.to_string(),
-            parser: create_unified_parser_for_family(family, tools)?,
-            opened_calls: HashSet::new(),
-            tool_emitted: false,
-            failed: false,
-        })
+    /// Construct a choice directly from the request-level guided constraint.
+    ///
+    /// The ATEM adapter shares this state implementation but lives in a sibling
+    /// module. Keeping the constraint-to-wire-mode mapping here prevents the two
+    /// unified entry points from drifting as new guided modes are added.
+    pub(crate) fn new_with_constraint(
+        family: &str,
+        tools: &[Tool],
+        prefill: UnifiedParserStartingState,
+        constraint: &GuidedToolConstraint,
+        guided_streaming: bool,
+    ) -> anyhow::Result<Self> {
+        Self::new(
+            family,
+            tools,
+            prefill,
+            tool_output_mode(constraint),
+            guided_streaming,
+        )
+    }
+
+    pub(crate) fn preserve_message_phases(&mut self, enabled: bool) {
+        self.parser.preserve_message_phases(enabled);
+    }
+
+    pub(crate) fn take_message_boundaries(&mut self) -> Vec<Option<super::MessageBoundary>> {
+        std::mem::take(&mut self.message_boundaries)
     }
 
     /// Feed one decoded text delta through the parser.
@@ -608,7 +629,23 @@ impl ChoiceState {
     /// Convert one ordered delta into a streaming choice for `index`.
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
+        let boundary = match &delta {
+            UnifiedParserEvent::MessageStart(phase) => {
+                Some(super::MessageBoundary::Start(match phase {
+                    dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                        dynamo_protocols::types::responses::MessagePhase::Commentary
+                    }
+                    dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                        dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                    }
+                }))
+            }
+            UnifiedParserEvent::MessageEnd => Some(super::MessageBoundary::End),
+            _ => None,
+        };
+        self.message_boundaries.push(boundary);
         match delta {
+            UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {}
             UnifiedParserEvent::Text(text) => {
                 choice.delta.content = Some(ChatCompletionMessageContent::Text(text));
             }
@@ -648,6 +685,7 @@ impl ChoiceState {
         emit_tool_calls: bool,
         finish_reason: Option<FinishReason>,
     ) -> Vec<ChatChoiceStream> {
+        self.message_boundaries.clear();
         let deltas = coalesce(
             deltas
                 .into_iter()
@@ -809,6 +847,7 @@ pub(crate) fn parse_complete(
     let mut tool_calls = Vec::new();
     for event in parser.parse_complete(content)? {
         match event {
+            UnifiedEvent::MessageStart { .. } | UnifiedEvent::MessageEnd => {}
             UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
             UnifiedEvent::Reasoning { text: chunk } => reasoning.push_str(&chunk),
             UnifiedEvent::ToolCall { name, arguments } => {
@@ -1282,6 +1321,7 @@ mod tests {
     fn chunk(text: &str, finish: bool) -> Annotated<NvCreateChatCompletionStreamResponse> {
         #[allow(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -2670,6 +2710,7 @@ mod tests {
             };
             #[allow(deprecated)]
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test".to_string(),
                     choices: vec![make(0, index0.0, index0.1), make(1, index1.0, index1.1)],
@@ -3062,6 +3103,7 @@ mod tests {
         ) -> Annotated<NvCreateChatCompletionStreamResponse> {
             #[allow(deprecated)]
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test".to_string(),
                     choices,
@@ -3308,6 +3350,7 @@ mod tests {
     #[test]
     fn a_failed_push_keeps_committed_events_before_recovered_bytes() {
         let mut state = ChoiceState {
+            message_boundaries: Vec::new(),
             family: "test".to_string(),
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),

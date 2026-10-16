@@ -33,7 +33,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_parsers_v2::{
     Tool as ToolV2, ToolCallDelta, ToolParser, UnifiedEvent, UnifiedParserEvent, UnifiedParserExt,
-    create_tool_parser_for_family, create_unified_parser_for_family,
+    UnifiedParserStartingState, create_tool_parser_for_family, create_unified_parser_for_family,
 };
 
 use crate::protocols::openai::GuidedToolConstraint;
@@ -66,38 +66,42 @@ pub(crate) fn supports_family(family: &str) -> bool {
     V2_FAMILIES.contains(&family)
 }
 
-/// Families served by the v2 UNIFIED parser (reasoning + content + tool calls in
+/// Families served by a v2 UNIFIED parser (reasoning + content + tool calls in
 /// ONE ordered pass), default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
-/// Muse has no usable v1 reasoning parser (the v1 crate dropped the variant, so
+/// Muse and Muse Spark have no usable v1 reasoning parser (the v1 crate has no such
+/// variants, so
 /// `get_reasoning_parser_from_name` falls back to `Basic`, which cannot read the
 /// `to=self<|message|>` grammar), so the unified pass is the only correct path.
-/// Strings match dynamo's parser names.
-/// The two names the FRAMEWORKS register, so a card written against either engine
-/// selects the same parser here: vLLM ships `--reasoning-parser muse_glimmer` and
-/// `--tool-call-parser muse_glimmer`, SGLang registers the family as `muse` in both
-/// its reasoning and function-call registries. A hyphenated spelling matches neither
-/// engine, so it is not accepted.
-pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse"];
+/// The Muse aliases match the names registered by vLLM (`muse_glimmer`) and SGLang
+/// (`muse`). Muse Spark is a distinct canonical family because its additional reserved
+/// `commentary` recipient has different routing semantics.
+pub(crate) const UNIFIED_FAMILIES: &[&str] =
+    &["muse_glimmer", "muse", "muse_spark_open", "muse_spark"];
 
-/// The parser names that route through the muse unified pass. Public accessor for
-/// [`UNIFIED_FAMILIES`] so the Python bindings can add muse to the selectable
-/// tool-call and reasoning parser names — fc's v1 registries dropped muse, so this
-/// is the only source of truth for the unified names.
+/// Parser names that route through the default-on unified pass. Public accessor for
+/// [`UNIFIED_FAMILIES`] so Python bindings can add them to both selectable parser lists;
+/// the v1 registries are not the source of truth for these families.
 pub fn unified_family_names() -> &'static [&'static str] {
     UNIFIED_FAMILIES
 }
 
-/// The unified family for a request, or `None`. Keyed on EITHER the tool-call or
-/// the reasoning parser name being muse, so a card that sets only
-/// `--dyn-reasoning-parser muse_glimmer` still routes here. Canonicalizes the
-/// hyphen alias to the crate's family key `muse_glimmer`. Default-on: reads no
-/// environment variable.
+/// The unified family for a request, or `None`. Keyed on EITHER parser setting so a
+/// card that declares only tool-call or only reasoning parsing still routes correctly.
+/// Default-on: reads no environment variable.
 pub(crate) fn unified_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<String> {
-    let is_muse = |p: Option<&str>| UNIFIED_FAMILIES.contains(&p.unwrap_or_default());
-    (is_muse(tool_call_parser) || is_muse(reasoning_parser)).then(|| "muse_glimmer".to_string())
+    let canonical = |parser: &str| match parser {
+        "muse_glimmer" | "muse" => Some("muse_glimmer"),
+        // Keep the canonical family compatible with the pinned frontend crates.
+        "muse_spark_open" | "muse_spark" => Some("muse_spark"),
+        _ => None,
+    };
+    tool_call_parser
+        .and_then(canonical)
+        .or_else(|| reasoning_parser.and_then(canonical))
+        .map(str::to_string)
 }
 
 /// Map dynamo's v1 `ToolDefinition`s onto the v2 parser's `Tool` shape.
@@ -148,14 +152,31 @@ pub(crate) fn parse_complete(
 /// `(tool_calls, reasoning, content)`. Mirrors [`parse_complete`] but adds the
 /// reasoning channel the unified parser owns. Used by the (B)-topology aggregator
 /// path where raw model text reaches the frontend un-split.
+#[cfg(test)]
 pub(crate) fn parse_complete_unified(
     content: &str,
     tools: Option<&[ToolDefinition]>,
     family: &str,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, String, String)> {
+    parse_complete_unified_with_events(content, tools, family)
+        .map(|(calls, reasoning, text, _)| (calls, reasoning, text))
+}
+
+pub(crate) fn parse_complete_unified_with_events(
+    content: &str,
+    tools: Option<&[ToolDefinition]>,
+    family: &str,
+) -> anyhow::Result<(
+    Vec<ToolCallResponse>,
+    String,
+    String,
+    Vec<super::ResponseOutputEvent>,
+)> {
     let v2_tools = to_v2_tools(tools);
     let mut parser = create_unified_parser_for_family(family, &v2_tools)?;
+    parser.preserve_message_phases(true);
     let events = parser.parse_complete(content)?;
+    let mut ordered = Vec::new();
 
     let mut tool_calls = Vec::new();
     let mut reasoning = String::new();
@@ -163,29 +184,56 @@ pub(crate) fn parse_complete_unified(
     for event in events {
         match event {
             UnifiedEvent::Reasoning { text: t } => reasoning.push_str(&t),
-            UnifiedEvent::Text { text: t } => text.push_str(&t),
-            UnifiedEvent::ToolCall { name, arguments } => tool_calls.push(ToolCallResponse {
-                id: format!("call-{}", Uuid::new_v4()),
-                tp: ToolCallType::Function,
-                function: CalledFunction {
-                    name,
-                    // `UnifiedEvent` carries a typed `Value`; the wire wants a string.
-                    arguments: serde_json::to_string(&arguments)
-                        .unwrap_or_else(|_| "{}".to_string()),
-                },
-            }),
+            UnifiedEvent::Text { text: t } => {
+                text.push_str(&t);
+                ordered.push(super::ResponseOutputEvent::Text(t));
+            }
+            UnifiedEvent::MessageStart { phase } => ordered.push(
+                super::ResponseOutputEvent::Boundary(super::MessageBoundary::Start(match phase {
+                    dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                        dynamo_protocols::types::responses::MessagePhase::Commentary
+                    }
+                    dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                        dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                    }
+                })),
+            ),
+            UnifiedEvent::MessageEnd => ordered.push(super::ResponseOutputEvent::Boundary(
+                super::MessageBoundary::End,
+            )),
+            UnifiedEvent::ToolCall { name, arguments } => {
+                let id = format!("call-{}", Uuid::new_v4());
+                ordered.push(super::ResponseOutputEvent::ToolCall(id.clone()));
+                tool_calls.push(ToolCallResponse {
+                    id,
+                    tp: ToolCallType::Function,
+                    function: CalledFunction {
+                        name,
+                        // `UnifiedEvent` carries a typed `Value`; the wire wants a string.
+                        arguments: serde_json::to_string(&arguments)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    },
+                });
+            }
         }
     }
 
-    Ok((tool_calls, reasoning, text))
+    if !ordered
+        .iter()
+        .any(|event| matches!(event, super::ResponseOutputEvent::Boundary(_)))
+    {
+        ordered.clear();
+    }
+    Ok((tool_calls, reasoning, text, ordered))
 }
 
 /// Convert the two guided-JSON response shapes into parser-native tool calls.
 ///
 /// Named guidance emits only the selected tool's argument object. Required guidance
-/// emits one call envelope or an array of envelopes. This conversion is family-neutral:
-/// Muse has no guided mode in its unified parser, while Qwen's unified parser consumes
-/// the same constraint directly so it can also recover a preceding reasoning span.
+/// emits one call envelope or an array of envelopes. This conversion is family-neutral
+/// and remains the aggregate fallback when raw text reaches topology B; streaming
+/// unified parsers consume the same constraint directly so they can preserve a
+/// preceding reasoning span.
 pub(crate) fn parse_complete_guided_json(
     content: &str,
     constraint: &GuidedToolConstraint,
@@ -388,10 +436,19 @@ fn finish_unterminated_choices_unified(
         if let Some(last) = choices.last_mut() {
             last.finish_reason = state.unterminated_finish_reason();
         }
+        let mut boundaries = state.take_message_boundaries();
+        boundaries.resize(choices.len(), None);
         responses.extend(
             choices
                 .into_iter()
-                .map(|choice| response_with_choice(template, choice)),
+                .zip(boundaries)
+                .map(|(choice, boundary)| {
+                    let mut response = response_with_choice(template, choice);
+                    if let Some(data) = &mut response.data {
+                        data.message_boundary = boundary;
+                    }
+                    response
+                }),
         );
     }
     responses
@@ -406,6 +463,7 @@ fn response_with_choice(
     data.inner.usage = None;
     data.nvext = None;
     data.llm_metrics = None;
+    data.message_boundary = None;
     Annotated::from_data(data)
 }
 
@@ -575,7 +633,7 @@ where
     }
 }
 
-/// Streaming path for the UNIFIED families (muse), default-on. One parser per
+/// Streaming path for the ATEM UNIFIED families, default-on. One parser per
 /// choice owns reasoning + content + tool calls in ONE ordered pass, so this
 /// replaces BOTH the v1 reasoning stage and the tool jail. Each upstream text
 /// delta is pushed; the parser's ordered [`UnifiedParserEvent`]s fold into
@@ -587,6 +645,7 @@ where
 /// stripping while dropping the parsed calls, which is what `tool_choice=none`
 /// needs: the family has no v1 reasoning parser, so it must route here to be read
 /// at all, but a caller that disabled tools must not receive `tool_calls`.
+#[cfg(test)]
 pub(crate) fn apply_unified_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
@@ -596,9 +655,67 @@ pub(crate) fn apply_unified_stream<S>(
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
+    apply_unified_stream_with_constraint(
+        stream_in,
+        tool_definitions,
+        family,
+        GuidedToolConstraint::None,
+        UnifiedParserStartingState::None,
+        false,
+        emit_tool_calls,
+    )
+}
+
+/// Constraint-aware ATEM unified stream.
+///
+/// Required and named tool choices produce bare guided JSON, but SGLang can emit
+/// the model's native `to=self` reasoning channel before activating that grammar.
+/// Initializing the existing unified parser with both facts preserves the reasoning
+/// events and then decodes the guided payload into tool calls.
+#[cfg(test)]
+pub(crate) fn apply_unified_stream_with_constraint<S>(
+    stream_in: S,
+    tool_definitions: Option<Vec<ToolDefinition>>,
+    family: String,
+    guided_tool_constraint: GuidedToolConstraint,
+    prefill: UnifiedParserStartingState,
+    guided_streaming: bool,
+    emit_tool_calls: bool,
+) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
+    apply_unified_stream_with_phases(
+        stream_in,
+        tool_definitions,
+        family,
+        guided_tool_constraint,
+        prefill,
+        guided_streaming,
+        emit_tool_calls,
+        false,
+    )
+}
+
+// Keep the parser controls explicit at this stream boundary, including the
+// Responses-only phase preservation flag.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_unified_stream_with_phases<S>(
+    stream_in: S,
+    tool_definitions: Option<Vec<ToolDefinition>>,
+    family: String,
+    guided_tool_constraint: GuidedToolConstraint,
+    prefill: UnifiedParserStartingState,
+    guided_streaming: bool,
+    emit_tool_calls: bool,
+    preserve_phases: bool,
+) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
     let v2_tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
-        tracing::debug!(family = %family, "muse unified stream engaged");
+        tracing::debug!(family = %family, "ATEM unified stream engaged");
 
         // The caller only routes supported families here, but if a parser cannot be
         // built we pass every chunk through untouched rather than dropping output.
@@ -655,12 +772,33 @@ where
 
             let originals = std::mem::take(&mut chat_response.inner.choices);
             let mut emitted = Vec::new();
+            let mut boundaries = Vec::new();
             for original in originals {
-                let state = states.entry(original.index).or_insert_with(|| {
-                    // Family validated above; construction is deterministic in-process.
-                    UnifiedChoiceState::new_default(&family, &v2_tools)
-                        .expect("dynamo-parsers-v2 unified parser construction validated above")
-                });
+                let state = match states.entry(original.index) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        match UnifiedChoiceState::new_with_constraint(
+                            &family,
+                            &v2_tools,
+                            prefill,
+                            &guided_tool_constraint,
+                            guided_streaming,
+                        ) {
+                            Ok(mut state) => { state.preserve_message_phases(preserve_phases); entry.insert(state) },
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    family = %family,
+                                    choice = original.index,
+                                    "ATEM unified parser initialization failed; passing choice through"
+                                );
+                                boundaries.push(None);
+                                emitted.push(original);
+                                continue;
+                            }
+                        }
+                    }
+                };
 
                 // Only text content feeds the parser; multimodal parts pass through.
                 let text = match original.delta.content.as_ref() {
@@ -691,8 +829,12 @@ where
                     if parsed.is_empty() {
                         parsed.push(super::unified_parser::empty_choice(original.index));
                     }
+                    let mut sidecars = state.take_message_boundaries();
+                    sidecars.resize(parsed.len(), None);
+                    boundaries.extend(sidecars);
                     emitted.extend(parsed);
                 } else {
+                    boundaries.push(None);
                     emitted.push(original);
                 }
             }
@@ -707,6 +849,7 @@ where
                 let is_last = position == last;
                 let mut data = chat_response.clone();
                 data.inner.choices = vec![choice];
+                data.message_boundary = boundaries.get(position).cloned().flatten();
                 if !is_last {
                     data.inner.usage = None;
                     data.nvext = None;
@@ -773,14 +916,29 @@ mod tests {
     const MUSE_REASONING: &str = "<|start|>assistant to=self<|message|>Look it up.<|eom|>";
     const MUSE_TOOL: &str = "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>";
     const MUSE_ANSWER: &str = "<|start|>assistant to=user<|message|>It's 18C.<|eot|>";
+    const MUSE_SPARK_COMMENTARY: &str =
+        "<|start|>assistant to=commentary<|message|>Checking weather.<|eom|>";
 
     fn muse_turn() -> String {
         format!("{MUSE_REASONING}{MUSE_TOOL}{MUSE_ANSWER}")
     }
 
+    fn weather_tools() -> Option<Vec<ToolDefinition>> {
+        Some(vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: None,
+        }])
+    }
+
     fn chunk(text: &str, finish: bool) -> Annotated<NvCreateChatCompletionStreamResponse> {
         #[allow(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -1214,6 +1372,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn muse_spark_guided_required_preserves_reasoning_commentary_and_call() {
+        let turn = concat!(
+            " to=self<|message|>Need data.<|eom|>",
+            "<|start|>assistant to=commentary<|message|>Checking weather.<|eom|>",
+            "[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]"
+        );
+        let mut chunks: Vec<_> = turn
+            .as_bytes()
+            .chunks(7)
+            .map(|bytes| chunk(std::str::from_utf8(bytes).unwrap(), false))
+            .collect();
+        chunks.push(chunk("", true));
+
+        let out = apply_unified_stream_with_constraint(
+            stream::iter(chunks),
+            weather_tools(),
+            "muse_spark".to_string(),
+            GuidedToolConstraint::GuidedJsonRequired,
+            UnifiedParserStartingState::None,
+            true,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let (calls, content, reasoning) = reassemble_unified(&out);
+        assert_eq!(reasoning, "Need data.");
+        assert_eq!(content, "Checking weather.");
+        assert_eq!(calls.len(), 1, "expected one guided call: {calls:?}");
+        assert_eq!(calls[0].0, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].1).unwrap(),
+            serde_json::json!({"city": "Paris"})
+        );
+        assert_eq!(final_finish_reason(&out), Some(FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn muse_guided_named_preserves_reasoning_before_arguments() {
+        let turn = concat!(
+            " to=self<|message|>Need data.<|eom|>",
+            "{\"city\":\"Paris\"}"
+        );
+        let out = apply_unified_stream_with_constraint(
+            stream::iter([chunk(turn, false), chunk("", true)]),
+            weather_tools(),
+            "muse_glimmer".to_string(),
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            },
+            UnifiedParserStartingState::None,
+            true,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let (calls, content, reasoning) = reassemble_unified(&out);
+        assert_eq!(reasoning, "Need data.");
+        assert!(content.is_empty());
+        assert_eq!(calls.len(), 1, "expected one guided call: {calls:?}");
+        assert_eq!(calls[0].0, "get_weather");
+    }
+
+    #[tokio::test]
+    async fn muse_spark_guided_required_accepts_bare_json_without_reasoning_prefix() {
+        let out = apply_unified_stream_with_constraint(
+            stream::iter([
+                chunk(
+                    "[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]",
+                    false,
+                ),
+                chunk("", true),
+            ]),
+            weather_tools(),
+            "muse_spark".to_string(),
+            GuidedToolConstraint::GuidedJsonRequired,
+            UnifiedParserStartingState::None,
+            true,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let (calls, content, reasoning) = reassemble_unified(&out);
+        assert!(reasoning.is_empty());
+        assert!(content.is_empty());
+        assert_eq!(calls.len(), 1, "expected one guided call: {calls:?}");
+        assert_eq!(calls[0].0, "get_weather");
+    }
+
     // A call truncated mid parameter value at EOF is dropped by finish() (policy
     // P2), and no `<atem:invoke` opener may leak into content.
     #[tokio::test]
@@ -1412,6 +1662,13 @@ mod tests {
                 "reasoning name {parser:?} must route to muse unified"
             );
         }
+        for (tool, reasoning) in [(Some("muse_spark"), None), (None, Some("muse_spark"))] {
+            assert_eq!(
+                unified_family(tool, reasoning).as_deref(),
+                Some("muse_spark"),
+                "Muse Spark must route from either parser setting"
+            );
+        }
         assert_eq!(unified_family(Some("qwen3_coder"), None), None);
         assert_eq!(unified_family(None, None), None);
         // Default-on: `unified_family` reads no environment variable. muse routes to
@@ -1437,6 +1694,108 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn muse_spark_open_routes_both_parser_settings_to_the_spark_family() {
+        assert!(unified_family_names().contains(&"muse_spark_open"));
+        for (tool, reasoning) in [
+            (Some("muse_spark_open"), None),
+            (None, Some("muse_spark_open")),
+            (Some("muse_spark_open"), Some("muse_spark_open")),
+        ] {
+            let family = unified_family(tool, reasoning).expect("open parser must route");
+            let input = format!("{MUSE_REASONING}{MUSE_SPARK_COMMENTARY}{MUSE_TOOL}{MUSE_ANSWER}");
+            let (calls, reasoning, content) =
+                parse_complete_unified(&input, None, &family).unwrap();
+            assert_eq!(reasoning, "Look it up.");
+            assert_eq!(content, "Checking weather.It's 18C.");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].function.name, "get_weather");
+        }
+    }
+
+    #[test]
+    fn muse_spark_parse_complete_surfaces_commentary_as_content() {
+        let input = format!("{MUSE_REASONING}{MUSE_SPARK_COMMENTARY}{MUSE_TOOL}{MUSE_ANSWER}");
+        let (calls, reasoning, content) =
+            parse_complete_unified(&input, None, "muse_spark").unwrap();
+        assert_eq!(reasoning, "Look it up.");
+        assert_eq!(content, "Checking weather.It's 18C.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn muse_spark_parse_complete_drops_reserved_markers_from_reasoning() {
+        let input = concat!(
+            "<|start|>assistant to=self<|message|>",
+            "The prior assistant to=self would write ",
+            "<atem:parameter name=\"tier\">2</atem:parameter>",
+            " and then </atem:invoke>.",
+            "<|eom|>",
+            "<|start|>assistant to=get_weather<|message|>",
+            "<atem:invoke name=\"get_weather\">",
+            "<atem:parameter name=\"location\">Paris</atem:parameter>",
+            "</atem:invoke><|eom|>"
+        );
+        let (calls, reasoning, content) =
+            parse_complete_unified(input, None, "muse_spark").unwrap();
+
+        assert_eq!(reasoning, "The prior assistant  would write 2 and then .");
+        assert!(content.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"location": "Paris"})
+        );
+    }
+
+    #[tokio::test]
+    async fn muse_spark_stream_drops_reserved_markers_across_chunk_boundaries() {
+        let turn = concat!(
+            "<|start|>assistant to=self<|message|>",
+            "The prior assistant to=self would write ",
+            "<atem:parameter name=\"tier\">2</atem:parameter>",
+            " and then </atem:invoke>.",
+            "<|eom|>",
+            "<|start|>assistant to=get_weather<|message|>",
+            "<atem:invoke name=\"get_weather\">",
+            "<atem:parameter name=\"location\">Paris</atem:parameter>",
+            "</atem:invoke><|eom|>"
+        );
+        let mut chunks: Vec<_> = turn
+            .as_bytes()
+            .chunks(1)
+            .map(|bytes| chunk(std::str::from_utf8(bytes).unwrap(), false))
+            .collect();
+        chunks.push(chunk("", true));
+
+        let out = apply_unified_stream(stream::iter(chunks), None, "muse_spark".to_string(), true)
+            .collect::<Vec<_>>()
+            .await;
+        let (calls, content, reasoning) = reassemble_unified(&out);
+
+        assert_eq!(reasoning, "The prior assistant  would write 2 and then .");
+        assert!(content.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].1).unwrap(),
+            serde_json::json!({"location": "Paris"})
+        );
+        for marker in [
+            "to=self",
+            "<atem:parameter",
+            "</atem:parameter>",
+            "</atem:invoke>",
+        ] {
+            assert!(
+                !reasoning.contains(marker),
+                "reserved marker {marker:?} leaked into reasoning: {reasoning:?}"
+            );
+        }
     }
 
     #[tokio::test]

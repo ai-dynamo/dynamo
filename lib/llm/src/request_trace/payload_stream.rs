@@ -140,6 +140,7 @@ where
                 // emitted with `response = None`.
                 drop(tx);
                 let fallback = NvCreateChatCompletionResponse {
+                    response_events: Vec::new(),
                     inner: dynamo_protocols::types::CreateChatCompletionResponse {
                         id: String::new(),
                         created: 0,
@@ -232,6 +233,7 @@ pub fn final_response_to_one_chunk_stream(
     }
 
     let chunk = NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: resp.inner.id.clone(),
             object: "chat.completion.chunk".to_string(),
@@ -287,6 +289,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -328,6 +331,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -371,6 +375,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -414,6 +419,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -642,6 +648,7 @@ mod tests {
         // Test that metadata (id, event, comment) is preserved through passthrough
         let chunk_with_metadata = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![{

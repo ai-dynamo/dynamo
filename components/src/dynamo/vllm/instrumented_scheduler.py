@@ -1941,14 +1941,15 @@ class InstrumentedScheduler(AsyncScheduler):
         return scheduled.num_decode_requests > 0
 
     def _compute_queued(self) -> QueuedRequestMetrics:
-        """Single-pass aggregation over ``self.waiting`` and ``self.skipped_waiting``.
+        """Single-pass aggregation over the waiting queues exposed by vLLM.
 
-        vLLM's scheduler parks requests in two queues:
+        vLLM releases differ in where they park blocked requests:
 
         * ``self.waiting`` holds requests in ``WAITING`` (new, never scheduled)
-          and ``PREEMPTED`` (were decoding, evicted back for memory) states.
-        * ``self.skipped_waiting`` holds "blocked-waiting" requests awaiting an
-          async precondition — see ``Scheduler._is_blocked_waiting_status`` /
+          and ``PREEMPTED`` (were decoding, evicted back for memory) states,
+          and may also hold blocked requests.
+        * ``self.skipped_waiting``, when exposed by vLLM, holds blocked requests
+          awaiting an async precondition — see ``Scheduler._is_blocked_waiting_status`` /
           ``Scheduler._enqueue_waiting_request``:
 
               WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
@@ -1956,6 +1957,11 @@ class InstrumentedScheduler(AsyncScheduler):
                                           -- WAITING_FOR_FSM on older vLLM
               WAITING_FOR_REMOTE_KVS      -- disagg decode-engine KV transfer
               WAITING_FOR_STREAMING_REQ   -- streaming request handshake
+
+        Newer releases replace ``skipped_waiting`` with ``kv_holding_waiting``
+        for requests that already hold KV blocks. Their ``deferred_waiting``
+        set tracks blocked requests in the two queues; it is not another queue
+        and must not be counted separately.
 
         A ``WAITING_FOR_REMOTE_KVS`` request is a **decode** request: the
         prefill engine has already computed its KV and is transferring it; once
@@ -1968,31 +1974,27 @@ class InstrumentedScheduler(AsyncScheduler):
         ``WAITING_FOR_STREAMING_REQ`` have no KV computed yet — they are queued
         prefill requests blocked on a precondition.
 
-        Only iterating ``self.waiting`` (the previous behaviour) silently
-        misses every ``WAITING_FOR_REMOTE_KVS`` request on the decode engine
-        in disaggregated serving, and misclassifies it as queued prefill if it
-        ever transiently appears in ``self.waiting``.
+        Inspect both queues when available and classify by request status so
+        remote-KV waits count as decode work regardless of their queue.
         """
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
 
-        for request in self.waiting:
-            if request.status == RequestStatus.PREEMPTED:
-                decode_kv.add(request.num_computed_tokens)
-            else:
-                prefill.add(request.num_tokens)
-
-        for request in self.skipped_waiting:
-            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                # Disagg decode side: KV already computed on the prefill
-                # engine and being transferred. Next schedule() step will
-                # start generating -- count as queued decode.
-                decode_kv.add(request.num_computed_tokens)
-            else:
-                # Structured-output waits / WAITING_FOR_STREAMING_REQ:
-                # no KV yet, essentially a queued prefill awaiting a
-                # precondition.
-                prefill.add(request.num_tokens)
+        for waiting_queue in (
+            self.waiting,
+            getattr(self, "skipped_waiting", ()),
+            getattr(self, "kv_holding_waiting", ()),
+        ):
+            for request in waiting_queue:
+                if request.status in (
+                    RequestStatus.PREEMPTED,
+                    RequestStatus.WAITING_FOR_REMOTE_KVS,
+                ):
+                    # Preempted and remote-KV requests already have decode KV.
+                    decode_kv.add(request.num_computed_tokens)
+                else:
+                    # New requests and grammar/streaming waits need prefill.
+                    prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(
             num_prefill_requests=prefill.n,

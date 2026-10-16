@@ -50,7 +50,8 @@ ARG CARGO_BUILD_JOBS
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
 ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
-ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
+{# Allow a device-specific media policy and fall back to the framework default. #}
+ARG ENABLE_MEDIA_FFMPEG={{ context[framework].get(device_key, {}).get("enable_media_ffmpeg", context[framework].enable_media_ffmpeg) }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
 {% if device == "cuda" -%}
@@ -98,7 +99,8 @@ ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 
 {% if framework == "vllm" -%}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
-ARG TRANSFORMERS_VERSION={{ context.vllm.transformers_version }}
+ARG ENABLE_VLLM_OMNI={{ context.vllm.get(device_key, {}).get("enable_vllm_omni", context.vllm.enable_vllm_omni) }}
+ARG TRANSFORMERS_VERSION={{ context.vllm.get(device_key, {}).get("transformers_version", context.vllm.transformers_version) }}
 ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
 
 {% if device == "cuda" -%}

@@ -20,8 +20,10 @@ Runtime data-contract notes (not code-level shims):
   >= 0.5.11. Pass through; do not re-encode.
 """
 
+import importlib
 import inspect
 import logging
+import uuid
 from collections.abc import Mapping
 from functools import lru_cache, wraps
 from typing import Any
@@ -33,12 +35,125 @@ except ImportError:
     declare_late_resolution = None
 
 try:
+    from sglang.srt.runtime_context import publish as sglang_publish
+except ImportError:
+    # Upstream SGLang <= 0.5.18 constructs MMEncoder without a process-level
+    # configuration registry. The Muse Spark fork requires explicit publication.
+    sglang_publish = None
+
+try:
     from sglang.srt.arg_groups.overrides import resolved_view as sglang_resolved_view
 except ImportError:
     # SGLang #36255 exposes ServerArgs._resolved() instead.
     sglang_resolved_view = None
 
+try:
+    from sglang.srt.arg_groups.overrides import (
+        model_config_of as sglang_model_config_of,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.get_model_config().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_model_config_of = None
+
+try:
+    from sglang.srt.arg_groups.overrides import (
+        use_mla_backend as sglang_use_mla_backend,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.use_mla_backend().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_use_mla_backend = None
+
 logger = logging.getLogger(__name__)
+
+
+def publish_server_args(server_args: Any, *, role: str) -> None:
+    """Publish process configuration when the SGLang runtime requires it.
+
+    Muse Spark's encoder runtime asserts that configuration is published by the
+    process entrypoint before ``MMEncoder`` is constructed. Released SGLang
+    0.5.18 and the XPU 0.5.11 pin do not expose this registry, so publication is
+    a no-op there. Remove the fallback once all supported SGLang versions expose
+    ``runtime_context.publish``.
+    """
+    if sglang_publish is not None:
+        sglang_publish(server_args, role=role)
+
+
+def load_mm_encoder() -> Any | None:
+    """Load MMEncoder across the SGLang encoder package move.
+
+    The Muse Spark SGLang fork uses the nested ``encoder.server`` package.
+    Upstream 0.5.18 and its predecessor use the original flat module. Remove
+    the fallback when the minimum supported upstream release has the move.
+    """
+    try:
+        from sglang.srt.disaggregation.encoder.server import MMEncoder
+    except ModuleNotFoundError as exc:
+        if exc.name != "sglang.srt.disaggregation.encoder":
+            return None
+        try:
+            # Fallback for upstream SGLang <= 0.5.18.
+            from sglang.srt.disaggregation.encode_server import MMEncoder
+        except (ImportError, OSError):
+            return None
+    except (ImportError, OSError):
+        return None
+    return MMEncoder
+
+
+def get_encoder_preprocessor_module() -> Any | None:
+    """Return the module that owns the encode worker's preprocessing bindings."""
+    try:
+        return importlib.import_module("sglang.srt.disaggregation.encoder.preprocessor")
+    except ModuleNotFoundError as exc:
+        if exc.name != "sglang.srt.disaggregation.encoder":
+            return None
+        try:
+            # Fallback for upstream SGLang <= 0.5.18.
+            return importlib.import_module("sglang.srt.disaggregation.encode_server")
+        except (ImportError, OSError):
+            return None
+    except (ImportError, OSError):
+        return None
+
+
+async def mm_encode(
+    encoder: Any, media_inputs: list[Any], modality: Any
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Encode media across the supported SGLang MMEncoder APIs."""
+    legacy_encode = getattr(encoder, "_encode", None)
+    if callable(legacy_encode):
+        # Fallback for upstream SGLang <= 0.5.18.
+        return await legacy_encode(media_inputs, modality)
+
+    prepare = getattr(encoder, "_prepare_encode_context", None)
+    compute = getattr(encoder, "_compute_embedding", None)
+    if not callable(prepare) or not callable(compute):
+        raise RuntimeError("SGLang MMEncoder does not expose an encode API")
+
+    request = {
+        "req_id": f"dynamo-direct-{uuid.uuid4()}",
+        "num_parts": 1,
+        "part_idx": 0,
+        "mm_items": media_inputs,
+        "hashes": None,
+    }
+    encode_context = await prepare(
+        [request],
+        modality,
+        use_global_cache=False,
+    )
+    embeddings = await compute(encode_context, keep_on_gpu=False)
+    if embeddings is None:
+        raise RuntimeError("SGLang MMEncoder returned no embeddings")
+    return (
+        encode_context.preprocess_result.grid_thw,
+        embeddings,
+        encode_context.aux_data,
+    )
+
 
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
@@ -47,6 +162,36 @@ except ModuleNotFoundError as exc:
         raise
     # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+
+
+def get_sglang_model_config(server_args: Any) -> Any:
+    """Return the resolved model config across SGLang ServerArgs APIs.
+
+    SGLang #36972 moved ``ServerArgs.get_model_config()`` to the module-level
+    ``model_config_of()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "get_model_config", None)
+    if legacy_getter is not None:
+        return legacy_getter()
+    if sglang_model_config_of is None:
+        raise AttributeError("SGLang does not expose a model config accessor")
+    return sglang_model_config_of(server_args)
+
+
+def sglang_uses_mla_backend(server_args: Any) -> bool:
+    """Return whether this configuration selects SGLang's MLA attention backend.
+
+    SGLang #36972 moved ``ServerArgs.use_mla_backend()`` to the module-level
+    ``use_mla_backend()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "use_mla_backend", None)
+    if legacy_getter is not None:
+        return bool(legacy_getter())
+    if sglang_use_mla_backend is None:
+        raise AttributeError("SGLang does not expose an MLA backend accessor")
+    return bool(sglang_use_mla_backend(server_args))
 
 
 @lru_cache(maxsize=1)
@@ -221,7 +366,12 @@ __all__ = [
     "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
+    "get_encoder_preprocessor_module",
+    "get_sglang_model_config",
+    "load_mm_encoder",
+    "mm_encode",
     "override_server_args",
     "require_reasoning_kwargs",
     "resolved_server_args",
+    "sglang_uses_mla_backend",
 ]
