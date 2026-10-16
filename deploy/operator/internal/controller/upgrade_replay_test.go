@@ -173,6 +173,7 @@ func TestOperatorUpgradeReplay(t *testing.T) {
 	catalog := loadUpgradeReplayCatalog(t)
 	for _, profile := range catalog.Profiles {
 		t.Run(profile.Name, func(t *testing.T) {
+			t.Logf("Operator %s -> candidate %s; runtime image unchanged: %s", profile.Release, catalog.CandidateMinor, profile.Image)
 			t.Log("Seed the candidate with the released DGD and PCS, including their worker hash")
 			snapshot, pcs := loadUpgradeReplaySnapshot(t, catalog, profile)
 			originalSpec := snapshot.DGD.Spec.DeepCopy()
@@ -212,7 +213,7 @@ func TestOperatorUpgradeReplayIntentionalChangeAndRetry(t *testing.T) {
 	catalog := loadUpgradeReplayCatalog(t)
 	var profile upgradeReplayProfile
 	for _, candidate := range catalog.Profiles {
-		if candidate.Name == "sglang-1.5-suffixed" {
+		if candidate.Name == "operator-1.5-to-candidate_sglang-runtime-1.5-fixed" {
 			profile = candidate
 		}
 	}

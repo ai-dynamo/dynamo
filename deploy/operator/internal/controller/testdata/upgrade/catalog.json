@@ -5,8 +5,8 @@
     "1.5.0": {"revision": "b83b1d9304ebfc624709ac46db32b1b6f1ff1615", "newWorkerSuffix": true}
   },
   "profiles": [
-    {"name": "sglang-1.4-legacy", "release": "1.4.0", "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0"},
-    {"name": "sglang-1.4-custom-tag", "release": "1.4.0", "image": "registry.example.com/dynamo/sglang-runtime:v1.5.0-9aa3-repro"},
-    {"name": "sglang-1.5-suffixed", "release": "1.5.0", "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0"}
+    {"name": "operator-1.4-to-candidate_sglang-runtime-1.4-fixed", "release": "1.4.0", "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0"},
+    {"name": "operator-1.4-to-candidate_sglang-runtime-1.5-custom-fixed", "release": "1.4.0", "image": "registry.example.com/dynamo/sglang-runtime:v1.5.0-9aa3-repro"},
+    {"name": "operator-1.5-to-candidate_sglang-runtime-1.5-fixed", "release": "1.5.0", "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0"}
   ]
 }

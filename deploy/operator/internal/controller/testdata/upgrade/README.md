@@ -14,12 +14,29 @@ decision. They compare raw historical worker PodSpecs, labels, annotations and
 replica counts with every candidate reconciliation round. Raw input prevents a
 newer Go API type from silently discarding an old Pod field before comparison.
 
-The initial catalog selects operator 1.4.0 and 1.5.0 as historical release lines
-for candidate 1.6. It covers ordinary legacy workers, a parseable custom runtime
-1.5 tag under operator 1.4, and already-suffixed operator 1.5 workers. It is not
-a complete backend/provider/runtime matrix. The custom-tag profile reproduces
-the same runtime-version hash transition as the reported 1.2-to-1.5 incident,
-using a supported 1.4-operator/1.5-runtime starting pair.
+## Operator upgrade paths with fixed runtimes
+
+Every unchanged-workload profile upgrades only the operator. Its DGD spec and
+runtime image string stay identical before and after takeover. The catalog's
+`release` identifies the old operator that generates the baseline; `image`
+identifies the runtime held fixed throughout that profile. `candidate` is the
+operator code checked out for the CI run, currently on the 1.6 release line.
+
+| Profile | Old operator | Candidate operator | Fixed runtime image | Historical worker state |
+| --- | --- | --- | --- | --- |
+| `operator-1.4-to-candidate_sglang-runtime-1.4-fixed` | 1.4.0 | 1.6 candidate | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0` | Unsuffixed |
+| `operator-1.4-to-candidate_sglang-runtime-1.5-custom-fixed` | 1.4.0 | 1.6 candidate | `registry.example.com/dynamo/sglang-runtime:v1.5.0-9aa3-repro` | Unsuffixed |
+| `operator-1.5-to-candidate_sglang-runtime-1.5-fixed` | 1.5.0 | 1.6 candidate | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0` | Already suffixed |
+
+The first row tests a 1.6 candidate operator taking over existing runtime 1.4
+workers. In the second row, the custom runtime 1.5 tag is already present under
+operator 1.4; it is never upgraded by the replay. That profile detects whether
+the candidate's interpretation of the same tag changes the hash inputs and
+worker templates. It reproduces the runtime-version hash transition behind the
+reported operator 1.2-to-1.5 incident, rather than that exact version path.
+
+Operator 1.4 and 1.5 are the initial N-2 and N-1 source baselines for candidate
+1.6. These three profiles are not a complete backend/provider/runtime matrix.
 
 ## Generate immutable snapshots
 
@@ -60,9 +77,12 @@ is no skip, xfail or automatic baseline-update mode. Hash equality is diagnostic
 not the assertion: a safe comparison-hash migration is allowed if worker identity
 and templates remain unchanged.
 
-The intentional-change test modifies a real worker field, injects a failed PCS
-write, retries reconciliation and checks that the new worker generation converges
-without advancing the DGD hash before the failed write is retried.
+The separate intentional-change test is a control case: after loading the
+operator 1.5 baseline, it explicitly changes a worker environment variable while
+keeping the runtime image fixed. It injects a failed PCS write, retries
+reconciliation and checks that the new worker generation converges without
+advancing the DGD hash before the failed write is retried. This distinguishes
+an intentional DGD edit from the unchanged-workload upgrade profiles above.
 
 The standalone pull-request workflow executes these CPU checks independently of
 the GPU deploy-test switch. Aggregate N-2 inventory/merge enforcement, live
