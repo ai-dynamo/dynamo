@@ -32,7 +32,7 @@ pub mod replicas;
 pub mod watch;
 
 pub use admission::admit;
-pub use connection::{RelayDialer, RelayListener, StateConnection};
+pub use connection::{StateBroadcaster, StateConnection, StateReceiver};
 pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };
