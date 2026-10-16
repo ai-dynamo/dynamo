@@ -32,8 +32,8 @@ use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
 };
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
-    get_or_create_request_id, smart_json_error_middleware,
+    check_model_serving_ready, check_ready, get_body_limit, get_or_create_request_id,
+    preprocessed_context_from_headers, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
@@ -990,7 +990,7 @@ async fn handler_generate(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => {
                 metric_lifecycle.mark_error(generate_metric_error_type(response.0));

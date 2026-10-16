@@ -30,9 +30,14 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.backend_args import (
+    DynamoVllmArgGroup,
+    DynamoVllmConfig,
+    _configured_artifact_router_profile,
+)
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 from . import envs
 
@@ -116,6 +121,8 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
         The validated configuration, retaining the original source in ``model``.
     """
     dynamo_config, vllm_args = _parse_cli_args(argv)
+    if dynamo_config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(dynamo_config.artifact_router_profile)
     if needs_local_model_path(dynamo_config.model):
         vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
         if not vllm_args.served_model_name:
@@ -605,7 +612,7 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
+    inside MultiConnector or PdConnector (kv_connector_extra_config.connectors contains
     "NixlConnector").
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
@@ -613,9 +620,8 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":

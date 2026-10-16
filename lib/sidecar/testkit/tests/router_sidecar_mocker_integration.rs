@@ -124,6 +124,25 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
         ),
         "{error}"
     );
+    assert_eq!(
+        error.class(),
+        dynamo_backend_common::ErrorType::InvalidRequest,
+        "{error}"
+    );
+    assert!(
+        !dynamo_runtime::error::match_error_chain(
+            &error,
+            &[dynamo_backend_common::ErrorType::CannotConnect],
+            &[],
+        ),
+        "{error}"
+    );
+    assert!(
+        router
+            .selectable_worker_ids()
+            .is_ok_and(|ids| !ids.is_empty()),
+        "a request-validation refusal must not quarantine the worker"
+    );
     assert!(!rejected.reached(Event::Received));
     healthy::<F>(&env, &router, &control, "after-unsupported").await;
 
