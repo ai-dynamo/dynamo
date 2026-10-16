@@ -40,6 +40,7 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
+    native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -170,6 +171,7 @@ impl SglangSidecarEngine {
             "sglang sidecar bootstrapped native gRPC discovery"
         );
 
+        let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
         let config = WorkerConfig {
             runtime: common.runtime,
@@ -205,6 +207,7 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
+                native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -287,6 +290,7 @@ impl LLMEngine for SglangSidecarEngine {
             &self.endpoint,
             &discovery,
             self.transport.connect_attempt_timeout,
+            self.native_http_max_event_bytes,
         )? {
             Some(native_http) => {
                 match native_http
@@ -555,10 +559,24 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(mut grpc_client) = self.state.get().map(|state| state.pool.control_client())
-        else {
+        let Some(state) = self.state.get() else {
             return;
         };
+        // HTTP queues scheduler cancellation without first closing the gRPC stream.
+        if let Some(native_http) = &state.native_http {
+            match native_http
+                .abort(ctx.id(), self.transport.connect_attempt_timeout)
+                .await
+            {
+                Ok(()) => return,
+                Err(error) => tracing::debug!(
+                    request_id = ctx.id(),
+                    %error,
+                    "SGLang HTTP abort failed; falling back to gRPC"
+                ),
+            }
+        }
+        let mut grpc_client = state.pool.control_client();
         let request = pb::AbortRequest {
             rid: ctx.id().to_string(),
             abort_all: false,

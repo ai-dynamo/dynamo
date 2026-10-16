@@ -258,6 +258,7 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+proptest = "1.5"
 
 lazy_static = "1.4"
 mockito = "1.7.0"
