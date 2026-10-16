@@ -14,7 +14,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
-        preprocessor::MigrationState,
+        preprocessor::{LifecycleHandoff, MigrationState},
         timing::{RequestPhase, RequestTracker},
     },
 };
@@ -729,6 +729,15 @@ impl RequestGuard {
             if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
                 lifecycle.sent(worker);
             }
+        }
+    }
+
+    /// Pass the classifier lifecycle to the decode leg once prefill is
+    /// dispatched. The logical request continues there, so prefill completion
+    /// or failure must no longer end it.
+    pub(super) fn hand_off_request_lifecycle(&mut self, handoff: &LifecycleHandoff) {
+        if let Some(lifecycle) = self.cleanup.take_request_lifecycle() {
+            handoff.store(lifecycle);
         }
     }
 

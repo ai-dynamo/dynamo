@@ -10,7 +10,7 @@ use std::{
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::{AbortCause, KvSchedulerError},
+    scheduling::{AbortCause, KvSchedulerError, RequestLifecycle},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -36,7 +36,7 @@ use crate::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
-        preprocessor::owned_abort_error,
+        preprocessor::{LifecycleHandoff, owned_abort_error},
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
@@ -86,6 +86,23 @@ fn classifier_abort_error(error: &KvSchedulerError) -> Arc<AbortCause> {
     match error {
         KvSchedulerError::RequestClassifierFailed(source) => Arc::clone(source),
         _ => owned_abort_error(error),
+    }
+}
+
+/// Park a failed attempt's classifier lifecycle for a migration retry, or end
+/// it with the cause when the request will not be retried.
+pub(crate) fn settle_failed_lifecycle(
+    mut lifecycle: Box<RequestLifecycle>,
+    request: &PreprocessedRequest,
+    error: &Error,
+) {
+    if crate::migration::is_migratable(error.as_ref())
+        && let Some(state) = request.migration_state.as_ref()
+    {
+        lifecycle.prepare_retry();
+        state.store_request_lifecycle(lifecycle);
+    } else {
+        lifecycle.abort(Some(owned_abort_error(error.as_ref())));
     }
 }
 
@@ -792,16 +809,23 @@ impl RoutingHost {
         }
     }
 
+    /// `client` is the originating request's context: prefill runs under its
+    /// own context so dispatched work survives a disconnect, but selection
+    /// still stops when the client does.
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
+        client: &dyn AsyncEngineContext,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         match &self.policy {
-            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPolicy::Kv(_) => {
+                self.select_and_dispatch_kv_prefill(request, client, prepare)
+                    .await
+            }
             RoutingPolicy::Builtin(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {

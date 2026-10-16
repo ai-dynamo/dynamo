@@ -25,6 +25,7 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_per_role_router_modes,
     _test_disagg_per_role_session_affinity,
+    _test_disagg_program_classifier_places_on_prefill,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
@@ -1528,6 +1529,44 @@ def test_disagg_per_role_session_affinity(
             request=request,
             frontend_port=allocate_frontend_ports(request, 1)[0],
             test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_program_classifier_places_on_prefill(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """ThunderAgent admits and places disaggregated programs on the prefill pool."""
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    policy_config = tmp_path / "thunderagent.yaml"
+    policy_config.write_text("request_classifier:\n  type: thunderagent\n")
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=1,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_program_classifier_places_on_prefill(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            policy_config_path=str(policy_config),
             request_plane="nats",
         )
 

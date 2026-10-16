@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use dynamo_kv_router::{
     PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints,
+    config::RouterConfigOverride, protocols::RoutingConstraints, scheduling::RequestLifecycle,
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
@@ -27,11 +27,11 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource},
+    kv_router::{RoutingHost, plugins::RouterPluginBuilder, routing_host::settle_failed_lifecycle},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+        preprocessor::{BootstrapInfo, LifecycleHandoff, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
     protocols::response_merge::{
@@ -241,7 +241,9 @@ pub struct PrefillRouter {
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
-    selection_policy: Option<SelectionPolicySource>,
+    /// Worker selection and request classifier for the prefill hop. `None`
+    /// for a disabled router, which never builds one.
+    plugins: Option<RouterPluginBuilder>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     /// Mode of the decode set that owns this router. Governs decode-side
@@ -282,7 +284,7 @@ struct PrefillBuildContext {
     model_manager: Arc<ModelManager>,
     /// Fallback mode for the prefill hop when the prefill card advertises none.
     decode_router_mode: RouterMode,
-    selection_policy: SelectionPolicySource,
+    plugins: RouterPluginBuilder,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
@@ -509,6 +511,10 @@ impl
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
+        // A request classifier admits on the prefill hop; set the handoff before
+        // cloning so the decode leg can claim the lifecycle prefill dispatch leaves.
+        req.lifecycle_handoff = Some(LifecycleHandoff::default());
+
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
@@ -564,9 +570,11 @@ impl
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
-                })
+                .select_and_dispatch_prefill(
+                    prefill_context,
+                    engine_ctx.as_ref(),
+                    |request, target| self.prepare_prefill_dispatch(request, target, endpoint_id),
+                )
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
@@ -628,6 +636,9 @@ impl
                 } else {
                     tracing::error!(error = %error, "Remote prefill failed, failing request");
                 }
+                if let Some(lifecycle) = take_handed_off_lifecycle(&req) {
+                    settle_failed_lifecycle(lifecycle, &req, &error);
+                }
                 return Err(error);
             }
         };
@@ -638,6 +649,9 @@ impl
         // of launching a generation-only request with missing handoff IDs.
         let outcome = match outcome {
             PrefillOutcome::Terminal { output } => {
+                if let Some(mut lifecycle) = take_handed_off_lifecycle(&req) {
+                    lifecycle.complete();
+                }
                 let output = strip_terminal_disaggregated_params(*output);
                 return Ok(dynamo_runtime::pipeline::ResponseStream::new(
                     Box::pin(stream::once(async move { output })),
@@ -704,6 +718,14 @@ impl
             None => decode.await,
         }
     }
+}
+
+/// The classifier lifecycle a dispatched prefill hop left for a decode leg that
+/// will not run.
+fn take_handed_off_lifecycle(req: &PreprocessedRequest) -> Option<Box<RequestLifecycle>> {
+    req.lifecycle_handoff
+        .as_ref()
+        .and_then(LifecycleHandoff::take)
 }
 
 /// Prefill must survive client cancellation once decode needs its KV transfer.
@@ -1269,7 +1291,7 @@ mod tests {
             workers,
             None,
             16,
-            SelectionPolicySource::Registry,
+            crate::kv_router::SelectionPolicySource::Registry,
             Some(config),
             None,
             "decode",

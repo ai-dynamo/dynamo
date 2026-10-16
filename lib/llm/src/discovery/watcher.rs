@@ -632,13 +632,13 @@ impl ModelWatcher {
 
                 // Fallback only: a prefill worker that declares its own
                 // `router_config` overrides this at activation time.
-                Some(PrefillRouter::new_with_selection_policy(
+                Some(PrefillRouter::new_with_plugins(
                     None,
                     self.manager.clone(),
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
-                    self.plugins.selection_policy(),
+                    self.plugins.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,

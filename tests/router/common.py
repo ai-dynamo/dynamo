@@ -3952,3 +3952,110 @@ def _test_disagg_per_role_session_affinity(
             f"{set(prefill_ids)} (TTL advertised) while decode spread across "
             f"{set(decode_ids)} (no TTL)"
         )
+
+
+def _test_disagg_program_classifier_places_on_prefill(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    policy_config_path: str,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Validate that a program classifier schedules disaggregated sessions on prefill.
+
+    The frontend runs ThunderAgent as its request classifier. Both sessions send
+    the same prompt, so KV-overlap routing alone would favor one prefill worker
+    for both. ThunderAgent admits on the prefill hop and places each new program
+    on the least-used prefill rank, then keeps its turns there:
+
+    1. Each session's turns stay on one prefill worker.
+    2. The two sessions land on different prefill workers.
+    3. Session-final requests release the programs and succeed.
+    """
+    turns = 3
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        decode_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+        router_mode="kv",
+        min_initial_workers=decode_workers.num_workers,
+        extra_env={"DYN_ROUTER_POLICY_CONFIG": policy_config_path},
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
+                timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
+            )
+        )
+
+        content = test_payload["messages"][0]["content"]
+        session_ids = [f"program-{i}-{uuid.uuid4()}" for i in range(2)]
+
+        async def send_turn(session, session_id: str, final: bool = False):
+            headers = {"x-dynamo-session-id": session_id}
+            if final:
+                headers["x-dynamo-session-final"] = "true"
+            payload = {
+                **test_payload,
+                "messages": [{"role": "user", "content": content}],
+                "nvext": {"extra_fields": ["worker_id"]},
+                "stream": True,
+                "max_tokens": 1 if final else 8,
+            }
+            async with session.post(
+                chat_url, json=payload, headers=headers
+            ) as response:
+                assert (
+                    response.status == 200
+                ), f"{session_id} failed with status {response.status}"
+                body = await response.text()
+            prefill_wid = None
+            for data in parse_sse_json_chunks(body):
+                worker_id_info = data.get("nvext", {}).get("worker_id", {})
+                prefill_wid = worker_id_info.get("prefill_worker_id", prefill_wid)
+            return prefill_wid
+
+        async def run_sessions():
+            placements: dict[str, list] = {session_id: [] for session_id in session_ids}
+            async with aiohttp.ClientSession() as session:
+                for _ in range(turns):
+                    for session_id in session_ids:
+                        placements[session_id].append(
+                            await send_turn(session, session_id)
+                        )
+                for session_id in session_ids:
+                    await send_turn(session, session_id, final=True)
+            return placements
+
+        placements = asyncio.run(run_sessions())
+        logger.info(f"Program prefill placements: {placements}")
+
+        for session_id, prefill_ids in placements.items():
+            assert (
+                None not in prefill_ids
+            ), f"{session_id} turns must report a prefill worker; got {prefill_ids}"
+            assert len(set(prefill_ids)) == 1, (
+                f"{session_id} must stay on its assigned prefill worker; "
+                f"got {prefill_ids}"
+            )
+        assert len({ids[0] for ids in placements.values()}) == len(session_ids), (
+            "Each new program must be placed on the least-used prefill worker, "
+            f"not where the shared prompt is cached; got {placements}"
+        )

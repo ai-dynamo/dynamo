@@ -81,7 +81,9 @@ impl HttpFrontend {
         self
     }
 
-    /// Install one catalog-created request classifier per routed decode or aggregated model.
+    /// Install one catalog-created request classifier per routed model, on the
+    /// pool that runs prefill: the aggregated router, or the prefill hop of a
+    /// disaggregated model.
     pub fn request_classifier_factory(mut self, factory: RequestClassifierFactory) -> Self {
         self.plugins = self.plugins.with_request_classifier(factory);
         self
@@ -101,6 +103,16 @@ impl HttpFrontend {
                 .is_kv_routing()
         {
             anyhow::bail!("request classifiers require --router-mode kv");
+        }
+        // A bypassed turn skips the prefill hop where the classifier admits it.
+        if self.plugins.request_classifier().is_some()
+            && engine_config
+                .local_model()
+                .router_config()
+                .kv_router_config
+                .conditional_disagg_enabled
+        {
+            anyhow::bail!("request classifiers are not supported with conditional disaggregation");
         }
         if self.plugins.has_custom_plugins()
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
@@ -529,6 +541,50 @@ mod tests {
         .expect("gRPC must also reject the missing classifier before serving")
         .unwrap_err();
         assert!(error.to_string().contains("configured but not installed"));
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn classifier_rejects_conditional_disaggregation() {
+        use crate::{entrypoint::RouterMode, local_model::LocalModelBuilder};
+        use dynamo_kv_router::scheduling::RequestClassifier;
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        struct PassThrough;
+        impl RequestClassifier for PassThrough {}
+
+        let model = LocalModelBuilder::default()
+            .router_config(Some(RouterConfig::new(
+                RouterMode::KV,
+                KvRouterConfig {
+                    conditional_disagg_enabled: true,
+                    ..Default::default()
+                },
+            )))
+            .build()
+            .await
+            .unwrap();
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            HttpFrontend::default()
+                .request_classifier_factory(Arc::new(|_| Box::new(PassThrough)))
+                .run(
+                    drt,
+                    EngineConfig::Dynamic {
+                        model: Box::new(model),
+                        chat_engine_factory: None,
+                        prefill_load_estimator: None,
+                    },
+                ),
+        )
+        .await
+        .expect("must reject before serving")
+        .unwrap_err();
+        assert!(error.to_string().contains("conditional disaggregation"));
         runtime.shutdown();
     }
 
