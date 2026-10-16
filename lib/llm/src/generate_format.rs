@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use dynamo_runtime::error::DynamoError;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -36,27 +36,37 @@ pub const FORMAT_ENV: &str = "DYN_GENERATE_FORMAT";
 pub struct ClientRequest<'a> {
     pub body: &'a [u8],
     pub headers: &'a HeaderMap,
-    /// What the serving workers advertise under [`ENGINE_INFO_KEY`].
-    pub engine_info: &'a Value,
     /// Dynamo's request ID, for requests that carry none.
     pub default_request_id: &'a str,
 }
 
-/// A request the format rejects; the frontend answers 400 with `body`, or
-/// with [`GenerateFormat::error_body`].
+/// A request the format rejects; the frontend answers `status` with `body`,
+/// or with [`GenerateFormat::error_body`].
 #[derive(Debug)]
 pub struct ClientError {
+    pub status: StatusCode,
     pub message: String,
     pub body: Option<Value>,
 }
 
 impl ClientError {
+    /// A 400.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            status: StatusCode::BAD_REQUEST,
             message: message.into(),
             body: None,
         }
     }
+}
+
+/// The worker set chosen to serve a request.
+pub struct Worker<'a> {
+    /// What it advertises under [`ENGINE_INFO_KEY`]; `Null` when nothing.
+    pub engine_info: &'a Value,
+    pub kv_cache_block_size: u32,
+    pub lora_name: Option<&'a str>,
+    pub tower_connector_lora_enabled: bool,
 }
 
 /// A started client request.
@@ -65,8 +75,8 @@ pub struct Opened {
     pub request: PreprocessedRequest,
     pub request_id: String,
     pub stream: bool,
-    /// Why a failed attempt cannot continue on another worker, if it cannot.
-    pub migration: Result<(), String>,
+    /// The model the client names; the frontend's only one when `None`.
+    pub model: Option<String>,
     pub exchange: Box<dyn GenerateExchange>,
 }
 
@@ -74,6 +84,14 @@ pub struct Opened {
 /// order and never concurrently; [`Self::migrate`] runs only after every
 /// delivered output has passed through [`Self::chunk`].
 pub trait GenerateExchange: Send {
+    /// Finish `request` for the worker set that serves it. The inner `Err`
+    /// says why a failed attempt cannot continue on another worker.
+    fn bind(
+        &mut self,
+        request: &mut PreprocessedRequest,
+        worker: &Worker<'_>,
+    ) -> Result<Result<(), String>, ClientError>;
+
     /// One item of the worker stream; `prefill` marks prefill's final output
     /// in P/D. Streaming passes each client chunk to `emit`, which serializes
     /// it before returning; unary buffers.
@@ -141,7 +159,7 @@ pub trait GenerateFormat: Send + Sync + 'static {
     fn inspect(&self, response: Value, phase: Phase) -> Result<Inspected, DynamoError>;
 
     /// The body of a failed response.
-    fn error_body(&self, message: &str) -> Value {
+    fn error_body(&self, _status: StatusCode, message: &str) -> Value {
         json!({"error": {"message": message}})
     }
 }
@@ -157,7 +175,13 @@ impl Default for Registry {
     /// The formats Dynamo ships.
     fn default() -> Self {
         let sglang: SharedFormat = Arc::new(crate::protocols::sglang::SglangFormat::native());
-        Self(BTreeMap::from([(sglang.name().to_string(), sglang)]))
+        let vllm: SharedFormat = Arc::new(crate::protocols::openai::vllm_generate::VllmFormat);
+        Self(
+            [sglang, vllm]
+                .into_iter()
+                .map(|f| (f.name().to_string(), f))
+                .collect(),
+        )
     }
 }
 
@@ -196,5 +220,10 @@ pub fn selected() -> anyhow::Result<SharedFormat> {
         .ok()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| crate::protocols::sglang::NAME.to_string());
-    INSTALLED.get_or_init(Registry::default).get(&name)
+    named(&name)
+}
+
+/// A linked format by name.
+pub fn named(name: &str) -> anyhow::Result<SharedFormat> {
+    INSTALLED.get_or_init(Registry::default).get(name)
 }

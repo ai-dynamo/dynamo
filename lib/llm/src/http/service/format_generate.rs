@@ -31,13 +31,15 @@ use super::disconnect::{
     ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
 };
 use super::error::SanitizedError;
-use super::metrics::{CancellationLabels, ErrorType};
+use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
 use super::openai::{
     check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
     get_or_create_request_id, preprocessed_context_from_headers,
 };
 use super::{RouteDoc, service_v2};
-use crate::generate_format::{ClientRequest, GenerateExchange, Opened, SharedFormat};
+use crate::generate_format::{
+    ClientError, ClientRequest, GenerateExchange, Opened, SharedFormat, Worker,
+};
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
@@ -87,7 +89,14 @@ const CANCELLED: StatusCode = match StatusCode::from_u16(499) {
 };
 
 fn error_response(format: &SharedFormat, status: StatusCode, message: &str) -> Response {
-    (status, Json(format.error_body(message))).into_response()
+    (status, Json(format.error_body(status, message))).into_response()
+}
+
+fn client_error(format: &SharedFormat, error: ClientError) -> Response {
+    let body = error
+        .body
+        .unwrap_or_else(|| format.error_body(error.status, &error.message));
+    (error.status, Json(body)).into_response()
 }
 
 /// A failure's metric label, status, and client message.
@@ -114,6 +123,14 @@ fn classify(error: &(dyn std::error::Error + 'static)) -> (ErrorType, StatusCode
         )
     } else if let Some(error) = find_invalid_argument_in_chain(error) {
         let message = error.message().to_string();
+        (ErrorType::Validation, StatusCode::BAD_REQUEST, message)
+    } else if let Some(error) = super::error::find_canonical_error_in_chain(error)
+        .filter(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
+    {
+        let message = error
+            .public_message()
+            .unwrap_or("Invalid request")
+            .to_string();
         (ErrorType::Validation, StatusCode::BAD_REQUEST, message)
     } else if request_was_cancelled(error) {
         (
@@ -171,6 +188,115 @@ async fn run_until_killed<T>(
     }
 }
 
+/// Metrics adapter for the raw engine stream used by `/inference/v1/generate`.
+///
+/// Unlike the OpenAI text endpoints, Generate deliberately bypasses the
+/// tokenizer/postprocessor pipeline that emits `LLMMetricAnnotation`. Its
+/// token IDs are already rendered, so observe the same response metrics from
+/// the raw token deltas while leaving tokenizer and media metrics untouched.
+struct GenerateMetricCollector {
+    response: ResponseMetricCollector,
+    http_queue: Option<HttpQueueGuard>,
+    tracker: Arc<RequestTracker>,
+    input_tokens: usize,
+    output_tokens: usize,
+    worker_info_observed: bool,
+}
+
+impl GenerateMetricCollector {
+    fn new(
+        metrics: Arc<super::metrics::Metrics>,
+        model: &str,
+        tracker: Arc<RequestTracker>,
+        input_tokens: usize,
+    ) -> Self {
+        Self {
+            response: metrics.clone().create_response_collector(model),
+            http_queue: Some(metrics.create_http_queue_guard(model)),
+            tracker,
+            input_tokens,
+            output_tokens: 0,
+            worker_info_observed: false,
+        }
+    }
+
+    /// Copy routed worker labels once, after the tracker has populated them.
+    fn observe_worker_info(&mut self) {
+        if self.worker_info_observed {
+            return;
+        }
+
+        let Some(worker) = self.tracker.get_worker_info() else {
+            return;
+        };
+        self.response.set_worker_info(
+            worker.prefill_worker_id,
+            worker.prefill_dp_rank,
+            self.tracker.prefill_worker_type().map(String::from),
+            worker.decode_worker_id,
+            worker.decode_dp_rank,
+            self.tracker.decode_worker_type().map(String::from),
+        );
+        self.worker_info_observed = true;
+    }
+
+    fn observe(&mut self, annotated: &mut Annotated<LLMEngineOutput>) {
+        let Some(output) = annotated.data.as_mut() else {
+            return;
+        };
+
+        if let Some(routing_data) = output.routing_data.take() {
+            if let Some(timing) = routing_data.timing {
+                self.tracker.set_external_timing(timing);
+            }
+            if let Some(worker_id) = routing_data.worker_id {
+                self.tracker.set_external_worker_info(worker_id);
+            }
+            if let Some(token_ids) = routing_data.token_ids {
+                self.tracker.set_external_query_token_ids(token_ids);
+            }
+        }
+
+        self.observe_worker_info();
+
+        let cached_tokens = output
+            .completion_usage
+            .as_ref()
+            // A migrated attempt includes already-delivered output tokens in
+            // its prompt. Ignore that attempt-local usage for this logical
+            // request and let the RequestTracker fallback run on drop.
+            .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
+            .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            .and_then(|details| details.cached_tokens)
+            .map(|tokens| tokens as usize);
+        self.response.observe_cached_tokens(cached_tokens);
+
+        // RetryManager appends delivered tokens to the retried request and only
+        // yields newly generated deltas, so this remains exact across migration.
+        let chunk_tokens = output.token_ids.len();
+        self.output_tokens += chunk_tokens;
+        self.response.observe_current_osl(self.output_tokens);
+        if self.response.is_first_token()
+            && chunk_tokens > 0
+            && let Some(guard) = self.http_queue.take()
+        {
+            drop(guard);
+        }
+        self.response
+            .observe_response(self.input_tokens, chunk_tokens);
+    }
+}
+
+impl Drop for GenerateMetricCollector {
+    fn drop(&mut self) {
+        // Matching backend usage is authoritative when present. The response
+        // collector latches it during streaming; this logical-request router
+        // estimate fills missing or migration-expanded attempt usage.
+        self.response
+            .observe_cached_tokens(self.tracker.cached_tokens());
+    }
+}
+
 async fn handler(
     State(route): State<Arc<GenerateRoute>>,
     headers: HeaderMap,
@@ -180,22 +306,41 @@ async fn handler(
     if let Err(response) = check_ready(state) {
         return adapt_openai_error(format, response);
     }
+    let Opened {
+        mut request,
+        request_id,
+        stream: streaming,
+        model,
+        exchange,
+    } = match format.open(ClientRequest {
+        body: &body,
+        headers: &headers,
+        default_request_id: &get_or_create_request_id(&headers),
+    }) {
+        Ok(opened) => opened,
+        Err(error) => return client_error(format, error),
+    };
     let capability = format.capability();
-    let models = canonical_generate_models(
-        state.manager(),
-        state
-            .manager()
-            .list_generate_models_for_capability(capability),
-    );
-    let model = match models.len() {
-        1 => models.into_iter().next().unwrap(),
-        0 => {
-            let message = "no generate-capable model is registered";
-            return error_response(format, StatusCode::NOT_FOUND, message);
-        }
-        _ => {
-            let message = "multiple models serve this generate format; configure a model-specific generate endpoint";
-            return error_response(format, StatusCode::BAD_REQUEST, message);
+    let model = match model {
+        Some(model) => state.manager().resolve_canonical_name(&model),
+        None => {
+            let mut models = canonical_generate_models(
+                state.manager(),
+                state
+                    .manager()
+                    .list_generate_models_for_capability(capability),
+            );
+            match models.len() {
+                1 => models.remove(0),
+                0 => {
+                    let message = "no generate-capable model is registered";
+                    return error_response(format, StatusCode::NOT_FOUND, message);
+                }
+                _ => {
+                    let message = "multiple models are registered; specify the model";
+                    return error_response(format, StatusCode::BAD_REQUEST, message);
+                }
+            }
         }
     };
     if let Err(response) = check_model_serving_ready(state, &model) {
@@ -216,32 +361,22 @@ async fn handler(
             return error_response(format, status, &error.to_string());
         }
     };
-
-    let Opened {
-        mut request,
-        request_id,
-        stream: streaming,
-        migration,
-        exchange,
-    } = match format.open(ClientRequest {
-        body: &body,
-        headers: &headers,
-        engine_info: &selection.engine_info,
-        default_request_id: &get_or_create_request_id(&headers),
-    }) {
-        Ok(opened) => opened,
-        Err(error) => {
-            let body = error
-                .body
-                .unwrap_or_else(|| format.error_body(&error.message));
-            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-        }
-    };
     request.model = model.clone();
+    let mut exchange = exchange;
+    let worker = Worker {
+        engine_info: &selection.engine_info,
+        kv_cache_block_size: selection.kv_cache_block_size,
+        lora_name: selection.lora_name.as_deref(),
+        tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
+    };
+    let migration = match exchange.bind(&mut request, &worker) {
+        Ok(migration) => migration,
+        Err(error) => return client_error(format, error),
+    };
     // The router records TTFT and ITL into the request's tracker.
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(request.token_ids.len(), None);
-    request.tracker = Some(tracker);
+    request.tracker = Some(tracker.clone());
     let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
     match migration {
         Ok(()) => request.continuation = Some(exchange.clone()),
@@ -268,6 +403,7 @@ async fn handler(
     let dispatch_span =
         tracing::info_span!(target: "request_span", "generate", request_id = %request_id);
     let dispatch = Dispatch {
+        tracker,
         request_id,
         model,
         state: state.clone(),
@@ -341,6 +477,7 @@ fn events(
 }
 
 struct Dispatch {
+    tracker: Arc<RequestTracker>,
     request_id: String,
     model: String,
     state: Arc<service_v2::State>,
@@ -357,6 +494,7 @@ impl Dispatch {
         context: Context<PreprocessedRequest>,
     ) -> Response {
         let Self {
+            tracker,
             request_id,
             model,
             state,
@@ -409,6 +547,18 @@ impl Dispatch {
         };
 
         let engine_context = stream.context();
+        let input_tokens = tracker.isl_tokens().unwrap_or_default();
+        let metric_model = state.manager().metric_model_for(&model).to_string();
+        let mut collector = GenerateMetricCollector::new(
+            state.metrics_clone(),
+            &metric_model,
+            tracker,
+            input_tokens,
+        );
+        let stream = stream.map(move |mut item| {
+            collector.observe(&mut item);
+            item
+        });
         if !streaming {
             let fold = async {
                 pin_mut!(stream);
@@ -442,8 +592,8 @@ impl Dispatch {
             futures::stream::iter(match result {
                 Ok(events) => events.into_iter().map(Ok).collect(),
                 Err(error) => {
-                    let (error_type, _, message) = classify(&error);
-                    let body = rendering.error_body(&message).to_string();
+                    let (error_type, status, message) = classify(&error);
+                    let body = rendering.error_body(status, &message).to_string();
                     vec![Err(axum::Error::new(RenderedError { error_type, body }))]
                 }
             })
@@ -467,7 +617,44 @@ impl Dispatch {
 mod tests {
     use super::*;
 
-    use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
+    /// Fails dispatch the way an addressed worker that no longer serves the instance does.
+    struct WorkerUnavailableEngine;
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for WorkerUnavailableEngine
+    {
+        async fn generate(
+            &self,
+            _request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            Err(DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+                .message("Server unavailable: unknown endpoint a/generate")
+                .build()
+                .into())
+        }
+    }
+
+    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+        Context::new(
+            PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .expect("build dispatch test request"),
+        )
+    }
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use dynamo_runtime::protocols::maybe_error::MaybeError;
 
@@ -485,11 +672,11 @@ mod tests {
             .open(ClientRequest {
                 body: body.as_bytes(),
                 headers: &HeaderMap::new(),
-                engine_info: &Value::Null,
                 default_request_id: "request-id",
             })
             .unwrap();
         Dispatch {
+            tracker: Arc::new(RequestTracker::new()),
             request_id: "req".to_string(),
             model: "test-model".to_string(),
             state,
@@ -805,18 +992,17 @@ mod tests {
                 .to_string();
                 let Opened {
                     mut request,
-                    migration,
-                    exchange,
+                    mut exchange,
                     ..
                 } = sglang()
                     .open(ClientRequest {
                         body: body.as_bytes(),
                         headers: &HeaderMap::new(),
-                        engine_info: &Value::Null,
                         default_request_id: "request-id",
                     })
                     .unwrap();
-                assert!(migration.is_ok());
+                let worker = crate::generate_format::testkit::worker(&Value::Null);
+                assert!(matches!(exchange.bind(&mut request, &worker), Ok(Ok(()))));
                 let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
                 request.continuation = Some(exchange.clone());
                 let worker = Arc::new(FlakyWorker {

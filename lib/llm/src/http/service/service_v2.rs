@@ -1747,7 +1747,12 @@ impl HttpServiceConfigBuilder {
                 if let Some(path) = generate_path.as_deref() {
                     validate_generate_route_path(path)?;
                 }
-                let (docs, route) = super::generate::generate_router(state.clone(), generate_path);
+                let generate_path =
+                    generate_path.or_else(|| Some("/inference/v1/generate".to_string()));
+                let format =
+                    crate::generate_format::named(crate::protocols::openai::vllm_generate::NAME)?;
+                let (docs, route) =
+                    super::format_generate::router(state.clone(), generate_path, format);
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }

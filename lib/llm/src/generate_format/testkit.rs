@@ -18,7 +18,18 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
+use crate::generate_format::Worker;
 use crate::protocols::response_merge::RuleSet;
+
+/// A worker set advertising `engine_info`.
+pub fn worker(engine_info: &Value) -> Worker<'_> {
+    Worker {
+        engine_info,
+        kv_cache_block_size: 16,
+        lora_name: None,
+        tower_connector_lora_enabled: false,
+    }
+}
 
 pub mod driver;
 pub mod laws;

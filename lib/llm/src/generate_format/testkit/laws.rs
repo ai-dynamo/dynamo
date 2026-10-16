@@ -278,10 +278,15 @@ impl Harness {
             .open(ClientRequest {
                 body: &body,
                 headers: &Default::default(),
-                engine_info: &scenario.engine_info,
                 default_request_id: "dynamo-request",
             })
-            .is_ok_and(|opened| opened.migration.is_ok())
+            .is_ok_and(|mut opened| {
+                let worker = super::worker(&scenario.engine_info);
+                matches!(
+                    opened.exchange.bind(&mut opened.request, &worker),
+                    Ok(Ok(()))
+                )
+            })
     }
 
     /// A client that joins the streamed chunks gets the unary response.
@@ -438,12 +443,12 @@ impl Harness {
                 }) = self.format.open(ClientRequest {
                     body: &body,
                     headers: &Default::default(),
-                    engine_info: &scenario.engine_info,
                     default_request_id: "dynamo-request",
                 })
                 else {
                     return Ok(());
                 };
+                let _ = exchange.bind(&mut request, &super::worker(&scenario.engine_info));
                 for value in values {
                     let output = LLMEngineOutput {
                         engine_data: Some(json!({ crate::protocols::sglang::RESPONSE_KEY: value })),

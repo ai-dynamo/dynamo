@@ -40,8 +40,11 @@ use serde_json::{Value, json};
 use super::generate::SglangGenerateRequest;
 use super::migrate::{Continuation, RequestRules};
 use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
+use axum::http::StatusCode;
+use serde_json::Map;
+
 use crate::generate_format::{
-    ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase,
+    ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase, Worker,
 };
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::preprocessor::RoutingHints;
@@ -120,6 +123,7 @@ impl<C: ClientCodec> SglangFormat<C> {
 fn invalid_body(error: serde_json::Error) -> ClientError {
     let message = format!("Failed to deserialize the JSON body: {error}");
     ClientError {
+        status: StatusCode::BAD_REQUEST,
         body: Some(json!({
             "object": "error", "message": message, "type": "Bad Request",
             "param": null, "code": 400,
@@ -165,12 +169,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let stream = request.stream;
         let (input_ids, body) = request.into_worker_envelope(&request_id);
         let body = body.as_object().expect("the envelope is an object");
-        let continuation = Continuation::new(
-            &REQUEST_RULES,
-            body,
-            (limits.max_tokens, limits.min_tokens),
-            client.engine_info,
-        );
+        let budget = (limits.max_tokens, limits.min_tokens);
         let prefill_need = RULES.prefill_need(body);
         let prompt_tokens = input_ids.len();
         let routed = PreprocessedRequest::builder()
@@ -197,8 +196,10 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             .build()
             .map_err(|error| ClientError::new(error.to_string()))?;
         let exchange = Box::new(Exchange {
-            assembler: Assembler::new(RULES.clone(), continuation.is_ok()),
-            continuation,
+            assembler: Assembler::new(RULES.clone(), false),
+            unbound: Some(body.clone()),
+            budget,
+            continuation: Err("the request is not bound to a worker".to_string()),
             codec: self.codec.clone(),
             delivered: 0,
             request_id: request_id.clone(),
@@ -206,11 +207,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             prompt_tokens,
         });
         Ok(Opened {
-            migration: exchange
-                .continuation
-                .as_ref()
-                .map(|_| ())
-                .map_err(Clone::clone),
+            model: None,
             request: routed,
             request_id,
             stream,
@@ -222,7 +219,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         super::inspect::inspect(response, phase)
     }
 
-    fn error_body(&self, message: &str) -> Value {
+    fn error_body(&self, _status: StatusCode, message: &str) -> Value {
         self.codec.error_body(message)
     }
 }
@@ -230,6 +227,9 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
 struct Exchange<C> {
     codec: Arc<C>,
     assembler: Assembler,
+    /// The engine body and budget, until the request is bound to a worker.
+    unbound: Option<Map<String, Value>>,
+    budget: (Option<u32>, Option<u32>),
     continuation: Result<Continuation, String>,
     /// Generated tokens seen across attempts.
     delivered: usize,
@@ -239,6 +239,19 @@ struct Exchange<C> {
 }
 
 impl<C: ClientCodec> GenerateExchange for Exchange<C> {
+    fn bind(
+        &mut self,
+        _request: &mut PreprocessedRequest,
+        worker: &Worker<'_>,
+    ) -> Result<Result<(), String>, ClientError> {
+        if let Some(body) = self.unbound.take() {
+            self.continuation =
+                Continuation::new(&REQUEST_RULES, &body, self.budget, worker.engine_info);
+            self.assembler.set_capture(self.continuation.is_ok());
+        }
+        Ok(self.continuation.as_ref().map(|_| ()).map_err(Clone::clone))
+    }
+
     fn chunk(
         &mut self,
         output: LLMEngineOutput,
@@ -392,7 +405,6 @@ mod tests {
                 .open(ClientRequest {
                     body: body.to_string().as_bytes(),
                     headers: &Default::default(),
-                    engine_info: &Value::Null,
                     default_request_id: "id",
                 })
                 .unwrap();

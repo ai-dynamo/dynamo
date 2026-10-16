@@ -29,7 +29,7 @@ pub mod disconnect;
 pub mod error;
 pub mod format_generate;
 pub mod frontend_extension;
-pub mod generate;
+
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;

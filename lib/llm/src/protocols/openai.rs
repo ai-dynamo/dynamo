@@ -33,6 +33,7 @@ mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
+pub mod vllm_generate;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MAX_STOP_SEQUENCES, MIN_P_RANGE, N_RANGE,

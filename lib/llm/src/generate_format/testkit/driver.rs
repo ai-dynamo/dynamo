@@ -98,12 +98,14 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
     } = match format.open(ClientRequest {
         body,
         headers: &Default::default(),
-        engine_info: &scenario.engine_info,
         default_request_id: "dynamo-request",
     }) {
         Ok(opened) => opened,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
     };
+    if let Err(error) = exchange.bind(&mut request, &super::worker(&scenario.engine_info)) {
+        return Ok(Outcome::Rejected(error.message));
+    }
     if *request.token_ids != truth.prompt {
         return Err("the routed request does not carry the client's prompt".into());
     }
