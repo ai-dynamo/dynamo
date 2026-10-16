@@ -12,7 +12,7 @@
 //! so existing endpoint-picker scrape configuration keeps working.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
 
 use axum::{
     Router as AxumRouter, http::StatusCode, http::header::CONTENT_TYPE, response::IntoResponse,
@@ -90,36 +90,54 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
         .observe(cached_tokens as f64);
 }
 
-/// Register the KV router's queue gauges and admission counters with this
-/// registry, so the EPP's `/metrics` serves the same `dynamo_frontend_router_queue_*`
-/// series the Frontend serves on its own port.
+/// Register one group of router metrics with this registry at most once.
 ///
-/// The series are populated only on the Dynamo-discovery path, where the
-/// embedded router runs a scheduler and publishes queue updates. In standalone
-/// mode nothing writes them, so the families simply do not appear in a scrape.
-///
-/// Called from the scrape path: concurrent first scrapes serialize on a lock so
-/// none observes a half-registered registry, and a failed registration is
-/// retried on the next scrape instead of being latched forever.
-pub fn register_router_queue_metrics() {
-    static INIT_LOCK: Mutex<()> = Mutex::new(());
-    static REGISTERED: AtomicBool = AtomicBool::new(false);
-
-    if REGISTERED.load(Ordering::Acquire) {
+/// Concurrent first scrapes serialize on `lock` so none observes a
+/// half-registered registry, and a failed registration is retried on the next
+/// scrape instead of being latched forever.
+fn register_once(
+    lock: &Mutex<()>,
+    registered: &AtomicBool,
+    register: impl FnOnce() -> Result<(), prometheus::Error>,
+) {
+    if registered.load(Ordering::Acquire) {
         return;
     }
-    let _guard = INIT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if REGISTERED.load(Ordering::Acquire) {
+    let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    if registered.load(Ordering::Acquire) {
         return;
     }
-    match dynamo_llm::kv_router::metrics::register_router_queue_metrics(&REGISTRY) {
-        Ok(()) => REGISTERED.store(true, Ordering::Release),
+    match register() {
+        Ok(()) => registered.store(true, Ordering::Release),
         Err(error) => {
-            tracing::warn!(%error, "Failed to register router queue metrics with the EPP registry");
+            tracing::warn!(%error, "Failed to register router metrics with the EPP registry");
         }
     }
+}
+
+/// Register the KV router's queue gauges, admission counters, and per-worker
+/// load gauges with this registry, so the EPP's `/metrics` serves the same
+/// `dynamo_frontend_router_*` and `dynamo_frontend_worker_*` series the Frontend
+/// serves on its own port.
+///
+/// The series are populated only on the Dynamo-discovery path, where the
+/// embedded router runs a scheduler and publishes queue and load updates. In
+/// standalone mode nothing writes them, so the families simply do not appear in
+/// a scrape.
+///
+/// Called from the scrape path.
+pub fn register_router_metrics() {
+    static QUEUE_LOCK: Mutex<()> = Mutex::new(());
+    static QUEUE_REGISTERED: AtomicBool = AtomicBool::new(false);
+    static LOAD_LOCK: Mutex<()> = Mutex::new(());
+    static LOAD_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+    register_once(&QUEUE_LOCK, &QUEUE_REGISTERED, || {
+        dynamo_llm::kv_router::metrics::register_router_queue_metrics(&REGISTRY)
+    });
+    register_once(&LOAD_LOCK, &LOAD_REGISTERED, || {
+        dynamo_llm::kv_router::metrics::register_worker_load_metrics(&REGISTRY)
+    });
 }
 
 /// Serve `/metrics` until the process exits.
@@ -132,7 +150,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
 }
 
 async fn render() -> impl IntoResponse {
-    register_router_queue_metrics();
+    register_router_metrics();
 
     let mut buf = Vec::new();
     match TextEncoder::new().encode(&REGISTRY.gather(), &mut buf) {
@@ -222,12 +240,16 @@ mod tests {
         observe_cached_tokens(32);
         drop(guard);
 
-        // Instantiate one queue series so the family materializes in the scrape.
+        // Instantiate one series per family so both materialize in the scrape.
         let _ = dynamo_llm::kv_router::metrics::ROUTER_QUEUE_METRICS.handles(
             "queue-endpoint-test",
             "decode",
             "interactive",
         );
+        dynamo_llm::kv_router::metrics::WORKER_LOAD_METRICS
+            .active_decode_blocks
+            .with_label_values(&["1", "0", "decode"])
+            .set(7);
 
         let response = render().await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -250,6 +272,10 @@ mod tests {
         assert!(
             body.contains("dynamo_frontend_router_queue_pending_requests"),
             "expected the router queue family on the EPP endpoint, got:\n{body}"
+        );
+        assert!(
+            body.contains("dynamo_frontend_worker_active_decode_blocks"),
+            "expected the worker load family on the EPP endpoint, got:\n{body}"
         );
     }
 }
