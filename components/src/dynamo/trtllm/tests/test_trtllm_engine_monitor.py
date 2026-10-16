@@ -73,8 +73,6 @@ class _BlockingEngine(_FakeEngine):
 
 
 class _HangingShutdownEngine(_FakeEngine):
-    """Engine whose shutdown() never returns, like a teardown stuck on IPC."""
-
     def __init__(self, health_results=None, *, fatal_error=None):
         super().__init__(health_results, fatal_error=fatal_error)
         self.release = threading.Event()
@@ -328,7 +326,8 @@ def test_watchdog_poll_has_positive_floor_and_upper_bound(interval, expected):
 
 
 @pytest.mark.timeout(10)
-def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch):
+@pytest.mark.parametrize("shutdown_requested", [False, True])
+def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch, shutdown_requested):
     """A dead rank can block the loop thread in a TRT-LLM IPC send; the
     watchdog thread must still end the process."""
     exit_calls = _record_exit(monkeypatch)
@@ -336,13 +335,17 @@ def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch):
     runtime = _FakeRuntime()
 
     async def start_then_block_loop():
+        shutdown_event = asyncio.Event()
         TrtllmEngineMonitor(
             engine,
             runtime=runtime,
+            shutdown_event=shutdown_event,
             interval=0.01,
             shutdown_timeout=60.0,
         )
         engine._fatal_error = RuntimeError("MPI worker rank 0 exited unexpectedly")
+        if shutdown_requested:
+            shutdown_event.set()
         deadline = time.monotonic() + 5.0
         while not exit_calls and time.monotonic() < deadline:
             time.sleep(0.01)
