@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: beam-synthetic-bench
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: benchmark
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -c
+          args:
+            - |
+              set -euo pipefail
+              RUN_DIR="/shared-model-cache/perf/beam/${POD_UID}"
+              mkdir -p "$RUN_DIR"
+              aiperf --version > "$RUN_DIR/aiperf-version.txt"
+              printf '%s\n' "model=$MODEL_NAME" "url=$BASE_URL" "allocated_gpus=$ALLOCATED_GPUS" > "$RUN_DIR/run.txt"
+              aiperf profile \
+                --url "$BASE_URL" --model "$MODEL_NAME" --tokenizer "$TOKENIZER" \
+                --endpoint-type chat --endpoint /v1/chat/completions --streaming \
+                --synthetic-input-tokens-mean 8192 --synthetic-input-tokens-stddev 0 \
+                --output-tokens-mean 1024 --output-tokens-stddev 0 \
+                --concurrency "$CONCURRENCY" --request-count "$((20 * CONCURRENCY))" \
+                --warmup-request-count "$CONCURRENCY" --num-dataset-entries 4096 --random-seed 42 \
+                --extra-inputs '{"max_tokens":1024,"min_tokens":1024,"ignore_eos":true,"temperature":0}' \
+                --output-artifact-dir "$RUN_DIR/c${CONCURRENCY}" --export-level raw \
+                2>&1 | tee "$RUN_DIR/benchmark.log"
+          env:
+            - name: BASE_URL
+              value: http://beam-sglang-h200-agg-frontend:8000
+            - name: MODEL_NAME
+              value: Beam-1.0-501B-A23B
+            - name: TOKENIZER
+              value: reflection/Beam-1.0-501B-A23B-FP8
+            - name: ALLOCATED_GPUS
+              value: '8'
+            - name: CONCURRENCY
+              value: '32'
+            - name: HF_HOME
+              value: /shared-model-cache
+            - name: HF_HUB_OFFLINE
+              value: '1'
+            - name: TRANSFORMERS_OFFLINE
+              value: '1'
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: '8'
+              memory: 16Gi
+            limits:
+              cpu: '16'
+              memory: 32Gi
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

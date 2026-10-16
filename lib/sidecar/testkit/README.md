@@ -33,7 +33,7 @@ lib/sidecar/
 │   │   ├── request_tests.rs    # Request fields, validation, routing and handoffs
 │   │   └── response_tests.rs   # Stream conversion, logprobs, stops and usage
 │   ├── test_fixtures.rs        # Native request, response and metadata builders
-│   └── tests.rs                # Broader tests using a local fake gRPC server
+│   └── tests.rs                # Broader tests using a local fake gRPC server, including pre-cancelled decode
 ├── sglang/src/
 │   ├── client.rs               # Inline tests: discovery, status mapping and RPC deadlines
 │   ├── engine.rs               # Inline tests: worker metadata, bootstrap and KV sources
@@ -55,7 +55,7 @@ lib/sidecar/
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
-    │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
+    │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -158,6 +158,16 @@ Each suite exercises a different request path:
 - `router_sidecar_mocker_integration.rs` uses local discovery to find sidecar
   child processes and sends requests to them over TCP. Each sidecar calls a CPU
   Mocker over native gRPC. Handoff scenarios also use the production PrefillRouter.
+  HTTP error scenarios additionally run the real frontend: native invalid-argument
+  errors become HTTP 400, and failures after a token reaches the client become SSE
+  errors without a successful finish. Both paths verify subsequent recovery.
+
+The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
+The HTTP cancellation regression uses that peer and the production sidecar engine.
+It holds an admitted request before headers or during streaming, then checks
+targeted abort before disconnect, another request's isolation and recovery. These
+CPU checks do not exercise cancellation before engine admission or during physical
+KV transfer.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
