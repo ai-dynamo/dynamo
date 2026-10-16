@@ -38,3 +38,4 @@ tempfile = { workspace = true }
 tokio-util = { workspace = true }
 libc = { workspace = true }
 prost-types-v14 = { workspace = true }
+reqwest = { workspace = true }

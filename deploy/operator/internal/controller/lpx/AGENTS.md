@@ -92,7 +92,7 @@ SPDX-License-Identifier: Apache-2.0
 - Retain matching LPRs and their status across input edits. Collect missing
   requests in the same ordered pass that constructs desired requests. An
   immutable mismatch waits for its Grove engine to roll and LPX to release the
-  old requests; incompatible layouts and OnDelete builds require PCS replacement.
+  old requests; incompatible layouts require PCS replacement.
 - Publish missing requests independently in workload/PCSG ordinal/model order.
   Partial publication and idempotent retries are supported; exactly-once
   batches are not required. Creation order does not guarantee scheduler order or prevent
@@ -124,8 +124,11 @@ SPDX-License-Identifier: Apache-2.0
   This also defers PCS updates and replacement until all groups are observed.
 - Render a complete valid replacement before deleting an existing workload.
   A replacement error preserves the existing workload, even if its digest differs.
-- For incompatible layouts or OnDelete build changes, foreground-delete the PCS
-  and recreate it after garbage collection. Grove rolls compatible layouts.
+- For incompatible layouts, foreground-delete the PCS and recreate it after
+  garbage collection. Grove rolls compatible layouts, including build changes.
+- Admission rejects OnDelete for LPX DGDs: Grove would leave running Pods on
+  stale templates, which the LPX scheduler treats as dependency loss. Do not
+  add OnDelete-specific rollout handling.
 - Grove makes PCS clique composition and scaling-group `CliqueNames` immutable.
   Model removal therefore requires PCS replacement. Do not trim group membership
   while retaining templates; those templates can become standalone cliques.

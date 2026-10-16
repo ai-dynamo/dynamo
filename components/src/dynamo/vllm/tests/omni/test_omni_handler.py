@@ -109,6 +109,35 @@ def _make_handler(stage_types=("diffusion",)):
     return handler
 
 
+def test_handler_passes_png_compression_to_formatter():
+    config = SimpleNamespace(
+        model="test-model",
+        served_model_name=None,
+        default_video_fps=16,
+        image_png_compression_level=0,
+    )
+    handler = OmniHandler.__new__(OmniHandler)
+    handler.engine_client = MagicMock()
+    with (
+        patch(
+            "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
+        ),
+        patch("dynamo.vllm.omni.omni_handler.AudioGenerationHandler"),
+        patch("dynamo.vllm.omni.omni_handler.OutputFormatter") as formatter,
+    ):
+        OmniHandler.__init__(
+            handler, runtime=None, config=config, default_sampling_params={}
+        )
+
+    formatter.assert_called_once_with(
+        model_name="test-model",
+        media_fs=None,
+        media_http_url=None,
+        default_fps=16,
+        image_png_compression_level=0,
+    )
+
+
 class TestEngineInputs:
     def test_defaults(self):
         """EngineInputs uses CHAT_COMPLETION, fps=0, and None optionals by default."""
@@ -535,6 +564,97 @@ class _AsyncReturn:
 
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_reference_preserves_http_status(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = ImageLoader()
+        request = {
+            "model": "test-model",
+            "prompt": "a car",
+            "input_reference": "data:image/png;base64,bm90IGFuIGltYWdl",
+        }
+
+        with pytest.raises(HttpStatusError) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pytest.fail("Invalid reference must not yield a video response")
+
+        assert excinfo.value.status == 415
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_value_error_is_sanitized(self, image_request_handler):
+        """Do not expose loader details such as signed reference URLs."""
+        handler = image_request_handler
+        handler.config.output_modalities = ["video"]
+        reference = "https://example.com/reference.png?signature=private"
+        error = ValueError(f"Failed to load image: {reference}")
+        handler._image_loader.load_image.side_effect = error
+        request = {
+            "model": "test-model",
+            "prompt": "a car",
+            "input_reference": reference,
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pytest.fail("Invalid reference must not yield a video response")
+
+        assert str(excinfo.value) == "Failed to load input_reference"
+        assert excinfo.value.__cause__ is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_exceeding_pixel_limit_rejected(
+        self, image_request_handler, monkeypatch
+    ):
+        """Convert Pillow's pixel-limit failure to a client validation error."""
+        handler = image_request_handler
+        handler.config.output_modalities = ["video"]
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8)).save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "model": "test-model",
+            "prompt": "a car",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pytest.fail("Invalid reference must not yield a video response")
+
+        assert str(excinfo.value) == "Failed to load input_reference"
+        assert isinstance(excinfo.value.__cause__, Image.DecompressionBombError)
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            HttpConfigurationError("invalid proxy configuration"),
+            RuntimeError("image decoder failed unexpectedly"),
+        ],
+    )
+    async def test_reference_server_errors_are_preserved(self, error):
+        """Let deployment and decoder failures propagate before engine admission."""
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
+        request = {
+            "model": "test-model",
+            "prompt": "a car",
+            "input_reference": "https://example.com/reference.png",
+        }
+
+        with pytest.raises(type(error)) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pytest.fail("Reference loading errors must not yield a video response")
+
+        assert excinfo.value is error
+        handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.parametrize(
         "negative_prompt,with_image",

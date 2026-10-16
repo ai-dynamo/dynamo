@@ -3208,6 +3208,11 @@ class StreamIncomplete(DynamoException):
 
     ...
 
+class WorkerOverloaded(DynamoException):
+    """The worker temporarily cannot admit another request."""
+
+    ...
+
 class SelectionServiceError(DynamoException):
     """
     Raised by `SelectionService` for selector failures that are not malformed
