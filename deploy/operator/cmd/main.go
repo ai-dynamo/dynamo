@@ -661,10 +661,12 @@ func registerWebhookHandlers(
 	}
 
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
-		Config:           operatorCfg,
-		RuntimeConfig:    runtimeConfig,
-		OperatorVersion:  operatorVersion,
-		DGDRDefaultImage: dgdrDefaultImage,
+		Config:          operatorCfg,
+		RuntimeConfig:   runtimeConfig,
+		OperatorVersion: operatorVersion,
+		DGDRV1beta1: webhookdefaulting.DGDRV1beta1Options{
+			DefaultImage: dgdrDefaultImage,
+		},
 		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
 			AISimulateImage: dgdrAISimulateDefaultImage,
 			// The same discovery order as the DGDR reconciler: DCGM first, then node labels when

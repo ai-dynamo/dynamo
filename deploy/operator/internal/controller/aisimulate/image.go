@@ -21,22 +21,20 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 )
 
 // ResolveVersion returns the AISimulate compatibility version of a Request: the explicit
 // override when set, otherwise the version in the image tag. An image whose tag is not a
 // version, or a missing image, is an error; the caller reports it on the field that fixes it.
+// The parsing is shared with the runtime version of the other Request kinds.
 func ResolveVersion(image, versionOverride string) (string, error) {
-	if versionOverride != "" {
-		return versionOverride, nil
-	}
-	if image == "" {
+	if image == "" && versionOverride == "" {
 		return "", errors.New("no AISimulate image")
 	}
-	version, err := runtimeversion.ParseImageVersion(image)
+	version, err := versionoverride.Resolve(image, versionOverride)
 	if err != nil {
-		return "", fmt.Errorf("image %q has no version tag: %w", image, err)
+		return "", fmt.Errorf("resolve AISimulate version: %w", err)
 	}
-	return fmt.Sprint(version), nil
+	return version.String(), nil
 }

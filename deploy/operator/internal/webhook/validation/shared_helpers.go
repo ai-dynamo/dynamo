@@ -30,7 +30,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -153,7 +153,7 @@ func runtimeVersionOverrideRequired(image, override string) bool {
 	if override != "" {
 		return false
 	}
-	_, err := runtimeversion.ParseImageVersion(image)
+	_, err := versionoverride.ParseImageVersion(image)
 	return err != nil
 }
 
@@ -196,7 +196,7 @@ func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *fi
 		return nil
 	}
 
-	version, err := runtimeversion.Resolve(contract.image, contract.runtimeVersionOverride)
+	version, err := versionoverride.Resolve(contract.image, contract.runtimeVersionOverride)
 	if err != nil {
 		return nil
 	}
