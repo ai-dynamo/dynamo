@@ -618,6 +618,9 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
             self._nixl_connect.RdmaMetadata.model_validate(spec.serialized_request)
             for spec in metadata.tensor_specs
         ]
+        for rm in read_metadata:
+            if rm.operation_kind != self._nixl_connect.OperationKind.READ.value:
+                raise ValueError("mm_kwargs transfer metadata must be of kind READ")
         # Track acquired descriptors for release after reads complete.
         acquired: list[tuple[Any, bool, int | None]] = []
         # Store (spec_index, field_name, tensor_view, size_bytes) per task.

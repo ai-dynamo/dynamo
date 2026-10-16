@@ -669,6 +669,31 @@ class TestMmKwargsNixlReceiverPreparation:
         self.assert_pool_preserved(receiver, descriptors, native, handles)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_index", [0, 1])
+    @pytest.mark.parametrize(
+        "operation_kind",
+        [nixl_connect.OperationKind.WRITE.value, None],
+        ids=["write", "missing"],
+    )
+    async def test_non_read_metadata_does_not_borrow_buffers(
+        self, receiver, invalid_index, operation_kind
+    ):
+        receiver, descriptors, native = receiver
+        handles = [desc._nixl_hndl for desc in descriptors]
+        metadata = self.metadata([4, 8])
+        request = metadata.tensor_specs[invalid_index].serialized_request
+        if operation_kind is None:
+            request.pop("operation_kind")
+        else:
+            request["operation_kind"] = operation_kind
+        # Schema validation accepts these values; the READ contract does not.
+        nixl_connect.RdmaMetadata.model_validate(request)
+        with pytest.raises(ValueError, match="must be of kind READ"):
+            await receiver.receive(metadata)
+        receiver._acquire_descriptor.assert_not_called()
+        self.assert_pool_preserved(receiver, descriptors, native, handles)
+
+    @pytest.mark.asyncio
     async def test_allocation_failure_restores_prepared_buffers(
         self, receiver, monkeypatch
     ):
@@ -708,7 +733,12 @@ class TestMmKwargsNixlReceiverOrdering:
                 field_name="__pickled_kwargs_item__",
                 shape=[len(item)],
                 dtype_str="uint8",
-                serialized_request={"mock": True, "index": i},
+                serialized_request={
+                    "descriptors": [{"ptr": 1, "size": len(item), "device": "cpu"}],
+                    "operation_kind": nixl_connect.OperationKind.READ.value,
+                    "notification_key": str(i),
+                    "nixl_metadata": "unused-with-mocked-read",
+                },
             )
             for i, item in enumerate(items)
         ]
@@ -733,10 +763,7 @@ class TestMmKwargsNixlReceiverOrdering:
         receiver._acquire_descriptor = mock_acquire
         receiver._release_descriptor = MagicMock()
 
-        # Mock nixl_connect.RdmaMetadata.model_validate
-        mock_nixl = MagicMock()
-        mock_nixl.RdmaMetadata.model_validate = lambda x: x
-        receiver._nixl_connect = mock_nixl
+        receiver._nixl_connect = nixl_connect
 
         # Mock connector.begin_read: copy each payload into the buffer
         # with REVERSE completion order (item 2 finishes first, item 0 last)
