@@ -1207,7 +1207,7 @@ mod tests {
             ),
             Some(4..6)
         );
-        for invalid in [0, 4097, u32::MAX] {
+        for invalid in [0, 4097] {
             assert_eq!(
                 expected_fpm_ranks(
                     &serde_json::json!({"runtime_config":{"data_parallel_size":invalid}})

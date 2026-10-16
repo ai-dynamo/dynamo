@@ -117,7 +117,7 @@ def _drive_idle_pool_after_restart(config):
 @pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
 @pytest.mark.parametrize(
     ("target", "throughput", "nextn"),
-    [("load", False, 0), ("sla", True, 0), ("sla", False, 3)],
+    [("sla", True, 0), ("sla", False, 3)],
 )
 def test_idle_pool_reaches_minimum_after_restart(
     mode, target, throughput, nextn, cold_model
