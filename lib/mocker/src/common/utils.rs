@@ -221,11 +221,14 @@ impl ReusablePreciseTimer {
     }
 }
 
+/// Wait until the deadline on Tokio's clock, yielding once if it has expired.
+/// Deadlines converted from a paused Tokio clock must not be compared to real time.
 async fn sleep_until_tokio(deadline: Instant) {
-    if deadline <= Instant::now() {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    if deadline <= tokio::time::Instant::now() {
         tokio::task::yield_now().await;
     } else {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        tokio::time::sleep_until(deadline).await;
     }
 }
 
@@ -242,6 +245,17 @@ pub async fn sleep_until_precise(deadline: Instant) {
 mod tests {
     use super::*;
     use std::task::Poll;
+
+    /// Real elapsed time must not expire a deadline on the paused Tokio clock.
+    #[tokio::test(start_paused = true)]
+    async fn tokio_sleep_ignores_elapsed_real_time() {
+        let started = tokio::time::Instant::now();
+        let duration = Duration::from_millis(10);
+        // Let real time pass the deadline while Tokio's clock remains paused.
+        std::thread::sleep(Duration::from_millis(20));
+        sleep_until_tokio((started + duration).into_std()).await;
+        assert!(started.elapsed() >= duration);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_expired_precise_sleep_yields_to_runtime() {
