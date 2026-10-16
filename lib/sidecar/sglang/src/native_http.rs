@@ -24,6 +24,8 @@ use tokio_util::{
 use crate::{client, client::Discovery, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
+/// SGLang's default `SGLANG_DISAGGREGATION_WAITING_TIMEOUT`, so a healthy engine ends the wait first.
+const DECODE_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
 const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 
@@ -146,6 +148,7 @@ pub(crate) struct NativeHttp {
     endpoint: HttpEndpoint,
     max_event_bytes: usize,
     abort_timeout: Duration,
+    decode_drain_timeout: Duration,
 }
 
 // Closing the SSE connection does not reliably stop SGLang scheduler work.
@@ -175,33 +178,46 @@ impl Drop for AbortGuard<'_> {
         runtime.spawn(async move {
             // Decode must finish receiving KV before abort can release its destination pages.
             if needs_first_token {
-                if let Some(opening) = opening.take() {
-                    match opening.await {
-                        Ok(response) => stream = response_stream(response, native_http.max_event_bytes),
-                        Err(error) => {
-                            tracing::debug!(%request_id, %error, "SGLang native decode ended before first output");
-                            return;
+                let drain = async {
+                    if let Some(pending) = opening.as_mut() {
+                        let response = pending.await;
+                        opening = None;
+                        match response {
+                            Ok(response) => stream = response_stream(response, native_http.max_event_bytes),
+                            Err(error) => {
+                                tracing::debug!(%request_id, %error, "SGLang native decode ended before first output");
+                                return false;
+                            }
                         }
                     }
-                }
-                loop {
-                    let response = match next_response(&mut stream, native_http.max_event_bytes).await {
-                        Ok(response) => response,
-                        Err(error) => {
-                            tracing::debug!(%request_id, %error, "SGLang native decode ended before first output");
-                            return;
+                    loop {
+                        let response = match next_response(&mut stream, native_http.max_event_bytes).await {
+                            Ok(response) => response,
+                            Err(error) => {
+                                tracing::debug!(%request_id, %error, "SGLang native decode ended before first output");
+                                return false;
+                            }
+                        };
+                        let has_output = response_has_output(&response);
+                        if has_output && let Some(first_token) = &first_token {
+                            first_token.notify();
                         }
-                    };
-                    let has_output = response_has_output(&response);
-                    if has_output && let Some(first_token) = &first_token {
-                        first_token.notify();
+                        if response_is_terminal(&response) {
+                            return false;
+                        }
+                        if has_output {
+                            return true;
+                        }
                     }
-                    if response_is_terminal(&response) {
-                        return;
-                    }
-                    if has_output {
-                        break;
-                    }
+                };
+                match tokio::time::timeout(native_http.decode_drain_timeout, drain).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(_) => tracing::warn!(
+                        %request_id,
+                        timeout_secs = native_http.decode_drain_timeout.as_secs(),
+                        "SGLang native decode produced no output before the drain deadline; forcing abort"
+                    ),
                 }
             }
             let result = native_http.abort(&request_id, native_http.abort_timeout).await;
@@ -259,6 +275,7 @@ impl NativeHttp {
             endpoint,
             max_event_bytes,
             abort_timeout: connect_timeout,
+            decode_drain_timeout: DECODE_DRAIN_TIMEOUT,
         }))
     }
 
@@ -701,6 +718,7 @@ mod tests {
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
             max_event_bytes: MAX_EVENT_BYTES,
             abort_timeout: Duration::from_secs(1),
+            decode_drain_timeout: Duration::from_secs(1),
         }
     }
 
@@ -1427,6 +1445,56 @@ mod tests {
             ErrorType::Backend(BackendError::Cancelled)
         );
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropped_decode_forces_abort_after_drain_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            // Never answer /generate, like a hung prefill or KV transfer.
+            let (mut generate, _) = listener.accept().await.unwrap();
+            let _ = generate.read(&mut [0_u8; 4096]).await.unwrap();
+            request_seen_tx.send(()).unwrap();
+            let (mut abort, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let read = abort.read(&mut request).await.unwrap();
+            abort
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            drop(generate);
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let native = NativeHttp {
+            decode_drain_timeout: Duration::from_millis(50),
+            ..native_http(port)
+        };
+        let mut stream = native.generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                is_decode: true,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+        tokio::select! {
+            result = request_seen_rx => result.unwrap(),
+            output = stream.next() => panic!("decode returned before the backend responded: {output:?}"),
+        }
+        drop(stream);
+
+        let abort = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("abort was not sent after the drain deadline")
+            .unwrap();
+        assert!(abort.starts_with("POST /abort_request"), "{abort}");
     }
 
     #[test]
