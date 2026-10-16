@@ -209,9 +209,8 @@ class AISCoreEnginePerfModel:
         self._limits = limits
         self._attention_dp_size = attention_dp_size
         self._load_averages = _AggLoadAverages(max_observations)
-        # Fastest forward pass seen in tuning FPMs. Capacity searches never
-        # trust an estimate below it: a regression fit can extrapolate to zero
-        # (AISimulate clamps that to 1e-6 ms), which turns into millions of rps.
+        # Fastest forward pass seen in tuning FPMs; capacity searches floor at it
+        # because a fit extrapolating to zero (clamped to 1e-6 ms) gives huge rps.
         self._fastest_observed_forward_s: Optional[float] = None
         self._warned_forward_floor = False
 
