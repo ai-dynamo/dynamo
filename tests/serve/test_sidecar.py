@@ -6,6 +6,7 @@
 import importlib.util
 import os
 import pathlib
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -147,12 +148,24 @@ def _engine_metrics(
     )
 
 
+@dataclass
+class SidecarConfig(EngineConfig):
+    """Engine config plus the GPU variables its launch script reads."""
+
+    # Variable name -> logical GPU indices, mapped through CUDA_VISIBLE_DEVICES.
+    gpu_env: dict[str, tuple[int, ...]] = field(default_factory=dict)
+
+
+def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
+    return {name: (0,) for name in names}
+
+
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
 # has not been profiled for the sidecar launch path. Add one once measured, to
 # admit these into the parallel stage alongside the equivalent dynamo.{backend}
 # scenarios in tests/serve/test_{vllm,sglang,trtllm}.py.
 sidecar_configs = {
-    "vllm_aggregated": EngineConfig(
+    "vllm_aggregated": SidecarConfig(
         name="vllm_aggregated",
         directory=vllm_sidecar_dir,
         script_name="agg.sh",
@@ -174,7 +187,7 @@ sidecar_configs = {
             VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
         ),
     ),
-    "sglang_aggregated": EngineConfig(
+    "sglang_aggregated": SidecarConfig(
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
@@ -210,7 +223,7 @@ sidecar_configs = {
             ),
         ],
     ),
-    "trtllm_aggregated": EngineConfig(
+    "trtllm_aggregated": SidecarConfig(
         name="trtllm_aggregated",
         directory=trtllm_sidecar_dir,
         script_name="agg.sh",
@@ -235,10 +248,11 @@ sidecar_configs = {
             chat_payload_default(),
         ],
     ),
-    "trtllm_disaggregated": EngineConfig(
+    "trtllm_disaggregated": SidecarConfig(
         name="trtllm_disaggregated",
         directory=trtllm_sidecar_dir,
         script_name="disagg.sh",
+        gpu_env=_on_first_gpu("TRTLLM_PREFILL_GPU", "TRTLLM_DECODE_GPU"),
         marks=[
             pytest.mark.trtllm,
             # Both engines share one GPU: the handoff is what this covers, and
@@ -281,10 +295,11 @@ sidecar_configs = {
         },
         request_payloads=[disaggregated_chat_payload()],
     ),
-    "vllm_disaggregated": EngineConfig(
+    "vllm_disaggregated": SidecarConfig(
         name="vllm_disaggregated",
         directory=vllm_sidecar_dir,
         script_name="disagg.sh",
+        gpu_env=_on_first_gpu("VLLM_PREFILL_GPU", "VLLM_DECODE_GPU"),
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
@@ -307,10 +322,11 @@ sidecar_configs = {
             transfer_metrics=VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
         ),
     ),
-    "sglang_disaggregated": EngineConfig(
+    "sglang_disaggregated": SidecarConfig(
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
+        gpu_env=_on_first_gpu("SGLANG_PREFILL_GPU", "SGLANG_DECODE_GPU"),
         script_args=[
             "--disable-cuda-graph",
             "--enable-metrics",
@@ -338,10 +354,11 @@ sidecar_configs = {
             transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
         ),
     ),
-    "vllm_kv_router": EngineConfig(
+    "vllm_kv_router": SidecarConfig(
         name="vllm_kv_router",
         directory=vllm_sidecar_dir,
         script_name="agg_kv_router.sh",
+        gpu_env=_on_first_gpu("VLLM_WORKER1_GPU", "VLLM_WORKER2_GPU"),
         marks=[
             pytest.mark.vllm,
             pytest.mark.router,
@@ -356,10 +373,11 @@ sidecar_configs = {
         env=KV_ROUTING_ENV,
         request_payloads=[kv_routing_payload((1, 2), block_size=KV_ROUTING_BLOCK_SIZE)],
     ),
-    "sglang_kv_router": EngineConfig(
+    "sglang_kv_router": SidecarConfig(
         name="sglang_kv_router",
         directory=sglang_sidecar_dir,
         script_name="agg_kv_router.sh",
+        gpu_env=_on_first_gpu("SGLANG_WORKER1_GPU", "SGLANG_WORKER2_GPU"),
         script_args=[*SGLANG_KV_ROUTING_ARGS],
         marks=[
             pytest.mark.sglang,
@@ -375,10 +393,16 @@ sidecar_configs = {
         env=KV_ROUTING_ENV,
         request_payloads=[kv_routing_payload((1, 2), block_size=KV_ROUTING_BLOCK_SIZE)],
     ),
-    "vllm_disaggregated_kv_router": EngineConfig(
+    "vllm_disaggregated_kv_router": SidecarConfig(
         name="vllm_disaggregated_kv_router",
         directory=vllm_sidecar_dir,
         script_name="disagg_kv_router.sh",
+        gpu_env=_on_first_gpu(
+            "VLLM_PREFILL1_GPU",
+            "VLLM_PREFILL2_GPU",
+            "VLLM_DECODE1_GPU",
+            "VLLM_DECODE2_GPU",
+        ),
         marks=[
             pytest.mark.vllm,
             pytest.mark.router,
@@ -398,10 +422,16 @@ sidecar_configs = {
             )
         ],
     ),
-    "sglang_disaggregated_kv_router": EngineConfig(
+    "sglang_disaggregated_kv_router": SidecarConfig(
         name="sglang_disaggregated_kv_router",
         directory=sglang_sidecar_dir,
         script_name="disagg_kv_router.sh",
+        gpu_env=_on_first_gpu(
+            "SGLANG_PREFILL1_GPU",
+            "SGLANG_PREFILL2_GPU",
+            "SGLANG_DECODE1_GPU",
+            "SGLANG_DECODE2_GPU",
+        ),
         script_args=[*SGLANG_KV_ROUTING_ARGS, "--enable-metrics"],
         marks=[
             pytest.mark.sglang,
@@ -422,10 +452,11 @@ sidecar_configs = {
             )
         ],
     ),
-    "vllm_dep_kv_router": EngineConfig(
+    "vllm_dep_kv_router": SidecarConfig(
         name="vllm_dep_kv_router",
         directory=vllm_sidecar_dir,
         script_name="dep_kv_router.sh",
+        gpu_env={"CUDA_VISIBLE_DEVICES": (0, 1)},
         script_args=["--attention-backend", "TRITON_MLA"],
         marks=[
             pytest.mark.vllm,
@@ -443,10 +474,11 @@ sidecar_configs = {
             kv_routing_payload((1,), block_size=KV_ROUTING_BLOCK_SIZE, dp_ranks=(0, 1))
         ],
     ),
-    "sglang_dep_kv_router": EngineConfig(
+    "sglang_dep_kv_router": SidecarConfig(
         name="sglang_dep_kv_router",
         directory=sglang_sidecar_dir,
         script_name="dep_kv_router.sh",
+        gpu_env={"CUDA_VISIBLE_DEVICES": (0, 1)},
         script_args=[
             *SGLANG_KV_ROUTING_ARGS,
             "--attention-backend",
@@ -480,13 +512,6 @@ sidecar_configs = {
 }
 
 
-_GPU_ROLES = {
-    "disaggregated": ("PREFILL", "DECODE"),
-    "kv_router": ("WORKER1", "WORKER2"),
-    "disaggregated_kv_router": ("PREFILL1", "PREFILL2", "DECODE1", "DECODE2"),
-}
-
-
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
@@ -496,26 +521,19 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
     monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
-    backend, layout = config.name.split("_", 1)
-    if layout in _GPU_ROLES:
-        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
-        assert device != "-1", "One visible GPU is required"
-        for role in _GPU_ROLES[layout]:
-            monkeypatch.setenv(f"{backend.upper()}_{role}_GPU", device)
-    if layout == "dep_kv_router":
-        devices = map_cuda_visible_devices(
-            [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
-        ).split(",")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    for name, indices in config.gpu_env.items():
+        devices = map_cuda_visible_devices(indices, visible).split(",")
         assert (
-            len(set(devices)) == 2 and "-1" not in devices
-        ), "DEP requires two distinct GPUs"
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(devices))
-        # SGLang also takes the ports after its distributed-init port.
-        dist_init_ports = allocate_contiguous_ports(1, 9, DynamoPortRange.SERVE.value)
-        nccl_ports = allocate_ports(1, DynamoPortRange.NCCL.value)
-        request.addfinalizer(lambda: deallocate_ports(dist_init_ports + nccl_ports))
-        monkeypatch.setenv("DYN_DIST_INIT_PORT1", str(dist_init_ports[0]))
-        monkeypatch.setenv("DYN_NCCL_PORT1", str(nccl_ports[0]))
+            len(set(devices)) == len(indices) and "-1" not in devices
+        ), f"{name} requires {len(indices)} distinct visible GPU(s)"
+        monkeypatch.setenv(name, ",".join(devices))
+    # SGLang DEP also takes the ports after its distributed-init port.
+    dist_init_ports = allocate_contiguous_ports(1, 9, DynamoPortRange.SERVE.value)
+    nccl_ports = allocate_ports(1, DynamoPortRange.NCCL.value)
+    request.addfinalizer(lambda: deallocate_ports(dist_init_ports + nccl_ports))
+    monkeypatch.setenv("DYN_DIST_INIT_PORT1", str(dist_init_ports[0]))
+    monkeypatch.setenv("DYN_NCCL_PORT1", str(nccl_ports[0]))
     return config
 
 
@@ -532,7 +550,7 @@ def test_serve_deployment(
     num_system_ports,
     predownload_models,
 ):
-    """Launch a native engine and sidecar deployment and validate chat completion."""
+    """Launch a sidecar deployment and run its configured request payloads."""
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
