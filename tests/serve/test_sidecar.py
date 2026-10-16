@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.router.common import _test_frontend_kv_routing
+from tests.router.common import (
+    _test_frontend_disagg_kv_routing,
+    _test_frontend_kv_routing,
+)
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -140,17 +143,45 @@ SGLANG_KV_ROUTING_ARGS = [
 
 
 @dataclass
-class KvRoutingPayload(ChatPayload):
-    """Require engine KV events to route repeated prefixes to the cached worker or rank."""
-
+class _RoutedWorkersPayload(ChatPayload):
     routed_workers: tuple[int, ...] = field(kw_only=True)
-    dp_ranks: tuple[int, ...] = field(default=(0,), kw_only=True)
-    # vLLM counts KV transfers on decode engines and SGLang on prefill engines.
-    transfer_metrics: tuple[EngineMetrics, ...] = field(default=(), kw_only=True)
     _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def bind_environment(self, env: dict[str, str]) -> None:
         self._env = env
+
+    def _system_ports(self) -> list[int]:
+        return [
+            int(self._env[f"DYN_SYSTEM_PORT{worker}"]) for worker in self.routed_workers
+        ]
+
+
+@dataclass
+class KvRoutingPayload(_RoutedWorkersPayload):
+    """Require engine KV events to route repeated prefixes to the cached worker or rank."""
+
+    dp_ranks: tuple[int, ...] = field(default=(0,), kw_only=True)
+
+    def final_validation(self) -> None:
+        _test_frontend_kv_routing(
+            frontend_port=self.port,
+            system_ports=self._system_ports(),
+            namespace=self._env["DYN_NAMESPACE"],
+            model_name=self.body["model"],
+            block_size=KV_ROUTING_BLOCK_SIZE,
+            dp_ranks=self.dp_ranks,
+        )
+
+
+@dataclass
+class DisaggregatedKvRoutingPayload(_RoutedWorkersPayload):
+    """Require routing to the cached prefill worker and a fresh KV transfer to decode."""
+
+    # vLLM counts KV transfers on decode engines and SGLang on prefill engines.
+    transfer_metrics: tuple[EngineMetrics, ...] = field(kw_only=True)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        super().bind_environment(env)
         for metrics in self.transfer_metrics:
             metrics.bind_environment(env)
 
@@ -158,37 +189,41 @@ class KvRoutingPayload(ChatPayload):
         return sum(metrics.transfer_progress() for metrics in self.transfer_metrics)
 
     def final_validation(self) -> None:
-        _test_frontend_kv_routing(
+        _test_frontend_disagg_kv_routing(
             frontend_port=self.port,
-            system_ports=[
-                int(self._env[f"DYN_SYSTEM_PORT{worker}"])
-                for worker in self.routed_workers
-            ],
+            system_ports=self._system_ports(),
             namespace=self._env["DYN_NAMESPACE"],
             model_name=self.body["model"],
-            block_size=KV_ROUTING_BLOCK_SIZE,
-            dp_ranks=self.dp_ranks,
-            is_disaggregated=bool(self.transfer_metrics),
-            transfer_total=self._transfer_total if self.transfer_metrics else None,
+            transfer_total=self._transfer_total,
         )
 
 
-def _kv_routing_payload(
-    routed_workers: tuple[int, ...],
-    *,
-    dp_ranks: tuple[int, ...] = (0,),
-    transfer_metrics: tuple[EngineMetrics, ...] = (),
-) -> KvRoutingPayload:
-    return KvRoutingPayload(
-        body={
+def _routing_smoke_request() -> dict:
+    return {
+        "body": {
             "messages": [{"role": "user", "content": "Say hello."}],
             "max_tokens": 1,
             "temperature": 0,
         },
-        expected_response=[],
-        expected_log=[],
-        routed_workers=routed_workers,
-        dp_ranks=dp_ranks,
+        "expected_response": [],
+        "expected_log": [],
+    }
+
+
+def _kv_routing_payload(
+    routed_workers: tuple[int, ...], *, dp_ranks: tuple[int, ...] = (0,)
+) -> KvRoutingPayload:
+    return KvRoutingPayload(
+        **_routing_smoke_request(), routed_workers=routed_workers, dp_ranks=dp_ranks
+    )
+
+
+def _disaggregated_kv_routing_payload(
+    prefill_workers: tuple[int, ...], transfer_metrics: tuple[EngineMetrics, ...]
+) -> DisaggregatedKvRoutingPayload:
+    return DisaggregatedKvRoutingPayload(
+        **_routing_smoke_request(),
+        routed_workers=prefill_workers,
         transfer_metrics=transfer_metrics,
     )
 
@@ -448,8 +483,8 @@ sidecar_configs = {
         env=KV_ROUTING_ENV,
         # disagg_kv_router.sh launches decode as workers 1-2 and prefill as workers 3-4.
         request_payloads=[
-            _kv_routing_payload(
-                (3, 4), transfer_metrics=_engine_metrics(VllmMetricsChecker, 4)
+            _disaggregated_kv_routing_payload(
+                (3, 4), _engine_metrics(VllmMetricsChecker, 4)
             )
         ],
     ),
@@ -472,8 +507,8 @@ sidecar_configs = {
         env=KV_ROUTING_ENV,
         # disagg_kv_router.sh launches prefill as workers 1-2 and decode as workers 3-4.
         request_payloads=[
-            _kv_routing_payload(
-                (1, 2), transfer_metrics=_engine_metrics(SGLangMetricsChecker, 4)
+            _disaggregated_kv_routing_payload(
+                (1, 2), _engine_metrics(SGLangMetricsChecker, 4)
             )
         ],
     ),
