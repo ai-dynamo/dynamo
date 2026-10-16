@@ -63,6 +63,12 @@ For example, keep the default at `info` and enable trace output for the system-s
 export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 ```
 
+At the default `info` level, the frontend writes one line per request, `request completed`, when the response stream finishes. The line carries `request_id`, `model`, `endpoint`, `request_type`, `status`, `start_time`, `end_time`, and `elapsed_ms`. It inherits from the request span the HTTP `method`, `uri`, and `http_status`; `input_tokens`, `output_tokens`, and `cached_tokens`; the phase timings `prefill_wait_ms`, `prefill_ms`, `ttft_ms`, `decode_ms`, and `avg_itl_ms`; the routing decision as `prefill_worker_id`, `prefill_dp_rank`, `decode_worker_id`, `decode_dp_rank`, `kv_hit_rate`, and `router_queue_depth`; and the session identity as `session_id`, `agent_session_id`, and `parent_session_id` when the request carries `x-dynamo-session-id` or `x-dynamo-parent-session-id` (or a mapped Claude Code or OpenCode header). Phase and routing fields come from the router's request tracker and appear once a worker reports metrics. `ttft_ms`, `decode_ms`, and `avg_itl_ms` are measured by the frontend from handler entry, while `prefill_wait_ms` and `prefill_ms` are measured by the router, so the two groups do not sum exactly. `http_status` is the status the handler returned; a stream that fails after headers were sent has none. Cancelled and failed requests log the same message at `info` and `error` with an `error_type`. The per-request admission (`request received`), routing (`Selected worker`), and HTTP (`http response sent`) lines are at `debug`. Re-enable them for the frontend only:
+
+```bash
+export DYN_LOG='info,dynamo_llm::http::service=debug,dynamo_runtime::pipeline::network::egress=debug,dynamo_kv_router::scheduling::selector=debug,dynamo_llm::kv_router::routing_host=debug'
+```
+
 ## OTLP Export
 
 `OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Configure a

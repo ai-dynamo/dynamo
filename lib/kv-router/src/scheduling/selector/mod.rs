@@ -314,7 +314,7 @@ fn log_selection<C: WorkerConfigLike>(
         .unwrap_or(0);
 
     if request.pinned_worker == Some(worker) {
-        tracing::info!(
+        tracing::debug!(
             request_id,
             "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
             worker_type,
@@ -324,7 +324,7 @@ fn log_selection<C: WorkerConfigLike>(
             effective_overlap_blocks,
         );
     } else if worker_type == "decode" {
-        tracing::info!(
+        tracing::debug!(
             router_mode = "kv",
             request_id,
             worker_id = worker.worker_id,
@@ -339,7 +339,7 @@ fn log_selection<C: WorkerConfigLike>(
         let total_kv_blocks = workers
             .get(&worker.worker_id)
             .and_then(WorkerConfigLike::total_kv_blocks);
-        tracing::info!(
+        tracing::debug!(
             router_mode = "kv",
             request_id,
             worker_id = worker.worker_id,
