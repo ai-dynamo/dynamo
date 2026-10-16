@@ -73,7 +73,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
     def collect_fpm(self) -> FpmObservations:
         prefill_stats = None
         decode_stats = None
-        unavailable_reasons = {}
+        unavailable_reasons: dict[str, str] = {}
 
         if self._prefill_fpm_sub is not None:
             stats, reason = self._decode_fpm_bytes(self._prefill_fpm_sub, "prefill")
