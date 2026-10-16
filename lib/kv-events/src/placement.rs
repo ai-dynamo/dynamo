@@ -50,7 +50,7 @@ pub struct PlacementEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Positive text-only provenance required for shared-cache learning.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, rename = "sce", skip_serializing_if = "std::ops::Not::not")]
     pub shared_cache_eligible: bool,
 }
 
