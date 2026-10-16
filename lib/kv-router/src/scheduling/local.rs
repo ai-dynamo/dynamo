@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -30,11 +31,13 @@ use super::types::{
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillTokenDeltas, SequenceError,
-    SequencePublisher, SequenceRequest,
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
+    SequenceError, SequencePublisher, SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
@@ -60,6 +63,9 @@ pub struct LocalScheduler<
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
+    worker_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    applied_worker_configs: Arc<Mutex<Option<HashMap<WorkerId, C>>>>,
+    monitor_worker_configs: bool,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -186,21 +192,22 @@ where
         ));
 
         let (queue_updates, _) = watch::channel(());
+        let applied_worker_configs = Arc::new(Mutex::new(None));
 
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
+            let applied_configs_monitor = Arc::clone(&applied_worker_configs);
             let queue_config_updates = Arc::clone(&queue);
             let queue_updates_config = queue_updates.clone();
             let mut monitor_rx = workers_with_configs.clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
-                let mut last_workers = None;
-                Self::reconcile_worker_configs(
-                    &slots_monitor,
-                    monitor_rx.borrow_and_update().clone(),
-                    &mut last_workers,
-                );
+                {
+                    let mut applied = applied_configs_monitor.lock();
+                    let current_workers = monitor_rx.borrow_and_update().clone();
+                    Self::reconcile_worker_configs(&slots_monitor, current_workers, &mut applied);
+                }
 
                 loop {
                     tokio::select! {
@@ -216,16 +223,20 @@ where
                         }
                     }
 
-                    let current_workers = monitor_rx.borrow_and_update().clone();
-                    if Self::reconcile_worker_configs(
-                        &slots_monitor,
-                        current_workers,
-                        &mut last_workers,
-                    ) == WorkerConfigReconcileOutcome::Applied
                     {
-                        queue_config_updates.update().await;
-                        let _ = queue_updates_config.send(());
+                        // Read the watch while holding the same lock as synchronous publishers.
+                        let mut applied = applied_configs_monitor.lock();
+                        let current_workers = monitor_rx.borrow_and_update().clone();
+                        Self::reconcile_worker_configs(
+                            &slots_monitor,
+                            current_workers,
+                            &mut applied,
+                        );
                     }
+                    // A publisher may already have applied this topology. The queue still
+                    // needs every observed config update to recheck pending requests.
+                    queue_config_updates.update().await;
+                    let _ = queue_updates_config.send(());
                 }
             });
         }
@@ -274,14 +285,31 @@ where
             }
         });
 
-        Self {
+        let scheduler = Self {
             slots,
             queue,
             queue_updates,
             request_classifier: OnceLock::new(),
+            worker_configs: workers_with_configs,
+            applied_worker_configs,
+            monitor_worker_configs,
             track_prefill_tokens_default,
             worker_type,
+        };
+        if monitor_worker_configs {
+            scheduler.apply_published_worker_configs();
         }
+        scheduler
+    }
+
+    /// Apply published topology before a subsequent catalog mutation can replace it.
+    pub(crate) fn apply_published_worker_configs(&self) {
+        if !self.monitor_worker_configs {
+            return;
+        }
+        let mut applied = self.applied_worker_configs.lock();
+        let current_workers = self.worker_configs.borrow().clone();
+        Self::reconcile_worker_configs(&self.slots, current_workers, &mut applied);
     }
 
     pub async fn schedule_request(
@@ -447,6 +475,13 @@ where
         observer: NonMaxOverlapSelectionObserver,
     ) -> bool {
         self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
+    /// Install per-candidate cost capture for admitted selections.
+    ///
+    /// Returns `false` when a spec is already installed.
+    pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
+        self.queue.set_selection_trace(spec)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -720,15 +755,16 @@ where
     }
 
     /// `NoChange` when the booking no longer matches or its prefill was
-    /// already marked complete. Success confirms the state mutation and capacity
-    /// notification, not completion of pending admission.
+    /// already marked complete. `Applied` confirms the state mutation, the
+    /// ordered completion event, and a capacity notification when prompt load
+    /// was released; it does not confirm completion of pending admission.
     #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
         self.queue.ensure_running()?;
-        let outcome = self
+        let completion = self
             .slots
             .mark_prefill_completed_if_booking(
                 &booking.request_id,
@@ -737,10 +773,14 @@ where
                 Instant::now(),
             )
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))?;
-        if outcome.is_applied() {
-            self.queue.capacity_changed(Some(booking.worker));
-        }
-        Ok(outcome)
+        Ok(match completion {
+            PrefillCompletion::Unchanged => LifecycleMutationOutcome::NoChange,
+            PrefillCompletion::PhaseChanged => LifecycleMutationOutcome::Applied,
+            PrefillCompletion::LoadReleased => {
+                self.queue.capacity_changed(Some(booking.worker));
+                LifecycleMutationOutcome::Applied
+            }
+        })
     }
 
     /// Republish the ordered prefill-completion event while `booking` is live.
@@ -788,43 +828,42 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
+    /// Apply output updates before returning, without waiting for admission.
+    ///
+    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
+    /// does not mutate state or emit load observations. Queue shutdown is checked
+    /// first, including for zero counts.
     #[doc(hidden)]
-    pub async fn add_output_block_if_booking(
+    pub async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.queue.ensure_running()?;
-        self.add_output_block_if_booking_sync(booking, decay_fraction)
+        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
             .map(|_| ())
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
-    /// `add_output_block_if_booking` applied inline, like `add_output_block`,
-    /// for callers that cannot await.
+    /// Apply output updates directly without checking queue shutdown.
+    ///
+    /// Zero counts and stale or missing bookings return `NoChange`. A zero count
+    /// does not mutate state or emit load observations.
     #[doc(hidden)]
-    pub fn add_output_block_if_booking_sync(
+    pub fn add_output_blocks_if_booking_sync(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        self.slots.add_output_block_if_booking(
+        self.slots.add_output_blocks_if_booking(
             &booking.request_id,
             booking.worker,
             booking.attempt_id,
+            num_blocks,
             decay_fraction,
         )
-    }
-
-    /// Apply an output update before returning, without waiting for admission.
-    #[doc(hidden)]
-    pub async fn enqueue_output_block_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.add_output_block_if_booking(booking, decay_fraction)
-            .await
     }
 
     pub fn get_potential_loads(
@@ -941,10 +980,10 @@ mod tests {
             let before = slots.active_blocks()[&worker];
             // A single poll on this current-thread runtime cannot run the actor.
             assert!(matches!(
-                poll_once(scheduler.enqueue_output_block_if_booking(&booking, None)),
+                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
-            assert!(slots.active_blocks()[&worker] > before);
+            assert_eq!(slots.active_blocks()[&worker], before + 3);
             assert!(matches!(
                 poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
@@ -959,7 +998,7 @@ mod tests {
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
             ));
             assert!(matches!(
-                poll_once(scheduler.add_output_block_if_booking(&booking, None)),
+                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());
@@ -971,6 +1010,47 @@ mod tests {
             }
             cancellation.cancel();
         }
+    }
+
+    #[tokio::test]
+    async fn phase_only_booking_completion_reports_applied_once() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let (scheduler, _slots, _configs, cancellation) = make_scheduler(
+            HashMap::from([(0, SimpleWorkerConfig::default())]),
+            None,
+            false,
+            None,
+        );
+        let booking = scheduler
+            .add_request_if_registered_guarded(SequenceRequest {
+                request_id: "cached".into(),
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+                worker,
+                lora_name: None,
+            })
+            .unwrap()
+            .commit();
+
+        // `Applied` tells the reservation path that the completion event is already
+        // published, so it does not republish it as a fallback.
+        assert_eq!(
+            scheduler
+                .mark_prefill_completed_if_booking(&booking)
+                .await
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert_eq!(
+            scheduler
+                .mark_prefill_completed_if_booking(&booking)
+                .await
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        cancellation.cancel();
     }
 
     impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
@@ -2052,6 +2132,7 @@ mod tests {
         updated_workers.insert(0, SimpleWorkerConfig::default());
         updated_workers.insert(1, SimpleWorkerConfig::default());
         cfg_tx.send(updated_workers).unwrap();
+        scheduler.apply_published_worker_configs();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 

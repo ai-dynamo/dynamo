@@ -617,7 +617,7 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 			return err
 		}
 	}
-	if experimentalIsHubOnlyShape(src.Experimental) {
+	if experimentalNeedsWholeHubPreservation(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
 	} else if src.Experimental != nil && src.Experimental.Grove != nil {
 		// The grove block has no v1alpha1 representation; preserve it sparsely
@@ -887,6 +887,9 @@ func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.Component
 		dst.ProviderOverride = &v1beta1.ProviderOverride{}
 		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
 	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
 }
 
 // ConvertToComponentRoleSpec converts one explicit component role from
@@ -905,6 +908,9 @@ func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRo
 	if src.ProviderOverride != nil {
 		dst.ProviderOverride = &ProviderOverride{}
 		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
 	}
 }
 
@@ -1700,7 +1706,7 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	dst.PodTemplate = podTemplate
 
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
-	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
+	if dst.Experimental == nil && experimentalNeedsWholeHubPreservation(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
 	} else if dst.Experimental != nil && preserved.Experimental != nil &&
 		dst.Experimental.Grove == nil && preserved.Experimental.Grove != nil {
@@ -2099,7 +2105,7 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 	return false
 }
 
-func experimentalIsHubOnlyShape(src *v1beta1.ExperimentalSpec) bool {
+func experimentalNeedsWholeHubPreservation(src *v1beta1.ExperimentalSpec) bool {
 	return src != nil &&
 		src.GPUMemoryService == nil &&
 		src.Failover == nil &&

@@ -28,6 +28,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -155,7 +156,11 @@ func readGroveClusterTopology(ctx context.Context, mgr ctrl.Manager, name string
 // implements. Both the create-side and update-side metadata rules read this so
 // the set is stated once.
 func supportedWorkloadProviders() []string {
-	return []string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove}
+	return []string{
+		consts.WorkloadProviderComponent,
+		consts.WorkloadProviderGrove,
+		consts.WorkloadProviderDisaggregatedSet,
+	}
 }
 
 // isSupportedWorkloadProvider reports whether value names a workload program
@@ -176,6 +181,11 @@ func grovePathwayForDynamoGraphDeployment(
 		case consts.WorkloadProviderGrove:
 			return true, ""
 		case consts.WorkloadProviderComponent:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but workload provider %q is selected",
+				provider,
+			)
+		case consts.WorkloadProviderDisaggregatedSet:
 			return false, fmt.Sprintf(
 				"requires the Grove pathway, but workload provider %q is selected",
 				provider,
@@ -329,6 +339,28 @@ func effectiveNumberOfGPUsV1Beta1(
 		return effectiveNumberOfGPUs{path: resourcesPath}
 	}
 	return effectiveNumberOfGPUs{path: containersPath}
+}
+
+// effectivePodGPUCountV1Beta1 returns the scalar GPU scheduling footprint of the component Pod template.
+func effectivePodGPUCountV1Beta1(
+	ctx context.Context,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) (effectiveNumberOfGPUs, error) {
+	podSpecPath := fldPath.Child("podTemplate", "spec")
+	if component.PodTemplate == nil {
+		return effectiveNumberOfGPUs{path: podSpecPath}, nil
+	}
+
+	count, err := dra.ResolvePodGPUCount(ctx, nil, "", &component.PodTemplate.Spec)
+	if err != nil {
+		return effectiveNumberOfGPUs{}, err
+	}
+	return effectiveNumberOfGPUs{
+		value:   strconv.Itoa(count),
+		present: true,
+		path:    podSpecPath,
+	}, nil
 }
 
 func sortedComponentNames(

@@ -73,7 +73,7 @@ const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
-const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached libzmq's ZMQ_MAX_SOCKETS limit or its file-descriptor limit. Reduce direct-ZMQ peers or raise the limit with `ulimit -n`";
+const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached libzmq's ZMQ_MAX_SOCKETS limit or its file-descriptor limit. Reduce direct-ZMQ peers or raise the limit with `ulimit -n`. For routers with many direct-ZMQ KV publishers, increase `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` (default: 1) to group more publisher endpoints per subscriber socket";
 const PROCESS_FD_LIMIT_GUIDANCE: &str = "The process reached its file-descriptor limit. Reduce open file descriptors or raise the limit with `ulimit -n`";
 
 use super::codec::{Codec, MsgpackCodec};
@@ -781,6 +781,16 @@ mod tests {
     }
 
     #[test]
+    fn zmq_emfile_guides_routers_to_shared_subscribers() {
+        let guidance = socket_limit_guidance(Some(libc::EMFILE), ZMQ_SOCKET_LIMIT_GUIDANCE)
+            .expect("libzmq EMFILE should include socket-limit guidance");
+
+        assert!(guidance.contains("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB"));
+        assert!(guidance.contains("default: 1"));
+        assert!(guidance.contains("group more publisher endpoints per subscriber socket"));
+    }
+
+    #[test]
     fn tmq_io_emfile_preserves_error_and_adds_fd_guidance() {
         let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EMFILE));
         let original = error.to_string();
@@ -789,6 +799,7 @@ mod tests {
         assert!(message.starts_with(&original));
         assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
         assert!(!message.contains("ZMQ_MAX_SOCKETS"));
+        assert!(!message.contains("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB"));
     }
 
     #[test]

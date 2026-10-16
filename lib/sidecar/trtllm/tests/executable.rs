@@ -16,7 +16,15 @@ fn executable_exposes_native_grpc_configuration() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
-    for flag in ["--grpc-endpoint", "--model-path", "--disaggregation-mode"] {
+    for flag in [
+        "--grpc-endpoint",
+        "--model-path",
+        "--disaggregation-mode",
+        "--discovery-backend",
+        "--request-plane",
+        "--response-plane",
+        "--event-plane",
+    ] {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
     assert!(stdout.contains("DYN_SIDECAR_GRPC_ENDPOINT"));
@@ -33,7 +41,7 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     // A runtime configuration error must not mask a local argument error.
     let output = command
         .args(["--grpc-endpoint", "http://127.0.0.1:0", "--model-path", ""])
-        .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+        .env("ETCD_ENDPOINTS", "://invalid")
         .output()
         .unwrap();
     assert!(!output.status.success());

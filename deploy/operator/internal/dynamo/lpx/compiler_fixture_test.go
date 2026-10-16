@@ -28,12 +28,6 @@ const (
 	v3OpaqueTopology   = "opaque-v3-topology"
 )
 
-type unreachableBuildSnapshotSource struct{}
-
-func (unreachableBuildSnapshotSource) AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error) {
-	return nil, fmt.Errorf("unexpected build snapshot acquisition")
-}
-
 type staticBuildSnapshotSource map[string]*BuildSnapshot
 
 func (source staticBuildSnapshotSource) AcquireBuildSnapshot(_ context.Context, buildID string) (*BuildSnapshot, error) {
@@ -108,14 +102,13 @@ func writeV2CompilerFixture(t *testing.T) string {
 }
 
 func newV2CompilerFixture() testV3CapnpFixture {
-	topology := "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA"
 	fixture := newV3CompilerFixture()
+	fixture.architecture = "polaris"
 	fixture.buildDirectoryName = v2TestBuildName
-	fixture.numLPUNodes = 4
 	fixture.selectedPropSyncChains = [][]uint32{{7, 8}}
 	fixture.partitions = []testV3CapnpPartition{
-		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 16, devicesPerNode: 8},
-		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 16, devicesPerNode: 8},
+		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
+		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
 	}
 	return fixture
 }
@@ -130,9 +123,10 @@ type testV3CapnpFixture struct {
 	contractRevision       uint32
 	pipelineName           string
 	compilationMode        manifestcapnp.CompilationMode
-	numLPUNodes            uint32
+	architecture           string
 	selectedPropSyncChains [][]uint32
 	partSelect             bool
+	cpuEmbeddings          bool
 	partitions             []testV3CapnpPartition
 }
 
@@ -151,7 +145,7 @@ func newV3CompilerFixture() testV3CapnpFixture {
 		contractRevision: manifestcapnp.CurrentContractRevision,
 		pipelineName:     "default",
 		compilationMode:  manifestcapnp.CompilationMode_lpuOnly,
-		numLPUNodes:      2,
+		architecture:     "polarisB0",
 		partitions: []testV3CapnpPartition{{
 			id:             1,
 			deviceType:     manifestcapnp.DeviceType_lpu,
@@ -198,18 +192,17 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 	deployment, err := manifest.NewDeployment()
 	require.NoError(t, err)
 	deployment.SetCompilationMode(fixture.compilationMode)
-	deployment.SetNumLpuNodes(fixture.numLPUNodes)
 	program, err := deployment.NewProgram()
 	require.NoError(t, err)
 	require.NoError(t, program.SetProgramName(fixture.pipelineName))
-	program.SetBatchSize(1)
 	program.SetSequenceLength(8192)
 	program.SetInputSize(1)
 	program.SetOutputSize(1)
 	program.SetNumKvCaches(1)
+	program.SetSupportsCpuEmbeddings(fixture.cpuEmbeddings)
+	program.SetStandaloneTokenEmbeddings(fixture.cpuEmbeddings)
 	runtimeIO, err := deployment.NewRuntimeIo()
 	require.NoError(t, err)
-	runtimeIO.SetProtocol(runtimeIOProtocolHost)
 	runtimeIO.SetReserved1(0)
 	runtimeIO.SetIoFpgaCount(1)
 	runtimeIO.SetFanoutFactor(1)
@@ -229,6 +222,11 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 	t.Log("Encode the flat revision-2 artifact inventory")
 	artifacts, err := manifest.NewArtifacts()
 	require.NoError(t, err)
+	if fixture.cpuEmbeddings {
+		assets, err := artifacts.NewRuntimeAssets()
+		require.NoError(t, err)
+		require.NoError(t, assets.SetTokenEmbeddingsPath("part-0/text_embeddings.npz"))
+	}
 	if fixture.partSelect {
 		partSelect, err := artifacts.NewPartSelect()
 		require.NoError(t, err)
@@ -253,6 +251,7 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 			require.NoError(t, detail.SetTopology(fixturePartition.topology))
 			detail.SetNumChips(fixturePartition.numChips)
 			detail.SetDevicesPerNode(fixturePartition.devicesPerNode)
+			setManifestChipArchitectures(t, detail, []string{fixture.architecture})
 			if fixturePartition.topologyFamily != "" || fixturePartition.partitionShape != nil {
 				metadata, err := detail.NewTopologyMetadata()
 				require.NoError(t, err)
@@ -278,4 +277,20 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 	data, err := message.Marshal()
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestV2CapnpFile), data, 0o600))
+}
+
+func setManifestChipArchitectures(t *testing.T, detail manifestcapnp.LpuPartitionArtifact, architectures ...[]string) {
+	t.Helper()
+
+	programs, err := capnp.NewCompositeList(detail.Segment(), capnp.ObjectSize{PointerCount: 2}, int32(len(architectures)))
+	require.NoError(t, err)
+	require.NoError(t, detail.SetReserved4(programs.ToPtr()))
+	for index, values := range architectures {
+		chips, err := capnp.NewCompositeList(programs.Struct(index).Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 2}, int32(len(values)))
+		require.NoError(t, err)
+		require.NoError(t, programs.Struct(index).SetPtr(1, chips.ToPtr()))
+		for chip, architecture := range values {
+			require.NoError(t, chips.Struct(chip).SetText(1, architecture))
+		}
+	}
 }

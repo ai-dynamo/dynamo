@@ -233,6 +233,13 @@ for `ActiveSequencesMultiWorker`, but it does not route operations through
 `ThreadPoolIndexer` or `RouterEvent`. Each lifecycle method is synchronous, so
 method return is the completion boundary.
 
+Each mocker-replayed request contributes an Add at its engine arrival time,
+which is when a router books it, a PrefillComplete at its first output, and a
+Free at completion. Requests are therefore in prefill for their simulated
+queueing and prefill time. `--modeled-prefill-tokens-per-sec RATE` attaches an
+expected prefill duration of `ISL / RATE` to every Add, which exercises the
+modeled (AIC-style) prefill-load path; without it, prefill load is unmodeled.
+
 Preparation creates a data-only corpus with normalized per-worker deadlines,
 stable operation IDs, lifecycle metadata, and one flattened sequence-hash slab.
 It validates every Add → PrefillComplete → Free lifecycle before building the
@@ -246,7 +253,9 @@ At a shared deadline, operations retain per-worker source order. In particular,
 an Add is accepted and completed on its sticky lane before an associated
 PrefillComplete or Free. The timed path queues compact operation IDs, performs
 no per-operation task or timer creation, and drains every lane before throughput
-ends.
+ends. Projection reuses one map per runtime thread, matching the production
+scheduler queue's single reused map; its digest is computed after the
+projection timestamp so it does not count as projection service time.
 
 The result schema reports:
 
@@ -255,8 +264,12 @@ The result schema reports:
   and their total logical block visits.
 - Scheduled-to-accepted issue lag, accepted-to-started queue wait,
   scheduled-to-completed latency, queue depth, outstanding work, and drain.
-- Separate service distributions for projection, add, composite project+add,
-  prefill completion, and free.
+- Separate service distributions (mean and percentiles) for projection, add,
+  composite project+add, prefill completion, and free, plus
+  `tracker_service_ns_per_op`: the summed method service time per logical
+  operation.
+- Process and issuer-thread CPU over the timed window and
+  `backend_cpu_ns_per_op` (process CPU excluding the issuer).
 - Worker projections produced and inspected, exact IDs, per-worker FIFO,
   final-empty state, keep-up state, and compact failure reasons.
 
@@ -283,6 +296,15 @@ cargo bench --package dynamo-bench --bench active_sequences_bench \
   --benchmark-duration-ms 4000 \
   --result-json-output /path/to/active-sequences.json
 ```
+
+On Linux, keep the deadline issuer off the measured cores. `--backend-cpus`
+pins the Tokio lane runtime and sizes its worker pool to the mask, and
+`--issuer-cpu` pins the issuer to a disjoint CPU. On a hybrid CPU, give the
+backend one core type, for example `--backend-cpus 0-7 --issuer-cpu 16`.
+`--trials N` prepares the corpus once and replays it N times against fresh
+tracker state, writing one result per trial; use it to profile the timed phase
+without trace-generation setup in the samples, and use separate processes for
+A/B trials.
 
 Sweep cells rebuild the prepared corpus and Active Sequences state independently:
 

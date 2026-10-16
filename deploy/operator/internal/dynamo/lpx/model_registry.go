@@ -420,7 +420,7 @@ func localBuildFilePaths(ctx context.Context, root string, maxBytes int) ([]stri
 					// Retain malformed manifest directories so the required file read fails.
 					if entry.IsDir() {
 						pending = append(pending, relativePath)
-						if relativePath != gbuildManifestV2CapnpFile {
+						if relativePath != gbuildManifestV2CapnpFile && relativePath != gbuildDeploymentV1CapnpFile {
 							continue
 						}
 					}

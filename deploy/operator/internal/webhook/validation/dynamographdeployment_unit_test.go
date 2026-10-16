@@ -18,6 +18,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -177,6 +178,24 @@ func elasticEPSharedSpec(command, args []string) *nvidiacomv1beta1.DynamoCompone
 	}
 }
 
+func elasticEPRoleSharedSpec(leaderCommand, leaderArgs, workerCommand, workerArgs []string) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	roleTemplate := func(command, args []string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    consts.MainContainerName,
+				Command: command,
+				Args:    args,
+			}},
+		}}
+	}
+	return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate(leaderCommand, leaderArgs)},
+			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate(workerCommand, workerArgs)},
+		},
+	}
+}
+
 func TestValidateElasticEPRequiresCommand(t *testing.T) {
 	const vllm = "vllm"
 	rayArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
@@ -237,12 +256,64 @@ func TestValidateElasticEPRequiresCommand(t *testing.T) {
 			spec:    &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{},
 			want:    nil,
 		},
+		{
+			name:    "role templates own launch and do not require an operator rewrite command",
+			backend: vllm,
+			spec:    elasticEPRoleSharedSpec(nil, rayArgs, []string{"python3"}, rayArgs),
+			want:    nil,
+		},
+		{
+			name:    "role worker without command is accepted",
+			backend: vllm,
+			spec:    elasticEPRoleSharedSpec([]string{"python3"}, rayArgs, nil, rayArgs),
+			want:    nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assertFieldPaths(t, validateElasticEPRequiresCommand(tt.backend, tt.spec, fldPath), tt.want)
 		})
 	}
+}
+
+func TestDynamoGraphDeploymentUpdateAllowsUnchangedRoleGMSState(t *testing.T) {
+	one := int32(1)
+	roleTemplate := func(image string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  consts.MainContainerName,
+			Image: image,
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+			}},
+		}}}}
+	}
+	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName:          "engine",
+				ComponentType:          nvidiacomv1beta1.ComponentTypeDecode,
+				RuntimeVersionOverride: "1.5.0",
+				Replicas:               &one,
+				Multinode:              &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("leader:1.5.0")},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("worker:1.5.0")},
+				},
+				Experimental: &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+				},
+			}},
+		},
+	}
+	validation := &dynamoGraphDeploymentValidation{sharedValidation: sharedValidation{
+		ctx:                  features.WithGate(context.Background(), features.Gates{Grove: true}),
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+	}}
+
+	newDGD := oldDGD.DeepCopy()
+	assertFieldPaths(t, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD), nil)
 }
 
 // TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand proves the rule is
