@@ -238,6 +238,10 @@ class AISCoreEnginePerfModel:
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
             self._validate_metrics_by_rank(metrics_by_rank)
+        # Record the floor before the fallible tuner: callers keep a model that
+        # may have absorbed part of a batch whose tuning raised.
+        for metrics_by_rank in iterations:
+            self._observe_forward_pass_floor(metrics_by_rank)
         self._model.tune_with_fpms(
             [
                 [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
@@ -245,8 +249,6 @@ class AISCoreEnginePerfModel:
             ]
         )
         self._load_averages.observe_iterations(iterations)
-        for metrics_by_rank in iterations:
-            self._observe_forward_pass_floor(metrics_by_rank)
 
     def _observe_forward_pass_floor(
         self, metrics_by_rank: list[ForwardPassMetrics]

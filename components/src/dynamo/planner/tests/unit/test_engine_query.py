@@ -482,3 +482,36 @@ def test_aggregated_capacity_floor_uses_fastest_observed_forward_pass():
     assert capacity.itl_s is not None
     assert capacity.itl_s >= 0.02
     assert capacity.rps <= 16 / (request.osl * 0.02)
+
+
+def test_capacity_floor_survives_failed_tuning():
+    model, forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=_clamped_fit_estimate,
+    )
+
+    def _partial_tune(iterations: list[list[dict[str, Any]]]) -> None:
+        forward_pass_model.tuned_iterations.extend(iterations[:1])
+        raise RuntimeError("tuning failed after a partial update")
+
+    forward_pass_model.tune_with_fpms = _partial_tune  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        model.tune_with_fpms(
+            [
+                [
+                    ForwardPassMetrics(
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=2,
+                            sum_decode_kv_tokens=200,
+                        ),
+                        wall_time=0.02,
+                    )
+                ]
+            ]
+        )
+
+    capacity = model.find_engine_capacity_rps(_floor_request())
+
+    assert capacity is not None
+    assert capacity.itl_s is not None
+    assert capacity.itl_s >= 0.02
