@@ -17,6 +17,8 @@ class RuntimeMetrics:
     Provides utilities for integrating external metrics (e.g., from vLLM, SGLang, TensorRT-LLM).
     """
 
+    def shutdown_metrics(self) -> ShutdownMetrics: ...
+
     def register_prometheus_expfmt_callback(self, callback: Callable[[], str]) -> None:
         """
         Register a Python callback that returns Prometheus exposition text.
@@ -67,6 +69,10 @@ class RuntimeMetrics:
                      builds this from a ``CollectorRegistry``.
         """
         ...
+
+class ShutdownMetrics:
+    def record_stage(self, stage: str, reason: str, elapsed: float, remaining: float) -> None: ...
+    def record_state(self, inflight: int, kv_quiescent: bool | None) -> None: ...
 
 __all__ = [
     "RuntimeMetrics",

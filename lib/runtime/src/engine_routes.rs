@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
 
@@ -25,14 +26,28 @@ pub type EngineRouteCallback = Arc<
 #[derive(Clone, Default)]
 pub struct EngineRouteRegistry {
     routes: Arc<RwLock<HashMap<String, EngineRouteCallback>>>,
+    closed: Arc<AtomicBool>,
+    active: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl EngineRouteRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
-        Self {
-            routes: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
+    }
+
+    /// Permanently stop admission, including callbacks already fetched by HTTP.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Join admitted callbacks without shutting down runtime transports.
+    pub async fn wait_for_idle(&self) {
+        let _guard = self.active.write().await;
     }
 
     /// Register a callback for a route (e.g., "control/start_profile" for /engine/control/start_profile)
@@ -53,7 +68,27 @@ impl EngineRouteRegistry {
     /// Get callback for a route
     pub fn get(&self, route: &str) -> Option<EngineRouteCallback> {
         let routes = self.routes.read();
-        routes.get(route).cloned()
+        let callback = routes.get(route)?.clone();
+        let registry = self.clone();
+        Some(Arc::new(move |body| {
+            let registry = registry.clone();
+            let callback = callback.clone();
+            Box::pin(async move {
+                let guard = registry.active.clone().read_owned().await;
+                anyhow::ensure!(
+                    !registry.is_closed(),
+                    "worker engine routes are shutting down"
+                );
+                // The HTTP waiter may disappear while a Python callback keeps
+                // running. Own both the callback and its admission guard in a
+                // separate task so shutdown still joins the actual operation.
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    callback(body).await
+                })
+                .await?
+            })
+        }))
     }
 
     /// List all registered routes
@@ -66,6 +101,45 @@ impl EngineRouteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_joins_admitted_callbacks_and_rejects_cached_callbacks() {
+        let registry = EngineRouteRegistry::new();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        registry.register(
+            "control",
+            Arc::new({
+                let entered = entered.clone();
+                let release = release.clone();
+                move |_| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(serde_json::Value::Null)
+                    })
+                }
+            }),
+        );
+        let cached = registry.get("control").unwrap();
+        let active = tokio::spawn(cached(serde_json::Value::Null));
+        entered.notified().await;
+        // Disconnecting the waiter must not release the shutdown barrier while
+        // its admitted engine operation is still running.
+        active.abort();
+        assert!(active.await.unwrap_err().is_cancelled());
+        registry.close();
+        let idle = registry.wait_for_idle();
+        tokio::pin!(idle);
+        assert!(futures::poll!(&mut idle).is_pending());
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), idle)
+            .await
+            .unwrap();
+        assert!(cached(serde_json::Value::Null).await.is_err());
+    }
 
     #[tokio::test]
     async fn test_registry_basic() {

@@ -25,6 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
@@ -32,7 +33,6 @@ from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.env import env_bool
-from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
@@ -40,6 +40,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.worker_shutdown import WorkerShutdown
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -102,7 +103,6 @@ from .state_agent import (
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
@@ -258,6 +258,7 @@ async def worker(argv: list[str] | None = None) -> None:
         await initialize_configured_artifact_runtime()
 
     shutdown_event = asyncio.Event()
+    shutdown_endpoints: list = []
     state_agent_lifecycle = StateAgentLifecycle()
 
     async def close_worker_resources() -> None:
@@ -275,45 +276,36 @@ async def worker(argv: list[str] | None = None) -> None:
         # kernel releases it when the process exits.
         await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
-    # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
-    # there
-    wait_for_shutdown = install_signal_handlers(
-        loop,
+    shutdown = WorkerShutdown(
         runtime,
         shutdown_endpoints,
         shutdown_event,
-        pre_shutdown_callback=close_worker_resources,
+        prefill=config.disaggregation_mode == DisaggregationMode.PREFILL,
+        pre_shutdown=close_worker_resources,
     )
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        shutdown.post_shutdown = close_configured_artifact_runtime
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
-    try:
-        factory = WorkerFactory(
-            setup_vllm_engine_fn=setup_vllm_engine,
-            setup_kv_event_publisher_fn=setup_kv_event_publisher,
-            setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
-            register_vllm_model_fn=register_vllm_model,
-            setup_fpm_relay_fn=setup_fpm_relay,
-            setup_metrics_collection_fn=setup_metrics_collection,
-            state_agent_lifecycle=state_agent_lifecycle,
-        )
-        await factory.create(
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=setup_kv_event_publisher,
+        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=setup_fpm_relay,
+        setup_metrics_collection_fn=setup_metrics_collection,
+        state_agent_lifecycle=state_agent_lifecycle,
+        shutdown=shutdown,
+    )
+    await shutdown.run(
+        factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
         )
-    finally:
-        try:
-            # Join teardown before asyncio.run closes the loop.
-            await wait_for_shutdown()
-        finally:
-            try:
-                await close_worker_resources()
-            finally:
-                # Accepted generations can finalize after the pre-shutdown hook.
-                if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-                    await close_configured_artifact_runtime()
+    )
 
     logger.debug("Worker function completed, exiting...")
 

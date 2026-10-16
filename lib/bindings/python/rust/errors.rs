@@ -19,6 +19,7 @@ use pyo3::types::PyModule;
 // Base exception for all Dynamo errors.
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
+pyo3::create_exception!(dynamo._core, WorkerDraining, DynamoException);
 
 pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
@@ -97,6 +98,7 @@ macro_rules! define_dynamo_exceptions {
         /// Register all Dynamo exception classes on the `_core` module.
         pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("DynamoException", m.py().get_type::<DynamoException>())?;
+            m.add("WorkerDraining", m.py().get_type::<WorkerDraining>())?;
             m.add(
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),

@@ -51,6 +51,9 @@ def _registered_engine_routes(handler, configured_routes=None):
     registered = {}
 
     class Runtime:
+        def engine_routes_closed(self):
+            return False
+
         def register_engine_route(self, path, route_handler):
             registered[path] = route_handler
 
@@ -77,6 +80,36 @@ def _make_native_manager_methods_routable(manager):
 
         setattr(manager, method_name, route_method)
     return mocks
+
+
+@pytest.mark.asyncio
+async def test_terminal_shutdown_blocks_and_undoes_pause_broadcast_publication(handler):
+    closed = False
+    handler._engine_route_runtime = SimpleNamespace(engine_routes_closed=lambda: closed)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def register():
+        entered.set()
+        await release.wait()
+
+    async def broadcast():
+        async with handler._engine_route_lock:
+            await handler._sync_discovery_with_sglang_pause_state()
+
+    handler.generate_endpoint.register_endpoint_instance.side_effect = register
+    publishing = asyncio.create_task(broadcast())
+    await entered.wait()
+    closed = True
+    joined = asyncio.create_task(handler.wait_for_discovery_sync())
+    await asyncio.sleep(0)
+    assert not joined.done()
+    release.set()
+    await publishing
+    await joined
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    await handler._sync_discovery_with_sglang_pause_state()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio

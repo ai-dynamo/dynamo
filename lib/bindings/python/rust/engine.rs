@@ -380,6 +380,11 @@ where
 
 pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
     Python::with_gil(|py| {
+        if error.is_instance_of::<crate::errors::WorkerDraining>(py) {
+            return dynamo_backend_common::lifecycle::draining_error(
+                dynamo_backend_common::lifecycle::DRAINING_MESSAGE,
+            );
+        }
         error.display(py);
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {

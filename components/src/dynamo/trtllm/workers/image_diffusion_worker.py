@@ -12,6 +12,7 @@ import logging
 from typing import Optional
 
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
@@ -22,6 +23,7 @@ async def init_image_diffusion_worker(
     config: Config,
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     # [gluo TODO] this can be the same as video diffusion worker, just need to update the handler and model type
     """Initialize and run the image diffusion worker.
@@ -71,45 +73,48 @@ async def init_image_diffusion_worker(
 
     # Initialize the diffusion engine (auto-detects pipeline from model_index.json)
     engine = DiffusionEngine(diffusion_config)
-    await engine.initialize()
-
-    # Create the request handler
-    handler = ImageGenerationHandler(engine, diffusion_config)
-
-    # Register the model with Dynamo's discovery system
-    model_name = config.served_model_name or config.model
-
-    # Use ModelType.Images for image generation
-    if not hasattr(ModelType, "Images"):
-        raise RuntimeError(
-            "ModelType.Images not available in dynamo-runtime. "
-            "Image diffusion requires a compatible dynamo-runtime version. "
-            "See docs/backends/trtllm/README.md for setup instructions."
-        )
-    model_type = ModelType.Images
-
-    logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
-
-    # Diffusion has no prefill/decode split: a single worker owns the
-    # whole pipeline, so it advertises as Aggregated with no peer
-    # dependencies.
-    await register_model(
-        ModelInput.Text,
-        model_type,
-        endpoint,
-        config.model,
-        model_name,
-        worker_type=WorkerType.Aggregated,
-        needs=[],
-    )
-    register_model_taint_route(runtime, endpoint)
-
-    logging.info(f"Model registered, serving endpoint: {config.endpoint}")
-
-    # Serve the endpoint
+    handler = None
     try:
-        await endpoint.serve_endpoint(
+        await engine.initialize()
+
+        # Create the request handler
+        handler = ImageGenerationHandler(engine, diffusion_config)
+
+        # Register the model with Dynamo's discovery system
+        model_name = config.served_model_name or config.model
+
+        # Use ModelType.Images for image generation
+        if not hasattr(ModelType, "Images"):
+            raise RuntimeError(
+                "ModelType.Images not available in dynamo-runtime. "
+                "Image diffusion requires a compatible dynamo-runtime version. "
+                "See docs/backends/trtllm/README.md for setup instructions."
+            )
+        model_type = ModelType.Images
+
+        logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
+
+        # Diffusion has no prefill/decode split: a single worker owns the
+        # whole pipeline, so it advertises as Aggregated with no peer
+        # dependencies.
+        await register_model(
+            ModelInput.Text,
+            model_type,
+            endpoint,
+            config.model,
+            model_name,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+        register_model_taint_route(runtime, endpoint)
+
+        logging.info(f"Model registered, serving endpoint: {config.endpoint}")
+
+        # Serve the endpoint
+        await serve_endpoint(
+            endpoint,
             handler.generate,
+            shutdown=shutdown,
             graceful_shutdown=True,
         )
     except asyncio.CancelledError:
@@ -118,5 +123,8 @@ async def init_image_diffusion_worker(
         logging.error(f"Error serving endpoint: {e}", exc_info=True)
         raise
     finally:
-        handler.cleanup()
-        engine.cleanup()
+        try:
+            if handler is not None:
+                handler.cleanup()
+        finally:
+            engine.cleanup()

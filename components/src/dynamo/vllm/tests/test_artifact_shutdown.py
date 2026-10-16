@@ -15,6 +15,7 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
+    pytest.mark.timeout(30),
     pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
 ]
 
@@ -63,6 +64,7 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
             model=str(model_path), served_model_name="test-model"
         ),
         headless=False,
+        disaggregation_mode=None,
         discovery_backend=None,
         request_plane=None,
         event_plane=None,
@@ -70,7 +72,12 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
     )
     lifecycle = SimpleNamespace(close=AsyncMock())
     factory = SimpleNamespace(create=AsyncMock(side_effect=factory_create))
-    signal_handlers = Mock(return_value=AsyncMock())
+    from dynamo.common.utils import worker_shutdown
+
+    monkeypatch.setattr(worker_shutdown, "ShutdownWatchdog", Mock())
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS", "0")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", "5")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "1")
 
     monkeypatch.setattr(
         vllm_main, "parse_args_with_model_fetch", AsyncMock(return_value=config)
@@ -84,15 +91,21 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
         vllm_main, "prepare_snapshot_engine", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(
-        vllm_main, "create_runtime", Mock(return_value=(Mock(), Mock()))
+        vllm_main,
+        "create_runtime",
+        Mock(
+            return_value=(
+                Mock(shutdown_and_wait=AsyncMock(), shutdown_engine_routes=AsyncMock()),
+                Mock(),
+            )
+        ),
     )
-    monkeypatch.setattr(vllm_main, "install_signal_handlers", signal_handlers)
     monkeypatch.setattr(vllm_main, "StateAgentLifecycle", Mock(return_value=lifecycle))
     monkeypatch.setattr(vllm_main, "WorkerFactory", Mock(return_value=factory))
     monkeypatch.setattr(
         vllm_main, "initialize_configured_artifact_runtime", AsyncMock()
     )
-    return lifecycle, signal_handlers
+    return lifecycle, factory
 
 
 @pytest.mark.asyncio
@@ -138,7 +151,7 @@ async def test_shutdown_without_artifact_config_does_not_touch_runtime(
 
 
 @pytest.mark.asyncio
-async def test_signal_hook_keeps_artifact_runtime_open_for_accepted_work(
+async def test_shutdown_keeps_artifact_runtime_open_for_accepted_work(
     monkeypatch, tmp_path, vllm_main
 ) -> None:
     monkeypatch.setenv("DYNAMO_ARTIFACT_CONFIG", str(tmp_path / "artifact.json"))
@@ -150,24 +163,33 @@ async def test_signal_hook_keeps_artifact_runtime_open_for_accepted_work(
     finished = asyncio.Event()
 
     async def serve_accepted_request(*_args, **_kwargs):
-        accepted.set()
-        await finished.wait()
+        shutdown = vllm_main.WorkerFactory.call_args.kwargs["shutdown"]
 
-    lifecycle, signal_handlers = _patch_worker_startup(
+        async def request():
+            accepted.set()
+            await finished.wait()
+            yield None
+
+        async for _ in shutdown.wrap(request)():
+            pass
+
+    lifecycle, _ = _patch_worker_startup(
         vllm_main, monkeypatch, tmp_path, factory_create=serve_accepted_request
     )
     worker = asyncio.create_task(vllm_main.worker([]))
     try:
         await accepted.wait()
-        callback = signal_handlers.call_args.kwargs["pre_shutdown_callback"]
-        await callback()
-        lifecycle.close.assert_awaited_once_with()
+        shutdown = vllm_main.WorkerFactory.call_args.kwargs["shutdown"]
+        shutdown.request_shutdown()
+        while shutdown.accepting:
+            await asyncio.sleep(0)
+        lifecycle.close.assert_not_awaited()
         close_artifact_runtime.assert_not_awaited()
     finally:
         finished.set()
         await worker
 
-    assert lifecycle.close.await_count == 2
+    lifecycle.close.assert_awaited_once_with()
     close_artifact_runtime.assert_awaited_once_with()
 
 
