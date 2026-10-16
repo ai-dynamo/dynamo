@@ -39,11 +39,7 @@ from tests.utils.payloads import (
     KvTransferPayload,
     OmittedMaxTokensChatPayload,
 )
-from tests.utils.port_utils import (
-    allocate_contiguous_ports,
-    allocate_ports,
-    deallocate_ports,
-)
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -506,14 +502,6 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
         assert device != "-1", "One visible GPU is required"
         for role in _GPU_ROLES[layout]:
             monkeypatch.setenv(f"{backend.upper()}_{role}_GPU", device)
-    if backend == "sglang" and layout == "disaggregated_kv_router":
-        # Each prefill engine hosts its own KV-transfer bootstrap server.
-        bootstrap_ports = allocate_ports(2, DynamoPortRange.BOOTSTRAP.value)
-        request.addfinalizer(lambda: deallocate_ports(bootstrap_ports))
-        for index, port in enumerate(bootstrap_ports, start=1):
-            monkeypatch.setenv(
-                f"SGLANG_DISAGGREGATION_BOOTSTRAP_PORT{index}", str(port)
-            )
     return config
 
 
