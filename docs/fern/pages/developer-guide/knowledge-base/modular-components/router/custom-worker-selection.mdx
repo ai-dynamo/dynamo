@@ -386,6 +386,8 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
+| `queue_thresholds()` | Busy thresholds of the request's policy class. The router queue held the request while every eligible worker was past them; selection can still pick such a worker |
+| `reject_thresholds()` | Router-wide busy thresholds read at this selection, set with the `--active-*-threshold` flags or `/busy_threshold`. Workers past them are already excluded from the candidates |
 
 ### Session Context
 

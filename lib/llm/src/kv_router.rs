@@ -27,9 +27,9 @@ use dynamo_kv_router::{
         WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
-        RequestClassifier, RequestClassifierContext, RequestClassifierWorker,
-        WorkerAvailabilityProvider, effective_prefill_tokens,
+        BusyThresholds, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
+        PotentialLoad, RejectThresholdsProvider, RequestClassifier, RequestClassifierContext,
+        RequestClassifierWorker, WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
     },
@@ -828,6 +828,21 @@ impl KvRouter {
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        // The queue checks the live busy thresholds against its own booked load at
+        // selection, so the worker monitor stops deriving an overloaded set from them.
+        let reject_thresholds = scheduler_load.route_busy_thresholds().map(|thresholds| {
+            Arc::new(move || {
+                let config = thresholds.get();
+                BusyThresholds {
+                    prefill_busy_threshold: config
+                        .active_prefill_tokens_threshold
+                        .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
+                    prefill_busy_threshold_frac: config.active_prefill_tokens_threshold_frac,
+                    decode_busy_threshold_frac: config.active_decode_blocks_threshold,
+                }
+            }) as RejectThresholdsProvider
+        });
+
         let client_for_registration = client.clone();
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
@@ -878,6 +893,7 @@ impl KvRouter {
                 is_eagle,
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
+                reject_thresholds,
                 available_worker_provider,
                 registration_availability_provider,
                 shared_cache: shared_cache.clone(),

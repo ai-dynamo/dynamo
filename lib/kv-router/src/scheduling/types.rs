@@ -454,10 +454,24 @@ pub struct SchedulingRequest {
 
     // Load state computed during admission.
     pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Busy thresholds that apply to this request, filled by the scheduler.
+    pub busy_thresholds: RequestBusyThresholds,
 
     /// Sender half of the admission ownership handoff. For tracked requests,
     /// the actor must book before sending and undo the booking if delivery fails.
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
+}
+
+/// The two sets of busy thresholds that apply to one request. Each is checked per worker rank
+/// with [`BusyThresholds::has_room`](crate::scheduling::BusyThresholds::has_room).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RequestBusyThresholds {
+    /// The request's policy-class thresholds. The queue holds the request while every
+    /// eligible worker is past them.
+    pub queue: crate::scheduling::BusyThresholds,
+    /// The router-wide thresholds, read live at each selection. Selection skips a worker
+    /// past them and rejects the request when none remains.
+    pub reject: crate::scheduling::BusyThresholds,
 }
 
 #[derive(Clone, Copy)]
@@ -659,6 +673,7 @@ mod tests {
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
             worker_loads,
+            busy_thresholds: Default::default(),
             resp_tx: None,
         }
     }

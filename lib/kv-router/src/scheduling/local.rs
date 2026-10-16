@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::config::RouterQueuePolicy;
 use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
-use super::policy_config::PolicyProfile;
+use super::policy_config::{PolicyProfile, RejectThresholdsProvider};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
@@ -127,6 +127,7 @@ where
             retain_kv_transfer_chain,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
+            busy_thresholds: Default::default(),
             resp_tx,
         };
 
@@ -484,6 +485,15 @@ where
         observer: NonMaxOverlapSelectionObserver,
     ) -> bool {
         self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
+    /// Install the host's live reject thresholds. Selection skips a worker whose every rank
+    /// is past them and rejects the request when no eligible worker remains.
+    ///
+    /// Returns `false` when limits are already installed.
+    #[doc(hidden)]
+    pub fn set_reject_thresholds_provider(&self, provider: RejectThresholdsProvider) -> bool {
+        self.queue.set_reject_thresholds_provider(provider)
     }
 
     #[expect(clippy::too_many_arguments)]

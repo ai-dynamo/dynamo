@@ -249,6 +249,7 @@ mod tests {
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
             worker_loads: Default::default(),
+            busy_thresholds: Default::default(),
             resp_tx: None,
         };
         for (id, overlap_blocks, active_requests) in workers {

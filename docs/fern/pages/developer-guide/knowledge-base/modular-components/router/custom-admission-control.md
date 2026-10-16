@@ -210,6 +210,9 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `input_tokens()` | Input size used by the scheduler |
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
+| `queue_thresholds()` | Busy thresholds of the policy class the request resolves to now, including the classifier's override. The queue holds the request while every eligible worker is past them |
+| `queue_thresholds_for(name)` | Busy thresholds another policy family or class would apply to this request, or `None` if the router does not know it |
+| `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
 | `progress().context_tokens()` | Live context high-water mark from input and generated tokens; this measures logical context, not physical KV occupancy |
@@ -277,7 +280,7 @@ Dynamo builds these rows with the same code that worker selection uses, so `CACH
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 - Do not keep the view after the callback returns.
 
-To ask whether a rank has room, declare `WorkerInputs::LOAD | WorkerInputs::CAPACITY` and call `BusyThresholds::has_room` with the row's `load()` and `capacity()`. The policy-class queue runs the same function on the same row to decide when queued requests wait.
+To ask whether a rank has room, declare `WorkerInputs::LOAD | WorkerInputs::CAPACITY` and call `has_room` on the thresholds with the row's `load()` and `capacity()`. The router runs the same check on the same row: `queue_thresholds().has_room(...)` answers whether the queue would hold the request, and `reject_thresholds().has_room(...)` whether selection would skip the worker.
 
 ### Admission Decisions
 

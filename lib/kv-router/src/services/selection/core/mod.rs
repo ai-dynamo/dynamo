@@ -33,9 +33,10 @@ use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
-    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
-    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
-    narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
+    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider,
+    ScheduleMode, ScheduleRequest, SessionContext, TieredOverlapRefresher,
+    WorkerAvailabilityProvider, effective_prefill_tokens, narrow_allowed_worker_ids_by_lora,
+    prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
@@ -181,6 +182,8 @@ pub struct HostLoad {
     pub overloaded_workers: Option<OverloadedWorkerProvider>,
     /// Workers the host can currently reach; others are never selected.
     pub available_workers: Option<WorkerAvailabilityProvider>,
+    /// Live per-rank limits past which workers are shed from selection.
+    pub reject_thresholds: Option<RejectThresholdsProvider>,
 }
 
 /// Where a partition's KV knowledge comes from.

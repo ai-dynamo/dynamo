@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -74,6 +75,10 @@ impl PolicyClassConfig {
         }
     }
 }
+
+/// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
+/// past them, and rejects the request when no eligible worker remains.
+pub type RejectThresholdsProvider = Arc<dyn Fn() -> BusyThresholds + Send + Sync + 'static>;
 
 /// Per-rank load limits. A rank is full once its booked load passes any configured limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
