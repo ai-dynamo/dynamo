@@ -57,10 +57,10 @@ fn shared_replay_metrics(
     super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
 }
 
-pub(crate) fn build_request_end_trace_state(
+pub(crate) fn build_request_end_trace_state<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
     trace_block_size: usize,
 ) -> Option<RequestEndTraceState> {
     build_request_end_trace_state_for_policy(
@@ -72,10 +72,10 @@ pub(crate) fn build_request_end_trace_state(
     )
 }
 
-pub(crate) fn build_request_end_trace_state_for_policy(
+pub(crate) fn build_request_end_trace_state_for_policy<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
     trace_block_size: usize,
     request_trace_enabled: bool,
 ) -> Option<RequestEndTraceState> {
@@ -234,31 +234,39 @@ pub(crate) fn wrap_engine_output_request_end_stream(
     let Some(state) = trace_state.as_ref() else {
         return stream;
     };
-    let tracker = state
-        .request
+    let (tracker, input_tokens) = match state.request.as_ref() {
+        Some(request) => (
+            Some(request.request_tracker.clone()),
+            request.replay_metrics.input_length,
+        ),
+        None => (None, 0),
+    };
+    let finish_reason_metadata = state
+        .agent
         .as_ref()
-        .map(|request| request.request_tracker.clone());
-    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
+        .map(|agent| agent.finish_reason_metadata.clone());
     let mut output_tokens = 0;
     let stream = stream.map(move |response| {
         if let Some(output) = response.data.as_ref() {
             super::record_backend_finish_reason_metadata(
                 finish_reason_metadata.as_ref(),
-                Some(output.index.unwrap_or(0)),
+                output.index,
                 output.finish_reason.as_ref(),
                 output.stop_reason.as_ref(),
             );
             output_tokens += output.token_ids.len();
-            let usage = output.completion_usage.as_ref();
-            super::record_llm_metric_tokens(
-                tracker.as_deref(),
-                usage.map(|usage| usage.prompt_tokens as usize),
-                output_tokens,
-                usage
-                    .and_then(|usage| usage.prompt_tokens_details.as_ref())
-                    .and_then(|details| details.cached_tokens)
-                    .map(|tokens| tokens as usize),
-            );
+            // ISL was recorded at request construction (first write wins).
+            // A migrated attempt's prompt includes already-delivered output
+            // tokens, so only trust cached tokens from usage that matches
+            // this logical request's input length.
+            let cached_tokens = output
+                .completion_usage
+                .as_ref()
+                .filter(|usage| usage.prompt_tokens as usize == input_tokens)
+                .and_then(|usage| usage.prompt_tokens_details.as_ref())
+                .and_then(|details| details.cached_tokens)
+                .map(|tokens| tokens as usize);
+            super::record_llm_metric_tokens(tracker.as_deref(), None, output_tokens, cached_tokens);
         }
         response
     });

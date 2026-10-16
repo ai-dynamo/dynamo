@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod batch_proxy;
+mod engine_output_metrics;
 pub mod metadata;
 mod openai;
 mod write_timeout;
