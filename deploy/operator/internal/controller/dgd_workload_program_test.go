@@ -560,6 +560,10 @@ func TestGroveProgramPersistsCompatibilityWarningOnError(t *testing.T) {
 		require.NotNil(t, warning)
 		assert.Equal(t, step.generation, warning.ObservedGeneration)
 
+		t.Log("Consume the resource creation error event before checking status-transition events")
+		require.Len(t, recorder.Events, 1)
+		assert.Contains(t, <-recorder.Events, "CreateServiceAccount")
+
 		t.Log("Persist through the outer controller and verify warning publication")
 		failStatusWrite = step.failStatusWrite
 		err = reconciler.persistWorkloadProgramResult(t.Context(), dgd, result)
