@@ -189,14 +189,16 @@ async def test_fetch_bytes_maps_connection_error() -> None:
         await client.fetch_bytes("https://h/x", 30.0)
 
 
-def _response_error(url: str) -> aiohttp.ClientResponseError:
+def _response_error(
+    url: str, message: str = "Forbidden"
+) -> aiohttp.ClientResponseError:
     return aiohttp.ClientResponseError(
         # Any headers mapping works at runtime; multidict isn't importable in
         # every environment that collects these tests.
         request_info=aiohttp.RequestInfo(URL(url), "GET", {}),  # type: ignore[arg-type]
         history=(),
         status=403,
-        message="Forbidden",
+        message=message,
     )
 
 
@@ -209,8 +211,13 @@ def _response_error(url: str) -> aiohttp.ClientResponseError:
             mm_http.HttpConnectionError,
         ),
         (_response_error, mm_http.HttpStatusError),
+        # The reason phrase is the server's, and can echo the request URL.
+        (
+            lambda url: _response_error(url, message=f"Denied: {url}"),
+            mm_http.HttpStatusError,
+        ),
     ],
-    ids=["client_error", "connection_error", "response_error"],
+    ids=["client_error", "connection_error", "response_error", "response_reason"],
 )
 async def test_fetch_bytes_error_keeps_a_presigned_url_out(exc_factory, raised) -> None:
     """aiohttp errors can quote the request URL; its signature must reach

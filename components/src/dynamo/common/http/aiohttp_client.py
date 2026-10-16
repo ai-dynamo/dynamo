@@ -79,11 +79,12 @@ def _bounded_cause(exc: BaseException) -> BaseException | None:
                     info.headers,
                     URL(describe_media_source(str(info.real_url)), encoded=True),
                 )
+            # The message is the server's reason phrase, so it can echo the URL too.
             return type(exc)(
                 info,
                 exc.history,
                 status=exc.status,
-                message=exc.message,
+                message=describe_error_detail(exc.message),
                 headers=exc.headers,
             )
         if not mentions_url(str(exc)):
