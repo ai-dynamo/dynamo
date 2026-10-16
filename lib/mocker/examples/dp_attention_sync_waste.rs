@@ -37,8 +37,9 @@ struct Timing {
     attention_ms_per_kv_token: f64,
     /// Fixed MoE-phase cost per pass (expert weight read, dispatch/combine).
     moe_fixed_ms: f64,
-    /// MoE cost per token row across the whole EP group.
-    moe_ms_per_group_token: f64,
+    /// MoE cost per token row on one rank. Expert parallelism spreads the group's tokens over
+    /// its ranks, so each rank's MoE work follows the group's tokens divided by the EP size.
+    moe_ms_per_rank_token: f64,
     /// Fixed prefill cost per pass.
     prefill_fixed_ms: f64,
     /// Prefill cost per uncached prompt token.
@@ -55,7 +56,7 @@ impl Timing {
     }
 
     fn moe_ms(&self, group_tokens: f64) -> f64 {
-        self.moe_fixed_ms + self.moe_ms_per_group_token * group_tokens
+        self.moe_fixed_ms + self.moe_ms_per_rank_token * group_tokens / self.dp_size as f64
     }
 }
 
@@ -493,7 +494,7 @@ const USAGE: &str = "dp_attention_sync_waste --trace <trace.jsonl> [--policy-yam
 [--decode-radix-cache on|off] [--kv-bytes-per-token N] [--kv-transfer-gbps X] \
 [--host-transfer-gbps X] [--decode-dp-ranks-per-host N] [--trace-format mooncake|mooncake-delta] \
 [--attention-fixed-ms X] [--attention-ms-per-kv-token X] [--moe-fixed-ms X] \
-[--moe-ms-per-group-token X] [--prefill-fixed-ms X] [--prefill-ms-per-token X] \
+[--moe-ms-per-rank-token X] [--prefill-fixed-ms X] [--prefill-ms-per-token X] \
 [--prefill-attention-fraction X]";
 
 fn parse_on_off(flag: &str, value: &str) -> Result<bool> {
@@ -536,7 +537,7 @@ fn parse_args() -> Result<Args> {
             attention_fixed_ms: 1.5,
             attention_ms_per_kv_token: 1.25e-5,
             moe_fixed_ms: 6.0,
-            moe_ms_per_group_token: 0.02,
+            moe_ms_per_rank_token: 0.32,
             prefill_fixed_ms: 2.0,
             prefill_ms_per_token: 0.05,
             prefill_attention_fraction: 0.5,
@@ -596,7 +597,7 @@ fn parse_args() -> Result<Args> {
             "--attention-fixed-ms" => timing.attention_fixed_ms = value()?.parse()?,
             "--attention-ms-per-kv-token" => timing.attention_ms_per_kv_token = value()?.parse()?,
             "--moe-fixed-ms" => timing.moe_fixed_ms = value()?.parse()?,
-            "--moe-ms-per-group-token" => timing.moe_ms_per_group_token = value()?.parse()?,
+            "--moe-ms-per-rank-token" => timing.moe_ms_per_rank_token = value()?.parse()?,
             "--prefill-fixed-ms" => timing.prefill_fixed_ms = value()?.parse()?,
             "--prefill-ms-per-token" => timing.prefill_ms_per_token = value()?.parse()?,
             "--prefill-attention-fraction" => {
