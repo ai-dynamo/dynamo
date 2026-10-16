@@ -255,10 +255,11 @@ async def test_submit_approves_and_actuates(use_lock):
 
 
 @pytest.mark.asyncio
-async def test_submit_rejects_empty_targets_before_backend_dispatch():
+@pytest.mark.parametrize("max_gpus", [-1, 2])
+async def test_submit_rejects_empty_targets_before_backend_dispatch(max_gpus):
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
-    orch = _orch(cm, max_gpus=2)
+    orch = _orch(cm, max_gpus=max_gpus)
 
     with pytest.raises(EmptyTargetReplicasError):
         await _submit(orch, "default/a", [])
