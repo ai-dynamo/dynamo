@@ -177,8 +177,14 @@ impl<'a> Candidates<'a> {
 
     /// The bound row, or the row whose DP idle time saving (as a fraction of the request's
     /// context) beats the threshold times its move cost by the most. A huge request makes any
-    /// destination the new straggler, so it saves little and stays.
-    fn affinity_row(&self, bound_row: usize, request_blocks: usize) -> usize {
+    /// destination the new straggler, so it saves little and stays. Another group is a
+    /// destination only if `group_open`, so moves never overload a group.
+    fn affinity_row(
+        &self,
+        bound_row: usize,
+        request_blocks: usize,
+        group_open: impl Fn(usize) -> bool,
+    ) -> usize {
         let parameters = self.parameters;
         let bound = self.workers[bound_row];
         let host = |worker: WorkerWithDpRank| {
@@ -197,8 +203,12 @@ impl<'a> Candidates<'a> {
         let stay = self.dp_idle_increase(bound_row, request_blocks);
         let scale =
             self.groups[self.group_of[bound_row]].ranks as f64 * request_blocks.max(1) as f64;
+        let bound_group = self.group_of[bound_row];
         (0..self.workers.len())
-            .filter(|row| *row != bound_row)
+            .filter(|row| {
+                *row != bound_row
+                    && (self.group_of[*row] == bound_group || group_open(self.group_of[*row]))
+            })
             .map(|row| {
                 let saved = (stay - self.dp_idle_increase(row, request_blocks)) / scale;
                 let cost = move_cost(row);
@@ -253,15 +263,6 @@ fn pick_row(
     let allowed = |row: usize| !has_affine_row || is_affine(row);
     let state = Candidates::new(parameters, candidates, load, allowed);
 
-    if let Some(target) = affinity_target
-        && let Some(bound_row) = state.workers.iter().position(|worker| {
-            worker.worker_id == target.worker_id
-                && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank)
-        })
-    {
-        return Some(state.affinity_row(bound_row, request_blocks_usize));
-    }
-
     let max_ranks = state.groups.iter().map(|g| g.ranks).max()?;
     let group_loads: Vec<f64> = state
         .groups
@@ -276,9 +277,19 @@ fn pick_row(
         .map(|(_, l)| *l)
         .fold(f64::INFINITY, f64::min);
     let load_cutoff = min_load * (1.0 + parameters.group_load_tolerance);
+    let group_open = |group: usize| group_loads[group] <= load_cutoff;
+
+    if let Some(target) = affinity_target
+        && let Some(bound_row) = state.workers.iter().position(|worker| {
+            worker.worker_id == target.worker_id
+                && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank)
+        })
+    {
+        return Some(state.affinity_row(bound_row, request_blocks_usize, group_open));
+    }
 
     (0..candidates.len())
-        .filter(|row| allowed(*row) && group_loads[state.group_of[*row]] <= load_cutoff)
+        .filter(|row| allowed(*row) && group_open(state.group_of[*row]))
         .min_by(|l, r| {
             let key = |row: usize| {
                 (
@@ -555,6 +566,22 @@ mod tests {
                 }
             ),
             WorkerWithDpRank::new(0, 1)
+        );
+    }
+
+    #[test]
+    fn bound_session_does_not_move_into_a_busier_group() {
+        // Bound rank 1 is its group's straggler; either group's least-loaded rank absorbs the turn
+        // with no barrier rise. Worker 1 (lighter rank) wins only while it is not busier.
+        let even = [[(4, 80, 1), (4, 120, 1)], [(4, 10, 1), (4, 100, 1)]];
+        assert_eq!(
+            select_with_affinity(&even, &[], Some((0, 1)), 40, Parameters::default()),
+            WorkerWithDpRank::new(1, 0)
+        );
+        let busy_other = [[(4, 80, 1), (4, 120, 1)], [(8, 10, 1), (8, 100, 1)]];
+        assert_eq!(
+            select_with_affinity(&busy_other, &[], Some((0, 1)), 40, Parameters::default()),
+            WorkerWithDpRank::new(0, 0)
         );
     }
 

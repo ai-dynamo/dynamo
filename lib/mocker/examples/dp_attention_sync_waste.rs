@@ -102,6 +102,9 @@ struct Waste {
     modeled_gpu_seconds: f64,
     /// Share of rank-time (while the group is active) in which a rank has any work.
     busy_rank_fraction: f64,
+    /// Mean over steps of (busiest worker's decode requests / mean worker's − 1). Workers do
+    /// not wait for each other, so this skew shows up as TPOT, not as barrier wait.
+    worker_request_skew: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -391,7 +394,20 @@ fn summarize_waste(lanes: &Lanes, dp: usize, steps: usize, args: &Args) -> Waste
         }
     }
     let group_steps = (rank_steps / dp.max(1)).max(1) as f64;
+    let (mut skew, mut skew_steps) = (0.0, 0);
+    for step in 0..steps {
+        let per_worker: Vec<f64> = lanes
+            .values()
+            .map(|ranks| ranks.iter().map(|lane| lane[step].decode_requests).sum())
+            .collect();
+        let mean = per_worker.iter().sum::<f64>() / per_worker.len().max(1) as f64;
+        if mean > 0.0 {
+            skew += per_worker.iter().copied().fold(0.0, f64::max) / mean - 1.0;
+            skew_steps += 1;
+        }
+    }
     Waste {
+        worker_request_skew: skew / skew_steps.max(1) as f64,
         decode_wait_fraction_of_gpu_time: decode_wait / group_steps,
         total_wait_fraction_of_gpu_time: total_wait / group_steps,
         modeled_gpu_seconds: rank_steps as f64 * step_ms / 1000.0,
@@ -732,13 +748,14 @@ fn main() -> Result<()> {
     }
     println!(
         "{}: decode_wait={:.2}% total_wait={:.2}% of {:.0} gpu-s | ttft p50={:.0}ms p95={:.0}ms | \
-         turns moved={:.1}% (same host {}) | kv transfer network={:.0}s host_tier={:.0}s | placed={} unplaced={}",
+         worker skew={:.1}% | turns moved={:.1}% (same host {}) | kv transfer network={:.0}s host_tier={:.0}s | placed={} unplaced={}",
         summary.label,
         summary.waste.decode_wait_fraction_of_gpu_time * 100.0,
         summary.waste.total_wait_fraction_of_gpu_time * 100.0,
         summary.waste.modeled_gpu_seconds,
         summary.ttft_p50_ms,
         summary.ttft_p95_ms,
+        summary.waste.worker_request_skew * 100.0,
         summary.decode_turn_moved_fraction * 100.0,
         summary.kv_transfer.moved_same_host_turns,
         summary.network_transfer_s,
