@@ -13,7 +13,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
-use crate::to_pyerr;
+use crate::errors::pipeline_error_to_pyerr;
 
 #[pyclass]
 pub struct RoutedEngine {
@@ -36,7 +36,14 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(|error| {
+            crate::errors::dynamo_error_to_pyerr(
+                dynamo_runtime::error::DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .diagnostic(error.to_string())
+                    .build(),
+            )
+        })?;
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_context = parent_context.inner();
@@ -68,7 +75,10 @@ impl RoutedEngine {
         crate::future_into_py(
             py,
             async move {
-                let mut stream = inner.generate(request_context).await.map_err(to_pyerr)?;
+                let mut stream = inner
+                    .generate(request_context)
+                    .await
+                    .map_err(pipeline_error_to_pyerr)?;
                 let task_context = stream.context();
                 let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(32);
 
@@ -271,5 +281,113 @@ mod tests {
             headers.get("x-request-id").map(String::as_str),
             Some("xr-1")
         );
+    }
+}
+
+#[cfg(test)]
+mod semantic_error_tests {
+    use super::*;
+    use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason, PublicDetails};
+
+    struct FailingEngine {
+        error: DynamoError,
+        streaming: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::pipeline::AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<
+                RsAnnotated<dynamo_llm::protocols::common::llm_backend::LLMEngineOutput>,
+            >,
+            anyhow::Error,
+        > for FailingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> anyhow::Result<
+            dynamo_runtime::pipeline::ManyOut<
+                RsAnnotated<dynamo_llm::protocols::common::llm_backend::LLMEngineOutput>,
+            >,
+        > {
+            use dynamo_runtime::protocols::maybe_error::MaybeError;
+            if !self.streaming {
+                return Err(anyhow::Error::new(self.error.clone()).context("dispatch failed"));
+            }
+            let context = request.context();
+            let stream = Box::pin(tokio_stream::iter([RsAnnotated::from_err(
+                self.error.clone(),
+            )]));
+            Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                stream, context,
+            ))
+        }
+    }
+
+    #[test]
+    fn actual_routed_generate_roundtrips_initial_and_stream_errors() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            pyo3_async_runtimes::tokio::run(py, async {
+                for streaming in [false, true] {
+                    let original = DynamoError::builder()
+                        .class(ErrorClass::UnsupportedMedia)
+                        .public_message("Images are unsupported")
+                        .diagnostic("private engine response")
+                        .build();
+                    let initial = Python::with_gil(|py| {
+                        let engine = RoutedEngine::new(std::sync::Arc::new(FailingEngine {
+                            error: original.clone(),
+                            streaming,
+                        }));
+                        let request =
+                            pythonize(py, &serde_json::json!({"token_ids": [1]}))?.unbind();
+                        pyo3_async_runtimes::tokio::into_future(engine.generate(py, request, None)?)
+                    })?;
+                    let error = if streaming {
+                        let response = initial.await?;
+                        let next = Python::with_gil(|py| {
+                            pyo3_async_runtimes::tokio::into_future(
+                                response.bind(py).call_method0("__anext__")?,
+                            )
+                        })?;
+                        next.await
+                            .expect_err("stream must raise the semantic error")
+                    } else {
+                        initial
+                            .await
+                            .expect_err("dispatch must raise the semantic error")
+                    };
+                    let restored = crate::engine::map_python_exception(error);
+                    assert_eq!(restored.class(), original.class());
+                    assert_eq!(restored.reason(), original.reason());
+                    assert_eq!(restored.public_details(), original.public_details());
+                    assert_eq!(restored.diagnostic(), original.diagnostic());
+                }
+                Ok(())
+            })
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn initial_routed_engine_error_preserves_semantics_through_python() {
+        pyo3::prepare_freethreaded_python();
+        let original = DynamoError::builder()
+            .class(ErrorClass::UnsupportedMedia)
+            .reason(ErrorReason::new("request.unsupported_media").unwrap())
+            .public_details(PublicDetails::Message {
+                message: "Images are unsupported".into(),
+            })
+            .diagnostic("private media engine detail")
+            .build();
+        let pipeline_error = anyhow::Error::new(original.clone()).context("dispatch failed");
+        let restored = crate::engine::map_python_exception(pipeline_error_to_pyerr(pipeline_error));
+        assert_eq!(restored.class(), original.class());
+        assert_eq!(restored.reason(), original.reason());
+        assert_eq!(restored.public_details(), original.public_details());
+        assert_eq!(restored.diagnostic(), original.diagnostic());
     }
 }

@@ -591,8 +591,21 @@ async def generate(self, request, context):
     ...
 ```
 
-The package README has the full table of exception types and which
-lifecycle phase raises which one. Engine-init failures should raise
+For semantic categories beyond the legacy exception subclasses, use `classified_error`. It preserves the canonical class, registered reason, approved public details, and bounded private diagnostic through the Python/Rust bridge:
+
+```python
+from dynamo.llm.exceptions import classified_error
+
+raise classified_error(
+    "CapacityExhausted",
+    reason="capacity.worker_overloaded",
+    diagnostic="The inference engine rejected admission at its request limit",
+)
+```
+
+The factory accepts canonical class names and rejects unknown or incompatible class/reason pairs. Omit `reason` to use the class's registered default. `diagnostic` stays private; supply `public_details` only for fixed or explicitly allowlisted client-visible information. Preserve existing `DynamoException` instances when forwarding errors. Backends choose semantic meaning; the [Frontend configuration reference](../../../reference/components/frontend-configuration.mdx) documents operator-controlled HTTP status overrides. A failure after streaming headers cannot change the committed status.
+
+The package README has the full table of exception types and which lifecycle phase raises which one. Engine-init failures should raise
 `EngineShutdown` from `start()`. Cleanup shouldn't normally raise —
 log and swallow if a subsystem fails.
 

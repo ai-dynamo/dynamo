@@ -21,6 +21,7 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
     new_sglang_request_id,
 )
+from dynamo.sglang.errors import raise_if_abort_error, submit_generation
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
@@ -240,27 +241,29 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 {"logprobs": output_options.get("logprobs")},
                 allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
             )
-            results = await self.engine.async_generate(
-                **input_param,
-                **logprob_kwargs,
-                **mm_kwargs,
-                **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(
-                    self.engine,
-                    inner_request,
-                    thinking_budget_requested=has_thinking_budget,
-                ),
-                bootstrap_host=bootstrap_host,
-                bootstrap_port=bootstrap_port,
-                bootstrap_room=bootstrap_room,
-                external_trace_header=trace_header,
-                rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **priority_kwargs,
-                **agent_session_kwargs(self.engine, inner_request),
+            results = await submit_generation(
+                self.engine.async_generate(
+                    **input_param,
+                    **logprob_kwargs,
+                    **mm_kwargs,
+                    **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **require_reasoning_kwargs(
+                        self.engine,
+                        inner_request,
+                        thinking_budget_requested=has_thinking_budget,
+                    ),
+                    bootstrap_host=bootstrap_host,
+                    bootstrap_port=bootstrap_port,
+                    bootstrap_room=bootstrap_room,
+                    external_trace_header=trace_header,
+                    rid=sglang_request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_path=lora_path,
+                    **priority_kwargs,
+                    **agent_session_kwargs(self.engine, inner_request),
+                )
             )
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
@@ -323,6 +326,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     .get("meta_info", {})
                 )
                 if meta_info.get("finish_reason"):
+                    raise_if_abort_error(meta_info["finish_reason"])
                     final_meta_info = meta_info
                 if not request_id_future.done():
                     sglang_request_id = meta_info.get("id")

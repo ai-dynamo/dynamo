@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import DynamoException, InvalidArgument
 
 if not torch.cuda.is_available():
     pytest.skip(
@@ -1012,17 +1012,19 @@ class TestGenerateLocally:
             "stop_conditions": {"max_tokens": 10},
             "sampling_options": {},
         }
-        chunks = [
-            chunk
-            async for chunk in handler.generate_locally(request, self._make_context())
-        ]
-
-        assert chunks == [
-            {
-                "finish_reason": {"error": str(error)},
-                "token_ids": [],
-            }
-        ]
+        with pytest.raises(DynamoException) as raised:
+            _ = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, self._make_context()
+                )
+            ]
+        assert raised.value.error_class == (
+            "NotImplemented"
+            if isinstance(error, NotImplementedError)
+            else "InvalidRequest"
+        )
+        assert raised.value.diagnostic == str(error)
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1051,17 +1053,19 @@ class TestGenerateLocally:
             "stop_conditions": {"max_tokens": 10},
             "sampling_options": {},
         }
-        chunks = [
-            chunk
-            async for chunk in handler.generate_locally(request, self._make_context())
-        ]
-
-        assert chunks == [
-            {
-                "finish_reason": {"error": str(error)},
-                "token_ids": [],
-            }
-        ]
+        with pytest.raises(DynamoException) as raised:
+            _ = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, self._make_context()
+                )
+            ]
+        assert raised.value.error_class == (
+            "NotImplemented"
+            if isinstance(error, NotImplementedError)
+            else "InvalidRequest"
+        )
+        assert raised.value.diagnostic == str(error)
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1093,14 +1097,11 @@ class TestGenerateLocally:
             async for chunk in handler.generate_locally(request, self._make_context())
         ]
 
-        assert len(chunks) == 1
-        error_message = chunks[0]["finish_reason"]["error"]
-        assert "unexpected keyword argument 'cache_salt'" in error_message
-        assert chunks[0]["token_ids"] == []
+        assert chunks == []
         handler._initiate_shutdown.assert_awaited_once()
         shutdown_error = handler._initiate_shutdown.await_args.args[0]
         assert isinstance(shutdown_error, TypeError)
-        assert str(shutdown_error) == error_message
+        assert "unexpected keyword argument 'cache_salt'" in str(shutdown_error)
 
     @pytest.mark.asyncio
     async def test_validation_error_during_iteration_remains_fatal(self):
@@ -1127,12 +1128,7 @@ class TestGenerateLocally:
             async for chunk in handler.generate_locally(request, self._make_context())
         ]
 
-        assert chunks == [
-            {
-                "finish_reason": {"error": str(error)},
-                "token_ids": [],
-            }
-        ]
+        assert chunks == []
         handler._initiate_shutdown.assert_awaited_once_with(error)
 
     @pytest.mark.asyncio
@@ -1513,7 +1509,6 @@ class TestRequestHasImages:
 
 
 class _FakeConversationParams:
-
     """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
     is read back by the assertions."""
 

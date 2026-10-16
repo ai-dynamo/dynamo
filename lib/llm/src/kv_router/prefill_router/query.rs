@@ -119,13 +119,7 @@ impl PrefillRouter {
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                anyhow::bail!(
-                    "prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
-                    rejection.policy_class,
-                    rejection.limit_kind,
-                    rejection.current,
-                    rejection.limit,
-                )
+                Err(rejection.into())
             }
         }
     }
@@ -372,6 +366,13 @@ mod tests {
     }
 
     async fn tracked_binding(label: &str) -> (Arc<PrefillBinding>, Arc<KvRouter>) {
+        tracked_binding_with_policy(label, None).await
+    }
+
+    async fn tracked_binding_with_policy(
+        label: &str,
+        policy: Option<&str>,
+    ) -> (Arc<PrefillBinding>, Arc<KvRouter>) {
         let runtime = Runtime::from_current().unwrap();
         let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
             .await
@@ -391,7 +392,15 @@ mod tests {
             (7, ModelRuntimeConfig::default()),
             (8, ModelRuntimeConfig::default()),
         ]));
+        let policy_file = policy.map(|yaml| {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), yaml).unwrap();
+            file
+        });
         let config = KvRouterConfig {
+            router_policy_config: policy_file
+                .as_ref()
+                .map(|file| file.path().to_string_lossy().into_owned()),
             overlap_score_credit: 0.0,
             router_temperature: 0.0,
             use_kv_events: false,
@@ -442,6 +451,63 @@ mod tests {
             std::sync::atomic::Ordering::Release,
         );
         (router, chooser)
+    }
+
+    #[tokio::test]
+    async fn typed_prefill_reservation_preserves_policy_queue_rejection() {
+        use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
+        let policy = r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 0
+"#;
+        let (binding, _) = tracked_binding_with_policy("queue-rejection", Some(policy)).await;
+        let router = PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None);
+        router.binding.store(Some(binding));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        let reserve = |id: &'static str| {
+            router.reserve_prefill_worker(
+                id,
+                &[1u32; 64],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                Some("capped".to_owned()),
+                Some(HashSet::from([7])),
+                RoutingConstraints::default(),
+            )
+        };
+        // Zero queue capacity still admits directly while the eligible worker is idle.
+        let held = tokio::time::timeout(Duration::from_secs(3), reserve("queue-held"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.worker_id(), 7);
+        let error = tokio::time::timeout(Duration::from_secs(3), reserve("queue-rejected"))
+            .await
+            .unwrap()
+            .err()
+            .expect("busy worker must reject instead of queueing");
+        held.release().await.unwrap();
+        let rejection = error
+            .downcast_ref::<QueueRejection>()
+            .unwrap_or_else(|| panic!("reservation lost typed queue rejection: {error:#}"));
+        assert_eq!(rejection.policy_class, "capped");
+        assert_eq!(rejection.limit_kind, QueueLimitKind::Requests);
+        assert_eq!((rejection.current, rejection.limit), (0, 0));
     }
 
     #[tokio::test]

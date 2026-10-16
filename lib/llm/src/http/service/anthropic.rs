@@ -130,10 +130,15 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
+        if let Ok(error) = serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes)
+            && error.object_type == "error"
+        {
+            return Response::from_parts(parts, Body::from(body_bytes));
+        }
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
         return anthropic_error(
             ErrorClass::InvalidRequest,
@@ -1271,7 +1276,9 @@ fn apply_anthropic_nvext_policy(
 /// Re-render a backend error event whose semantic failure was already recorded.
 fn anthropic_backend_error_response(error_response: super::openai::ErrorResponse) -> Response {
     let (status, Json(error)) = error_response;
-    let error_type = if error.is_overload() {
+    let error_type = if let Some(class) = error.semantic_class() {
+        anthropic_error_type_for_class(class)
+    } else if error.is_overload() {
         "overloaded_error"
     } else {
         anthropic_error_type_for_status(status, "api_error")
@@ -1462,6 +1469,118 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
 mod tests {
     use super::*;
     use crate::protocols::common::extensions::parse_nvext;
+
+    #[tokio::test]
+    async fn typed_prefill_queue_rejection_uses_anthropic_overload_category() {
+        const CHILD: &str = "DYNAMO_QUEUE_HTTP_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http::service::anthropic::tests::typed_prefill_queue_rejection_uses_anthropic_overload_category", "--nocapture"])
+                .env(CHILD, "1").env("DYN_HTTP_ERROR_STATUS_OVERRIDES", "CapacityExhausted=429")
+                .status().unwrap();
+            assert!(
+                result.success(),
+                "isolated typed queue HTTP regression failed"
+            );
+            return;
+        }
+        let rejection = dynamo_kv_router::scheduling::QueueRejection {
+            policy_class: "capped".to_owned(),
+            limit_kind: dynamo_kv_router::scheduling::QueueLimitKind::Requests,
+            current: 1,
+            limit: 1,
+        };
+        let counter = super::super::metrics::DYNAM_FAILURES_TOTAL
+            .with_label_values(&["CapacityExhausted", "capacity.exhausted"]);
+        let before = counter.get();
+        let response =
+            super::super::openai::ErrorMessage::from_anyhow(rejection.into(), "fallback");
+        let response = anthropic_backend_error_response(response);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "overloaded_error");
+        assert_eq!(counter.get() - before, 1);
+    }
+
+    #[tokio::test]
+    async fn semantic_status_overrides_preserve_anthropic_backend_categories() {
+        const CHILD: &str = "DYNAMO_ANTHROPIC_OVERRIDE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http::service::anthropic::tests::semantic_status_overrides_preserve_anthropic_backend_categories", "--nocapture"])
+                .env(CHILD, "1")
+                .env("DYN_HTTP_ERROR_STATUS_OVERRIDES", "UnsupportedMedia=409,InvalidRequest=499")
+                .status().unwrap();
+            assert!(
+                result.success(),
+                "isolated Anthropic category regression failed"
+            );
+            return;
+        }
+        for (class, status, category) in [
+            (ErrorClass::UnsupportedMedia, 409, "invalid_request_error"),
+            (ErrorClass::InvalidRequest, 499, "invalid_request_error"),
+            (ErrorClass::RateLimited, 429, "rate_limit_error"),
+        ] {
+            let error = DynamoError::builder()
+                .class(class)
+                .diagnostic("PRIVATE_CATEGORY_DIAGNOSTIC")
+                .build();
+            let response =
+                super::super::openai::ErrorMessage::from_anyhow(error.into(), "fallback");
+            let response = anthropic_backend_error_response(response);
+            assert_eq!(response.status().as_u16(), status);
+            let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("PRIVATE_CATEGORY_DIAGNOSTIC"));
+            let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body.error.error_type, category, "{class}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn semantic_status_overrides_preserve_anthropic_middleware_response() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/semantic", get(|| async {
+                let mut response = anthropic_error_unrecorded(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request_error", "safe validation");
+                response.headers_mut().insert("x-semantic-error", "preserved".parse().unwrap());
+                response
+            }))
+            .route("/raw", get(|| async {
+                (StatusCode::UNPROCESSABLE_ENTITY, r#"{"type":"message","error":{"type":"invalid_request_error","message":"raw validation"}}"#)
+            }))
+            .layer(middleware::from_fn(anthropic_error_middleware));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/semantic")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.headers()["x-semantic-error"], "preserved");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.object_type, "error");
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(body.error.message, "safe validation");
+        let response = app
+            .oneshot(Request::builder().uri("/raw").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({

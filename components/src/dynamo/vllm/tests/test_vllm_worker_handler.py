@@ -26,6 +26,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.llm.exceptions import DynamoException
 from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
@@ -675,13 +676,16 @@ class TestReasoningParserForwarding:
         handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
 
-        with pytest.raises(ValueError, match="sampling mask"):
+        with pytest.raises(DynamoException) as raised:
             async for _ in handler.generate_tokens(
                 PatchedTokensPrompt(prompt_token_ids=[1]),
                 SamplingParams(max_tokens=2),
                 "req-mask",
             ):
                 pass
+
+        assert raised.value.error_class == "Internal"
+        assert "sampling mask" in raised.value.diagnostic
 
     async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
         """routed_experts.start echoes SamplingParams.routed_experts_prompt_start
@@ -1499,20 +1503,15 @@ class TestDecodeWorkerMultimodalBranching:
             "output_options": {},
         }
         context = MagicMock()
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
-
-        assert chunks == [
-            {
-                "finish_reason": (
-                    "error: Decode worker received multimodal request without "
-                    "prefill result"
-                ),
-                "index": 0,
-                "token_ids": [],
-            }
-        ]
+        with pytest.raises(DynamoException) as raised:
+            _ = [
+                chunk
+                async for chunk in handler._generate_token_mode(
+                    request, context, "req-1"
+                )
+            ]
+        assert raised.value.error_class == "Internal"
+        assert "without prefill result" in raised.value.diagnostic
 
     async def test_decode_only_qwen_missing_embedding_params_errors(self):
         """Decode-only Qwen VL with prefill_result but no embedding_params -> error."""
@@ -1534,13 +1533,15 @@ class TestDecodeWorkerMultimodalBranching:
             },
         }
         context = MagicMock()
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
-
-        assert len(chunks) == 1
-        assert chunks[0]["token_ids"] == []
-        assert "embedding metadata" in chunks[0]["finish_reason"]
+        with pytest.raises(DynamoException) as raised:
+            _ = [
+                chunk
+                async for chunk in handler._generate_token_mode(
+                    request, context, "req-1"
+                )
+            ]
+        assert raised.value.error_class == "Internal"
+        assert "embedding metadata" in raised.value.diagnostic
 
     async def test_aggregated_transfer_failure_returns_actionable_error(self):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
@@ -1557,21 +1558,17 @@ class TestDecodeWorkerMultimodalBranching:
             "output_options": {},
         }
 
-        chunks = [
-            chunk
-            async for chunk in handler._generate_token_mode(
-                request, MagicMock(), "req-transfer-error"
-            )
-        ]
-
-        assert chunks == [
-            {
-                "finish_reason": f"error: {transfer_error}",
-                "index": 0,
-                "token_ids": [],
-            }
-        ]
-        assert "use DYNAMO_MM_TRANSFER=nixl" in chunks[0]["finish_reason"]
+        with pytest.raises(DynamoException) as raised:
+            _ = [
+                chunk
+                async for chunk in handler._generate_token_mode(
+                    request, MagicMock(), "req-transfer-error"
+                )
+            ]
+        assert raised.value.error_class == "Internal"
+        assert raised.value.diagnostic == str(transfer_error)
+        assert "use DYNAMO_MM_TRANSFER=nixl" in raised.value.diagnostic
+        assert "shared-memory" not in str(raised.value.public_details)
 
     async def test_decode_only_non_qwen_proceeds_without_embedding_params(self):
         """Decode-only non-Qwen with prefill_result but no embedding_params -> proceeds.
@@ -1907,11 +1904,14 @@ async def test_prefill_non_probe_keeps_protocol_handoff(
 async def test_prefill_probe_preserves_engine_error(prefill_probe_handler):
     handler = prefill_probe_handler
     handler.engine_client.generate.side_effect = RuntimeError("engine failed")
-    with pytest.raises(RuntimeError, match="engine failed"):
+    with pytest.raises(DynamoException) as raised:
         async for _ in handler.generate(
             {"token_ids": [1], HEALTH_CHECK_KEY: True}, MagicMock()
         ):
             pass
+
+    assert raised.value.error_class == "Internal"
+    assert raised.value.diagnostic == "engine failed"
 
 
 @pytest.mark.asyncio
@@ -2646,9 +2646,11 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
 
         request = {"input": ["a", "b", "c", "d"], "model": "test-model"}
-        with pytest.raises(RuntimeError, match="boom"):
+        with pytest.raises(DynamoException) as raised:
             async for _ in handler.generate(request, context):
                 pass
+        assert raised.value.error_class == "Internal"
+        assert raised.value.diagnostic == "boom"
 
         # Sibling encodes (0, 2, 3) must have started (so we know they were
         # in flight when idx=1 failed) AND been observed as cancelled.
@@ -3601,3 +3603,20 @@ class TestRLAdminRouteHardening:
         await guard.abort()
         assert len(escalated) == 1
         assert isinstance(escalated[0], EngineDeadError)
+
+
+@pytest.mark.asyncio
+async def test_prefill_iterated_native_engine_death_preserves_unavailable(
+    prefill_probe_handler,
+):
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    handler = prefill_probe_handler
+    handler.engine_client.generate.side_effect = EngineDeadError()
+    with pytest.raises(DynamoException) as raised:
+        async for _ in handler.generate(
+            {"token_ids": [1], HEALTH_CHECK_KEY: True}, MagicMock()
+        ):
+            pass
+    assert raised.value.error_class == "Unavailable"
+    assert raised.value.reason == "backend.engine_shutdown"

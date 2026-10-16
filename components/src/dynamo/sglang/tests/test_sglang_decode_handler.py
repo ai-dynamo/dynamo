@@ -15,7 +15,7 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import DynamoException, EngineShutdown, InvalidArgument
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
@@ -450,7 +450,7 @@ def _abort_chunk(finish_reason):
         ),
     ],
 )
-async def test_error_abort_preserves_http_error_before_output(
+async def test_error_abort_preserves_semantic_error_before_output(
     processor_name, status_code, message, err_type, abort_context
 ):
     """Raise the backend error before exposing placeholder output or token timing."""
@@ -465,15 +465,13 @@ async def test_error_abort_preserves_http_error_before_output(
         _stream([_abort_chunk(finish_reason)]), abort_context
     )
 
-    expected_error = InvalidArgument if status_code == 400 else HttpError
-    with pytest.raises(expected_error) as error:
+    with pytest.raises(DynamoException) as error:
         await anext(stream)
 
-    if status_code == 400:
-        assert str(error.value) == message
-    else:
-        assert error.value.code == status_code
-        assert error.value.message == message
+    assert error.value.error_class == (
+        "InvalidRequest" if status_code in (400, 422) else "Internal"
+    )
+    assert error.value.diagnostic == message
     abort_context.notify_first_token.assert_not_called()
 
 
@@ -510,9 +508,10 @@ async def test_error_abort_after_output_preserves_error_and_stops(
         assert first["choices"][0]["delta"]["content"] == "hello"
         assert first["choices"][0]["finish_reason"] is None
 
-    with pytest.raises(InvalidArgument) as error:
+    with pytest.raises(DynamoException) as error:
         await anext(stream)
-    assert str(error.value) == message
+    assert error.value.error_class == "InvalidRequest"
+    assert error.value.diagnostic == message
 
     # Neither the abort's placeholder nor a successful terminal chunk can follow.
     with pytest.raises(StopAsyncIteration):
@@ -553,11 +552,11 @@ async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
         _stream([_abort_chunk(finish_reason)]), abort_context
     )
 
-    with pytest.raises(HttpError) as error:
+    with pytest.raises(DynamoException) as error:
         await anext(stream)
 
-    assert error.value.code == 500
-    assert error.value.message == message
+    assert error.value.error_class == "Internal"
+    assert error.value.diagnostic == message
     abort_context.notify_first_token.assert_not_called()
 
 
@@ -2899,3 +2898,19 @@ def test_build_native_generate_request_forwards_prefill_dp_rank():
         prefill_dp_rank=3,
     )
     assert native.disagg_prefill_dp_rank == 3
+
+
+def test_structured_capacity_abort_has_capacity_semantics():
+    from dynamo.sglang.request_handlers.llm.decode_handler import _raise_if_sglang_error
+
+    with pytest.raises(Exception) as raised:
+        _raise_if_sglang_error(
+            {
+                "type": "abort",
+                "status_code": 429,
+                "err_type": "TooManyRequestsError",
+                "message": "private admission detail",
+            }
+        )
+    assert raised.value.error_class == "CapacityExhausted"
+    assert raised.value.reason == "capacity.worker_overloaded"

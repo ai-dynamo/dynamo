@@ -4625,3 +4625,43 @@ class TestToolCallGrammarReasoningStart:
         )
         assert seen == {"reasoning": True}
         assert result.guided_decoding == {"structural_tag": {"format": {"type": "tag"}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_output", [False, True])
+@pytest.mark.parametrize(
+    "error_class,reason",
+    [
+        ("CapacityExhausted", "capacity.worker_overloaded"),
+        ("UnsupportedMedia", "request.unsupported_media"),
+    ],
+)
+async def test_routed_processor_preserves_semantic_failure(
+    vllm_processor_module, after_output, error_class, reason
+):
+    from _routed_engine_fakes import FakeRoutedItem
+
+    from dynamo.llm.exceptions import classified_error
+
+    failure = classified_error(
+        error_class, reason=reason, diagnostic="private engine detail"
+    )
+
+    class FailingEngine(_FakeRoutedEngine):
+        async def generate(self, *args, **kwargs):
+            async def stream():
+                if after_output:
+                    yield FakeRoutedItem(
+                        {"token_ids": [101], "index": 0, "finish_reason": None}
+                    )
+                raise failure
+
+            return stream()
+
+    processor = _make_processor(vllm_processor_module, FailingEngine())
+    with pytest.raises(type(failure)) as raised:
+        await _run_generate(processor, _base_preproc())
+    assert raised.value is failure
+    assert raised.value.error_class == error_class
+    assert raised.value.reason == reason
+    assert not processor.output_processor.request_states

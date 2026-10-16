@@ -1578,21 +1578,21 @@ def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
 
 
 @pytest.mark.parametrize(
-    ("error_type", "expected_status"),
+    ("error_type", "expected_class"),
     [
-        ("VLLMValidationError", 400),
-        ("VLLMNotFoundError", 404),
-        ("VLLMUnprocessableEntityError", 422),
+        ("VLLMValidationError", "InvalidRequest"),
+        ("VLLMNotFoundError", "NotFound"),
+        ("VLLMUnprocessableEntityError", "InvalidRequest"),
     ],
 )
-def test_vllm_client_error_preserves_http_status(error_type, expected_status):
+def test_vllm_client_error_preserves_semantic_class(error_type, expected_class):
     from vllm import exceptions as vllm_exceptions
 
-    from dynamo.vllm.errors import vllm_client_error_to_http_error
+    from dynamo.vllm.errors import engine_error
 
     error = getattr(vllm_exceptions, error_type)("invalid request")
 
-    assert vllm_client_error_to_http_error(error).code == expected_status
+    assert engine_error(error).error_class == expected_class
 
 
 def test_build_sampling_params_accepts_productive_recursive_guided_json():
