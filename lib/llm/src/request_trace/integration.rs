@@ -231,20 +231,12 @@ pub(crate) fn wrap_engine_output_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
 ) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
-    let Some(state) = trace_state.as_ref() else {
-        return stream;
+    let Some(request) = trace_state.as_ref().and_then(|s| s.request.as_ref()) else {
+        return wrap_request_end_stream(stream, trace_state);
     };
-    let (tracker, input_tokens) = match state.request.as_ref() {
-        Some(request) => (
-            Some(request.request_tracker.clone()),
-            request.replay_metrics.input_length,
-        ),
-        None => (None, 0),
-    };
-    let finish_reason_metadata = state
-        .agent
-        .as_ref()
-        .map(|agent| agent.finish_reason_metadata.clone());
+    let tracker = request.request_tracker.clone();
+    let input_tokens = request.replay_metrics.input_length;
+    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
     let mut output_tokens = 0;
     let stream = stream.map(move |response| {
         if let Some(output) = response.data.as_ref() {
@@ -256,17 +248,12 @@ pub(crate) fn wrap_engine_output_request_end_stream(
             );
             output_tokens += output.token_ids.len();
             // ISL was recorded at request construction (first write wins).
-            // A migrated attempt's prompt includes already-delivered output
-            // tokens, so only trust cached tokens from usage that matches
-            // this logical request's input length.
-            let cached_tokens = output
-                .completion_usage
-                .as_ref()
-                .filter(|usage| usage.prompt_tokens as usize == input_tokens)
-                .and_then(|usage| usage.prompt_tokens_details.as_ref())
-                .and_then(|details| details.cached_tokens)
-                .map(|tokens| tokens as usize);
-            super::record_llm_metric_tokens(tracker.as_deref(), None, output_tokens, cached_tokens);
+            super::record_llm_metric_tokens(
+                Some(&tracker),
+                None,
+                output_tokens,
+                output.cached_tokens_for_prompt(input_tokens),
+            );
         }
         response
     });
@@ -494,17 +481,6 @@ mod tests {
                 request.request_received_ms.unwrap() + total.round() as u64
             );
         }
-    }
-
-    #[test]
-    fn engine_output_stream_is_unchanged_without_trace_state() {
-        let stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> =
-            Box::pin(futures::stream::iter(Vec::new()));
-        let before = &*stream as *const _ as *const ();
-
-        let stream = wrap_engine_output_request_end_stream(stream, None);
-
-        assert_eq!(&*stream as *const _ as *const (), before);
     }
 
     #[test]

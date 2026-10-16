@@ -97,17 +97,10 @@ impl GenerateMetricCollector {
 
         self.observe_worker_info();
 
-        let cached_tokens = output
-            .completion_usage
-            .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
-            // request and let the RequestTracker fallback run on drop.
-            .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
-            .and_then(|usage| usage.prompt_tokens_details.as_ref())
-            .and_then(|details| details.cached_tokens)
-            .map(|tokens| tokens as usize);
-        self.response.observe_cached_tokens(cached_tokens);
+        // Mismatched (migrated-attempt) usage is ignored; the RequestTracker
+        // fallback runs on drop.
+        self.response
+            .observe_cached_tokens(output.cached_tokens_for_prompt(self.input_tokens));
 
         // RetryManager appends delivered tokens to the retried request and only
         // yields newly generated deltas, so this remains exact across migration.
@@ -136,9 +129,9 @@ impl Drop for GenerateMetricCollector {
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(in crate::http::service) mod test_support {
     /// Find the series of metric family `name` carrying all `labels`.
-    pub(crate) fn metric_value<'a>(
+    pub(in crate::http::service) fn metric_value<'a>(
         families: &'a [prometheus::proto::MetricFamily],
         name: &str,
         labels: &[(&str, &str)],

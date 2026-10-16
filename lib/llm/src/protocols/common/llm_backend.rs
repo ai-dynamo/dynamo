@@ -294,6 +294,16 @@ pub struct LLMEngineOutput {
 }
 
 impl LLMEngineOutput {
+    /// Cached prompt tokens, only when this usage describes a prompt of `input_tokens`; a migrated attempt's prompt also holds delivered output.
+    pub(crate) fn cached_tokens_for_prompt(&self, input_tokens: usize) -> Option<usize> {
+        self.completion_usage
+            .as_ref()
+            .filter(|usage| usage.prompt_tokens as usize == input_tokens)
+            .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            .and_then(|details| details.cached_tokens)
+            .map(|tokens| tokens as usize)
+    }
+
     pub fn cancelled() -> Self {
         LLMEngineOutput {
             token_ids: vec![],

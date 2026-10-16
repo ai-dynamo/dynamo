@@ -201,8 +201,6 @@ impl
 
 #[tokio::test]
 async fn pre_stream_deadline_maps_to_http_429_with_cancelled_metric() {
-    use crate::http::service::metrics::{Endpoint, RequestType, Status};
-
     let engine: crate::types::openai::generate::GenerateStreamingEngine = Arc::new(DeadlineEngine);
     let service = service_v2::HttpService::builder().build().unwrap();
     let state = service.state_clone();
