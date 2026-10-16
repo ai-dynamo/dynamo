@@ -15,7 +15,7 @@ and prefill. They work together or on their own. None of them apply to audio yet
 
 A VLM request takes six steps. Each feature below speeds up one of them.
 
-![The six steps of a VLM request: the frontend receives the request and the router picks a worker; the worker loads the image, runs the vision encoder, prefills, and decodes. Multimodal KV routing helps when picking a worker, frontend media decoding and the shared image cache help when loading the image, and the embedding cache and encoder disaggregation help when encoding.](./_assets/vlm-request-path.svg)
+![The six steps of a VLM request: the frontend receives the request and the router picks a worker; the worker loads the image, runs the vision encoder, prefills, and decodes. Multimodal KV routing helps when picking a worker, frontend media decoding and the shared image cache help when loading the image, and the embedding cache and encoder disaggregation help when encoding.](../../../assets/img/vlm-request-path.svg)
 
 ## When Each Feature Helps
 
