@@ -306,6 +306,7 @@ impl<'a> WorkerCacheInputs<'a> {
 pub struct WorkerLoadInput {
     pub(crate) available: bool,
     pub(crate) active_prefill_tokens: usize,
+    pub(crate) active_decode_blocks: usize,
     pub(crate) decode_cost_blocks: f64,
     pub(crate) active_requests: usize,
 }
@@ -459,6 +460,7 @@ impl WorkerLoadInput {
         Self {
             available: true,
             active_prefill_tokens: load.active_prefill_tokens,
+            active_decode_blocks: load.active_decode_blocks,
             decode_cost_blocks: load.potential_decode_blocks() as f64,
             active_requests: load.active_requests,
         }
@@ -477,7 +479,15 @@ impl WorkerLoadInput {
         self.active_prefill_tokens
     }
 
-    /// Return the projected active decode footprint in KV blocks.
+    /// Return the KV blocks this worker's active requests hold, prompt and output included.
+    /// Unlike [`decode_cost_blocks`](Self::decode_cost_blocks), this excludes the incoming
+    /// request.
+    pub fn active_decode_blocks(&self) -> usize {
+        self.active_decode_blocks
+    }
+
+    /// Return the projected active decode footprint in KV blocks, including the incoming
+    /// request's blocks not already active on this worker.
     pub fn decode_cost_blocks(&self) -> f64 {
         self.decode_cost_blocks
     }
