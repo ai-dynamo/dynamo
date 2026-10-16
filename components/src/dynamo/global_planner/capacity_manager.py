@@ -6,10 +6,8 @@
 :class:`CapacityManager` is the infrastructure-facing base class the
 :class:`~dynamo.global_planner.orchestrator.Orchestrator` drives to **observe**
 current pool state and **scale** replicas. It defines a neutral,
-infrastructure-agnostic surface (``observe`` / ``scale`` / ``discover`` /
-``ensure_participant`` / ``participant_exists`` / ``remember_roles`` /
-``current_replicas``) keyed by opaque ``participant_id``; the orchestrator never
-sees Kubernetes concepts.
+infrastructure-agnostic surface keyed by opaque ``participant_id``; the
+orchestrator never sees Kubernetes concepts.
 
 The concrete Kubernetes backend is
 :class:`~dynamo.global_planner.kubernetes_capacity_manager.KubernetesCapacityManager`.
@@ -17,10 +15,14 @@ The concrete Kubernetes backend is
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypeVar
 
 from dynamo.planner import TargetReplica
+from dynamo.planner.connectors.base import ReplicaUpdateResult
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -93,6 +95,15 @@ class CapacityManager:
         """
         raise NotImplementedError
 
+    def refresh_participant(self, participant_id: str) -> None:
+        """Refresh one participant's backend identity without a global snapshot.
+
+        Backends without identity generations keep the default no-op. This lets
+        unbounded orchestration repair lifecycle state without paying for global
+        budget observation.
+        """
+        return None
+
     async def scale(
         self,
         participant_id: str,
@@ -102,6 +113,48 @@ class CapacityManager:
         """Apply desired replica targets to one participant."""
         raise NotImplementedError
 
+    async def scale_with_result(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
+    ) -> ReplicaUpdateResult:
+        """Adapt the historical scale contract for transactional orchestration."""
+        result = await self.scale(participant_id, targets, blocking)
+        if isinstance(result, ReplicaUpdateResult):
+            return result
+        if result is None:
+            return ReplicaUpdateResult(accepted=True, applied=True)
+        accepted = bool(result)
+        return ReplicaUpdateResult(accepted=accepted, applied=accepted)
+
+    def supports_split_readiness(self) -> bool:
+        """Whether scale can apply without waiting and settle separately."""
+        return False
+
+    async def wait_for_ready(self, participant_id: str) -> None:
+        """Wait until one participant has settled after an accepted scale."""
+        raise NotImplementedError
+
+    async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
+        """Run a complete capacity transaction with backend conflict semantics."""
+        return await operation()
+
+    def is_conflict(self, error: Exception) -> bool:
+        """Whether ``error`` can safely restart the complete transaction."""
+        return False
+
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         """Read back current replica counts as ``{sub_type: replicas}``."""
         raise NotImplementedError
+
+    def capture_current_replicas(
+        self, participant_id: str
+    ) -> Callable[[], dict[str, int]]:
+        """Capture a post-write readback while transaction state is serialized.
+
+        Backends with mutable participant registries should override this method
+        and freeze the participant identity needed by the returned callable.
+        """
+
+        return lambda: self.current_replicas(participant_id)

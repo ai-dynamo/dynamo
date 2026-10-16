@@ -113,7 +113,10 @@ Request fields:
 - `graph_deployment_name` (string): Target `DynamoGraphDeployment` name
 - `k8s_namespace` (string): Kubernetes namespace of the target deployment
 - `target_replicas` (list): Desired replica targets
-- `blocking` (bool, default `false`): Wait for scaling completion
+- `blocking` (bool, default `false`): Wait for scaling completion. When a GPU
+  budget is enabled, the Global Planner always waits for each accepted capacity
+  stage internally so a later request cannot reuse capacity that is still
+  converging.
 - `timestamp` (optional float): Caller-provided request timestamp
 - `predicted_load` (optional object): Caller-provided prediction context
 

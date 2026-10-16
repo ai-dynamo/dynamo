@@ -11,6 +11,7 @@ capability discovery, and replica-state introspection for one deployment mode.
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Protocol, TypeGuard, runtime_checkable
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
@@ -22,6 +23,21 @@ if TYPE_CHECKING:
         ComponentGPUShape,
         ComponentPowerConfig,
     )
+
+
+@dataclass(frozen=True)
+class ReplicaUpdateResult:
+    """Outcome of one absolute replica-target operation.
+
+    ``accepted`` reports whether the connector accepted the target. ``applied``
+    is true only when this invocation completed at least one write.
+    ``requires_settlement`` forces an exact readiness check before the outcome
+    can be reported, including for an otherwise nonblocking request.
+    """
+
+    accepted: bool
+    applied: bool
+    requires_settlement: bool = False
 
 
 class WorkerInfoProvider(Protocol):

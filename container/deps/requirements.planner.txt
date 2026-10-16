@@ -11,7 +11,7 @@ filterpy==1.4.5
 # gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
 # Pin in sync with requirements.common.txt.
 grpcio>=1.63.0
-kubernetes==32.0.1
+kubernetes[google-auth]==37.0.1
 kubernetes_asyncio==32.0.0
 # AISimulate's compatibility application calls plotext.plot_size, removed in plotext 6.
 plotext<6

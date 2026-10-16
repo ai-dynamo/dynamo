@@ -37,15 +37,21 @@ RUN pip install --no-cache-dir --no-deps \
       ai-dynamo==${DYNAMO_VERSION}
 
 # ai-dynamo's declared core dependencies, plus the Rust _core extension wheel
-# (`ai-dynamo-runtime`) that the Python package imports natively. `kubernetes`,
-# `pydantic`, and `pydantic-settings` are explicitly pinned because the latest
-# unpinned versions (kubernetes 35.x, pydantic 2.13.x) violate ai-dynamo's
-# declared compatibility ranges.
-RUN pip install --no-cache-dir \
+# (`ai-dynamo-runtime`) that the Python package imports natively. Read the
+# Kubernetes constraint from the selected wheel so DYNAMO_VERSION overrides
+# cannot silently install an incompatible client. Intersect the selected Dynamo
+# and Kubernetes Pydantic constraints. The runtime wheel supplies Dynamo's
+# bound when the pure-Python wheel does not declare Pydantic directly.
+RUN KUBERNETES_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next(r for r in requires("ai-dynamo") or () if re.match(r"^kubernetes(?:\[|\s|[<>=!~])", r, re.IGNORECASE)))')" \
+    && pip install --no-cache-dir --no-deps "${KUBERNETES_REQUIREMENT}" \
+    && DYNAMO_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("ai-dynamo") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic"))')" \
+    && KUBERNETES_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("kubernetes") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic"))')" \
+    && pip install --no-cache-dir \
       --extra-index-url https://pypi.nvidia.com \
       ai-dynamo-runtime==${DYNAMO_VERSION} \
-      "kubernetes<33.0.0,>=32.0.1" \
-      "pydantic<2.13" "pydantic-settings<2.13.0" \
+      "${KUBERNETES_REQUIREMENT}" \
+      "${DYNAMO_PYDANTIC_REQUIREMENT}" "${KUBERNETES_PYDANTIC_REQUIREMENT}" \
+      "pydantic-settings<2.13.0" \
       msgpack msgspec prometheus-client pyzmq transformers
 
 # ai-dynamo[vllm] extras minus nixl + ray (handled above), plus the

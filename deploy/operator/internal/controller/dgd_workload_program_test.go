@@ -35,14 +35,17 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -882,13 +885,87 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 
 			t.Log("Apply checkpoint gating, then preserve immutable state from an existing DCD")
 			require.NoError(t, workloads.applyCheckpointStartupPolicy(desired, tt.checkpointInfo))
-			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), desired))
+			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), nil, desired))
 
 			t.Log("Verify stored immutable state is preserved without overriding checkpoint policy")
 			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
 			assert.Equal(t, tt.wantReplicas, desired.Spec.Replicas)
 		})
 	}
+}
+
+func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "graph",
+			Namespace: "jsm",
+			UID:       "dgd-uid",
+		},
+	}
+	existing := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm", ResourceVersion: "stale"},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(dgd, existing, scheme))
+	apiReaderCalls := 0
+	apiReader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+				apiReaderCalls++
+				if err := delegated.Get(ctx, key, object, opts...); err != nil {
+					return err
+				}
+				object.SetResourceVersion("fresh")
+				return nil
+			},
+		}).
+		Build()
+	patchVersions := []string{}
+	cachedReaderCalls := 0
+	var patched *nvidiacomv1beta1.DynamoComponentDeployment
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+				cachedReaderCalls++
+				return delegated.Get(ctx, key, object, opts...)
+			},
+			Patch: func(_ context.Context, _ client.WithWatch, object client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				patchVersions = append(patchVersions, object.GetResourceVersion())
+				if len(patchVersions) == 1 {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamocomponentdeployments"},
+						object.GetName(),
+						errors.New("stale DynamoComponentDeployment"),
+					)
+				}
+				patched = object.DeepCopyObject().(*nvidiacomv1beta1.DynamoComponentDeployment)
+				return nil
+			},
+		}).
+		Build()
+	workloads := &componentWorkloadsReconciler{
+		syncer: newDGDResourceSyncer(kubeClient, nil),
+		reader: apiReader,
+	}
+	desired := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
+	}
+
+	require.NoError(t, workloads.preserveExistingDCDState(context.Background(), dgd, desired))
+
+	assert.Equal(t, 1, cachedReaderCalls)
+	assert.Equal(t, 1, apiReaderCalls)
+	assert.Equal(t, []string{"stale", "fresh"}, patchVersions)
+	require.NotNil(t, patched)
+	assert.Equal(t, "dgd-uid", patched.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
+	assert.Equal(t, "vllm", desired.Spec.BackendFramework)
 }
 
 func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T) {
@@ -1077,7 +1154,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 	t.Log("Wire the component workloads reconciler backed by a fake client seeded with only the DGD")
 	r := createTestDGDReconcilerWithStatus(dgd)
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
 	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
@@ -1157,7 +1234,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")
 	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)

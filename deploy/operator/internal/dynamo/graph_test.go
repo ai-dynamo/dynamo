@@ -1265,6 +1265,7 @@ func TestGetDGDComponentResourceLabelsDoesNotSynthesizeLegacySubComponentType(t 
 				PodTemplate:   &corev1.PodTemplateSpec{},
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{UID: "dgd-uid"},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
 				},
@@ -1272,17 +1273,21 @@ func TestGetDGDComponentResourceLabelsDoesNotSynthesizeLegacySubComponentType(t 
 			original := dgd.DeepCopy()
 			labels := GetDGDComponentResourceLabels(dgd, "worker", &dgd.Spec.Components[0])
 			require.NotContains(t, labels, commonconsts.KubeLabelDynamoSubComponentType)
+			require.NotContains(t, labels, commonconsts.KubeLabelDynamoGraphDeploymentUID)
 			podLabels := GetDGDComponentPodLabels(dgd, "worker", &dgd.Spec.Components[0])
 			require.Equal(t, string(componentType), podLabels[commonconsts.KubeLabelDynamoSubComponentType])
+			require.Equal(t, "dgd-uid", podLabels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 			require.Equal(t, original, dgd)
 
 			dgd.Spec.Components[0].PodTemplate.Labels = map[string]string{
-				commonconsts.KubeLabelDynamoSubComponentType: "custom",
+				commonconsts.KubeLabelDynamoSubComponentType:   "custom",
+				commonconsts.KubeLabelDynamoGraphDeploymentUID: "spoofed",
 			}
 			labels = GetDGDComponentResourceLabels(dgd, "worker", &dgd.Spec.Components[0])
 			require.Equal(t, "custom", labels[commonconsts.KubeLabelDynamoSubComponentType])
 			podLabels = GetDGDComponentPodLabels(dgd, "worker", &dgd.Spec.Components[0])
 			require.Equal(t, "custom", podLabels[commonconsts.KubeLabelDynamoSubComponentType])
+			require.Equal(t, "dgd-uid", podLabels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 		})
 	}
 }
@@ -11013,6 +11018,7 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "ns",
+			UID:       "dgd-uid",
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Annotations: map[string]string{"team/cost-center": "abc"},
@@ -11040,6 +11046,7 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 	clique := pcs.Spec.Template.Cliques[0]
 	assert.Equal(t, "svc-override", clique.Annotations["team/cost-center"],
 		"service-level annotation should take precedence over spec.metadata")
+	assert.Equal(t, "dgd-uid", clique.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 }
 
 func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T) {
@@ -11256,6 +11263,7 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "ns",
+			UID:       "dgd-uid",
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Annotations: map[string]string{"team/cost-center": "abc", "shared": "dgd"},
@@ -11296,6 +11304,8 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 	// Controller labels must always be present
 	assert.Equal(t, "frontend", dcd.Labels[commonconsts.KubeLabelDynamoComponent])
 	assert.Equal(t, dgd.Name, dcd.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "dgd-uid", dcd.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
+	assert.Equal(t, "dgd-uid", GetDCDKubeLabels(dcd)[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 }
 
 func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {

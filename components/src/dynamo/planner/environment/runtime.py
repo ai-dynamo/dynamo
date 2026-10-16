@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Protocol
 
@@ -37,8 +38,8 @@ class RuntimeNamespaceBinding:
 
     async def refresh_runtime_namespace(self) -> bool:
         try:
-            runtime_namespace = self.resolver.get_worker_runtime_namespace(
-                self.namespace
+            runtime_namespace = await asyncio.to_thread(
+                self.resolver.get_worker_runtime_namespace, self.namespace
             )
         except (ApiException, ConfigException, PlannerError) as exc:
             logger.warning(

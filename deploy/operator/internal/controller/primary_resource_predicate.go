@@ -18,7 +18,9 @@
 package controller
 
 import (
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -28,5 +30,17 @@ func dgdPrimaryPredicate() predicate.Predicate {
 		commoncontroller.GenerationOrDeletionChangedPredicate(),
 		predicate.AnnotationChangedPredicate{},
 		predicate.LabelChangedPredicate{},
+	)
+}
+
+func dcdPrimaryPredicate() predicate.Predicate {
+	return predicate.Or(
+		commoncontroller.GenerationOrDeletionChangedPredicate(),
+		predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return e.ObjectOld.GetLabels()[consts.KubeLabelDynamoGraphDeploymentUID] !=
+					e.ObjectNew.GetLabels()[consts.KubeLabelDynamoGraphDeploymentUID]
+			},
+		},
 	)
 }

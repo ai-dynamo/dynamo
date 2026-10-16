@@ -281,6 +281,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		podTemplate.Labels = map[string]string{}
 	}
 	podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dynamoDeployment.UID)
 	podTemplate.Labels[consts.KubeLabelDynamoComponent] = componentName
 	if workerHash != "" {
 		podTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = workerHash
@@ -411,6 +412,7 @@ func buildAutomaticSnapshotJob(
 	name := fmt.Sprintf("checkpoint-%s", checkpointID)
 	labels := map[string]string{
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoGraphDeploymentUID:  string(dgd.UID),
 		consts.KubeLabelDynamoComponent:           componentName,
 	}
 	if workerHash != "" {
@@ -436,6 +438,12 @@ func buildAutomaticSnapshotJob(
 		consts.SnapshotCompatibilityHashAnnotation:    compatibilityHash,
 		consts.SnapshotGMSModeAnnotation:              gmsMode,
 	}
+	if podTemplate.Labels == nil {
+		podTemplate.Labels = make(map[string]string)
+	}
+	podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
+	podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
+	podTemplate.Labels[consts.KubeLabelDynamoComponent] = componentName
 
 	return &snapshotv1alpha1.SnapshotJob{
 		TypeMeta: metav1.TypeMeta{

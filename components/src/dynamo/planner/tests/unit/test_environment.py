@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+from threading import Event, get_ident
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -102,6 +104,86 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     assert order.index("ready") < order.index("namespace") < order.index("gpu")
     assert order.index("gpu") < order.index("fpm:base-ns-workerhash")
     fpm_provider.async_init.assert_awaited_once_with("base-ns-workerhash")
+
+
+@pytest.mark.asyncio
+async def test_refresh_deployment_state_offloads_synchronous_reads():
+    event_loop_thread = get_ident()
+    read_threads = []
+    controller = _controller()
+
+    def worker_info(sub_component_type, backend):
+        read_threads.append(get_ident())
+        return build_worker_info_from_defaults(backend, sub_component_type)
+
+    def gpu_shapes(**_kwargs):
+        read_threads.append(get_ident())
+        return ComponentGPUShape(2, 2), ComponentGPUShape(4, 4)
+
+    def model_name(*_args, **_kwargs):
+        read_threads.append(get_ident())
+        return "test-model"
+
+    controller.get_worker_info.side_effect = worker_info
+    controller.get_gpu_shapes.side_effect = gpu_shapes
+    controller.get_model_name.side_effect = model_name
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+
+    await environment._refresh_deployment_state()
+
+    assert len(read_threads) == 4
+    assert all(thread_id != event_loop_thread for thread_id in read_threads)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_refresh_cannot_overwrite_newer_state():
+    started = Event()
+    release = Event()
+    finished = Event()
+    controller = _controller()
+    calls = 0
+
+    def worker_info(sub_component_type, backend):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait()
+            finished.set()
+            return WorkerInfo(k8s_name="stale", max_num_batched_tokens=1)
+        return WorkerInfo(k8s_name="fresh", max_num_batched_tokens=2)
+
+    controller.get_worker_info.side_effect = worker_info
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=False,
+    )
+    stale_refresh = asyncio.create_task(environment._refresh_deployment_state())
+
+    assert await asyncio.to_thread(started.wait, 1)
+    stale_refresh.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stale_refresh, timeout=0.2)
+
+        await environment._refresh_deployment_state()
+        fresh_info = environment.deployment_state().prefill.info
+        assert fresh_info is not None
+        assert fresh_info.k8s_name == "fresh"
+    finally:
+        release.set()
+
+    assert await asyncio.to_thread(finished.wait, 1)
+    current_info = environment.deployment_state().prefill.info
+    assert current_info is not None
+    assert current_info.k8s_name == "fresh"
 
 
 @pytest.mark.asyncio

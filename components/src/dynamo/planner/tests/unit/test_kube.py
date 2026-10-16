@@ -16,13 +16,22 @@
 import asyncio
 import threading
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch, sentinel
+from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 
 import pytest
 from kubernetes import client
 
-from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
+from dynamo.planner.connectors.clients.kubernetes_api import (
+    KUBERNETES_LABEL_SELECTOR_MAX_LENGTH,
+    KUBERNETES_LIST_PAGE_SIZE,
+    NONTERMINAL_POD_FIELD_SELECTOR,
+    PARTIAL_OBJECT_METADATA_ACCEPT,
+    REPLICA_WRITE_FENCE_ANNOTATION,
+    KubernetesAPI,
+)
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
@@ -62,12 +71,13 @@ class _StatefulScalingAPI:
             self.adapter["spec"]["replicas"] = body["spec"]["replicas"]
             self._advance_resource_version()
 
-    def call_api(self, *_args, body: list[dict], **_kwargs) -> object:
+    def patch_namespaced_custom_object(self, *, body: dict, **_kwargs) -> dict:
         with self._lock:
-            expected_version = body[0]["value"]
-            if expected_version != self.adapter["metadata"]["resourceVersion"]:
+            supplied_version = body.get("metadata", {}).get("resourceVersion")
+            if supplied_version != self.adapter["metadata"]["resourceVersion"]:
                 raise client.ApiException(status=409)
-            self.adapter["metadata"]["annotations"] = dict(body[1]["value"])
+            annotations = body.get("metadata", {}).get("annotations", {})
+            self.adapter["metadata"]["annotations"].update(annotations)
             self._advance_resource_version()
         return deepcopy(self.adapter)
 
@@ -91,11 +101,25 @@ def mock_config():
         yield mock
 
 
+@pytest.fixture(autouse=True)
+def mock_api_client():
+    with patch(
+        "dynamo.planner.connectors.clients.kubernetes_api.client_go_api_client"
+    ) as mock:
+        yield mock.return_value
+
+
 @pytest.fixture
 def mock_custom_api():
     with patch(
         "dynamo.planner.connectors.clients.kubernetes_api.client.CustomObjectsApi"
     ) as mock:
+        mock.return_value.get_namespaced_custom_object_scale.return_value = {
+            "metadata": {
+                "uid": "adapter-uid",
+                "resourceVersion": "scale-rv-1",
+            }
+        }
         yield mock.return_value
 
 
@@ -117,13 +141,119 @@ def mock_core_api():
 
 
 @pytest.fixture
-def k8s_api(mock_custom_api, mock_core_api, mock_config, mock_namespace):
+def k8s_api(
+    mock_custom_api,
+    mock_core_api,
+    mock_config,
+    mock_namespace,
+    mock_api_client,
+):
+    mock_core_api.metadata_api_client = mock_api_client
     return KubernetesAPI()
 
 
 @pytest.fixture
 def k8s_api_with_namespace(mock_custom_api, mock_config):
     return KubernetesAPI(k8s_namespace="test-namespace")
+
+
+@pytest.mark.parametrize("response", [{}, {"items": None}, {"items": {}}])
+def test_list_graph_deployments_rejects_malformed_items(
+    k8s_api, mock_custom_api, response
+):
+    mock_custom_api.list_namespaced_custom_object.return_value = response
+
+    with pytest.raises(TypeError, match="items is not a list"):
+        k8s_api.list_graph_deployments()
+
+
+def test_list_graph_deployments_rejects_non_object_item(k8s_api, mock_custom_api):
+    mock_custom_api.list_namespaced_custom_object.return_value = {"items": [None]}
+
+    with pytest.raises(TypeError, match=r"items\[0\] is not an object"):
+        k8s_api.list_graph_deployments()
+
+
+def test_list_graph_deployments_follows_continue_tokens(k8s_api, mock_custom_api):
+    first = {"metadata": {"name": "first"}}
+    second = {"metadata": {"name": "second"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [first], "metadata": {"continue": "next-page"}},
+        {"items": [second], "metadata": {}},
+    ]
+
+    assert k8s_api.list_graph_deployments() == [first, second]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [None, "next-page"]
+    assert all(
+        call.kwargs["limit"] == KUBERNETES_LIST_PAGE_SIZE
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    )
+
+
+def test_list_graph_deployments_restarts_expired_pagination(k8s_api, mock_custom_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh_first = {"metadata": {"name": "fresh-first"}}
+    fresh_second = {"metadata": {"name": "fresh-second"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [stale], "metadata": {"continue": "expired-page"}},
+        client.ApiException(status=410, reason="ResourceExpired"),
+        {"items": [fresh_first], "metadata": {"continue": "fresh-page"}},
+        {"items": [fresh_second], "metadata": {}},
+    ]
+
+    assert k8s_api.list_graph_deployments() == [fresh_first, fresh_second]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [None, "expired-page", None, "fresh-page"]
+
+
+def test_list_scaling_adapters_follows_continue_tokens(k8s_api, mock_custom_api):
+    first = {"metadata": {"name": "first"}}
+    second = {"metadata": {"name": "second"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [first], "metadata": {"continue": "next-page"}},
+        {"items": [second], "metadata": {}},
+    ]
+
+    assert k8s_api.list_scaling_adapters() == [first, second]
+    assert [
+        (call.kwargs["plural"], call.kwargs["_continue"])
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [
+        ("dynamographdeploymentscalingadapters", None),
+        ("dynamographdeploymentscalingadapters", "next-page"),
+    ]
+
+
+def test_list_scaling_adapters_restarts_expired_pagination(k8s_api, mock_custom_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh = {"metadata": {"name": "fresh"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [stale], "metadata": {"continue": "expired-page"}},
+        client.ApiException(status=410, reason="ResourceExpired"),
+        {"items": [fresh], "metadata": {}},
+    ]
+
+    assert k8s_api.list_scaling_adapters() == [fresh]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [None, "expired-page", None]
+
+
+def _dgd_merge_patch_bodies(mock_custom_api):
+    calls = mock_custom_api.patch_namespaced_custom_object.call_args_list
+    for api_call in calls:
+        assert api_call.kwargs["group"] == "nvidia.com"
+        assert api_call.kwargs["version"] == "v1beta1"
+        assert api_call.kwargs["plural"] == "dynamographdeployments"
+        assert "_content_type" not in api_call.kwargs
+    mock_custom_api.api_client.call_api.assert_not_called()
+    return [api_call.kwargs["body"] for api_call in calls]
 
 
 def test_kubernetes_api_init_with_namespace(mock_custom_api, mock_config):
@@ -158,6 +288,13 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
     )
 
 
+def test_get_graph_deployment_rejects_non_object_response(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object.return_value = object()
+
+    with pytest.raises(TypeError, match="instead of an object"):
+        k8s_api.get_graph_deployment("test-deployment")
+
+
 def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
     """Test that update_service_replicas uses DGDSA Scale API when available"""
     mock_custom_api.patch_namespaced_custom_object_scale.return_value = None
@@ -171,7 +308,10 @@ def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-frontend",  # lowercase service name
-        body={"spec": {"replicas": 3}},
+        body={
+            "metadata": {"resourceVersion": "scale-rv-1"},
+            "spec": {"replicas": 3},
+        },
     )
     # Should NOT fall back to DGD patch
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
@@ -227,6 +367,60 @@ def test_update_scaling_adapter_replicas_is_strict(k8s_api, mock_custom_api):
     mock_custom_api.api_client.call_api.assert_not_called()
 
 
+def test_patch_scaling_adapter_replica_write_fence(k8s_api, mock_custom_api):
+    adapter = {
+        "metadata": {
+            "name": "test-deployment-frontend",
+            "resourceVersion": "101",
+        }
+    }
+
+    k8s_api.patch_scaling_adapter_replica_write_fence(
+        "test-deployment", "Frontend", "fence-1", adapter=adapter
+    )
+
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",
+        body={
+            "metadata": {
+                "resourceVersion": "101",
+                "annotations": {REPLICA_WRITE_FENCE_ANNOTATION: "fence-1"},
+            }
+        },
+    )
+
+
+def test_patch_dgd_replica_write_fence(k8s_api, mock_custom_api):
+    deployment = {
+        "metadata": {
+            "name": "test-deployment",
+            "resourceVersion": "11",
+        }
+    }
+
+    k8s_api.patch_dgd_replica_write_fence(
+        "test-deployment", "fence-1", deployment=deployment
+    )
+
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeployments",
+        name="test-deployment",
+        body={
+            "metadata": {
+                "resourceVersion": "11",
+                "annotations": {REPLICA_WRITE_FENCE_ANNOTATION: "fence-1"},
+            }
+        },
+    )
+
+
 def test_update_scaling_adapter_replicas_never_falls_back_on_404(
     k8s_api, mock_custom_api
 ):
@@ -242,14 +436,84 @@ def test_update_scaling_adapter_replicas_never_falls_back_on_404(
     mock_custom_api.api_client.call_api.assert_not_called()
 
 
+def test_update_service_replicas_rereads_scale_on_conflict(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = [
+        {"metadata": {"uid": "adapter-uid", "resourceVersion": "scale-rv-1"}},
+        {"metadata": {"uid": "adapter-uid", "resourceVersion": "scale-rv-2"}},
+    ]
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+
+    k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    assert mock_custom_api.get_namespaced_custom_object_scale.call_count == 2
+    assert [
+        call.kwargs["body"]["metadata"]["resourceVersion"]
+        for call in mock_custom_api.patch_namespaced_custom_object_scale.call_args_list
+    ] == ["scale-rv-1", "scale-rv-2"]
+
+
+def test_update_service_replicas_stops_retry_after_adapter_recreation(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = [
+        {"metadata": {"uid": "adapter-old", "resourceVersion": "scale-rv-1"}},
+        {"metadata": {"uid": "adapter-new", "resourceVersion": "scale-rv-2"}},
+    ]
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=409)
+    )
+
+    with pytest.raises(RuntimeError, match="identity changed during retry"):
+        k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
+
+
+def test_update_service_replicas_retries_429_without_rereading_scale(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = [
+        client.ApiException(status=429),
+        None,
+    ]
+
+    k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    assert mock_custom_api.patch_namespaced_custom_object_scale.call_count == 2
+
+
+def test_update_service_replicas_does_not_fallback_after_ambiguous_404(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = [
+        client.ApiException(status=500),
+        client.ApiException(status=404),
+    ]
+
+    with pytest.raises(AmbiguousKubernetesWriteError):
+        k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    assert mock_custom_api.patch_namespaced_custom_object_scale.call_count == 2
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
 def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     """Test that update_service_replicas falls back to DGD when DGDSA not found"""
     # DGDSA doesn't exist (404)
-    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
         client.ApiException(status=404)
     )
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment"},
+        "metadata": {
+            "name": "test-deployment",
+            "uid": "dgd-uid",
+            "resourceVersion": "dgd-rv-1",
+        },
         "spec": {
             "components": [
                 {"name": "test-component", "type": "decode", "replicas": 0},
@@ -257,59 +521,144 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
             ]
         },
     }
-    mock_custom_api.patch_namespaced_custom_object.return_value = None
-
     k8s_api.update_service_replicas("test-deployment", "test-component", 1)
 
-    # Should have tried DGDSA first
-    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
+    # Should have tried DGDSA first, but the GET failed before the Scale patch.
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_not_called()
 
-    # Should fall back to a narrow DGD JSON Patch.
-    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
-    mock_custom_api.api_client.call_api.assert_called_once_with(
-        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
-        "PATCH",
+    assert _dgd_merge_patch_bodies(mock_custom_api) == [
         {
-            "group": "nvidia.com",
-            "version": "v1beta1",
-            "namespace": k8s_api.current_namespace,
-            "plural": "dynamographdeployments",
-            "name": "test-deployment",
-        },
-        [],
+            "metadata": {"resourceVersion": "dgd-rv-1"},
+            "spec": {
+                "components": [
+                    {"name": "test-component", "type": "decode", "replicas": 1},
+                    {"name": "other-component", "type": "prefill", "replicas": 2},
+                ]
+            },
+        }
+    ]
+
+
+def test_update_service_replicas_rereads_dgd_on_conflict(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.side_effect = [
         {
-            "Accept": "application/json",
-            "Content-Type": "application/json-patch+json",
+            "metadata": {"uid": "dgd-uid", "resourceVersion": "dgd-rv-1"},
+            "spec": {"components": [{"name": "target", "replicas": 0}]},
         },
-        body=[
-            {
-                "op": "test",
-                "path": "/spec/components/0/name",
-                "value": "test-component",
+        {
+            "metadata": {"uid": "dgd-uid", "resourceVersion": "dgd-rv-2"},
+            "spec": {
+                "components": [
+                    {"name": "other", "replicas": 1},
+                    {"name": "target", "replicas": 0},
+                ]
             },
-            {
-                "op": "add",
-                "path": "/spec/components/0/replicas",
-                "value": 1,
-            },
-        ],
-        response_type="object",
-        auth_settings=["BearerToken"],
-        _return_http_data_only=True,
-        collection_formats={},
+        },
+    ]
+    mock_custom_api.patch_namespaced_custom_object.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+
+    k8s_api.update_service_replicas("test-deployment", "target", 2)
+
+    assert mock_custom_api.get_namespaced_custom_object.call_count == 2
+    bodies = _dgd_merge_patch_bodies(mock_custom_api)
+    assert bodies[0] == {
+        "metadata": {"resourceVersion": "dgd-rv-1"},
+        "spec": {"components": [{"name": "target", "replicas": 2}]},
+    }
+    assert bodies[1] == {
+        "metadata": {"resourceVersion": "dgd-rv-2"},
+        "spec": {
+            "components": [
+                {"name": "other", "replicas": 1},
+                {"name": "target", "replicas": 2},
+            ]
+        },
+    }
+
+
+def test_update_service_replicas_stops_retry_after_dgd_recreation(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.side_effect = [
+        {
+            "metadata": {"uid": "dgd-old", "resourceVersion": "dgd-rv-1"},
+            "spec": {"components": [{"name": "target", "replicas": 0}]},
+        },
+        {
+            "metadata": {"uid": "dgd-new", "resourceVersion": "dgd-rv-2"},
+            "spec": {"components": [{"name": "target", "replicas": 0}]},
+        },
+    ]
+    mock_custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(
+        status=409
     )
 
+    with pytest.raises(RuntimeError, match="identity changed during retry"):
+        k8s_api.update_service_replicas("test-deployment", "target", 2)
 
-def test_update_service_replicas_propagates_other_errors(k8s_api, mock_custom_api):
-    """Test that update_service_replicas propagates non-404 errors"""
+    assert mock_custom_api.patch_namespaced_custom_object.call_count == 1
+
+
+def test_update_service_replicas_preserves_non_cas_merge_patch_error(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.return_value = {
+        "metadata": {"uid": "dgd-uid", "resourceVersion": "dgd-rv-1"},
+        "spec": {"components": [{"name": "target", "replicas": 0}]},
+    }
+    mock_custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(
+        status=422, reason="replicas: Invalid value"
+    )
+
+    with pytest.raises(client.ApiException) as error:
+        k8s_api.update_service_replicas("test-deployment", "target", 2)
+
+    assert error.value.status == 422
+    assert mock_custom_api.get_namespaced_custom_object.call_count == 1
+    assert mock_custom_api.patch_namespaced_custom_object.call_count == 1
+
+
+def test_update_service_replicas_preserves_dgd_not_found_error(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
+        status=404
+    )
+
+    with pytest.raises(DynamoGraphDeploymentNotFoundError):
+        k8s_api.update_service_replicas("missing-deployment", "target", 2)
+
+
+def test_update_service_replicas_propagates_non_retryable_errors(
+    k8s_api, mock_custom_api
+):
+    """Test that update_service_replicas propagates non-retryable errors."""
     mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
-        client.ApiException(status=500, reason="Internal Server Error")
+        client.ApiException(status=422, reason="Invalid")
     )
 
     with pytest.raises(client.ApiException) as exc_info:
         k8s_api.update_service_replicas("test-deployment", "test-component", 1)
 
-    assert exc_info.value.status == 500
+    assert exc_info.value.status == 422
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
     # Should NOT fall back to DGD
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
 
@@ -328,7 +677,10 @@ def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custo
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-test-component",
-        body={"spec": {"replicas": 1}},
+        body={
+            "metadata": {"resourceVersion": "scale-rv-1"},
+            "spec": {"replicas": 1},
+        },
     )
 
 
@@ -336,59 +688,75 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     """The strict DGD path never probes or writes a convention-named DGDSA."""
     component = {"name": "test-component", "type": "prefill", "replicas": 0}
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment", "resourceVersion": "42"},
+        "metadata": {
+            "name": "test-deployment",
+            "uid": "dgd-uid",
+            "resourceVersion": "42",
+        },
         "spec": {"components": [component]},
     }
-    mock_custom_api.patch_namespaced_custom_object.return_value = None
-
     k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
 
-    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
-    mock_custom_api.api_client.call_api.assert_called_once_with(
-        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
-        "PATCH",
+    assert _dgd_merge_patch_bodies(mock_custom_api) == [
         {
-            "group": "nvidia.com",
-            "version": "v1beta1",
-            "namespace": k8s_api.current_namespace,
-            "plural": "dynamographdeployments",
+            "metadata": {"resourceVersion": "42"},
+            "spec": {
+                "components": [
+                    {
+                        "name": "test-component",
+                        "type": "prefill",
+                        "replicas": 1,
+                    }
+                ]
+            },
+        }
+    ]
+
+
+def test_update_dgd_replica_targets_uses_one_cas_merge_patch(k8s_api, mock_custom_api):
+    deployment = {
+        "metadata": {
             "name": "test-deployment",
+            "uid": "dgd-uid",
+            "resourceVersion": "42",
         },
-        [],
-        {
-            "Accept": "application/json",
-            "Content-Type": "application/json-patch+json",
+        "spec": {
+            "components": [
+                {"name": "prefill", "type": "prefill", "replicas": 1},
+                {"name": "decode", "type": "decode", "replicas": 2},
+            ]
         },
-        body=[
-            {
-                "op": "test",
-                "path": "/metadata/resourceVersion",
-                "value": "42",
-            },
-            {
-                "op": "test",
-                "path": "/spec/components/0",
-                "value": component,
-            },
-            {
-                "op": "add",
-                "path": "/spec/components/0/replicas",
-                "value": 1,
-            },
-        ],
-        response_type="object",
-        auth_settings=["BearerToken"],
-        _return_http_data_only=True,
-        collection_formats={},
+    }
+
+    k8s_api.update_dgd_replica_targets(
+        "test-deployment",
+        {"prefill": 3, "decode": 4},
+        deployment=deployment,
     )
+
+    assert _dgd_merge_patch_bodies(mock_custom_api) == [
+        {
+            "metadata": {"resourceVersion": "42"},
+            "spec": {
+                "components": [
+                    {"name": "prefill", "type": "prefill", "replicas": 3},
+                    {"name": "decode", "type": "decode", "replicas": 4},
+                ]
+            },
+        }
+    ]
 
 
 def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
     k8s_api, mock_custom_api
 ):
-    """A DGDSA opt-in after connector preflight must retry via new authority."""
+    """A DGDSA opt-in after connector preflight must stop the stale write."""
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment", "resourceVersion": "43"},
+        "metadata": {
+            "name": "test-deployment",
+            "uid": "dgd-uid",
+            "resourceVersion": "43",
+        },
         "spec": {
             "components": [
                 {
@@ -401,10 +769,11 @@ def test_update_dgd_replicas_directly_rejects_scaling_adapter_opt_in(
         },
     }
 
-    with pytest.raises(client.ApiException) as error:
+    with pytest.raises(RuntimeError, match="now declares a scalingAdapter"):
         k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
 
-    assert error.value.status == 409
+    mock_custom_api.get_namespaced_custom_object.assert_called_once()
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
     mock_custom_api.api_client.call_api.assert_not_called()
 
 
@@ -460,6 +829,88 @@ def test_fetch_authoritative_targets_allows_cold_restart_at_dgdsa_zero(
     assert deployment["spec"]["components"][0]["replicas"] == 1
 
 
+def test_fetch_authoritative_targets_uses_validated_inventory_snapshot(k8s_api):
+    deployment = {
+        "metadata": {"name": "graph", "uid": "dgd-uid"},
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                }
+            ]
+        },
+    }
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "uid": "adapter-uid",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 3,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+
+    authoritative = k8s_api.fetch_authoritative_replica_targets(
+        deployment,
+        scaling_adapters={"graph-worker": adapter},
+    )
+
+    assert authoritative["spec"]["components"][0]["replicas"] == 3
+
+
+def test_fetch_authoritative_targets_rejects_wrong_inventory_owner(k8s_api):
+    deployment = {
+        "metadata": {"name": "graph", "uid": "dgd-uid"},
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                }
+            ]
+        },
+    }
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "other-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 3,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+
+    with pytest.raises(ValueError, match="not controller-owned"):
+        k8s_api.fetch_authoritative_replica_targets(
+            deployment,
+            scaling_adapters={"graph-worker": adapter},
+        )
+
+
 def test_scaling_adapter_identity_requires_resource_version_only_for_mutation(
     k8s_api,
 ):
@@ -496,7 +947,43 @@ def test_scaling_adapter_identity_requires_resource_version_only_for_mutation(
     )
 
 
-def test_patch_scaling_adapter_writer_fence_uses_resource_version_json_patch(
+def test_verify_scaling_adapter_replica_target_rejects_replacement(
+    k8s_api, mock_custom_api
+):
+    deployment = {"metadata": {"name": "graph", "uid": "dgd-uid"}}
+    adapter = {
+        "metadata": {
+            "name": "graph-worker",
+            "uid": "replacement-uid",
+            "annotations": {"dynamo.nvidia.com/planner-writer-fence": "writer-1"},
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "graph",
+                    "uid": "dgd-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": 2,
+            "dgdRef": {"name": "graph", "componentName": "worker"},
+        },
+    }
+    mock_custom_api.get_namespaced_custom_object.return_value = adapter
+
+    with pytest.raises(ValueError, match="identity changed"):
+        k8s_api.verify_scaling_adapter_replica_target(
+            deployment,
+            "worker",
+            expected_uid="original-uid",
+            expected_replicas=2,
+            writer_id="writer-1",
+        )
+
+
+def test_patch_scaling_adapter_writer_fence_uses_resource_version_merge_patch(
     k8s_api, mock_custom_api
 ):
     adapter = {
@@ -510,42 +997,23 @@ def test_patch_scaling_adapter_writer_fence_uses_resource_version_json_patch(
         "test-deployment", "worker", "writer-new", adapter=adapter
     )
 
-    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
-    mock_custom_api.api_client.call_api.assert_called_once_with(
-        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
-        "PATCH",
-        {
-            "group": "nvidia.com",
-            "version": "v1beta1",
-            "namespace": k8s_api.current_namespace,
-            "plural": "dynamographdeploymentscalingadapters",
-            "name": "test-deployment-worker",
-        },
-        [],
-        {
-            "Accept": "application/json",
-            "Content-Type": "application/json-patch+json",
-        },
-        body=[
-            {
-                "op": "test",
-                "path": "/metadata/resourceVersion",
-                "value": "42",
-            },
-            {
-                "op": "add",
-                "path": "/metadata/annotations",
-                "value": {
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-worker",
+        body={
+            "metadata": {
+                "resourceVersion": "42",
+                "annotations": {
                     "keep.example/key": "value",
                     "dynamo.nvidia.com/planner-writer-fence": "writer-new",
                 },
-            },
-        ],
-        response_type="object",
-        auth_settings=["BearerToken"],
-        _return_http_data_only=True,
-        collection_formats={},
+            }
+        },
     )
+    mock_custom_api.api_client.call_api.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -658,6 +1126,22 @@ async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api)
 
 
 @pytest.mark.asyncio
+async def test_wait_for_graph_deployment_ready_checks_before_sleep(
+    k8s_api, mock_custom_api
+):
+    deployment = {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    with (
+        patch.object(k8s_api, "get_graph_deployment", return_value=deployment),
+        patch.object(asyncio, "sleep", new_callable=AsyncMock) as sleep,
+    ):
+        await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment", max_attempts=1, delay_seconds=10
+        )
+
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api):
     """Test wait_for_graph_deployment_ready when deployment times out"""
     # Mock the _get_graph_deployment_from_name response with not ready status
@@ -766,7 +1250,12 @@ def _stable_worker_dgd(
 ) -> Dict[str, Any]:
     """Production-shaped DGD: stable replica counts, explicit generation lag."""
     return {
-        "metadata": {"name": dgd_name, "generation": generation},
+        "metadata": {
+            "name": dgd_name,
+            "uid": "dgd-uid",
+            "generation": generation,
+            "resourceVersion": "dgd-rv-1",
+        },
         "spec": {
             "components": [
                 {
@@ -794,16 +1283,19 @@ def _stable_worker_dgd(
         },
         "status": {
             "observedGeneration": observed_generation,
+            "conditions": [{"type": "Ready", "status": "True"}],
             "components": {
                 "decode": {
                     "gpuPowerLimitWatts": decode_watts,
                     "gpusPerEngine": 1,
                     "gpusPerReplica": 1,
+                    "replicas": 2,
                     "readyReplicas": 2,
                     "updatedReplicas": 2,
                     "availableReplicas": 2,
                 },
                 "Planner": {
+                    "replicas": 0,
                     "readyReplicas": 0,
                     "updatedReplicas": 0,
                     "availableReplicas": 0,
@@ -814,11 +1306,16 @@ def _stable_worker_dgd(
 
 
 def _owned_scaling_adapter(
-    component_name: str, *, replicas: int, dgd_name: str = "test-deployment"
+    component_name: str,
+    *,
+    replicas: int,
+    dgd_name: str = "test-deployment",
+    uid: str = "adapter-uid",
 ) -> Dict[str, Any]:
     return {
         "metadata": {
             "name": f"{dgd_name}-{component_name.lower()}",
+            "uid": uid,
             "ownerReferences": [
                 {
                     "apiVersion": "nvidia.com/v1beta1",
@@ -852,7 +1349,10 @@ def _make_pod(
         if annotation is not None
         else {}
     )
-    pod.metadata.labels = {"nvidia.com/dynamo-component": component}
+    pod.metadata.labels = {
+        "nvidia.com/dynamo-component": component,
+        "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+    }
     pod.metadata.deletion_timestamp = deletion_timestamp
     pod.status.phase = phase
     return pod
@@ -861,10 +1361,22 @@ def _make_pod(
 def _mock_pod_list(mock_core_api, pods: list, *, component: str = "decode"):
     """Wire the single DGD-scoped Pod LIST and label its mock Pods."""
     for pod in pods:
-        pod.metadata.labels = {"nvidia.com/dynamo-component": component}
+        pod.metadata.labels = {
+            **(pod.metadata.labels or {}),
+            "nvidia.com/dynamo-component": component,
+            "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+        }
     result = MagicMock()
     result.items = pods
+    result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
+    response = MagicMock()
+    api_client = mock_core_api.metadata_api_client
+    api_client.param_serialize.return_value = ("serialized", "request")
+    api_client.call_api.return_value = response
+    api_client.response_deserialize.return_value = SimpleNamespace(
+        data={"items": pods, "metadata": {}}
+    )
 
 
 def test_is_spec_generation_observed_requires_catch_up(k8s_api):
@@ -881,6 +1393,30 @@ def test_is_spec_generation_observed_requires_catch_up(k8s_api):
         is True
     )
     assert k8s_api.is_spec_generation_observed({"status": {}}) is False
+
+
+@pytest.mark.parametrize("phase", ["Succeeded", "Failed"])
+def test_pcsg_replica_range_ignores_terminal_pods(k8s_api, phase):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["spec"]["components"][0]["replicas"] = 0
+    deployment["status"]["components"]["decode"][
+        "componentKind"
+    ] = "PodCliqueScalingGroup"
+    terminal = _make_pod("terminal", phase=phase)
+    terminal.metadata.labels["grove.io/podcliquescalinggroup-replica-index"] = "7"
+
+    assert k8s_api.pcsg_pods_within_desired_replicas(deployment, [terminal])
+
+
+def test_deployment_pod_count_rejects_surge_and_ignores_terminal_pods(k8s_api):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["status"]["components"]["decode"]["componentKind"] = "Deployment"
+    serving = [_make_pod(f"decode-{index}") for index in range(3)]
+
+    assert not k8s_api.deployment_pods_within_desired_replicas(deployment, serving)
+
+    serving[-1].status.phase = "Succeeded"
+    assert k8s_api.deployment_pods_within_desired_replicas(deployment, serving)
 
 
 @pytest.mark.asyncio
@@ -989,6 +1525,298 @@ async def test_wait_exclude_planner_uses_adapter_target_after_cold_restart(k8s_a
     get_adapter.assert_called_once_with("test-deployment", "worker")
 
 
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_ignores_stale_ready_condition(
+    k8s_api, mock_core_api
+):
+    stale = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale["spec"]["components"][0]["replicas"] = 1
+    stale["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    settled = deepcopy(stale)
+    settled_status = settled["status"]["components"]["decode"]
+    settled_status.update(
+        {
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        }
+    )
+    _mock_pod_list(mock_core_api, [_make_pod("decode-0")])
+
+    with patch.object(
+        k8s_api, "get_graph_deployment", side_effect=[stale, settled, settled]
+    ) as get_dgd:
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 1},
+            expected_replica_authorities={"decode": (False, None)},
+            max_attempts=2,
+            delay_seconds=0,
+        )
+
+    assert got is settled
+    assert get_dgd.call_count == 3
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_requires_current_workload_ready(
+    k8s_api, mock_core_api
+):
+    projected = _stable_worker_dgd(generation=2, observed_generation=2)
+    projected["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    settled = deepcopy(projected)
+    settled["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("decode-0"), _make_pod("decode-1")],
+    )
+
+    with patch.object(
+        k8s_api,
+        "get_graph_deployment",
+        side_effect=[projected, settled, settled],
+    ) as get_dgd:
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 2},
+            expected_replica_authorities={"decode": (False, None)},
+            max_attempts=2,
+            delay_seconds=0,
+        )
+
+    assert got is settled
+    assert get_dgd.call_count == 3
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_excludes_planner_readiness(
+    k8s_api, mock_core_api
+):
+    settled_workers = _stable_worker_dgd(generation=2, observed_generation=2)
+    settled_workers["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("decode-0"), _make_pod("decode-1")],
+    )
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=settled_workers):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 2},
+            expected_replica_authorities={"decode": (False, None)},
+            max_attempts=1,
+            delay_seconds=0,
+        )
+
+    assert got is settled_workers
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_waits_for_adapter_projection(
+    k8s_api, mock_core_api
+):
+    stale = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale_component = stale["spec"]["components"][0]
+    stale_component["scalingAdapter"] = {}
+    stale_status = stale["status"]["components"]["decode"]
+    stale_status.update(
+        {
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        }
+    )
+    settled = deepcopy(stale)
+    settled["metadata"]["generation"] = 3
+    settled["status"]["observedGeneration"] = 3
+    settled["spec"]["components"][0]["replicas"] = 1
+    adapter = _owned_scaling_adapter("decode", replicas=1)
+    _mock_pod_list(mock_core_api, [_make_pod("decode-0")])
+
+    with (
+        patch.object(
+            k8s_api,
+            "get_graph_deployment",
+            side_effect=[stale, settled, settled],
+        ) as get_dgd,
+        patch.object(
+            k8s_api, "get_service_scaling_adapter", return_value=adapter
+        ) as get_adapter,
+    ):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 1},
+            expected_replica_authorities={"decode": (True, "adapter-uid")},
+            max_attempts=2,
+            delay_seconds=0,
+        )
+
+    assert got is settled
+    assert get_dgd.call_count == 3
+    assert get_adapter.call_count == 3
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_replaced_dgd(k8s_api, mock_core_api):
+    replacement = _stable_worker_dgd(generation=2, observed_generation=2)
+    replacement["metadata"]["uid"] = "replacement-uid"
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=replacement):
+        with pytest.raises(RuntimeError, match="DGD identity changed"):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+    mock_core_api.list_namespaced_pod.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_pods_from_replaced_dgd(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale_pod = _make_pod("decode-old")
+    _mock_pod_list(mock_core_api, [stale_pod])
+    stale_pod.metadata.labels["nvidia.com/dynamo-graph-deployment-uid"] = "old-dgd-uid"
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_removed_component_pods(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale_pod = _make_pod("removed-worker-0", component="removed-worker")
+    _mock_pod_list(mock_core_api, [stale_pod], component="removed-worker")
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_deployment_surge_pods(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["status"]["components"]["decode"]["componentKind"] = "Deployment"
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod(f"decode-{index}") for index in range(3)],
+    )
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_retries_dgd_change_during_pod_inventory(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    changed = deepcopy(deployment)
+    changed["metadata"]["resourceVersion"] = "dgd-rv-2"
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("decode-0"), _make_pod("decode-1")],
+    )
+
+    with patch.object(
+        k8s_api,
+        "get_graph_deployment",
+        side_effect=[deployment, changed],
+    ):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_replaced_adapter(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    replacement = _owned_scaling_adapter(
+        "decode", replicas=2, uid="replacement-adapter-uid"
+    )
+
+    with (
+        patch.object(k8s_api, "get_graph_deployment", return_value=deployment),
+        patch.object(k8s_api, "get_service_scaling_adapter", return_value=replacement),
+    ):
+        with pytest.raises(RuntimeError, match="DGDSA identity"):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (True, "adapter-uid")},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+    mock_core_api.list_namespaced_pod.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # worker_pods_settled unit tests
 # ---------------------------------------------------------------------------
@@ -1006,10 +1834,22 @@ def test_worker_pods_settled_all_match(k8s_api, mock_core_api):
     assert pending == []
 
 
+def test_worker_pods_settled_rejects_pods_from_replaced_dgd(k8s_api, mock_core_api):
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    stale_pod = _make_pod("pod-old", annotation="300")
+    _mock_pod_list(mock_core_api, [stale_pod])
+    stale_pod.metadata.labels["nvidia.com/dynamo-graph-deployment-uid"] = "old-dgd-uid"
+
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
+
+    assert settled is False
+    assert pending == ["Pods have stale DGD identity: ['pod-old']"]
+
+
 def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_api):
     """Prefill 350 W/GPU and decode 300 W/GPU are independent — both must match."""
     dgd = {
-        "metadata": {"name": "test-deployment"},
+        "metadata": {"name": "test-deployment", "uid": "dgd-uid"},
         "spec": {
             "components": [
                 {
@@ -1074,6 +1914,7 @@ def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_ap
         _make_pod("d-0", annotation="300", component="decode"),
         _make_pod("d-1", annotation="300", component="decode"),
     ]
+    result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
     settled, pending = k8s_api.worker_pods_settled(dgd, {"prefill": 350, "decode": 300})
     assert settled is True
@@ -1615,6 +2456,7 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
     decode = _make_pod("decode-0", component="decode")
     result = MagicMock()
     result.items = [prefill, decode]
+    result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
 
     pods = k8s_api.list_pods_for_graph("my-dgd")
@@ -1623,11 +2465,304 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
     mock_core_api.list_namespaced_pod.assert_called_once_with(
         namespace="default",
         label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
+        field_selector=None,
+        limit=KUBERNETES_LIST_PAGE_SIZE,
+        _continue=None,
     )
     assert by_component == {
         "prefill": [prefill],
         "decode": [decode],
     }
+
+
+def test_list_nonterminal_pods_for_graph_filters_at_server(k8s_api, mock_core_api):
+    pod = {"metadata": {"name": "decode-0"}}
+
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [pod], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_nonterminal_pods_for_graph("my-dgd") == [pod]
+
+    read_page.assert_called_once_with(
+        label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token=None,
+    )
+    mock_core_api.list_namespaced_pod.assert_not_called()
+
+
+def test_list_graph_pods_uses_untyped_metadata_request(k8s_api):
+    pod = {"metadata": {"name": "prefill-0"}}
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [pod], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_graph_pods() == [pod]
+    read_page.assert_called_once_with(
+        label_selector="nvidia.com/dynamo-graph-deployment-name",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token=None,
+    )
+
+
+def test_list_graph_pods_filters_selected_deployments(k8s_api):
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_graph_pods({"model-b", "model-a"}) == []
+    read_page.assert_called_once_with(
+        label_selector=("nvidia.com/dynamo-graph-deployment-name in (model-a,model-b)"),
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token=None,
+    )
+
+
+def test_list_graph_pods_falls_back_before_selector_exceeds_uri_bound(k8s_api):
+    names = {f"model-{index:04d}-{'a' * 48}" for index in range(100)}
+    selected_name = min(names)
+    selected = {
+        "metadata": {
+            "name": "selected-pod",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": selected_name,
+            },
+        }
+    }
+    unrelated = {
+        "metadata": {
+            "name": "unrelated-pod",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "other-model",
+            },
+        }
+    }
+    selector = f"nvidia.com/dynamo-graph-deployment-name in ({','.join(sorted(names))})"
+    assert len(selector) > KUBERNETES_LABEL_SELECTOR_MAX_LENGTH
+
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [selected, unrelated], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_graph_pods(names) == [selected]
+
+    read_page.assert_called_once_with(
+        label_selector="nvidia.com/dynamo-graph-deployment-name",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token=None,
+    )
+
+
+def test_partial_metadata_pods_work_with_settlement_helpers(k8s_api):
+    serving = {
+        "metadata": {
+            "name": "decode-0",
+            "deletionTimestamp": "2026-10-16T12:00:00Z",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "my-dgd",
+                "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+                "nvidia.com/dynamo-component": "decode",
+                "grove.io/podcliquescalinggroup-replica-index": "0",
+            },
+        }
+    }
+    capture = {
+        "metadata": {
+            "name": "capture-0",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "my-dgd",
+                "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+                "nvidia.com/dynamo-component": "decode",
+                "nvidia.com/snapshot-job-uid": "snapshot-uid",
+                "nvidia.com/snapshot-job": "capture-job",
+            },
+            "ownerReferences": [
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": "capture-job",
+                    "controller": True,
+                }
+            ],
+        }
+    }
+
+    assert k8s_api.partition_pods_by_graph([serving, capture]) == {
+        "my-dgd": [serving, capture]
+    }
+    assert k8s_api.partition_pods_by_component([serving]) == {"decode": [serving]}
+    assert k8s_api.exclude_checkpoint_capture_pods([serving, capture]) == [serving]
+    assert k8s_api.has_terminating_pods([serving]) is True
+    assert k8s_api.pod_graph_uid_mismatches([serving], "dgd-uid") == []
+    assert k8s_api.pod_graph_uid_mismatches([serving], "replacement-uid") == [
+        "decode-0"
+    ]
+
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    assert k8s_api.pod_component_mismatches([serving], deployment) == []
+    stale_component = deepcopy(serving)
+    stale_component["metadata"]["labels"][
+        "nvidia.com/dynamo-component"
+    ] = "removed-worker"
+    assert k8s_api.pod_component_mismatches([stale_component], deployment) == [
+        "decode-0"
+    ]
+    deployment["status"]["components"]["decode"][
+        "componentKind"
+    ] = "PodCliqueScalingGroup"
+    assert k8s_api.pcsg_pods_within_desired_replicas(deployment, [serving])
+
+
+def test_read_core_pod_metadata_page_uses_public_untyped_api_client(k8s_api):
+    response = MagicMock()
+    payload = {"items": [{"metadata": {"name": "prefill-0"}}], "metadata": {}}
+    k8s_api.api_client.param_serialize.return_value = ("serialized", "request")
+    k8s_api.api_client.call_api.return_value = response
+    k8s_api.api_client.response_deserialize.return_value = SimpleNamespace(data=payload)
+
+    result = k8s_api._read_core_pod_metadata_page(
+        label_selector="nvidia.com/dynamo-graph-deployment-name",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token="next-page",
+    )
+
+    assert result == payload
+    request = k8s_api.api_client.param_serialize.call_args.kwargs
+    assert request["method"] == "GET"
+    assert request["resource_path"] == "/api/v1/namespaces/{namespace}/pods"
+    assert request["path_params"] == {"namespace": "default"}
+    assert request["header_params"] == {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
+    assert ("continue", "next-page") in request["query_params"]
+    k8s_api.api_client.call_api.assert_called_once_with("serialized", "request")
+    response.read.assert_called_once_with()
+    k8s_api.api_client.response_deserialize.assert_called_once_with(
+        response,
+        {"200": "object"},
+    )
+
+
+def test_read_custom_object_metadata_page_uses_public_untyped_api_client(k8s_api):
+    response = MagicMock()
+    payload = {"items": [{"metadata": {"name": "model"}}], "metadata": {}}
+    k8s_api.api_client.param_serialize.return_value = ("serialized", "request")
+    k8s_api.api_client.call_api.return_value = response
+    k8s_api.api_client.response_deserialize.return_value = SimpleNamespace(data=payload)
+
+    result = k8s_api._read_custom_object_metadata_page(
+        plural="dynamographdeployments",
+        continue_token="next-page",
+    )
+
+    assert result == payload
+    request = k8s_api.api_client.param_serialize.call_args.kwargs
+    assert request["method"] == "GET"
+    assert request["resource_path"] == (
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}"
+    )
+    assert request["path_params"] == {
+        "group": "nvidia.com",
+        "version": "v1beta1",
+        "namespace": "default",
+        "plural": "dynamographdeployments",
+    }
+    assert request["header_params"] == {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
+    assert ("continue", "next-page") in request["query_params"]
+    k8s_api.api_client.call_api.assert_called_once_with("serialized", "request")
+    response.read.assert_called_once_with()
+
+
+def test_list_custom_object_metadata_follows_continue_tokens(k8s_api):
+    first = {"metadata": {"name": "first"}}
+    second = {"metadata": {"name": "second"}}
+    with patch.object(
+        k8s_api,
+        "_read_custom_object_metadata_page",
+        side_effect=[
+            {"items": [first], "metadata": {"continue": "next-page"}},
+            {"items": [second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_deployment_metadata() == [first, second]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "next-page",
+    ]
+
+
+def test_list_custom_object_metadata_restarts_expired_pagination(k8s_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh_first = {"metadata": {"name": "fresh-first"}}
+    fresh_second = {"metadata": {"name": "fresh-second"}}
+    expired = client.ApiException(status=410, reason="ResourceExpired")
+    with patch.object(
+        k8s_api,
+        "_read_custom_object_metadata_page",
+        side_effect=[
+            {"items": [stale], "metadata": {"continue": "expired-page"}},
+            expired,
+            {
+                "items": [fresh_first],
+                "metadata": {"continue": "fresh-page"},
+            },
+            {"items": [fresh_second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_deployment_metadata() == [
+            fresh_first,
+            fresh_second,
+        ]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "expired-page",
+        None,
+        "fresh-page",
+    ]
+
+
+def test_list_graph_pods_follows_continue_tokens(k8s_api):
+    first = {"metadata": {"name": "prefill-0"}}
+    second = {"metadata": {"name": "decode-0"}}
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        side_effect=[
+            {"items": [first], "metadata": {"continue": "next-page"}},
+            {"items": [second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_pods() == [first, second]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "next-page",
+    ]
+
+
+def test_list_graph_pods_restarts_expired_pagination(k8s_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh_first = {"metadata": {"name": "fresh-first"}}
+    fresh_second = {"metadata": {"name": "fresh-second"}}
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        side_effect=[
+            {"items": [stale], "metadata": {"continue": "expired-page"}},
+            client.ApiException(status=410, reason="ResourceExpired"),
+            {"items": [fresh_first], "metadata": {"continue": "fresh-page"}},
+            {"items": [fresh_second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_pods() == [fresh_first, fresh_second]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "expired-page",
+        None,
+        "fresh-page",
+    ]
 
 
 def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(

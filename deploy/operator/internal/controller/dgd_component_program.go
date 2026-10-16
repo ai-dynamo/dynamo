@@ -24,6 +24,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -55,10 +56,17 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		rollout:         rollout,
 		restart:         newDGDRestartReconciler(),
 		restartProgress: newComponentRestartProgressResolver(r.Client),
-		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
+		workloads:       newComponentWorkloadsReconciler(r.Client, r.apiReader(), r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
+}
+
+func (r *DynamoGraphDeploymentReconciler) apiReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // Reconcile composes the complete component pathway. Each earlier operation

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from typing import Optional
@@ -184,10 +185,18 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def _refresh_deployment_state(
         self, deployment: Optional[dict] = None
     ) -> None:
-        self._refresh_worker_info()
-        self._refresh_gpu_counts(deployment=deployment)
-        await self._refresh_replica_counts()
-        self._refresh_model_name()
+        staged_state = self._state.clone()
+        await asyncio.to_thread(self._refresh_worker_info, staged_state)
+        await asyncio.to_thread(
+            self._refresh_gpu_counts, deployment=deployment, state=staged_state
+        )
+        await self._refresh_replica_counts(staged_state)
+        await asyncio.to_thread(self._refresh_model_name, staged_state)
+
+        # Publish without an await so event-loop readers see one generation.
+        self._state.prefill = staged_state.prefill
+        self._state.decode = staged_state.decode
+        self._state.model_name = staged_state.model_name
 
     def _shared_dgd_deployment(self) -> Optional[dict]:
         """One DGD GET for GPU + power reads when power awareness is on.
@@ -255,20 +264,22 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 return method(**kwargs, deployment=deployment)
         return method(**kwargs)
 
-    def _refresh_worker_info(self) -> None:
+    def _refresh_worker_info(self, state: Optional[DeploymentState] = None) -> None:
+        if state is None:
+            state = self._state
         get_worker_info = getattr(self.controller, "get_worker_info", None)
         if not callable(get_worker_info):
             return
         if self.require_prefill:
             self._refresh_component_worker_info(
                 SubComponentType.PREFILL,
-                self._state.prefill,
+                state.prefill,
                 get_worker_info,
             )
         if self.require_decode:
             self._refresh_component_worker_info(
                 SubComponentType.DECODE,
-                self._state.decode,
+                state.decode,
                 get_worker_info,
             )
 
@@ -303,8 +314,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             ):
                 setattr(component_state.info, field_name, fresh_val)
 
-    def _refresh_gpu_counts(self, deployment: Optional[dict] = None) -> None:
-        state = self.deployment_state()
+    def _refresh_gpu_counts(
+        self,
+        deployment: Optional[dict] = None,
+        *,
+        state: Optional[DeploymentState] = None,
+    ) -> None:
+        if state is None:
+            state = self.deployment_state()
         try:
             prefill_shape, decode_shape = self._call_with_optional_deployment(
                 self.controller.get_gpu_shapes,
@@ -501,15 +518,19 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 ]
             )
 
-    async def _refresh_replica_counts(self) -> None:
+    async def _refresh_replica_counts(
+        self, state: Optional[DeploymentState] = None
+    ) -> None:
+        if state is None:
+            state = self._state
         prefill_name = (
-            self._state.prefill.info.k8s_name
-            if self.require_prefill and self._state.prefill.info is not None
+            state.prefill.info.k8s_name
+            if self.require_prefill and state.prefill.info is not None
             else None
         )
         decode_name = (
-            self._state.decode.info.k8s_name
-            if self.require_decode and self._state.decode.info is not None
+            state.decode.info.k8s_name
+            if self.require_decode and state.decode.info is not None
             else None
         )
         power_controller: Optional[PowerAwareConnector] = None
@@ -535,7 +556,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 for required, replicas, active, expected, scaling, pending in (
                     (
                         self.require_prefill,
-                        self._state.prefill.replicas,
+                        state.prefill.replicas,
                         inventory.ready_num_prefill,
                         inventory.expected_num_prefill,
                         inventory.prefill_scaling_in_progress,
@@ -543,7 +564,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                     ),
                     (
                         self.require_decode,
-                        self._state.decode.replicas,
+                        state.decode.replicas,
                         inventory.ready_num_decode,
                         inventory.expected_num_decode,
                         inventory.decode_scaling_in_progress,
@@ -557,8 +578,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         replicas.pending_startup = pending
                 return
         # Never retain previously verified pending counts after losing access.
-        self._state.prefill.replicas.pending_startup = 0
-        self._state.decode.replicas.pending_startup = 0
+        state.prefill.replicas.pending_startup = 0
+        state.decode.replicas.pending_startup = 0
         if power_controller is not None:
             counts = await power_controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,
@@ -571,17 +592,19 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             )
         prefill_count, decode_count, stable = counts
         if self.require_prefill:
-            self._state.prefill.replicas.active = prefill_count
-            self._state.prefill.replicas.expected = prefill_count if stable else None
-            self._state.prefill.replicas.scaling = not stable
+            state.prefill.replicas.active = prefill_count
+            state.prefill.replicas.expected = prefill_count if stable else None
+            state.prefill.replicas.scaling = not stable
         if self.require_decode:
-            self._state.decode.replicas.active = decode_count
-            self._state.decode.replicas.expected = decode_count if stable else None
-            self._state.decode.replicas.scaling = not stable
+            state.decode.replicas.active = decode_count
+            state.decode.replicas.expected = decode_count if stable else None
+            state.decode.replicas.scaling = not stable
 
-    def _refresh_model_name(self) -> None:
+    def _refresh_model_name(self, state: Optional[DeploymentState] = None) -> None:
+        if state is None:
+            state = self._state
         try:
-            self._state.model_name = self.controller.get_model_name(
+            state.model_name = self.controller.get_model_name(
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             )

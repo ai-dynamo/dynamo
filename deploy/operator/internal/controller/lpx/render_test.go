@@ -484,6 +484,7 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	annotationMaps := []map[string]string{pcs.Annotations}
 	for _, clique := range pcs.Spec.Template.Cliques {
 		require.Equal(t, restartToken, clique.Annotations[consts.RestartAnnotation])
+		require.Equal(t, string(dgd.UID), clique.Labels[consts.KubeLabelDynamoGraphDeploymentUID])
 		annotationMaps = append(annotationMaps, clique.Annotations)
 	}
 	for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {

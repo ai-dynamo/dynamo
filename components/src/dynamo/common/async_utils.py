@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Cancellation-safe helpers for offloaded and admitted work."""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from contextvars import copy_context
+from functools import partial
+from typing import Any, TypeVar
+
+T = TypeVar("T")
+
+
+def _report_delayed_exception(future: asyncio.Future[Any], message: str) -> None:
+    """Report work that failed while its cancelled caller was waiting for it."""
+    if future.cancelled():
+        return
+    exception = future.exception()
+    if exception is not None:
+        future.get_loop().call_exception_handler(
+            {"message": message, "exception": exception, "future": future}
+        )
+
+
+async def run_sync_in_thread(
+    function: Callable[..., T], /, *args: Any, **kwargs: Any
+) -> T:
+    """Run synchronous work without abandoning it when the caller is cancelled.
+
+    Python cannot stop a worker created by :func:`asyncio.to_thread`. Wait for
+    that worker before propagating cancellation so a caller never assumes a
+    mutating operation has stopped while it can still commit in the background.
+    """
+
+    context = copy_context()
+    call = partial(function, *args, **kwargs)
+    worker = asyncio.get_running_loop().run_in_executor(None, context.run, call)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.wait({worker})
+            except asyncio.CancelledError:
+                continue
+        _report_delayed_exception(
+            worker, "Thread operation failed after its caller was cancelled"
+        )
+        raise
+
+
+async def run_async_to_completion(
+    awaitable: Awaitable[T],
+    *,
+    complete_on_cancel: Callable[[], bool] | None = None,
+) -> T:
+    """Conditionally finish async work before propagating cancellation.
+
+    By default the operation is always joined. When ``complete_on_cancel`` is
+    provided, a false result cancels the operation instead; callers can use this
+    to cross an admission boundary without making pre-admission work sticky.
+    """
+
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if complete_on_cancel is not None and not complete_on_cancel():
+            task.cancel()
+        while not task.done():
+            try:
+                await asyncio.wait({task})
+            except asyncio.CancelledError:
+                continue
+        _report_delayed_exception(
+            task, "Async operation failed after its caller was cancelled"
+        )
+        raise

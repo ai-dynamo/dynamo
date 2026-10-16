@@ -27,22 +27,30 @@ import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, Optional
+from typing import Awaitable, Callable, Iterator, Optional, TypeVar
+from weakref import WeakValueDictionary
 
+from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
 from dynamo.global_planner.capacity_manager import (
     CapacityManager,
     PoolSnapshot,
     PoolSpec,
 )
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleStatus
 from dynamo.planner.core import budget
 
 # Planner-level "not ready" signal a backend may raise from ``scale``; the
 # orchestrator treats it as a soft rejection. Not a Kubernetes SDK type.
-from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
+from dynamo.planner.errors import (
+    DynamoGraphDeploymentNotReadyError,
+    EmptyTargetReplicasError,
+)
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -93,6 +101,17 @@ class ScaleOutcome:
     status: ScaleStatus
     message: str
     current_replicas: dict = field(default_factory=dict)
+
+
+class _ParticipantMutationBusy(Exception):
+    """Signal that a prior response still owns one participant readback."""
+
+    def __init__(self, lock: asyncio.Lock):
+        self.lock = lock
+
+    async def wait(self) -> None:
+        await self.lock.acquire()
+        self.lock.release()
 
 
 class Orchestrator:
@@ -159,6 +178,9 @@ class Orchestrator:
         # different pools cannot both pass against the same pre-scale state.
         # Toggleable: a single-threaded replay coordinator can disable it.
         self._scale_lock: Optional[asyncio.Lock] = asyncio.Lock() if use_lock else None
+        self._participant_mutation_locks: WeakValueDictionary[
+            str, asyncio.Lock
+        ] = WeakValueDictionary()
 
     # ------------------------------------------------------------------ #
     # Participant registry / authorization                               #
@@ -243,6 +265,144 @@ class Orchestrator:
     # observe -> decide -> scale                                       #
     # ------------------------------------------------------------------ #
 
+    async def _run_with_conflict_retry(
+        self, operation: Callable[[], Awaitable[T]]
+    ) -> T:
+        retry = getattr(self.capacity_manager, "run_with_conflict_retry", None)
+        if retry is None:
+            return await operation()
+        return await retry(operation)
+
+    def _capture_current_replicas(
+        self, participant_id: str
+    ) -> Callable[[], dict[str, int]]:
+        capture = getattr(self.capacity_manager, "capture_current_replicas", None)
+        if capture is not None:
+            return capture(participant_id)
+        return lambda: self.capacity_manager.current_replicas(participant_id)
+
+    def _supports_split_readiness(self) -> bool:
+        supports = getattr(self.capacity_manager, "supports_split_readiness", None)
+        return bool(supports()) if supports is not None else False
+
+    def _capture_request_intents(
+        self, participant_id: str, targets: list[TargetReplica]
+    ) -> dict[str, PoolIntent | None]:
+        """Snapshot request-owned cache entries until the plan is admitted."""
+        return {
+            self._pool_cache_key(participant_id, target.sub_component_type.value): (
+                self._intent_cache.get(
+                    self._pool_cache_key(
+                        participant_id, target.sub_component_type.value
+                    )
+                )
+            )
+            for target in targets
+        }
+
+    def _restore_request_intents(self, previous: dict[str, PoolIntent | None]) -> None:
+        for key, intent in previous.items():
+            if intent is None:
+                self._intent_cache.pop(key, None)
+            else:
+                self._intent_cache[key] = intent
+
+    @staticmethod
+    def _target_pool(
+        pools: dict[str, PoolSpec], target: TargetReplica
+    ) -> PoolSpec | None:
+        role_pool = pools.get(target.sub_component_type.value)
+        if role_pool is not None:
+            if (
+                target.component_name
+                and role_pool.component_name
+                and target.component_name != role_pool.component_name
+            ):
+                raise ValueError(
+                    f"component {target.component_name!r} does not match observed "
+                    f"{target.sub_component_type.value} pool "
+                    f"{role_pool.component_name!r}"
+                )
+            return role_pool
+        if target.component_name:
+            for pool in pools.values():
+                if pool.component_name == target.component_name:
+                    if pool.sub_type != target.sub_component_type.value:
+                        raise ValueError(
+                            f"component {target.component_name!r} belongs to observed "
+                            f"{pool.sub_type} pool, not requested "
+                            f"{target.sub_component_type.value} pool"
+                        )
+                    return pool
+        return None
+
+    def _budget_target_stages(
+        self,
+        grouped_targets: dict[str, list[TargetReplica]],
+        all_pools: PoolSnapshot,
+    ) -> list[dict[str, list[TargetReplica]]]:
+        """Split a hard-budget plan into settled reductions, checks, and increases."""
+        reductions: dict[str, list[TargetReplica]] = defaultdict(list)
+        verifications: dict[str, list[TargetReplica]] = defaultdict(list)
+        increases: dict[str, list[TargetReplica]] = defaultdict(list)
+        for participant_id, targets in grouped_targets.items():
+            pools = all_pools.get(participant_id, {})
+            for target in targets:
+                pool = self._target_pool(pools, target)
+                if pool is None:
+                    raise RuntimeError(
+                        f"accepted target for {participant_id} has no observed pool"
+                    )
+                if target.desired_replicas < pool.current_replicas:
+                    reductions[participant_id].append(target)
+                elif target.desired_replicas > pool.current_replicas:
+                    increases[participant_id].append(target)
+                else:
+                    verifications[participant_id].append(target)
+        return [stage for stage in (reductions, verifications, increases) if stage]
+
+    def _validate_budget_targets(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        all_pools: PoolSnapshot,
+    ) -> None:
+        """Reject targets that resolve to the same observed pool."""
+        pools = all_pools.get(participant_id, {})
+        seen: set[str] = set()
+        for target in targets:
+            pool = self._target_pool(pools, target)
+            if pool is None:
+                continue
+            pool_id = pool.component_name or target.sub_component_type.value
+            if pool_id in seen:
+                raise ValueError(f"duplicate replica target for pool {pool_id!r}")
+            seen.add(pool_id)
+
+    async def _scale_with_result(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
+    ) -> ReplicaUpdateResult:
+        scale_with_result = getattr(self.capacity_manager, "scale_with_result", None)
+        if scale_with_result is not None:
+            result = await scale_with_result(participant_id, targets, blocking)
+        else:
+            result = await self.capacity_manager.scale(
+                participant_id, targets, blocking
+            )
+        if isinstance(result, ReplicaUpdateResult):
+            return result
+        if result is None:
+            return ReplicaUpdateResult(accepted=True, applied=True)
+        accepted = bool(result)
+        return ReplicaUpdateResult(accepted=accepted, applied=accepted)
+
+    def _is_conflict(self, error: Exception) -> bool:
+        is_conflict = getattr(self.capacity_manager, "is_conflict", None)
+        return bool(is_conflict(error)) if is_conflict is not None else False
+
     async def submit(
         self,
         participant_id: str,
@@ -254,32 +414,131 @@ class Orchestrator:
         """Arbitrate and execute one scale request.
 
         The observe -> decide -> scale span is serialized under the scale lock
-        (when enabled) so concurrent requests can't both pass against the same
-        pre-scale state. The post-scale replica read-back runs outside the lock,
-        matching the original behavior. Patch failures propagate to the caller
-        (the API layer maps them to REJECTED / ERROR).
+        (when enabled) so concurrent requests cannot both pass against the same
+        pre-scale state. Backend conflict retries repeat this complete span so
+        every write is mediated against its fresh observation. Other patch
+        failures propagate to the caller (the API layer maps them to REJECTED /
+        ERROR).
         """
-        if self._scale_lock is not None:
-            async with self._scale_lock:
-                terminal = await self._observe_decide_apply(
-                    participant_id, targets, blocking, deployment_name, caller_name
-                )
-        else:
-            terminal = await self._observe_decide_apply(
-                participant_id, targets, blocking, deployment_name, caller_name
+
+        if not targets:
+            raise EmptyTargetReplicasError()
+
+        admitted = asyncio.Event()
+        committed_participants: list[str] = []
+        held_participant_locks: dict[str, asyncio.Lock] = {}
+        transaction_attempts = 0
+
+        def complete_after_cancel() -> bool:
+            return admitted.is_set()
+
+        async def operation() -> Optional[ScaleOutcome]:
+            nonlocal transaction_attempts
+            transaction_attempts += 1
+            return await self._observe_decide_apply(
+                participant_id,
+                targets,
+                blocking,
+                deployment_name,
+                caller_name,
+                admitted,
+                committed_participants,
+                held_participant_locks,
             )
 
-        if terminal is not None:
-            return terminal
+        async def transaction() -> Optional[ScaleOutcome]:
+            nonlocal transaction_attempts
+            transaction_attempts = 0
+            try:
+                return await self._run_with_conflict_retry(operation)
+            except Exception as error:
+                if committed_participants:
+                    return self._partial_plan_error(
+                        participant_id,
+                        committed_participants,
+                        f"transaction retry failed: {error}",
+                    )[0]
+                raise
 
-        # Read back current replica counts (outside the lock).
-        current_replicas = self.capacity_manager.current_replicas(participant_id)
-        logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
-        return ScaleOutcome(
-            status=ScaleStatus.SUCCESS,
-            message=f"Scaled {deployment_name} successfully",
-            current_replicas=current_replicas,
-        )
+        async def execute_transaction() -> tuple[
+            Optional[ScaleOutcome], Callable[[], dict[str, int]] | None
+        ]:
+            terminal = await transaction()
+            if terminal is not None:
+                return terminal, None
+
+            # Freeze backend identity under the transaction lock, but do not
+            # hold the global lock across the potentially unbounded read GET.
+            return None, self._capture_current_replicas(participant_id)
+
+        async def execute_serialized_transaction() -> tuple[
+            Optional[ScaleOutcome], Callable[[], dict[str, int]] | None
+        ]:
+            while True:
+                try:
+                    if self._scale_lock is not None:
+                        async with self._scale_lock:
+                            return await execute_transaction()
+                    return await execute_transaction()
+                except _ParticipantMutationBusy as busy:
+                    if transaction_attempts > 1:
+                        raise RuntimeError(
+                            "participant set changed during conflict retry; "
+                            "refusing to restart without the retained identity fence"
+                        ) from busy
+                    await busy.wait()
+
+        try:
+            terminal, readback = await run_async_to_completion(
+                execute_serialized_transaction(),
+                complete_on_cancel=complete_after_cancel,
+            )
+            if terminal is not None:
+                return terminal
+            assert readback is not None
+
+            # The captured readback depends only on the requester.
+            for locked_participant_id in tuple(held_participant_locks):
+                if locked_participant_id == participant_id:
+                    continue
+                held_participant_locks.pop(locked_participant_id).release()
+
+            # Preserve the response contract: current_replicas is an observed
+            # post-transaction snapshot, not the requested desired state.
+            current_replicas = await run_sync_in_thread(readback)
+            logger.info(f"Successfully scaled {deployment_name}: {current_replicas}")
+            return ScaleOutcome(
+                status=ScaleStatus.SUCCESS,
+                message=f"Scaled {deployment_name} successfully",
+                current_replicas=current_replicas,
+            )
+        finally:
+            for participant_lock in reversed(held_participant_locks.values()):
+                participant_lock.release()
+
+    async def _reserve_participant_mutations(
+        self,
+        participant_ids: list[str],
+        held_participant_locks: dict[str, asyncio.Lock],
+    ) -> None:
+        """Reserve participants through settlement.
+
+        The requester remains reserved through its response readback.
+        """
+        pending: list[tuple[str, asyncio.Lock]] = []
+        for participant_id in sorted(set(participant_ids)):
+            if participant_id in held_participant_locks:
+                continue
+            participant_lock = self._participant_mutation_locks.setdefault(
+                participant_id, asyncio.Lock()
+            )
+            if participant_lock.locked():
+                raise _ParticipantMutationBusy(participant_lock)
+            pending.append((participant_id, participant_lock))
+
+        for participant_id, participant_lock in pending:
+            await participant_lock.acquire()
+            held_participant_locks[participant_id] = participant_lock
 
     async def _observe_decide_apply(
         self,
@@ -288,32 +547,46 @@ class Orchestrator:
         blocking: bool,
         deployment_name: str,
         caller_name: str,
+        admitted: asyncio.Event,
+        committed_participants: list[str],
+        held_participant_locks: dict[str, asyncio.Lock],
     ) -> Optional[ScaleOutcome]:
         """Observe all pools, decide the budget outcome, and apply it.
 
-        Returns a terminal ``ScaleOutcome`` for a rejection or an unrecoverable
-        first-patch error; returns ``None`` when the request was applied and the
-        caller should read back current replicas. May raise a patch error from
-        the first applied participant (propagated to the API layer).
+        Returns the result from the serialized observation and accepted absolute
+        targets. May raise a patch error from the first applied participant
+        (propagated to the API layer).
         """
         # Let the backend record any request context it needs to read pool state
         # correctly (e.g. component-name role hints for generic workers).
         self.capacity_manager.remember_roles(participant_id, targets)
 
-        # TODO(global-planner): Make the request path scale: avoid full-cluster
-        # observation when budget enforcement is disabled, move synchronous
-        # Kubernetes readback and PATCH work off the event loop, and do not hold
-        # the budget lock through blocking readiness waits.
-        # Read ALL known participants' current state once. Cross-participant
-        # partner search needs every pool's current replicas and gpu_per_replica;
-        # cross-participant budget math also consumes this. Run the synchronous
-        # backend reads off-thread so the event loop isn't blocked for the N
-        # round-trips. When budget is enforced, require a complete snapshot so a
-        # partial read can't under-count cluster usage.
-        all_pools = await asyncio.to_thread(
-            self.capacity_manager.observe, self.budget_enforcement_enabled()
-        )
+        # Cross-participant mediation needs a complete snapshot only when a
+        # budget is active. The unbounded mode approves without pool state and
+        # performs a targeted post-write readback for the response.
+        if self.budget_enforcement_enabled():
+            reconcile_pending = getattr(
+                self.capacity_manager, "reconcile_pending_settlements", None
+            )
+            if reconcile_pending is not None:
+                await reconcile_pending()
+            all_pools = await run_sync_in_thread(self.capacity_manager.observe, True)
+        else:
+            refresh_participant = getattr(
+                self.capacity_manager, "refresh_participant", None
+            )
+            if refresh_participant is not None:
+                await run_sync_in_thread(refresh_participant, participant_id)
+            reconcile_pending = getattr(
+                self.capacity_manager, "reconcile_pending_settlements", None
+            )
+            if reconcile_pending is not None:
+                await reconcile_pending(participant_id)
+            all_pools = {}
 
+        previous_intents = self._capture_request_intents(participant_id, targets)
+        if self.budget_enforcement_enabled():
+            self._validate_budget_targets(participant_id, targets, all_pools)
         result = self.mediate(
             participant_id,
             targets,
@@ -322,6 +595,13 @@ class Orchestrator:
             log_caller_name=caller_name,
         )
         if not result.approved:
+            if committed_participants:
+                return self._partial_plan_error(
+                    participant_id,
+                    committed_participants,
+                    result.reject_message
+                    or "fresh budget mediation rejected the retry",
+                )[0]
             # Soft denial: budget breach is an expected operational outcome in
             # fixed-total mode, not a fault.
             return ScaleOutcome(
@@ -329,15 +609,10 @@ class Orchestrator:
                 message=result.reject_message or "",
                 current_replicas={},
             )
-
-        # TODO(global-planner): Make an approved plan equivalent to execution:
-        # apply same-DGD targets atomically and confirm downscale capacity is
-        # released before dependent upscales (especially with blocking=False),
-        # so intermediate or partial state cannot exceed the hard ceiling.
         # Apply: request + selected partners (may be empty), grouped by
         # participant with at most one scale call per participant.
-        # Direction-aware order: scale-down participants first (most negative net
-        # delta), so GPUs are freed before scale-up participants submit new pods.
+        # Budgeted plans are split below so every reduction settles before any
+        # increase and the final stage settles before serialization is released.
         grouped_targets: dict[str, list[TargetReplica]] = defaultdict(list)
         grouped_targets[participant_id].extend(targets)
         for partner in result.selected_partners:
@@ -355,7 +630,7 @@ class Orchestrator:
             pools = all_pools.get(pid, {})
             net = 0
             for t in tgts:
-                spec = pools.get(t.sub_component_type.value)
+                spec = self._target_pool(pools, t)
                 if spec is not None and spec.gpu_per_replica > 0:
                     net += (
                         t.desired_replicas - spec.current_replicas
@@ -367,57 +642,182 @@ class Orchestrator:
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
 
-        # TODO(global-planner): Give multi-participant apply transaction or
-        # reconciliation semantics: on failure or cancellation, stop subsequent
-        # patches, report a non-success outcome, and persist enough state to
-        # repair or roll back the partially applied transfer.
-        applied: list[str] = []
-        for i, pid in enumerate(ordered_participants):
+        # Cancellation remains safe until every participant selected by this
+        # observation is reserved. Once the locks are held, completion must be
+        # shielded because the first Kubernetes write can commit immediately.
+        try:
+            await self._reserve_participant_mutations(
+                ordered_participants, held_participant_locks
+            )
+        except BaseException:
+            self._restore_request_intents(previous_intents)
+            raise
+        admitted.set()
+
+        stages = (
+            self._budget_target_stages(grouped_targets, all_pools)
+            if self.budget_enforcement_enabled()
+            else [grouped_targets]
+        )
+        for stage in stages:
+            stage_order = [
+                participant
+                for participant in ordered_participants
+                if participant in stage
+            ]
+            terminal, _ = await self._apply_approved_targets(
+                stage,
+                stage_order,
+                blocking=blocking,
+                settle=self.budget_enforcement_enabled(),
+                committed_participants=committed_participants,
+                held_participant_locks=held_participant_locks,
+            )
+            if terminal is not None:
+                return terminal
+        return None
+
+    async def _apply_approved_targets(
+        self,
+        grouped_targets: dict[str, list[TargetReplica]],
+        ordered_participants: list[str],
+        *,
+        blocking: bool,
+        settle: bool,
+        committed_participants: list[str],
+        held_participant_locks: dict[str, asyncio.Lock],
+    ) -> tuple[Optional[ScaleOutcome], list[str]]:
+        """Apply one admitted stage and settle it when capacity depends on it."""
+
+        await self._reserve_participant_mutations(
+            ordered_participants, held_participant_locks
+        )
+
+        # TODO(global-planner): Persist enough state to repair or roll back a
+        # plan that still becomes partial because a later participant fails.
+        completed: list[str] = []
+        for pid in ordered_participants:
             tgts = grouped_targets[pid]
             if not self.capacity_manager.participant_exists(pid):
-                if i == 0:
-                    # First patch: missing participant is unrecoverable since
-                    # nothing has been applied yet.
+                if not committed_participants:
                     logger.error(
-                        f"Multi-partner transfer aborted: unknown "
-                        f"first participant ({pid})"
+                        f"Multi-partner transfer aborted: unknown participant ({pid})"
                     )
-                    return ScaleOutcome(
-                        status=ScaleStatus.ERROR,
-                        message=f"Multi-partner transfer: unknown participant {pid}",
-                        current_replicas={},
+                    return (
+                        ScaleOutcome(
+                            status=ScaleStatus.ERROR,
+                            message=f"Multi-partner transfer: unknown participant {pid}",
+                            current_replicas={},
+                        ),
+                        completed,
                     )
                 logger.error(
                     f"Multi-partner transfer: unknown participant {pid} "
-                    f"after applying {applied}; will self-correct on next tick"
+                    f"after applying {committed_participants}; "
+                    "stopping plan until the next tick"
                 )
-                continue
+                return self._partial_plan_error(
+                    pid, committed_participants, "participant is unknown"
+                )
             try:
-                await self.capacity_manager.scale(pid, tgts, blocking=blocking)
-                applied.append(pid)
+                split_readiness = self._supports_split_readiness()
+                result = await self._scale_with_result(
+                    pid,
+                    tgts,
+                    blocking=(blocking or settle) and not split_readiness,
+                )
             except DynamoGraphDeploymentNotReadyError as patch_err:
-                if i == 0:
+                if not committed_participants:
                     raise
                 logger.warning(
                     "Multi-partner transfer: patch on %s was skipped "
                     "after applying %s because the participant is not ready: %s; "
-                    "will self-correct on next tick",
+                    "stopping plan until the next tick",
                     pid,
-                    applied,
+                    committed_participants,
                     patch_err,
                 )
+                return self._partial_plan_error(
+                    pid,
+                    committed_participants,
+                    f"participant is not ready: {patch_err}",
+                )
             except Exception as patch_err:
-                if i == 0:
-                    # First patch failure: nothing applied, propagate to the
-                    # outer handler so the caller sees ERROR.
+                if self._is_conflict(patch_err):
+                    raise
+                if not committed_participants:
+                    # No write has completed, so preserve the original failure
+                    # for the API-layer handler.
                     raise
                 logger.error(
                     f"Multi-partner transfer: patch on {pid} "
-                    f"failed after applying {applied}: "
-                    f"{patch_err}; will self-correct on next tick"
+                    f"failed after applying {committed_participants}: "
+                    f"{patch_err}; stopping plan until the next tick"
                 )
+                return self._partial_plan_error(
+                    pid, committed_participants, str(patch_err)
+                )
+            if not result.accepted:
+                logger.warning(
+                    "Multi-partner transfer: participant %s did not accept its "
+                    "target after applying %s; stopping plan until the next tick",
+                    pid,
+                    committed_participants,
+                )
+                if committed_participants:
+                    return self._partial_plan_error(
+                        pid,
+                        committed_participants,
+                        "participant did not accept its scale target",
+                    )
+                return (
+                    ScaleOutcome(
+                        status=ScaleStatus.REJECTED,
+                        message=f"Participant {pid} did not accept its scale target",
+                        current_replicas={},
+                    ),
+                    completed,
+                )
+            completed.append(pid)
+            if result.applied and pid not in committed_participants:
+                committed_participants.append(pid)
+            if (blocking or settle or result.requires_settlement) and split_readiness:
+                try:
+                    await self.capacity_manager.wait_for_ready(pid)
+                except Exception as readiness_error:
+                    if not committed_participants:
+                        raise
+                    logger.error(
+                        "Multi-partner transfer: readiness wait on %s failed "
+                        "after applying %s: %s; stopping plan until the next tick",
+                        pid,
+                        committed_participants,
+                        readiness_error,
+                    )
+                    return self._partial_plan_error(
+                        pid,
+                        committed_participants,
+                        f"readiness wait failed: {readiness_error}",
+                    )
 
-        return None
+        return None, completed
+
+    @staticmethod
+    def _partial_plan_error(
+        participant_id: str, applied: list[str], reason: str
+    ) -> tuple[ScaleOutcome, list[str]]:
+        """Report a stopped plan after at least one participant was changed."""
+        return (
+            ScaleOutcome(
+                status=ScaleStatus.ERROR,
+                message=(
+                    f"Scale plan stopped at {participant_id} after applying "
+                    f"{applied}: {reason}"
+                ),
+                current_replicas={},
+            ),
+            applied,
+        )
 
     # ------------------------------------------------------------------ #
     # Budget arbitration (decision)                                      #

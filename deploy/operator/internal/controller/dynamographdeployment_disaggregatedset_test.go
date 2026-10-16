@@ -429,7 +429,7 @@ func TestDeleteOwnedSelectedDCDsUsesOwnerReference(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(dgd, ownedWithoutGraphLabel, ownedWithStaleGraphLabel, foreignLabeled, foreignUnlabeled).
 		Build()
-	auxiliaryDCDs := newDisaggregatedSetAuxiliaryDCDReconciler(kubeClient, events.NewFakeRecorder(10))
+	auxiliaryDCDs := newDisaggregatedSetAuxiliaryDCDReconciler(kubeClient, kubeClient, events.NewFakeRecorder(10))
 
 	require.NoError(t, auxiliaryDCDs.DeleteSelected(t.Context(), dgd, selected))
 	for _, name := range []string{ownedWithoutGraphLabel.Name, ownedWithStaleGraphLabel.Name} {
