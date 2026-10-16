@@ -1098,11 +1098,32 @@ where
     T: Send + Sync + 'static,
     F: FnOnce(&T) -> Option<InputTrigger>,
 {
+    let agent_context = agent_context_from_headers(headers);
+    context_from_headers_with_agent_context(
+        request,
+        request_id,
+        headers,
+        agent_context,
+        classify_input_trigger,
+    )
+}
+
+fn context_from_headers_with_agent_context<T, F>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+    agent_context: Option<AgentContext>,
+    classify_input_trigger: F,
+) -> Result<Context<T>, ErrorResponse>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&T) -> Option<InputTrigger>,
+{
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(mut agent_context) = agent_context_from_headers(headers) {
+    if let Some(mut agent_context) = agent_context {
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
@@ -1123,8 +1144,9 @@ pub(super) fn preprocessed_context_from_headers(
     request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<crate::preprocessor::PreprocessedRequest>, ErrorResponse> {
-    request.agent_context = agent_context_from_headers(headers);
-    context_from_headers(request, request_id, headers)
+    let agent_context = agent_context_from_headers(headers);
+    request.agent_context = agent_context.clone();
+    context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
 }
 
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
@@ -6636,6 +6658,10 @@ mod tests {
             .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
             .expect("context agent_context");
         assert_eq!(in_context.session_id, on_request.session_id);
+        assert!(
+            Arc::ptr_eq(&in_context.agent_headers, &on_request.agent_headers),
+            "headers are parsed once and the captured map is shared"
+        );
         assert!(
             context
                 .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
