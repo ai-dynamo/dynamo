@@ -67,8 +67,10 @@ pub const MAX_TOP_LOGPROBS: u8 = 20;
 
 /// Minimum allowed value for `logprobs` in completion requests
 pub const MIN_LOGPROBS: u8 = 0;
-/// Maximum allowed value for `logprobs` in completion requests
-pub const MAX_LOGPROBS: u8 = 5;
+/// Maximum allowed value for `logprobs` in completion requests. The same bound as
+/// chat's `top_logprobs`: engines score up to 20 alternatives per position, and
+/// `echo` + `logprobs` teacher-forcing clients ask for that many on the prompt.
+pub const MAX_LOGPROBS: u8 = 20;
 
 /// Minimum allowed value for `n` (number of choices)
 pub const MIN_N: u8 = 1;

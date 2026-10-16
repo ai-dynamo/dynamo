@@ -29,7 +29,7 @@ pub mod pooling;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
-mod strict_schema;
+pub(crate) mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -275,6 +275,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
         let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();
 
         Ok(common::OutputOptions {
+            retain_model_stop_token_text: None,
             logprobs,
             prompt_logprobs,
             skip_special_tokens,
@@ -389,6 +390,13 @@ pub enum GuidedToolConstraint {
     GuidedJsonNamed { tool_name: String },
     /// The model emits one call object or an array of `{name, parameters}` objects.
     GuidedJsonRequired,
+    /// The parsers crate's Beam turn grammar holds the whole turn on the model's own
+    /// wire: a non-empty analysis, then native calls whose arguments keep their schema
+    /// types, or the answer. Parsing stays native, framing every held tool's typed
+    /// arguments the way the grammar wrote them. `frames_answer`: the request's
+    /// `response_format` document is held inside the final channel behind the analysis
+    /// instead of being installed as a bare JSON constraint from the first token.
+    BeamTurnGrammar { frames_answer: bool },
 }
 
 impl GuidedToolConstraint {
@@ -401,6 +409,17 @@ impl GuidedToolConstraint {
 
     pub(crate) fn uses_structural_tag(&self) -> bool {
         matches!(self, Self::StructuralTag)
+    }
+
+    /// The request's `response_format` is produced inside the model's answer channel
+    /// behind its reasoning, so the output is a native turn and not a bare document.
+    pub(crate) fn frames_structured_answer(&self) -> bool {
+        matches!(
+            self,
+            Self::BeamTurnGrammar {
+                frames_answer: true
+            }
+        )
     }
 }
 
@@ -538,7 +557,14 @@ impl ParsingOptions {
             if !whole_response_decoder {
                 self.tool_call_parser = None;
             }
-            self.guided_tool_constraint = GuidedToolConstraint::None;
+            // The Beam turn grammar shaped the whole turn (answer included) and installs
+            // no tool JSON, so it still describes the output when calls are not allowed.
+            if !matches!(
+                self.guided_tool_constraint,
+                GuidedToolConstraint::BeamTurnGrammar { .. }
+            ) {
+                self.guided_tool_constraint = GuidedToolConstraint::None;
+            }
         }
         self
     }

@@ -782,6 +782,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            echo: None,
         })];
         for response in &responses {
             record_completion_finish_reason_metadata(&trace_state.finish_reason_metadata, response);
