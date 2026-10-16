@@ -1137,19 +1137,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     engine_data["routed_experts"] = routed_experts
                 # The frontend retains prompt/cache metadata and counts output
                 # tokens itself. Capture changes before metadata upload clears it.
-                input_tokens = meta_info.get("prompt_tokens")
-                completion_tokens = meta_info.get("completion_tokens")
-                cached_tokens = meta_info.get("cached_tokens")
-                usage_metadata = (input_tokens, cached_tokens)
-                if (
-                    input_tokens is not None
-                    and completion_tokens is not None
-                    and (
-                        finish_reason
-                        or usage_metadata_by_index.get(output_idx) != usage_metadata
-                    )
-                ):
-                    out["completion_usage"] = _sglang_completion_usage(meta_info)
+                usage_metadata = (
+                    meta_info.get("prompt_tokens"),
+                    meta_info.get("cached_tokens"),
+                )
+                changed = (
+                    finish_reason
+                    or usage_metadata_by_index.get(output_idx) != usage_metadata
+                )
+                if changed and (usage := _sglang_completion_usage(meta_info)):
+                    out["completion_usage"] = usage
                     usage_metadata_by_index[output_idx] = usage_metadata
 
                 if finish_reason:

@@ -347,9 +347,8 @@ class ThunderAgentRouterHandler:
                 # Intermediate usage can be sparse. Only a terminal report can
                 # replace the token count used when a stream is interrupted.
                 if (
-                    isinstance(chunk, dict)
+                    isinstance(usage, dict)
                     and chunk.get("finish_reason")
-                    and isinstance(usage, dict)
                     and isinstance(usage.get("completion_tokens"), int)
                 ):
                     completion_tokens_seen = usage["completion_tokens"]
