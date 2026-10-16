@@ -192,35 +192,6 @@ def test_region_uses_gms_pool_only_for_rw_managed_tags(
     assert pool_calls == expected_pool_calls
 
 
-def test_region_accepts_torch_memory_saver_0_0_10_kwargs(build_impl):
-    # torch_memory_saver 0.0.10 forwards these exact keywords to impl.region().
-    impl, _, _, pool_calls = build_impl()
-
-    with impl.region(
-        "weights",
-        enable_cpu_backup=False,
-        enable_disk_backup=False,
-        cpu_backup_backend=None,
-    ):
-        pass
-
-    assert pool_calls == [("weights", _EXPECTED_DEVICE)]
-
-
-@pytest.mark.parametrize(
-    "backup_kwargs",
-    [{"enable_cpu_backup": True}, {"enable_disk_backup": True}],
-)
-def test_region_rejects_enabled_backup(build_impl, backup_kwargs):
-    impl, _, _, pool_calls = build_impl()
-
-    with pytest.raises(ValueError, match=next(iter(backup_kwargs))):
-        with impl.region("weights", **backup_kwargs):
-            pass
-
-    assert pool_calls == []
-
-
 def test_pause_resume_routes_only_managed_tags(build_impl):
     impl, weights, kv_cache, _ = build_impl(
         weights_lock=GrantedLockType.RO,

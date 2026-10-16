@@ -97,29 +97,11 @@ class GMSMemorySaverImpl:
         )
 
     @contextmanager
-    def region(
-        self,
-        tag: str,
-        enable_cpu_backup: bool = False,
-        enable_disk_backup: bool = False,
-        **backup_options,
-    ):
+    def region(self, tag: str, enable_cpu_backup: bool, **backup_options):
         """Use the tag's RW pool and publish pending weights after clean exit."""
-        # Accept torch_memory_saver 0.0.10 backup keywords but reject any enabled
-        # backup: GMS owns the allocation and never offloads it.
-        enabled = [
-            name
-            for name, value in (
-                ("enable_cpu_backup", enable_cpu_backup),
-                ("enable_disk_backup", enable_disk_backup),
-                *backup_options.items(),
-            )
-            if value
-        ]
-        if enabled:
+        if enable_cpu_backup or any(backup_options.values()):
             raise ValueError(
-                "SGLang with GMS does not support backup for allocations; "
-                f"got {', '.join(enabled)}"
+                "SGLang with GMS does not support CPU or disk backup for allocations."
             )
 
         if tag not in _TAG_LOCK_TYPES:

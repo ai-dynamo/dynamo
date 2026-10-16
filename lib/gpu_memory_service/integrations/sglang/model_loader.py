@@ -50,9 +50,9 @@ logger.info("[GMS] Applied patches")
 class GMSModelLoader:
     """SGLang model loader that loads/imports weights via GPU Memory Service."""
 
-    # SGLang adds this to pre_model_load_memory; keep it 0 because
-    # patch_model_runner already counts the read-mode preloaded bytes.
-    preloaded_weights_bytes: int = 0
+    # SGLang adds this to its memory baseline. Keep it 0 because
+    # patch_model_runner already adds the read-mode preloaded bytes.
+    preloaded_weights_bytes = 0
 
     def __init__(self, load_config):
         self.load_config = load_config

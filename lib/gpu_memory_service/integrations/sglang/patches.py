@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 from contextlib import contextmanager
 from typing import Optional
@@ -215,21 +214,7 @@ def patch_static_state_for_gms() -> None:
         return
 
     try:
-        try:
-            _mixin = importlib.import_module(
-                "sglang.srt.managers.scheduler_components.weight_updater"
-            )
-        except ModuleNotFoundError as exc:
-            # Only a missing new module means an older SGLang layout. Report
-            # other import failures below with their real cause.
-            if exc.name not in (
-                "sglang.srt.managers.scheduler_components",
-                "sglang.srt.managers.scheduler_components.weight_updater",
-            ):
-                raise
-            # Older SGLang ships scheduler_update_weights_mixin; remove once
-            # no supported image pins such a release.
-            from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+        from sglang.srt.managers.scheduler_components import weight_updater
 
         def _export_noop(model):
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
@@ -239,8 +224,8 @@ def patch_static_state_for_gms() -> None:
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
             pass
 
-        _mixin._export_static_state = _export_noop
-        _mixin._import_static_state = _import_noop
+        weight_updater._export_static_state = _export_noop
+        weight_updater._import_static_state = _import_noop
         _static_state_patched = True
         logger.info(
             "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
@@ -248,6 +233,6 @@ def patch_static_state_for_gms() -> None:
         )
     except Exception:
         logger.warning(
-            "[GMS] Could not patch SGLang weight_updater _export/_import_static_state: ",
+            "[GMS] Could not patch SGLang weight_updater static state: ",
             exc_info=True,
         )
