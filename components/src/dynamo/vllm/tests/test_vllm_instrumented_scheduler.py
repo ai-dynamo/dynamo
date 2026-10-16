@@ -680,10 +680,9 @@ def test_dp_rank_prefers_data_parallel_index():
     assert InstrumentedScheduler._resolve_dp_rank(pc) == 1
 
 
-def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(
-    monkeypatch, unused_tcp_port
-):
-    monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_PORT, str(unused_tcp_port))
+def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(monkeypatch):
+    base_port = 20000  # The mocked publisher never binds a socket.
+    monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_PORT, str(base_port))
     monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_WORKER_ID, "dp-worker")
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler, "__init__", lambda *a, **kw: None
@@ -705,7 +704,7 @@ def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(
 
     assert publisher.call_args_list == [
         call(
-            f"tcp://*:{unused_tcp_port + rank}",
+            f"tcp://*:{base_port + rank}",
             worker_id="dp-worker",
             dp_rank=rank,
             start_paused=False,
@@ -9347,9 +9346,20 @@ def _complete_realseed_cache_shot(stub):
     return requests, hits
 
 
+@pytest.mark.parametrize(("new_tokens", "kv_read_tokens"), [(1, 16), (16, 64)])
+def test_prefill_grid_rejects_eagle_points_without_a_measurable_tail(
+    new_tokens, kv_read_tokens
+):
+    grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
+    grid.max_model_len = 4096
+    grid.kv_cache_manager.use_eagle = True
+    _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
+    assert not grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
+
+
 @pytest.mark.parametrize(
     ("drop", "new_tokens", "kv_read_tokens"),
-    [(0, 1, 16), (0, 16, 64), (16, 1, 16), (16, 16, 64), (16, 17, 16), (16, 32, 1024)],
+    [(0, 1, 16), (0, 16, 64), (16, 17, 16), (16, 32, 1024)],
 )
 def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
     realseed_prefix_cache, kv_read_tokens, drop, new_tokens
@@ -9358,11 +9368,7 @@ def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
     grid.max_model_len = 4096
     grid.kv_cache_manager.use_eagle = bool(drop)
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
-    feasible = grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
-    if drop and new_tokens <= drop:
-        assert not feasible
-        return
-    assert feasible
+    assert grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
     point = BenchmarkPoint(
         "prefill",

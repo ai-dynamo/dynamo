@@ -237,7 +237,7 @@ def test_idle_fpms_release_long_prefill_consolidation_veto(fake_engine_factory):
         state._prefill_load_decision(
             {("w0", 0): _prefill_fpm(queued_tokens=1)}, num_workers=2
         )
-        != 1
+        == 3
     )
 
     for _ in range(config.max_num_fpm_samples):

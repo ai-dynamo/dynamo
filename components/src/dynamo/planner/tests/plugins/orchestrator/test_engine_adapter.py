@@ -1071,7 +1071,7 @@ async def test_observation_prefetch_and_dispatch_share_tick_timestamp():
         )
         assert load_plugin.last_call_at == pytest.approx(scheduled.at_monotonic_s)
         if has_fpm:
-            assert effects.diagnostics.load_decision_reason != "no_fpm_data"
+            assert effects.diagnostics.load_decision_reason == "no_change"
         else:
             assert effects.scale_to is None
             assert effects.diagnostics.load_decision_reason == "no_fpm_data"
