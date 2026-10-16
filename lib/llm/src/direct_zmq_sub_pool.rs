@@ -4,7 +4,7 @@
 //! Shared direct-ZMQ SUB socket grouping for high-fanout KV ingress.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     sync::Arc,
     time::Duration,
@@ -109,8 +109,8 @@ struct SocketGroup {
     /// Routes per connected endpoint. Publishers that share one PUB endpoint share
     /// one connection, so they must land in the same group.
     endpoints: HashMap<String, usize>,
-    /// Raw-topic subscriptions; a group never holds two that prefix-match.
-    topics: Vec<Vec<u8>>,
+    /// Raw-topic routes. Frames route by exact topic, so topics are unique per group.
+    topics: HashSet<Vec<u8>>,
     command_tx: mpsc::UnboundedSender<GroupCommand>,
     cancel: CancellationToken,
     handle: JoinHandle<()>,
@@ -118,11 +118,7 @@ struct SocketGroup {
 
 impl SocketGroup {
     fn accepts_topic(&self, topic: Option<&[u8]>) -> bool {
-        topic.is_none_or(|topic| {
-            self.topics
-                .iter()
-                .all(|existing| !existing.starts_with(topic) && !topic.starts_with(existing))
-        })
+        topic.is_none_or(|topic| !self.topics.contains(topic))
     }
 }
 
@@ -352,8 +348,8 @@ impl DirectZmqSubPool {
     }
 
     /// Route the frames `endpoint` publishes on exactly `topic` to `route_id`.
-    /// Topics must be non-empty; a group never holds two that prefix-match, since
-    /// a SUB socket's subscriptions are prefix filters.
+    /// Topics must be non-empty, and a group holds each topic once: subscriptions
+    /// are prefix filters, so frames are routed only by an exact topic match.
     pub(crate) async fn register_raw(
         &self,
         route_id: u64,
@@ -414,7 +410,7 @@ impl DirectZmqSubPool {
             if let Some((_, group)) = affine {
                 anyhow::ensure!(
                     group.accepts_topic(topic_bytes.as_deref()),
-                    "topic overlaps another route on endpoint {endpoint}"
+                    "duplicate raw topic on endpoint {endpoint}"
                 );
             }
             // A new endpoint brings every publisher discovered behind it, so place it
@@ -976,11 +972,9 @@ fn release_endpoint(endpoints: &mut HashMap<String, usize>, endpoint: &str) {
     }
 }
 
-fn release_topic(topics: &mut Vec<Vec<u8>>, topic: Option<&[u8]>) {
-    if let Some(topic) = topic
-        && let Some(index) = topics.iter().position(|existing| existing == topic)
-    {
-        topics.swap_remove(index);
+fn release_topic(topics: &mut HashSet<Vec<u8>>, topic: Option<&[u8]>) {
+    if let Some(topic) = topic {
+        topics.remove(topic);
     }
 }
 
@@ -1390,10 +1384,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_topics_route_exact_frames_and_separate_prefix_overlaps() {
+    async fn raw_topics_route_exact_frames_and_separate_duplicates() {
         use tmq::AsZmqSocket;
 
-        let pool = DirectZmqSubPool::new_raw(2, 128, CancellationToken::new()).unwrap();
+        let pool = DirectZmqSubPool::new_raw(4, 128, CancellationToken::new()).unwrap();
         let publisher = crate::utils::zmq::bind_pub_socket("tcp://127.0.0.1:*")
             .await
             .unwrap();
@@ -1408,17 +1402,18 @@ mod tests {
             .register_raw(1, &endpoint, "slot-0001", 1)
             .await
             .unwrap();
-        let second = pool
-            .register_raw(2, "tcp://127.0.0.1:31201", "slot-0002", 1)
+        // A prefix of another route's topic shares the socket; routing is exact.
+        let mut prefix = pool
+            .register_raw(2, "tcp://127.0.0.1:31201", "slot-000", 1)
             .await
             .unwrap();
-        // SUB filters are prefixes, so an overlapping topic needs its own socket.
-        let overlapping = pool
-            .register_raw(3, "tcp://127.0.0.1:31202", "slot-0", 1)
+        // The same topic on another endpoint could not be told apart.
+        let duplicate = pool
+            .register_raw(3, "tcp://127.0.0.1:31202", "slot-0001", 1)
             .await
             .unwrap();
-        assert_eq!(first.group_id, second.group_id);
-        assert_ne!(first.group_id, overlapping.group_id);
+        assert_eq!(first.group_id, prefix.group_id);
+        assert_ne!(first.group_id, duplicate.group_id);
         assert!(
             pool.register_raw(4, "tcp://127.0.0.1:31203", "", 1)
                 .await
@@ -1451,6 +1446,7 @@ mod tests {
         .await
         .expect("the exact topic route should receive frames");
         assert_eq!(received, frames("slot-0001", 1));
+        assert!(prefix.receiver.try_recv().is_err());
         pool.shutdown().await;
     }
 

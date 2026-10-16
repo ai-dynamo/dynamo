@@ -962,46 +962,24 @@ async fn run_state_agent_router(
         // One reconciliation covers every discovery update already queued: the
         // initial watch snapshot delivers each source and attachment as its own
         // event.
-        let mut watch_ended = false;
-        loop {
-            let mut drained = false;
-            match source_stream.next().now_or_never() {
-                Some(Some(event)) => {
-                    drained = true;
-                    apply_discovery_event(
-                        event,
-                        &endpoint,
-                        KV_STATE_SOURCE_TOPIC_V2,
-                        &mut sources,
-                        &mut retries,
-                        &mut dirty,
-                    );
-                }
-                Some(None) => watch_ended = true,
-                None => {}
-            }
-            if let Some(stream) = attachment_stream.as_mut() {
-                match stream.next().now_or_never() {
-                    Some(Some(event)) => {
-                        drained = true;
-                        apply_discovery_event(
-                            event,
-                            &endpoint,
-                            KV_STATE_ATTACHMENT_TOPIC_V2,
-                            &mut attachments,
-                            &mut retries,
-                            &mut dirty,
-                        );
-                    }
-                    Some(None) => watch_ended = true,
-                    None => {}
-                }
-            }
-            if watch_ended || !drained {
-                break;
-            }
-        }
-        if watch_ended {
+        let watches_open = apply_queued_discovery(
+            &mut source_stream,
+            &endpoint,
+            KV_STATE_SOURCE_TOPIC_V2,
+            &mut sources,
+            &mut retries,
+            &mut dirty,
+        ) && attachment_stream.as_mut().is_none_or(|stream| {
+            apply_queued_discovery(
+                stream,
+                &endpoint,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+                &mut attachments,
+                &mut retries,
+                &mut dirty,
+            )
+        });
+        if !watches_open {
             fail_closed_until_cancelled(&endpoint, WATCH_ENDED, &fence, &indexer, &cancel).await;
             break;
         }
@@ -1105,6 +1083,27 @@ fn apply_discovery_event<T: Advertisement>(
         }
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, topic, "Ignoring invalid V2 KV state advertisement"),
+    }
+}
+
+/// Applies the discovery events already queued on `stream`. Returns false once
+/// the watch has ended.
+fn apply_queued_discovery<T: Advertisement>(
+    stream: &mut DiscoveryStream,
+    endpoint: &EndpointId,
+    topic: &str,
+    advertisements: &mut HashMap<u64, T>,
+    retries: &mut RecoveryRetries,
+    dirty: &mut DirtyOwners,
+) -> bool {
+    loop {
+        match stream.next().now_or_never() {
+            Some(Some(event)) => {
+                apply_discovery_event(event, endpoint, topic, advertisements, retries, dirty)
+            }
+            Some(None) => return false,
+            None => return true,
+        }
     }
 }
 

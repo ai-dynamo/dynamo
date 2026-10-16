@@ -78,9 +78,6 @@ use super::{
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 16;
-/// Raw batches queued for one slot's coordinator. A full queue drops the batch,
-/// which the coordinator then observes as a raw cursor gap.
-const INGRESS_QUEUE_CAPACITY: usize = 1_024;
 const MAX_INGRESS_EVENTS: usize = 128;
 const MAX_INGRESS_BLOCKS: usize = 8_192;
 const MAX_ZMQ_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -252,7 +249,7 @@ struct Coordinator<P> {
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
-    ingress_rx: mpsc::Receiver<IngressBatch>,
+    ingress_rx: mpsc::UnboundedReceiver<IngressBatch>,
     attachment: Option<Attachment>,
     ingress_generation: Option<u64>,
     next_outbound_id: u64,
@@ -819,7 +816,7 @@ pub struct KvStateAgent {
     recovery_target: dynamo_runtime::component::Instance,
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
-    ingress_tx: mpsc::Sender<IngressBatch>,
+    ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     raw_pool: Option<DirectZmqSubPool>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
@@ -942,7 +939,7 @@ impl KvStateAgent {
                 ));
 
         let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let (ingress_tx, ingress_rx) = mpsc::unbounded_channel();
         let coordinator_cancel = cancel.child_token();
         let coordinator = component.drt().runtime().secondary().spawn(
             Coordinator {
@@ -1542,7 +1539,7 @@ async fn start_vllm_listener(
     kv_block_size: u32,
     raw_pool: Option<&DirectZmqSubPool>,
     route_id: u64,
-    ingress_tx: mpsc::Sender<IngressBatch>,
+    ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
@@ -1606,7 +1603,7 @@ struct VllmListenerTask<'a> {
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
-    ingress_tx: mpsc::Sender<IngressBatch>,
+    ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     socket: RawSubscription,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
@@ -1726,25 +1723,13 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
     }
 }
 
-/// Queue a raw batch without waiting on the coordinator. A full queue drops an
-/// ordinary batch; the coordinator records the gap when the next batch arrives.
-/// A batch reporting a fault fails the listener instead, which quarantines the
-/// attachment.
-fn admit_ingress(ingress_tx: &mpsc::Sender<IngressBatch>, envelope: IngressBatch) -> Result<()> {
-    match ingress_tx.try_send(envelope) {
-        Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(envelope)) => {
-            match envelope.source_fault.or(envelope.cache_owner_fault) {
-                Some(fault) => {
-                    anyhow::bail!("state-agent ingress queue is full at a fault: {fault}")
-                }
-                None => Ok(()),
-            }
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            anyhow::bail!("state-agent ingress coordinator is closed")
-        }
-    }
+fn admit_ingress(
+    ingress_tx: &mpsc::UnboundedSender<IngressBatch>,
+    envelope: IngressBatch,
+) -> Result<()> {
+    ingress_tx
+        .send(envelope)
+        .context("state-agent ingress coordinator is closed")
 }
 
 struct NormalizedRawBatch {
@@ -2243,7 +2228,7 @@ mod tests {
             32,
         ));
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
         let mut coordinator = Coordinator {
             publisher: RecordingSink::default(),
             local_indexer: local_indexer.clone(),
@@ -2341,12 +2326,12 @@ mod tests {
     }
 
     fn send_ingress(
-        tx: &mpsc::Sender<IngressBatch>,
+        tx: &mpsc::UnboundedSender<IngressBatch>,
         generation: u64,
         source_cursor: u64,
         events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        tx.try_send(IngressBatch {
+        tx.send(IngressBatch {
             generation,
             source_cursor,
             chunk_index: 0,
@@ -2359,23 +2344,26 @@ mod tests {
     }
 
     #[test]
-    fn listener_admission_drops_batches_but_not_faults_when_the_coordinator_lags() {
-        let batch = |source_cursor, cache_owner_fault| IngressBatch {
-            generation: 7,
-            source_cursor,
-            chunk_index: 0,
-            final_chunk: true,
-            events: Vec::new(),
-            source_fault: None,
-            cache_owner_fault,
-        };
-        let (tx, mut rx) = mpsc::channel(1);
-        admit_ingress(&tx, batch(1, None)).unwrap();
-        admit_ingress(&tx, batch(2, None)).unwrap();
-        assert!(admit_ingress(&tx, batch(3, Some("KVCR block size is incompatible"))).is_err());
+    fn listener_admission_does_not_wait_for_coordinator_progress() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for source_cursor in 1..=1_024 {
+            admit_ingress(
+                &tx,
+                IngressBatch {
+                    generation: 7,
+                    source_cursor,
+                    chunk_index: 0,
+                    final_chunk: true,
+                    events: Vec::new(),
+                    source_fault: None,
+                    cache_owner_fault: None,
+                },
+            )
+            .unwrap();
+        }
 
         assert_eq!(rx.try_recv().unwrap().source_cursor, 1);
-        assert!(rx.try_recv().is_err());
+        assert_eq!(rx.len(), 1_023);
     }
 
     async fn detach(control: &mpsc::Sender<ControlCommand>, generation: u64) -> Result<u64> {
@@ -2444,7 +2432,7 @@ mod tests {
         let publications = sink.publications.clone();
         let sink_observer = sink.clone();
         let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let (ingress_tx, ingress_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(
             Coordinator {
                 publisher: sink,
@@ -2599,7 +2587,7 @@ mod tests {
         let sink = RecordingSink::default();
         let output = sink.events.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
         let mut coordinator = Coordinator {
             publisher: sink,
             local_indexer: local_indexer.clone(),
@@ -2724,7 +2712,7 @@ mod tests {
         let sink = RecordingSink::default();
         let fail_publication = sink.fail.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
         let mut coordinator = Coordinator {
             publisher: sink,
             local_indexer: local_indexer.clone(),
