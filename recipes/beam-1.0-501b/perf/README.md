@@ -24,7 +24,7 @@ First deploy a profile using the [recipe](../README.md). In `perf.yaml`, set:
 
 The Job uses `nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0`, as in the other model recipes.
 
-Run from `recipes/beam` with `NAMESPACE` set:
+Run from `recipes/beam-1.0-501b` with `NAMESPACE` set:
 
 ```bash
 kubectl apply -n "$NAMESPACE" -f perf/perf.yaml

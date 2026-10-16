@@ -85,7 +85,7 @@ fabric in your cluster overlay:
 Run from the repository root:
 
 ```bash
-cd recipes/beam
+cd recipes/beam-1.0-501b
 export NAMESPACE=beam
 export PROFILE=sglang/agg-h200 # choose a target from the table above
 PROFILE_TARGET=${PROFILE#*/}

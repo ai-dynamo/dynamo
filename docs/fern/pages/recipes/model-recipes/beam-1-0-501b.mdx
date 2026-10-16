@@ -215,7 +215,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
   `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-beam-1.0-501b-dev.1` or
   `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-beam-1.0-501b-dev.1`.
 - Prepare the `shared-model-cache` PVC and Hugging Face checkpoints using the
-  [model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam/README.md#2-stage-the-model-and-drafter).
+  [model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam-1.0-501b/README.md#2-stage-the-model-and-drafter).
   Configure storage, registry access, and GPU placement for your cluster.
 
 Stage the [FP8 checkpoint](https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8)
@@ -398,7 +398,7 @@ export PROFILE=vllm/disagg-gb300-nvfp4
 </div>
 
 Before deploying, follow the
-[model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam/README.md#2-stage-the-model-and-drafter)
+[model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam-1.0-501b/README.md#2-stage-the-model-and-drafter)
 for your selected `PROFILE`. Use the namespace containing that staged model cache.
 Use your cluster overlay for GPU and CPU-architecture placement when nodes differ.
 On a cluster with matching hardware, apply the portable manifest below:
@@ -408,7 +408,7 @@ export NAMESPACE=beam
 PROFILE_TARGET=${PROFILE#*/}
 PROFILE_TARGET=${PROFILE_TARGET%-nvfp4}
 export DEPLOYMENT="beam-${PROFILE%%/*}-${PROFILE_TARGET#*-}-${PROFILE_TARGET%%-*}"
-kubectl apply -n "$NAMESPACE" -f "recipes/beam/$PROFILE/deploy.yaml"
+kubectl apply -n "$NAMESPACE" -f "recipes/beam-1.0-501b/$PROFILE/deploy.yaml"
 kubectl wait -n "$NAMESPACE" --for=condition=Ready "dgd/$DEPLOYMENT" --timeout=7200s
 kubectl port-forward -n "$NAMESPACE" "svc/$DEPLOYMENT-frontend" 8000:8000
 ```
@@ -454,4 +454,4 @@ for KV-routing, disaggregation, and speculative-decoding studies.
 
 ## Source
 
-[Beam-1.0-501B-A23B recipe and manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/beam)
+[Beam-1.0-501B-A23B recipe and manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/beam-1.0-501b)
