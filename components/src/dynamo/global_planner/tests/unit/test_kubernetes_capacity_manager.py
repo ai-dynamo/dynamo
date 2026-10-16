@@ -159,6 +159,9 @@ def _install_connector(
     connector.kube_api.has_terminating_pods = MagicMock(
         side_effect=KubernetesAPI.has_terminating_pods
     )
+    connector.kube_api.pod_graph_uid_mismatches = MagicMock(
+        side_effect=KubernetesAPI.pod_graph_uid_mismatches
+    )
     connector.kube_api.pcsg_pods_within_desired_replicas = MagicMock(
         side_effect=lambda deployment, pods: KubernetesAPI.pcsg_pods_within_desired_replicas(
             connector.kube_api,
@@ -973,6 +976,7 @@ def test_complete_implicit_observation_batches_authorities_and_fails_closed():
     terminating = MagicMock()
     terminating.metadata.labels = {
         "nvidia.com/dynamo-graph-deployment-name": "model",
+        "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
         "nvidia.com/dynamo-component": "prefill-svc",
     }
     terminating.metadata.owner_references = []
@@ -1024,6 +1028,39 @@ def test_complete_implicit_observation_rejects_duplicate_adapter_inventory():
 
     with pytest.raises(RuntimeError, match="duplicate DGDSA"):
         cm.observe(require_complete=True)
+
+
+def test_complete_implicit_observation_rejects_pods_from_replaced_dgd():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    deployment = _listed_dgd(_dgd_spec(1, 1), "model")
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+    )
+    cm._inventory_api = connector.kube_api
+    connector.kube_api.list_graph_deployments.return_value = [deployment]
+    pod = {
+        "metadata": {
+            "name": "prefill-old",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "model",
+                "nvidia.com/dynamo-graph-deployment-uid": "old-dgd-uid",
+                "nvidia.com/dynamo-component": "prefill-svc",
+            },
+        }
+    }
+    connector.kube_api.list_graph_pods.return_value = [pod]
+
+    with pytest.raises(RuntimeError, match="still draining"):
+        cm.observe(require_complete=True)
+
+    pod["metadata"]["labels"]["nvidia.com/dynamo-graph-deployment-uid"] = "dgd-uid"
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/model"]["prefill"].current_replicas == 1
 
 
 def test_observe_multinode_scales_gpu_count():

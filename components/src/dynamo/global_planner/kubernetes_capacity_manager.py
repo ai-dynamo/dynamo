@@ -751,9 +751,17 @@ class KubernetesCapacityManager(CapacityManager):
                 raise ValueError("DGD metadata.name is unavailable")
             pods = api.list_nonterminal_pods_for_graph(dgd_name)
         pods = api.exclude_checkpoint_capture_pods(pods)
-        if api.has_terminating_pods(pods) or not api.pcsg_pods_within_desired_replicas(
-            authoritative_deployment,
-            pods,
+        dgd_uid = declared_deployment.get("metadata", {}).get("uid")
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            raise ValueError("DGD metadata.uid is unavailable")
+        identity_mismatches = api.pod_graph_uid_mismatches(pods, dgd_uid)
+        if (
+            identity_mismatches
+            or api.has_terminating_pods(pods)
+            or not api.pcsg_pods_within_desired_replicas(
+                authoritative_deployment,
+                pods,
+            )
         ):
             raise RuntimeError("replica Pods are still draining")
 
@@ -768,11 +776,28 @@ class KubernetesCapacityManager(CapacityManager):
         blocking: bool,
     ) -> None:
         """Apply desired targets while preserving the CapacityManager contract."""
-        try:
-            await self.reconcile_pending_settlements(participant_id)
-            result = await self.scale_with_result(participant_id, targets, blocking)
+        write_admitted = False
+
+        def admit_write() -> None:
+            nonlocal write_admitted
+            write_admitted = True
+
+        async def operation() -> None:
+            result = await self._scale_with_result(
+                participant_id,
+                targets,
+                blocking,
+                admit_write,
+            )
             if result.accepted and (blocking or result.requires_settlement):
                 await self.wait_for_ready(participant_id)
+
+        try:
+            await self.reconcile_pending_settlements(participant_id)
+            await run_async_to_completion(
+                operation(),
+                complete_on_cancel=lambda: write_admitted,
+            )
         except asyncio.CancelledError:
             self._protect_replica_settlement(participant_id)
             raise

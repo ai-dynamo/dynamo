@@ -58,6 +58,7 @@ DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
 ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress"})
 # Stable labels the operator stamps on every worker Pod.
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
+DYNAMO_DGD_UID_LABEL = "nvidia.com/dynamo-graph-deployment-uid"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
 GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
@@ -1269,6 +1270,17 @@ class KubernetesAPI:
                 by_graph.setdefault(graph_name, []).append(pod)
         return by_graph
 
+    @staticmethod
+    def pod_graph_uid_mismatches(pods: list, expected_uid: str) -> list[str]:
+        """Return Pods that do not carry the current DGD identity label."""
+        mismatches: list[str] = []
+        for pod in pods:
+            if _pod_labels(pod).get(DYNAMO_DGD_UID_LABEL) == expected_uid:
+                continue
+            name = _object_field(_pod_metadata(pod), "name")
+            mismatches.append(str(name or "<unknown>"))
+        return mismatches
+
     def worker_pods_settled(
         self,
         deployment: dict,
@@ -1291,12 +1303,20 @@ class KubernetesAPI:
         if blocking:
             return False, [reason]
 
-        dgd_name = deployment.get("metadata", {}).get("name", "")
+        dgd_metadata = deployment.get("metadata", {}) or {}
+        dgd_name = dgd_metadata.get("name", "")
+        dgd_uid = dgd_metadata.get("uid", "")
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            return False, ["DGD metadata.uid is unavailable"]
         components_by_name = get_components_by_name(deployment)
         pending: list[str] = []
-        pods_by_component = self.partition_pods_by_component(
+        graph_pods = self.exclude_checkpoint_capture_pods(
             self.list_pods_for_graph(dgd_name)
         )
+        mismatches = self.pod_graph_uid_mismatches(graph_pods, dgd_uid)
+        if mismatches:
+            return False, [f"Pods have stale DGD identity: {mismatches}"]
+        pods_by_component = self.partition_pods_by_component(graph_pods)
 
         for component_name, expected_watts in expected_power_by_component.items():
             all_pods = pods_by_component.get(component_name, [])
@@ -1473,15 +1493,22 @@ class KubernetesAPI:
                     self.list_nonterminal_pods_for_graph, graph_deployment_name
                 )
                 pods = self.exclude_checkpoint_capture_pods(pods)
-                if self.has_terminating_pods(
-                    pods
-                ) or not self.pcsg_pods_within_desired_replicas(
-                    settlement_deployment, pods
+                identity_mismatches = self.pod_graph_uid_mismatches(
+                    pods, expected_dgd_uid
+                )
+                if (
+                    identity_mismatches
+                    or self.has_terminating_pods(pods)
+                    or not self.pcsg_pods_within_desired_replicas(
+                        settlement_deployment, pods
+                    )
                 ):
                     logger.info(
-                        "[Attempt %d/%d] Waiting for replica Pods to drain",
+                        "[Attempt %d/%d] Waiting for replica Pods to drain: "
+                        "identity_mismatches=%s",
                         attempt + 1,
                         max_attempts,
+                        identity_mismatches,
                     )
                     continue
                 return graph_deployment

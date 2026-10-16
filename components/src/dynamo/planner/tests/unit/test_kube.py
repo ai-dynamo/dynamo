@@ -1340,7 +1340,10 @@ def _make_pod(
         if annotation is not None
         else {}
     )
-    pod.metadata.labels = {"nvidia.com/dynamo-component": component}
+    pod.metadata.labels = {
+        "nvidia.com/dynamo-component": component,
+        "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+    }
     pod.metadata.deletion_timestamp = deletion_timestamp
     pod.status.phase = phase
     return pod
@@ -1349,7 +1352,11 @@ def _make_pod(
 def _mock_pod_list(mock_core_api, pods: list, *, component: str = "decode"):
     """Wire the single DGD-scoped Pod LIST and label its mock Pods."""
     for pod in pods:
-        pod.metadata.labels = {"nvidia.com/dynamo-component": component}
+        pod.metadata.labels = {
+            **(pod.metadata.labels or {}),
+            "nvidia.com/dynamo-component": component,
+            "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
+        }
     result = MagicMock()
     result.items = pods
     result.metadata._continue = None
@@ -1649,6 +1656,27 @@ async def test_wait_for_replica_targets_rejects_replaced_dgd(k8s_api, mock_core_
 
 
 @pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_pods_from_replaced_dgd(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale_pod = _make_pod("decode-old")
+    _mock_pod_list(mock_core_api, [stale_pod])
+    stale_pod.metadata.labels["nvidia.com/dynamo-graph-deployment-uid"] = "old-dgd-uid"
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
 async def test_wait_for_replica_targets_rejects_replaced_adapter(
     k8s_api, mock_core_api
 ):
@@ -1692,10 +1720,22 @@ def test_worker_pods_settled_all_match(k8s_api, mock_core_api):
     assert pending == []
 
 
+def test_worker_pods_settled_rejects_pods_from_replaced_dgd(k8s_api, mock_core_api):
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    stale_pod = _make_pod("pod-old", annotation="300")
+    _mock_pod_list(mock_core_api, [stale_pod])
+    stale_pod.metadata.labels["nvidia.com/dynamo-graph-deployment-uid"] = "old-dgd-uid"
+
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
+
+    assert settled is False
+    assert pending == ["Pods have stale DGD identity: ['pod-old']"]
+
+
 def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_api):
     """Prefill 350 W/GPU and decode 300 W/GPU are independent — both must match."""
     dgd = {
-        "metadata": {"name": "test-deployment"},
+        "metadata": {"name": "test-deployment", "uid": "dgd-uid"},
         "spec": {
             "components": [
                 {
@@ -1760,6 +1800,7 @@ def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_ap
         _make_pod("d-0", annotation="300", component="decode"),
         _make_pod("d-1", annotation="300", component="decode"),
     ]
+    result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
     settled, pending = k8s_api.worker_pods_settled(dgd, {"prefill": 350, "decode": 300})
     assert settled is True
@@ -2359,6 +2400,7 @@ def test_partial_metadata_pods_work_with_settlement_helpers(k8s_api):
             "deletionTimestamp": "2026-10-16T12:00:00Z",
             "labels": {
                 "nvidia.com/dynamo-graph-deployment-name": "my-dgd",
+                "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
                 "nvidia.com/dynamo-component": "decode",
                 "grove.io/podcliquescalinggroup-replica-index": "0",
             },
@@ -2369,6 +2411,7 @@ def test_partial_metadata_pods_work_with_settlement_helpers(k8s_api):
             "name": "capture-0",
             "labels": {
                 "nvidia.com/dynamo-graph-deployment-name": "my-dgd",
+                "nvidia.com/dynamo-graph-deployment-uid": "dgd-uid",
                 "nvidia.com/dynamo-component": "decode",
                 "nvidia.com/snapshot-job-uid": "snapshot-uid",
                 "nvidia.com/snapshot-job": "capture-job",
@@ -2390,6 +2433,10 @@ def test_partial_metadata_pods_work_with_settlement_helpers(k8s_api):
     assert k8s_api.partition_pods_by_component([serving]) == {"decode": [serving]}
     assert k8s_api.exclude_checkpoint_capture_pods([serving, capture]) == [serving]
     assert k8s_api.has_terminating_pods([serving]) is True
+    assert k8s_api.pod_graph_uid_mismatches([serving], "dgd-uid") == []
+    assert k8s_api.pod_graph_uid_mismatches([serving], "replacement-uid") == [
+        "decode-0"
+    ]
 
     deployment = _stable_worker_dgd(generation=2, observed_generation=2)
     deployment["status"]["components"]["decode"][

@@ -225,6 +225,7 @@ func GetDCDKubeLabelsForComponent(
 		commonconsts.KubeLabelDynamoComponent,
 		commonconsts.KubeLabelDynamoNamespace,
 		commonconsts.KubeLabelDynamoGraphDeploymentName,
+		commonconsts.KubeLabelDynamoGraphDeploymentUID,
 		commonconsts.KubeLabelDynamoWorkerHash,
 		commonconsts.KubeLabelDynamoComponentClass,
 	} {

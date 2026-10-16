@@ -1409,7 +1409,9 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
 	assert.Empty(t, updated.OwnerReferences)
 	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "dgd-uid", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.Equal(t, "dgd-uid", updated.Spec.PodTemplate.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
 	assert.Equal(t, "captured:latest", updated.Spec.PodTemplate.Spec.Containers[0].Image,
 		"non-invalidating input changes must not replace the one-shot capture")
 }

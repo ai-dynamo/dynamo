@@ -513,6 +513,7 @@ func generateSingleDCDFromNormalized(
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentUID] = string(parentDGD.UID)
 	deployment.Labels = labels
 
 	// only label worker DCDs with their hash for cleanup during rolling updates
@@ -585,6 +586,9 @@ func GetDGDComponentPodLabels(dgd *v1beta1.DynamoGraphDeployment, componentName 
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = alphaComponent.SubComponentType
 	}
 	maps.Copy(labels, GetPodTemplateLabels(component))
+	if dgd != nil && dgd.UID != "" {
+		labels[commonconsts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
+	}
 	return labels
 }
 
