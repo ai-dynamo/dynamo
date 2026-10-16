@@ -14,7 +14,7 @@ from .engine import (
     RawRequest,
     RawResponseChunk,
 )
-from .worker import Worker, WorkerConfig
+from .worker import ShutdownConfig, Worker, WorkerConfig
 
 __all__ = [
     "BaseEngine",
@@ -28,6 +28,7 @@ __all__ = [
     "RawRequest",
     "RawResponseChunk",
     "Worker",
+    "ShutdownConfig",
     "WorkerConfig",
     "telemetry",
 ]

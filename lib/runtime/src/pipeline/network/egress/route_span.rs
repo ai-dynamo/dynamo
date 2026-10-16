@@ -201,6 +201,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Unavailable => "unavailable",
         ErrorType::WorkerOverloaded => "worker_overloaded",
         ErrorType::WorkerUnavailable => "worker_unavailable",
+        ErrorType::WorkerDraining => "worker_draining",
         ErrorType::Backend(BackendError::Unknown) => "backend_unknown",
         ErrorType::Backend(BackendError::InvalidArgument) => "backend_invalid_argument",
         ErrorType::Backend(BackendError::CannotConnect) => "backend_cannot_connect",
@@ -252,6 +253,7 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         }
         ErrorType::ResourceExhausted
         | ErrorType::WorkerOverloaded
+        | ErrorType::WorkerDraining
         | ErrorType::Backend(BackendError::WorkerOverloaded) => "rejected",
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
         // Deadline expiry matches the HTTP metric classification, which labels

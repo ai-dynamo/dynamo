@@ -8,7 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig,
+    shutdown::KvTransferFallback, usage,
 };
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
@@ -390,6 +391,16 @@ impl LLMEngine for TrtllmSidecarEngine {
                 "TensorRT-LLM Control.Abort failed"
             );
         }
+    }
+
+    /// This adapter cannot observe the engine's KV-transfer state, so a
+    /// prefill worker waits the full stage budget before releasing GPU memory
+    /// rather than risk freeing blocks a decode peer is still pulling.
+    /// Declared explicitly so the wait is a recorded decision, not an
+    /// inherited default. Replace with a real `is_quiescent` when the engine
+    /// exposes transfer status.
+    fn kv_transfer_fallback(&self) -> KvTransferFallback {
+        KvTransferFallback::WaitFullBudget
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

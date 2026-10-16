@@ -53,6 +53,12 @@ where
             }
             signal_token.cancel();
             signal_runtime.mark_shutting_down();
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+            tracing::warn!("Second shutdown signal received; exiting immediately");
+            std::process::exit(dynamo_runtime::worker::EXIT_CODE_SHUTDOWN_TIMEOUT);
         });
 
         let result = task(runtime.clone(), shutdown.clone()).await;
