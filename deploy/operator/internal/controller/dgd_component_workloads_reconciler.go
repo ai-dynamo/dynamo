@@ -25,6 +25,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -99,7 +100,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
-		if err := r.preserveExistingDCDState(ctx, dgd, dcd); err != nil {
+		if err := preserveExistingBackendFramework(ctx, r.syncer, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment state", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
@@ -114,6 +115,16 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		if err != nil {
 			logger.Error(err, "failed to sync the DynamoComponentDeployment", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
+		}
+
+		// Establish identity only after SyncResource has persisted a no-surge spec.
+		apiReader := r.reader
+		if apiReader == nil {
+			apiReader = r.syncer
+		}
+		if _, err := ensureDCDGraphUIDLabel(ctx, apiReader, r.syncer, dgd, syncedDCD); err != nil {
+			logger.Error(err, "failed to establish DynamoComponentDeployment graph identity", "name", dcd.Name)
+			return ReconcileResult{}, fmt.Errorf("failed to establish DynamoComponentDeployment graph identity: %w", err)
 		}
 		resources = append(resources, syncedDCD)
 	}
@@ -260,73 +271,99 @@ func applyRestoreCandidateMetadataToComponent(
 	return nil
 }
 
-// preserveExistingDCDState carries forward immutable server state that must not
-// be overwritten by a generated DCD.
-func (r *componentWorkloadsReconciler) preserveExistingDCDState(
+// preserveExistingBackendFramework carries forward immutable server state that
+// must not be overwritten by a generated DCD.
+func preserveExistingBackendFramework(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	reader client.Reader,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
-	reader := r.reader
-	if reader == nil {
-		reader = r.syncer
+	// Read the immutable value from the existing child when it is present.
+	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	err := reader.Get(
+		ctx,
+		types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace},
+		existing,
+	)
+	if apierrors.IsNotFound(err) {
+		return nil
 	}
-	return preserveExistingDCDState(ctx, reader, r.syncer, dgd, desired)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to get existing DynamoComponentDeployment %s/%s: %w",
+			desired.Namespace,
+			desired.Name,
+			err,
+		)
+	}
+
+	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+	return nil
 }
 
-func preserveExistingDCDState(
+// ensureDCDGraphUIDLabel establishes Pod identity only after the live DCD spec
+// guarantees that projecting the label cannot create surge capacity. dgd and
+// dcd must be non-nil.
+func ensureDCDGraphUIDLabel(
 	ctx context.Context,
 	apiReader client.Reader,
 	kubeClient client.Client,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	desired *nvidiacomv1beta1.DynamoComponentDeployment,
-) error {
-	var backendFramework string
-	if apiReader == nil {
-		apiReader = kubeClient
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	// New objects already carry this label; only legacy DCDs need migration.
+	if dgd.UID == "" {
+		return false, nil
+	}
+	if dcd.Labels[consts.KubeLabelDynamoGraphDeploymentUID] == string(dgd.UID) {
+		return false, nil
+	}
+	if !allowsNoSurgeUIDLabelMigration(dcd) {
+		log.FromContext(ctx).V(1).Info(
+			"Deferring DGD UID label migration until the component uses a no-surge Deployment strategy",
+			"name", dcd.Name,
+		)
+		return false, nil
 	}
 
-	// Use the cache normally and bypass it only after a conflict proves the object stale.
+	// A conflict proves the cached resourceVersion stale. Only then bypass the
+	// cache so each bounded retry uses a new optimistic-lock precondition.
 	reader := client.Reader(kubeClient)
+	modified := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		err := reader.Get(
+		// Revalidate strategy and ownership from the same object that is patched.
+		current := &nvidiacomv1beta1.DynamoComponentDeployment{}
+		if err := reader.Get(
 			ctx,
-			types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace},
-			existing,
-		)
-		if apierrors.IsNotFound(err) {
-			backendFramework = desired.Spec.BackendFramework
-			return nil
-		}
-		if err != nil {
+			types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace},
+			current,
+		); err != nil {
 			return err
 		}
-
-		backendFramework = existing.Spec.BackendFramework
-		if dgd == nil || dgd.UID == "" {
+		if current.Labels[consts.KubeLabelDynamoGraphDeploymentUID] == string(dgd.UID) {
 			return nil
 		}
-		if existing.Labels[consts.KubeLabelDynamoGraphDeploymentUID] == string(dgd.UID) {
+		if !allowsNoSurgeUIDLabelMigration(current) {
 			return nil
 		}
 		if err := commoncontroller.CheckControllerOwnership(
-			existing,
+			current,
 			dgd,
 			kubeClient.Scheme(),
 		); err != nil {
 			return err
 		}
 
-		before := existing.DeepCopy()
-		existing.Labels = maps.Clone(existing.Labels)
-		if existing.Labels == nil {
-			existing.Labels = make(map[string]string)
+		// Patch only the protected identity label under resourceVersion CAS.
+		before := current.DeepCopy()
+		current.Labels = maps.Clone(current.Labels)
+		if current.Labels == nil {
+			current.Labels = make(map[string]string)
 		}
-		existing.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
-		err = kubeClient.Patch(
+		current.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
+		err := kubeClient.Patch(
 			ctx,
-			existing,
+			current,
 			client.MergeFromWithOptions(
 				before,
 				client.MergeFromWithOptimisticLock{},
@@ -335,17 +372,30 @@ func preserveExistingDCDState(
 		if apierrors.IsConflict(err) {
 			reader = apiReader
 		}
+		if err == nil {
+			modified = true
+		}
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf(
-			"failed to preserve existing DynamoComponentDeployment %s/%s: %w",
-			desired.Namespace,
-			desired.Name,
+		return false, fmt.Errorf(
+			"failed to label DynamoComponentDeployment %s/%s: %w",
+			dcd.Namespace,
+			dcd.Name,
 			err,
 		)
 	}
+	return modified, nil
+}
 
-	desired.Spec.BackendFramework = backendFramework
-	return nil
+func allowsNoSurgeUIDLabelMigration(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
+	if dcd.Status.Component == nil || dcd.Status.Component.ComponentKind != nvidiacomv1beta1.ComponentKindDeployment {
+		return false
+	}
+	annotations := getResourceAnnotations(dcd)
+	if deploymentStrategyFromAnnotations(annotations) == common.DeploymentStrategyRecreate {
+		return true
+	}
+	maxSurge := annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge]
+	return maxSurge == "0" || maxSurge == "0%"
 }

@@ -99,6 +99,26 @@ rejected on updates.
 
 #### Operator behavior breaking changes
 
+##### Global Planner workload identity migration
+
+**Change:** Global Planner hard-budget observations now bind workload Pods to the immutable DGD UID. The operator labels new DCD workloads automatically, but it defers adding that label to an existing DCD when projecting it into the Pod template could create Deployment surge capacity.
+
+**Affected:** Existing Deployment-backed DGD components managed by a Global Planner with `--max-total-gpus` or `--min-total-gpus`. The default Deployment strategy permits 25% surge and is therefore not compatible with a hard GPU ceiling.
+
+**Action:** Before enabling hard-budget scaling after the upgrade, configure each affected component for a no-surge rollout. Use `maxSurge: 0` to preserve rolling availability, or select `Recreate` when temporary unavailability is acceptable:
+
+```yaml
+spec:
+  components:
+    - name: worker
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/deployment-rolling-update-max-surge: "0"
+```
+
+**Existing deployments:** An operator-only upgrade does not roll a Deployment that still permits surge. After its DCD spec contains a no-surge strategy, the operator adds the DGD UID label and performs one no-surge rollout. Global Planner hard-budget requests fail closed until that rollout settles and every live Pod carries the current DGD UID.
+
 ##### Frontend sidecar identity in container discovery mode
 
 **Change:** The operator now sets `CONTAINER_NAME` to the container selected by

@@ -57,12 +57,20 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 	resources := []Resource{}
 	modified := false
 	syncer := newDGDResourceSyncer(r.client, r.recorder)
+
+	// Use the direct reader only after an optimistic-lock conflict.
+	apiReader := r.reader
+	if apiReader == nil {
+		apiReader = r.client
+	}
 	for _, componentName := range sortedDCDKeys(dcds) {
 		dcd := dcds[componentName]
 		if _, selected := selection.componentToRole[componentName]; selected {
 			continue
 		}
-		if err := preserveExistingDCDState(ctx, r.reader, r.client, dgd, dcd); err != nil {
+
+		// Preserve immutable API state before synchronizing the desired spec.
+		if err := preserveExistingBackendFramework(ctx, r.client, dcd); err != nil {
 			return nil, false, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
 		wasModified, syncedDCD, err := commoncontroller.SyncResource(ctx, &syncer, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
@@ -71,7 +79,13 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to sync non-DisaggregatedSet DynamoComponentDeployment %s: %w", dcd.Name, err)
 		}
-		modified = modified || wasModified
+
+		// Migrate identity only after the synchronized DCD is no-surge.
+		identityModified, err := ensureDCDGraphUIDLabel(ctx, apiReader, r.client, dgd, syncedDCD)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to establish non-DisaggregatedSet DynamoComponentDeployment identity %s: %w", dcd.Name, err)
+		}
+		modified = modified || wasModified || identityModified
 		dcds[componentName] = syncedDCD
 		resources = append(resources, syncedDCD)
 	}

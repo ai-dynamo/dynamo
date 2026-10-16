@@ -885,7 +885,7 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 
 			t.Log("Apply checkpoint gating, then preserve immutable state from an existing DCD")
 			require.NoError(t, workloads.applyCheckpointStartupPolicy(desired, tt.checkpointInfo))
-			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), nil, desired))
+			require.NoError(t, preserveExistingBackendFramework(context.Background(), workloads.syncer, desired))
 
 			t.Log("Verify stored immutable state is preserved without overriding checkpoint policy")
 			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
@@ -894,7 +894,8 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 	}
 }
 
-func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
+func TestEnsureDCDGraphUIDLabelRetriesFromAPIReader(t *testing.T) {
+	t.Log("Build an owned no-surge DCD and separate cached and direct readers")
 	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -907,6 +908,16 @@ func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm", ResourceVersion: "stale"},
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					KubeAnnotationDeploymentRollingUpdateMaxSurge: "0",
+				}}},
+			},
+		},
+		Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+			Component: &nvidiacomv1beta1.ComponentReplicaStatus{
+				ComponentKind: nvidiacomv1beta1.ComponentKindDeployment,
+			},
 		},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(dgd, existing, scheme))
@@ -950,22 +961,74 @@ func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
 			},
 		}).
 		Build()
-	workloads := &componentWorkloadsReconciler{
-		syncer: newDGDResourceSyncer(kubeClient, nil),
-		reader: apiReader,
-	}
-	desired := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
-	}
+	t.Log("Conflict the cached write once, then retry from the direct reader")
+	modified, err := ensureDCDGraphUIDLabel(context.Background(), apiReader, kubeClient, dgd, existing)
+	require.NoError(t, err)
+	assert.True(t, modified)
 
-	require.NoError(t, workloads.preserveExistingDCDState(context.Background(), dgd, desired))
-
+	t.Log("Verify the retry used fresh state and established the graph identity")
 	assert.Equal(t, 1, cachedReaderCalls)
 	assert.Equal(t, 1, apiReaderCalls)
 	assert.Equal(t, []string{"stale", "fresh"}, patchVersions)
 	require.NotNil(t, patched)
 	assert.Equal(t, "dgd-uid", patched.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
-	assert.Equal(t, "vllm", desired.Spec.BackendFramework)
+}
+
+func TestEnsureDCDGraphUIDLabelDefersSurgingDeployment(t *testing.T) {
+	t.Log("Build an owned legacy DCD with the default surging Deployment strategy")
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "jsm", UID: "dgd-uid"},
+	}
+	existing := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(dgd, existing, scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	t.Log("Attempt the identity migration")
+	modified, err := ensureDCDGraphUIDLabel(context.Background(), kubeClient, kubeClient, dgd, existing)
+	require.NoError(t, err)
+	assert.False(t, modified)
+
+	t.Log("Verify the DCD remains unchanged until a no-surge strategy is configured")
+	current := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(existing), current))
+	assert.NotContains(t, current.Labels, commonconsts.KubeLabelDynamoGraphDeploymentUID)
+}
+
+func TestEnsureDCDGraphUIDLabelDefersNonDeploymentWorkload(t *testing.T) {
+	t.Log("Build an owned LeaderWorkerSet DCD with an irrelevant Deployment annotation")
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "jsm", UID: "dgd-uid"},
+	}
+	existing := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					KubeAnnotationDeploymentRollingUpdateMaxSurge: "0",
+				}}},
+			},
+		},
+		Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+			Component: &nvidiacomv1beta1.ComponentReplicaStatus{
+				ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
+			},
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(dgd, existing, scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+
+	t.Log("Attempt the identity migration")
+	modified, err := ensureDCDGraphUIDLabel(context.Background(), kubeClient, kubeClient, dgd, existing)
+	require.NoError(t, err)
+	assert.False(t, modified)
+
+	t.Log("Verify Deployment-only rollout controls did not authorize the migration")
+	current := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(existing), current))
+	assert.NotContains(t, current.Labels, commonconsts.KubeLabelDynamoGraphDeploymentUID)
 }
 
 func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T) {

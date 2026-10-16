@@ -1737,6 +1737,124 @@ class KubernetesConnector(PlannerConnector):
             decode_component_name=component_name,
         )
 
+    async def ensure_replica_writer_fence(self, writer_id: str) -> None:
+        """Claim every DGDSA authority before Global Planner actuation."""
+        if self._batch_writer_id == writer_id:
+            return
+        await run_sync_in_thread(self._ensure_replica_writer_fence_sync, writer_id)
+
+    def _ensure_replica_writer_fence_sync(self, writer_id: str) -> None:
+        """CAS one process identity onto every adapter owned by the DGD."""
+        if not isinstance(writer_id, str) or not writer_id:
+            raise ValueError("replica writer_id must be a non-empty string")
+        self._batch_writer_id = None
+
+        expected_dgd_uid: str | None = None
+        expected_authorities: dict[str, str] | None = None
+        ambiguous_fence_write: AmbiguousKubernetesWriteError | None = None
+
+        def write() -> None:
+            nonlocal expected_authorities, expected_dgd_uid
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            rejection = self._unready_recovery_dgd_rejection(deployment)
+            if rejection is not None:
+                raise RuntimeError(f"cannot acquire replica writer fence: {rejection}")
+            dgd_uid = (deployment.get("metadata", {}) or {}).get("uid")
+            if not isinstance(dgd_uid, str) or not dgd_uid:
+                raise RuntimeError(
+                    "cannot acquire replica writer fence: DGD UID missing"
+                )
+            if expected_dgd_uid is None:
+                expected_dgd_uid = dgd_uid
+            elif dgd_uid != expected_dgd_uid:
+                raise RuntimeError(
+                    "cannot acquire replica writer fence: DGD identity changed"
+                )
+
+            adapters: dict[str, dict] = {}
+            authorities: dict[str, str] = {}
+            for component_name, component in sorted(
+                get_components_by_name(deployment).items()
+            ):
+                if "scalingAdapter" not in component:
+                    continue
+                adapter = self.kube_api.get_service_scaling_adapter(
+                    self.graph_deployment_name, component_name
+                )
+                adapter_rejection = self._scaling_adapter_rejection(
+                    deployment, component_name, adapter
+                )
+                if adapter_rejection is not None:
+                    raise RuntimeError(
+                        f"cannot acquire replica writer fence: {adapter_rejection}"
+                    )
+                adapter_uid = (adapter.get("metadata", {}) or {}).get("uid")
+                if not isinstance(adapter_uid, str) or not adapter_uid:
+                    raise RuntimeError(
+                        "cannot acquire replica writer fence: "
+                        f"DGDSA UID for component {component_name!r} is missing"
+                    )
+                adapters[component_name] = adapter
+                authorities[component_name] = adapter_uid
+
+            if expected_authorities is None:
+                expected_authorities = authorities
+            elif authorities != expected_authorities:
+                raise RuntimeError(
+                    "cannot acquire replica writer fence: replica authorities changed"
+                )
+
+            for component_name, adapter in adapters.items():
+                annotations = (adapter.get("metadata", {}) or {}).get(
+                    "annotations"
+                ) or {}
+                if annotations.get(PLANNER_WRITER_FENCE_ANNOTATION) == writer_id:
+                    continue
+                self.kube_api.patch_scaling_adapter_writer_fence(
+                    self.graph_deployment_name,
+                    component_name,
+                    writer_id,
+                    adapter=adapter,
+                )
+
+        try:
+            retry_kubernetes_write(write)
+        except AmbiguousKubernetesWriteError as error:
+            ambiguous_fence_write = error
+
+        if not expected_authorities:
+            return
+        refreshed_deployment = self.kube_api.get_graph_deployment(
+            self.graph_deployment_name
+        )
+        if (refreshed_deployment.get("metadata", {}) or {}).get(
+            "uid"
+        ) != expected_dgd_uid:
+            raise RuntimeError(
+                "cannot acquire replica writer fence: DGD identity changed after CAS"
+            )
+        for component_name, expected_uid in expected_authorities.items():
+            adapter = self.kube_api.get_service_scaling_adapter(
+                self.graph_deployment_name, component_name
+            )
+            adapter_rejection = self._scaling_adapter_rejection(
+                refreshed_deployment, component_name, adapter
+            )
+            metadata = adapter.get("metadata", {}) or {}
+            annotations = metadata.get("annotations") or {}
+            if (
+                adapter_rejection is not None
+                or metadata.get("uid") != expected_uid
+                or annotations.get(PLANNER_WRITER_FENCE_ANNOTATION) != writer_id
+            ):
+                error = RuntimeError(
+                    "replica writer fence could not be verified after its CAS"
+                )
+                if ambiguous_fence_write is not None:
+                    raise error from ambiguous_fence_write
+                raise error
+        self._batch_writer_id = writer_id
+
     def _acquire_batch_writer_fence_sync(self, writer_id: str) -> str:
         """Perform the synchronous Kubernetes fencing transaction."""
         if not isinstance(writer_id, str) or not writer_id:
@@ -2131,13 +2249,16 @@ class KubernetesConnector(PlannerConnector):
 
     def _batch_writer_annotation_rejection(self, adapter: dict) -> str | None:
         """Require this process's writer claim before a fenced Scale PATCH."""
-        if self._batch_writer_id is None:
-            return None
         metadata = adapter.get("metadata", {}) or {}
         annotations = metadata.get("annotations") or {}
         if not isinstance(annotations, Mapping):
             return "DGDSA annotations are malformed"
-        if annotations.get(PLANNER_WRITER_FENCE_ANNOTATION) != self._batch_writer_id:
+        remote_writer_id = annotations.get(PLANNER_WRITER_FENCE_ANNOTATION)
+        if self._batch_writer_id is None:
+            if remote_writer_id is not None:
+                return "DGDSA Planner writer fence is owned by another writer"
+            return None
+        if remote_writer_id != self._batch_writer_id:
             return "DGDSA Planner writer fence is missing or owned by another writer"
         return None
 

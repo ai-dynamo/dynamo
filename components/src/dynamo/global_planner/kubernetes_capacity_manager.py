@@ -23,6 +23,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Optional, TypeVar
+from uuid import uuid4
 
 from kubernetes import client
 from kubernetes.aio.utils.retry import retry_on_conflict
@@ -54,6 +55,9 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+DEPLOYMENT_STRATEGY_ANNOTATION = "nvidia.com/deployment-strategy"
+DEPLOYMENT_MAX_SURGE_ANNOTATION = "nvidia.com/deployment-rolling-update-max-surge"
+
 
 @dataclass(frozen=True)
 class _ReplicaSettlement:
@@ -84,8 +88,9 @@ class KubernetesCapacityManager(CapacityManager):
     ``KubernetesConnector`` is cached per participant.
     """
 
-    def __init__(self, namespace: str):
+    def __init__(self, namespace: str, writer_id: str | None = None):
         self.namespace = namespace
+        self._writer_id = writer_id or uuid4().hex
         # participant_id -> KubernetesConnector
         self.connectors: dict[str, KubernetesConnector] = {}
         # participant_id -> {component_name: planner_role}. Generic ``worker``
@@ -1170,6 +1175,18 @@ class KubernetesCapacityManager(CapacityManager):
                 f"rollout={rollout_reason or 'settled'}"
             )
 
+        unsafe_deployments = (
+            KubernetesCapacityManager._deployment_components_with_surge(
+                declared_deployment
+            )
+        )
+        if unsafe_deployments:
+            raise RuntimeError(
+                "hard GPU budgets require Deployment components to use Recreate "
+                "or maxSurge=0; unsafe components="
+                f"{unsafe_deployments}"
+            )
+
         if pods is None:
             dgd_name = declared_deployment.get("metadata", {}).get("name")
             if not isinstance(dgd_name, str) or not dgd_name:
@@ -1198,6 +1215,34 @@ class KubernetesCapacityManager(CapacityManager):
             )
         ):
             raise RuntimeError("replica Pods are still draining")
+
+    @staticmethod
+    def _deployment_components_with_surge(deployment: dict) -> list[str]:
+        """Return Deployment-backed components that can create unbudgeted Pods."""
+        components = get_components_by_name(deployment)
+        statuses = (deployment.get("status", {}) or {}).get("components", {}) or {}
+        unsafe: list[str] = []
+        for component_name, status in statuses.items():
+            if (
+                not isinstance(status, Mapping)
+                or status.get("componentKind") != "Deployment"
+                or not isinstance(status.get("gpusPerReplica"), (int, float))
+                or status["gpusPerReplica"] <= 0
+            ):
+                continue
+            component = components.get(component_name)
+            if not isinstance(component, Mapping):
+                unsafe.append(component_name)
+                continue
+            annotations = (
+                (component.get("podTemplate") or {}).get("metadata") or {}
+            ).get("annotations") or {}
+            if annotations.get(DEPLOYMENT_STRATEGY_ANNOTATION) == "Recreate":
+                continue
+            if annotations.get(DEPLOYMENT_MAX_SURGE_ANNOTATION) in ("0", "0%"):
+                continue
+            unsafe.append(component_name)
+        return unsafe
 
     # ------------------------------------------------------------------ #
     # Scale                                                              #
@@ -1291,6 +1336,7 @@ class KubernetesCapacityManager(CapacityManager):
             )
         admit_write()
         try:
+            await connector.ensure_replica_writer_fence(self._writer_id)
             result = await connector.set_component_replicas_with_result(
                 targets,
                 blocking=blocking,

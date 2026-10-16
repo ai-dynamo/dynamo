@@ -910,6 +910,34 @@ async def test_scale_rejects_lost_batch_writer_fence(
 
 
 @pytest.mark.asyncio
+async def test_scale_rejects_remote_writer_fence_without_local_claim(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    adapter = _scaling_adapter("worker", replicas=0)
+    adapter["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/planner-writer-fence": "replacement-writer"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+
+    with pytest.raises(ValueError, match="owned by another writer"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_add_component_deployment_not_found(kubernetes_connector, mock_kube_api):
     # Arrange
     component_name = "test-component"
@@ -1834,6 +1862,42 @@ async def test_batch_writer_fence_retries_conflict_then_refreshes_authority(
     mock_kube_api.fetch_authoritative_replica_targets.assert_called_once_with(
         deployment
     )
+
+
+@pytest.mark.asyncio
+async def test_replica_writer_fence_claims_every_adapter_authority(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _adapter_component("prefill", "prefill", replicas=1),
+        _adapter_component("decode", "decode", replicas=1),
+    )
+    initial = {
+        name: _scaling_adapter(name, replicas=1) for name in ("prefill", "decode")
+    }
+    initial["prefill"]["metadata"]["uid"] = "prefill-uid"
+    initial["decode"]["metadata"]["uid"] = "decode-uid"
+    fenced = deepcopy(initial)
+    for adapter in fenced.values():
+        adapter["metadata"]["annotations"] = {
+            "dynamo.nvidia.com/planner-writer-fence": "global-writer"
+        }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial["decode"],
+        initial["prefill"],
+        fenced["decode"],
+        fenced["prefill"],
+    ]
+
+    await kubernetes_connector.ensure_replica_writer_fence("global-writer")
+
+    assert mock_kube_api.patch_scaling_adapter_writer_fence.call_args_list == [
+        call("test-graph", "decode", "global-writer", adapter=initial["decode"]),
+        call("test-graph", "prefill", "global-writer", adapter=initial["prefill"]),
+    ]
+    assert kubernetes_connector._batch_writer_id == "global-writer"
 
 
 @pytest.mark.asyncio

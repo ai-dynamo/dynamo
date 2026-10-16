@@ -126,6 +126,7 @@ def _install_connector(
     connector.set_component_replicas_with_result = AsyncMock(
         return_value=ReplicaUpdateResult(accepted=True, applied=True)
     )
+    connector.ensure_replica_writer_fence = AsyncMock()
     connector.wait_for_deployment_ready = AsyncMock()
     connector.wait_for_replica_targets = AsyncMock()
     connector.kube_api = MagicMock()
@@ -424,7 +425,7 @@ def test_ensure_participant_idempotent():
 
 @pytest.mark.asyncio
 async def test_scale_with_result_calls_connector():
-    cm = KubernetesCapacityManager("default")
+    cm = KubernetesCapacityManager("default", writer_id="global-planner-writer")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
 
     async def scale_with_identity(_targets, *, blocking, retry_state):
@@ -445,6 +446,9 @@ async def test_scale_with_result_calls_connector():
 
     assert result.accepted
     assert result.applied
+    connector.ensure_replica_writer_fence.assert_awaited_once_with(
+        "global-planner-writer"
+    )
     connector.set_component_replicas_with_result.assert_awaited_once()
     assert connector.set_component_replicas_with_result.await_args.args == (targets,)
     assert connector.set_component_replicas_with_result.await_args.kwargs["blocking"]
@@ -1167,6 +1171,11 @@ def test_complete_implicit_observation_rejects_deployment_surge_pods():
     cm._observe_all_deployments = True
     deployment = _listed_dgd(_dgd_spec(0, 1), "model")
     deployment["status"]["components"]["decode-svc"]["componentKind"] = "Deployment"
+    deployment["spec"]["components"][1]["podTemplate"]["metadata"] = {
+        "annotations": {
+            "nvidia.com/deployment-rolling-update-max-surge": "0",
+        }
+    }
     connector = _install_connector(
         cm,
         "default/model",
@@ -1190,6 +1199,16 @@ def test_complete_implicit_observation_rejects_deployment_surge_pods():
     ]
 
     with pytest.raises(RuntimeError, match="still draining"):
+        cm.observe(require_complete=True)
+
+
+def test_complete_observation_rejects_deployment_that_can_surge():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(0, 1)
+    deployment["status"]["components"]["decode-svc"]["componentKind"] = "Deployment"
+    _install_connector(cm, "default/my-dgd", deployment)
+
+    with pytest.raises(RuntimeError, match="maxSurge=0"):
         cm.observe(require_complete=True)
 
 
