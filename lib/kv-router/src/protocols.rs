@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
@@ -13,6 +14,7 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::identity::CacheOwnerId;
+use crate::kv_hints::{CacheOwnerKvTransferKeys, KvTransferSourceChoice, WorkerKvTransferKeys};
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -356,6 +358,12 @@ pub trait WorkerConfigLike {
     fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         None
     }
+
+    /// This worker's router-hint identity with hashed labels, used to choose
+    /// KV fetch sources. Configs read by many selections should cache it.
+    fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
+        Cow::Owned(WorkerKvTransferKeys::new(self))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -658,6 +666,8 @@ pub struct RouterHintSourceMetadata {
 pub struct ResolvedRouterHintSource {
     pub metadata: RouterHintSourceMetadata,
     pub attached_worker: Option<WorkerWithDpRank>,
+    /// `metadata` hashed for source matching.
+    pub kv_transfer_keys: CacheOwnerKvTransferKeys,
 }
 
 /// One immutable lookup snapshot for scheduling projection and persistent hint sources.
@@ -691,6 +701,7 @@ impl ResidencyRoutingSnapshot {
                 (
                     ResidencyOwner::cache_owner(owner).compact_key(),
                     ResolvedRouterHintSource {
+                        kv_transfer_keys: CacheOwnerKvTransferKeys::new(&metadata),
                         metadata,
                         attached_worker,
                     },
@@ -1103,6 +1114,10 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+
+    /// The source the selected worker fetches its KV prefix from, chosen with
+    /// the same rule that credited the fetch during selection.
+    pub kv_transfer_source: Option<KvTransferSourceChoice>,
 }
 
 /// How many candidates a selection trace retains: the `top_k` lowest-cost rows

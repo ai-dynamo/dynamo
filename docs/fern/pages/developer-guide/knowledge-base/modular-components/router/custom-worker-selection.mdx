@@ -446,10 +446,48 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
+| `KV_TRANSFER` | `kv_transfer()` | `None` if the host has no transfer data for this request: no worker in the partition consumes router hints, or the indexer cannot retain the matched block chain |
+| `KV_TRANSFER` | `local_prefix_blocks()` | Device-resident plus host-pinned prefix blocks; a fetch extends this prefix |
+| `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, or `None` when no eligible source holds more than the local prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
+
+A filter or scorer reads `KV_TRANSFER` through `WorkerCandidate::kv_transfer()`; pickers do not receive it. The host picks each worker's source with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands, and booking a worker attaches a fetch hint for that same source. Fetches are best effort: the source may no longer hold the blocks when the request runs.
+
+This scorer charges each worker for the prompt blocks it can neither reuse nor fetch:
+
+```rust
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+};
+
+struct UncoveredPromptScorer;
+
+impl WorkerScorer for UncoveredPromptScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::KV_TRANSFER
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let covered = candidate.kv_transfer().map_or(0, |transfer| {
+                transfer
+                    .source_prefix_blocks()
+                    .unwrap_or(transfer.local_prefix_blocks())
+            });
+            *cost = context.request_blocks().saturating_sub(u64::from(covered)) as f64;
+        }
+        Ok(())
+    }
+}
+```
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 
@@ -608,8 +646,10 @@ worker_selection:
 ```
 
 The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`,
-`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Values must be
-finite and non-negative. Per-request score and temperature overrides do not apply to this policy.
+`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. The multiplier
+also credits blocks a worker can fetch through a KV fetch hint, so set it to enable that credit
+without shared cache. Values must be finite and non-negative. Per-request score and temperature
+overrides do not apply to this policy.
 
 Omitted parameters normally inherit router configuration. When the resolved
 `overlap_score_credit` is nonzero, an omitted shared-cache multiplier uses the router's value,
@@ -621,7 +661,8 @@ nonzero host, disk, or shared-cache weight therefore enables cache inputs even w
 `overlap_score_credit: 0`. This changes startup behavior for existing policy YAML that
 previously used zero device credit to suppress all cache inputs despite explicit nonzero tier
 weights. Set all four cache-scoring weights to zero to keep such a policy load-only. Plain
-disaggregated decode always resolves all four weights to zero and skips cache inputs.
+disaggregated decode always resolves all four weights to zero and skips cache inputs. A nonzero
+shared-cache multiplier also requires `KV_TRANSFER` inputs.
 
 ## Runtime Configuration
 

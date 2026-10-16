@@ -12,7 +12,7 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
-use crate::kv_hints::KvTransferCandidates;
+use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
@@ -158,7 +158,9 @@ pub struct SchedulingResponse {
     /// Raw prefix overlap for the selected worker and DP rank, in tokens.
     pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    pub target_cached_prefix_blocks: u32,
+    /// The source `best_worker` fetches its KV prefix from; see
+    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`].
+    pub kv_transfer_source: Option<KvTransferSourceChoice>,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
     /// Per-candidate costs, present only when the scheduler has a selection
@@ -518,6 +520,11 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 }
 
+/// A KV fetch extends the device and host-pinned prefix; disk is not counted.
+pub(crate) fn transfer_local_prefix_blocks(device: usize, host_pinned: usize) -> u32 {
+    u32::try_from(device.saturating_add(host_pinned)).unwrap_or(u32::MAX)
+}
+
 impl SchedulingRequest {
     #[inline]
     pub fn eligibility(&self) -> RoutingEligibility<'_> {
@@ -555,6 +562,15 @@ impl SchedulingRequest {
             .saturating_add(tiers.host_pinned.get(&worker).copied().unwrap_or(0))
             .saturating_add(tiers.disk.get(&worker).copied().unwrap_or(0));
         blocks.saturating_mul(block_size as usize)
+    }
+
+    /// The prefix a KV fetch would extend on `worker`.
+    pub(crate) fn transfer_local_prefix_blocks_for(&self, worker: WorkerWithDpRank) -> u32 {
+        let tiers = &self.overlap.tier_overlap_blocks;
+        transfer_local_prefix_blocks(
+            tiers.device.get(&worker).copied().unwrap_or(0),
+            tiers.host_pinned.get(&worker).copied().unwrap_or(0),
+        )
     }
 
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {

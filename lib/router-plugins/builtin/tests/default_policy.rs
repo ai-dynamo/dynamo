@@ -208,12 +208,18 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                     std::iter::once(0..10).collect(),
                 ));
             }
+            // A nonzero multiplier also reads fetch inputs, which updates cannot add, so the
+            // shared case starts with a credit too small to change the choice.
             let config = KvRouterConfig {
                 conditional_disagg_enabled: role == WorkerType::Decode,
                 overlap_score_credit: 1.0,
                 host_cache_hit_weight: 0.0,
                 disk_cache_hit_weight: 0.0,
-                shared_cache_multiplier: Some(0.0),
+                shared_cache_multiplier: Some(if name == "shared_cache_multiplier" {
+                    0.5
+                } else {
+                    0.0
+                }),
                 ..Default::default()
             };
             let mut policy = dynamo_custom_policy_builtin::default_factory()(

@@ -329,7 +329,9 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 None
             };
             let candidate = input.row(
+                workers,
                 worker,
+                config,
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
@@ -358,7 +360,9 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             None
         };
         let filter_candidate = input.row(
+            workers,
             worker,
+            config,
             filter_preferred_taint_multiplier,
             state.filter_inputs,
         );
@@ -384,7 +388,9 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             None
         };
         let additional = input.row(
+            workers,
             worker,
+            config,
             additional_preferred_taint_multiplier,
             additional_inputs,
         );
@@ -718,6 +724,131 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn scorers_read_fetchable_prefixes_only_when_declared() {
+        use crate::kv_hints::KvTransferCandidates;
+        use crate::protocols::{ExternalSequenceBlockHash, KvHintTransferWorkerMetadata};
+        use std::sync::{Arc, Mutex};
+
+        struct HintWorker;
+
+        impl WorkerConfigLike for HintWorker {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                None
+            }
+
+            fn total_kv_blocks(&self) -> Option<u64> {
+                None
+            }
+
+            fn kv_hint_transfer_metadata_for_dp_rank(
+                &self,
+                _dp_rank: u32,
+            ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+                Some(KvHintTransferWorkerMetadata {
+                    worker_type: "prefill",
+                    source_control_endpoint: Some("tcp://worker:23280"),
+                })
+            }
+        }
+
+        type Seen = Arc<Mutex<Vec<(u64, Option<(u32, Option<u32>)>)>>>;
+
+        struct TransferScorer {
+            inputs: WorkerInputs,
+            seen: Seen,
+        }
+
+        impl WorkerScorer for TransferScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.inputs
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    let transfer = candidate.kv_transfer().map(|transfer| {
+                        (
+                            transfer.local_prefix_blocks(),
+                            transfer.source_prefix_blocks(),
+                        )
+                    });
+                    self.seen
+                        .lock()
+                        .unwrap()
+                        .push((candidate.worker().worker_id, transfer));
+                    *cost = 0.0;
+                }
+                Ok(())
+            }
+        }
+
+        let warm = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(0, HintWorker), (1, HintWorker)]);
+        let select = |candidates: Option<KvTransferCandidates>| {
+            let (declared, undeclared) = (Seen::default(), Seen::default());
+            let mut request = base_request(64);
+            request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
+            request.kv_transfer_candidates = candidates;
+            let policy = WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                vec![
+                    Box::new(TransferScorer {
+                        inputs: WorkerInputs::KV_TRANSFER,
+                        seen: declared.clone(),
+                    }),
+                    Box::new(TransferScorer {
+                        inputs: WorkerInputs::CACHE,
+                        seen: undeclared.clone(),
+                    }),
+                ],
+                Box::new(FirstPicker),
+            );
+            policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+            let sorted = |seen: Seen| {
+                let mut seen = seen.lock().unwrap().clone();
+                seen.sort_unstable();
+                seen
+            };
+            (sorted(declared), sorted(undeclared))
+        };
+
+        let (declared, undeclared) = select(Some(KvTransferCandidates {
+            block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+            owner_prefix_blocks: vec![(warm.into(), 3)],
+            routing_snapshot: None,
+        }));
+        // The warm worker holds the whole fetchable prefix; the cold one can fetch it.
+        assert_eq!(
+            declared,
+            vec![(0, Some((3, None))), (1, Some((0, Some(3))))]
+        );
+        assert_eq!(undeclared, vec![(0, None), (1, None)]);
+        // Without transfer candidates the host has nothing to report.
+        let (declared, _) = select(None);
+        assert_eq!(declared, vec![(0, None), (1, None)]);
     }
 
     #[test]

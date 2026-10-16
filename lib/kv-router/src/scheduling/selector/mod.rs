@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::{Cell, OnceCell},
+    collections::HashMap,
+};
 
 mod policy;
 #[cfg(any(test, feature = "bench"))]
@@ -19,7 +22,10 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
+use crate::kv_hints::{KvTransferSourceChoice, KvTransferSourceSummary};
+use crate::plugins::worker_selection::{
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerTransferInput,
+};
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
@@ -29,7 +35,9 @@ use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_
 use reference::pick_default_worker;
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
-use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use super::types::{
+    KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError, transfer_local_prefix_blocks,
+};
 use crate::protocols::{
     SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike, WorkerId,
     WorkerSelectionResult, WorkerWithDpRank,
@@ -165,6 +173,9 @@ struct MaterializedSelectionInput<'a> {
     // Track the maximum over the eligible ranks row() already visits; no second scan.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
+    // Built on first use and shared by every row's fetch credit and the
+    // selected worker's fetch source, so the two cannot disagree.
+    kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
@@ -189,7 +200,28 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .and_then(|config| config.router_temperature),
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
+            kv_transfer_sources: OnceCell::new(),
         }
+    }
+
+    /// The source `worker` would fetch from, when the request carries transfer
+    /// candidates.
+    fn kv_transfer_source<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        worker: WorkerWithDpRank,
+        config: &C,
+        local_prefix_blocks: u32,
+    ) -> Option<Option<KvTransferSourceChoice>> {
+        let candidates = self.request.kv_transfer_candidates.as_ref()?;
+        let sources = self
+            .kv_transfer_sources
+            .get_or_init(|| KvTransferSourceSummary::new(candidates, workers));
+        Some(sources.source_for(
+            worker,
+            &config.kv_transfer_keys(),
+            local_prefix_blocks as usize,
+        ))
     }
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
@@ -209,14 +241,18 @@ impl<'a> MaterializedSelectionInput<'a> {
     }
 
     #[inline(always)]
-    fn row(
+    fn row<C: WorkerConfigLike>(
         &self,
+        workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
+        config: &C,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
     ) -> CandidateData {
         self.row_with_device_overlap(
+            workers,
             worker,
+            config,
             preferred_taint_multiplier,
             inputs,
             |_, device_overlap_blocks| device_overlap_blocks,
@@ -224,9 +260,11 @@ impl<'a> MaterializedSelectionInput<'a> {
     }
 
     #[inline(always)]
-    fn row_with_device_overlap(
+    fn row_with_device_overlap<C: WorkerConfigLike>(
         &self,
+        workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
+        config: &C,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
@@ -241,31 +279,25 @@ impl<'a> MaterializedSelectionInput<'a> {
         } else {
             None
         };
+        let tiers = &self.request.overlap.tier_overlap_blocks;
+        let (device_blocks, host_blocks) =
+            if inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER) {
+                (
+                    tiers.device.get(&worker).copied().unwrap_or(0),
+                    tiers.host_pinned.get(&worker).copied().unwrap_or(0),
+                )
+            } else {
+                (0, 0)
+            };
         let cache = if inputs.contains(WorkerInputs::CACHE) {
             let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
-            let reported_device_overlap_blocks = self
-                .request
-                .overlap
-                .tier_overlap_blocks
-                .device
-                .get(&worker)
-                .copied()
-                .map(|blocks| blocks as f64)
-                .unwrap_or(0.0);
             let device_overlap_blocks =
-                select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
+                select_device_overlap(effective_overlap_blocks, device_blocks as f64);
             WorkerCacheData {
                 effective_overlap_blocks,
                 estimated_cached_tokens: cached_tokens,
                 device_overlap_blocks,
-                host_overlap_blocks: self
-                    .request
-                    .overlap
-                    .tier_overlap_blocks
-                    .host_pinned
-                    .get(&worker)
-                    .copied()
-                    .unwrap_or(0) as f64,
+                host_overlap_blocks: host_blocks as f64,
                 disk_overlap_blocks: self
                     .request
                     .overlap
@@ -290,12 +322,24 @@ impl<'a> MaterializedSelectionInput<'a> {
         } else {
             WorkerLoadInput::default()
         };
+        let transfer = if inputs.contains(WorkerInputs::KV_TRANSFER) {
+            let local_prefix_blocks = transfer_local_prefix_blocks(device_blocks, host_blocks);
+            self.kv_transfer_source(workers, worker, config, local_prefix_blocks)
+                .map(|source| WorkerTransferInput {
+                    local_prefix_blocks,
+                    source_prefix_blocks: source
+                        .map(|source| u32::try_from(source.prefix_blocks).unwrap_or(u32::MAX)),
+                })
+        } else {
+            None
+        };
 
         CandidateData {
             worker,
             inputs,
             cache,
             load,
+            transfer,
             preferred_taint_multiplier,
         }
     }
@@ -306,6 +350,7 @@ fn selection_result(
     worker: WorkerWithDpRank,
     block_size: u32,
     max_raw_cached_tokens: Option<usize>,
+    kv_transfer_source: Option<KvTransferSourceChoice>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
@@ -317,6 +362,7 @@ fn selection_result(
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+        kv_transfer_source,
     }
 }
 
@@ -569,7 +615,23 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
+    let kv_transfer_source = workers.get(&worker.worker_id).and_then(|config| {
+        input
+            .kv_transfer_source(
+                workers,
+                worker,
+                config,
+                request.transfer_local_prefix_blocks_for(worker),
+            )
+            .flatten()
+    });
+    let result = selection_result(
+        request,
+        worker,
+        block_size,
+        input.max_raw_cached_tokens(),
+        kv_transfer_source,
+    );
     log_selection(
         workers,
         request,
@@ -758,7 +820,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
-        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
+        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens(), None);
         assert_eq!(result.max_raw_cached_tokens, Some(96));
         assert_eq!(result.selected_raw_cached_tokens, Some(48));
         assert_eq!(result.cached_tokens, 120);
@@ -775,7 +837,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
-        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
+        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens(), None);
         assert_eq!(result.max_raw_cached_tokens, None);
         assert_eq!(result.selected_raw_cached_tokens, None);
     }
@@ -804,7 +866,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(selected, 3);
         assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
         assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
-        let result = selection_result(&request, selected, 16, Some(112));
+        let result = selection_result(&request, selected, 16, Some(112), None);
         assert_eq!(result.selected_raw_cached_tokens, Some(64));
     }
 
