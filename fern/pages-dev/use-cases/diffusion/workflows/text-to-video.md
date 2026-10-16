@@ -220,6 +220,7 @@ The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual
 
 ## See Also
 
+- [Cosmos3 Nano example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md) — experimental short-clip generation and reference conditioning
 - [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni) — animate a source image with the same `/v1/videos` endpoint
 - [Text-to-Video with SGLang](text-to-video.md#sglang)
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm)
