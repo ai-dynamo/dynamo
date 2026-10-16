@@ -64,7 +64,7 @@ spec:
                 import grpc
                 from google.protobuf.wrappers_pb2 import Int32Value
 
-                channel = grpc.insecure_channel("127.0.0.1:50051")
+                channel = grpc.insecure_channel("127.0.0.1:30001")
                 response = channel.unary_unary("/openengine.v1.Control/Health")(
                     b"", timeout=3
                 )
