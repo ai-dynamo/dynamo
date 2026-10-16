@@ -73,10 +73,11 @@ apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
-# Per-engine memory outside PyTorch's allocator: device context, NCCL and
-# workspaces. A fixed estimate, since device-wide free memory also moves with
-# the shadow peer. The CUDA context alone is about 1.1 GiB on A100.
-_NON_TORCH_MEMORY_BYTES = 13 << 28  # 3.25 GiB
+# Per-engine memory outside PyTorch's allocator: collectives and workspaces.
+# A fixed estimate, since device-wide free memory also moves with the shadow peer.
+_NON_TORCH_MEMORY_BYTES = 2 << 30  # 2 GiB
+# The CUDA context alone is about 1.1 GiB on A100; XPU has no CUDA context.
+_CUDA_CONTEXT_BYTES = 5 << 28  # 1.25 GiB
 
 
 def kv_reuse_enabled() -> bool:
@@ -254,6 +255,7 @@ class GMSWorker(_BaseWorker):
             + invisible_weights_memory
             + cudagraph_memory_estimate_applied
             + _NON_TORCH_MEMORY_BYTES
+            + (_CUDA_CONTEXT_BYTES if current_platform.is_cuda() else 0)
         )
         # The shadow peer runs the same model and stays resident while this
         # engine allocates its KV at wake, so reserve its non-KV memory too.
