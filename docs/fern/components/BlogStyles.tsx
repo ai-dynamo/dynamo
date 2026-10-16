@@ -76,6 +76,21 @@ article:has(.dynamo-blog-home) {
   padding: 0 clamp(0.25rem, 2vw, 1.5rem) 5rem;
 }
 
+/* The publication lists set hide-toc, which removes the TOC aside that holds
+   the right page margin, so Fern's mx-auto centers the article between the
+   sidebar and the viewport edge and it drifts right of the header on wide
+   screens. Reserve that margin the way Fern's reference layout does, and
+   start the article beside the sidebar where the digest landing starts.
+   Keyed on #fern-toc because Fern renders that aside before the content
+   wrapper, out of reach of a sibling combinator. */
+.fern-main:not(:has(> #fern-toc)) .fern-layout-guide:has(.dynamo-blog-home) {
+  padding-right: calc(var(--page-padding, 2rem) + var(--aside-offset, 0px));
+}
+
+.fern-main:not(:has(> #fern-toc)) article:has(.dynamo-blog-home) {
+  margin-inline: 0 auto;
+}
+
 article:has(.dynamo-blog-home) > header {
   display: none;
 }
@@ -169,6 +184,7 @@ article:has(.dynamo-blog-home) > header {
   background: linear-gradient(135deg, transparent 40%, rgba(0, 0, 0, 0.35));
 }
 
+.dynamo-blog-art--aiperf { background: linear-gradient(145deg, #16181f, #4b5368 52%, #0b0c10); }
 .dynamo-blog-art--encoder { background: linear-gradient(145deg, #2b0a1c, #a01f5c 52%, #1a0512); }
 
 .dynamo-blog-art--snapshot { background: linear-gradient(145deg, #031d28, #006b78 52%, #001318); }
@@ -596,6 +612,8 @@ article:has(.dynamo-blog-article) pre {
 }
 
 /* Date-first archive labels, inspired by editorial blog indexes. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before { content: "SEP 18"; }
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before { content: "SEP 09"; }
 
@@ -977,6 +995,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
   content: "" !important;
 }
 
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before { content: "SEP 18"; }
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before { content: "SEP 09"; }
 
