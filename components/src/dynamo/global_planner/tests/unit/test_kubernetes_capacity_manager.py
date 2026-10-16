@@ -57,7 +57,7 @@ def _with_operator_gpu_status(components):
             status = {"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu}
         statuses[component["name"]] = status
     return {
-        "metadata": {"generation": 1},
+        "metadata": {"generation": 1, "uid": "dgd-uid"},
         "spec": {"components": components},
         "status": {"observedGeneration": 1, "components": statuses},
     }
@@ -113,6 +113,7 @@ def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
         return_value=ReplicaUpdateResult(accepted=True, applied=True)
     )
     connector.wait_for_deployment_ready = AsyncMock()
+    connector.wait_for_replica_targets = AsyncMock()
     connector.kube_api = MagicMock()
     connector.kube_api.current_namespace = key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=spec)
@@ -182,6 +183,9 @@ def test_discover_explicit_mode():
         ) as mock_connector_cls,
     ):
         connector = MagicMock()
+        connector.kube_api.get_graph_deployment.return_value = {
+            "metadata": {"name": "model-a", "uid": "uid-a"}
+        }
         mock_connector_cls.return_value = connector
 
         # Managed callers are namespaces; the deployment name is derived.
@@ -267,8 +271,8 @@ def test_discover_implicit_mode():
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
         mock_kube.list_graph_deployments.return_value = [
-            {"metadata": {"name": "model-a"}},
-            {"metadata": {"name": "model-b"}},
+            {"metadata": {"name": "model-a", "uid": "uid-a"}},
+            {"metadata": {"name": "model-b", "uid": "uid-b"}},
         ]
         mock_connector_cls.return_value = MagicMock()
 
@@ -328,6 +332,11 @@ async def test_scale_with_result_calls_connector():
     async def scale_with_identity(_targets, *, blocking, retry_state):
         assert blocking
         retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
         return ReplicaUpdateResult(accepted=True, applied=True)
 
     connector.set_component_replicas_with_result.side_effect = scale_with_identity
@@ -348,9 +357,17 @@ async def test_scale_with_result_calls_connector():
 async def test_scale_preserves_accepted_noop_result():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
-    connector.set_component_replicas_with_result.return_value = ReplicaUpdateResult(
-        accepted=True, applied=False
-    )
+
+    async def accept_noop(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        return ReplicaUpdateResult(accepted=True, applied=False)
+
+    connector.set_component_replicas_with_result.side_effect = accept_noop
 
     result = await cm.scale_with_result(
         "default/my-dgd",
@@ -371,6 +388,17 @@ async def test_scale_preserves_accepted_noop_result():
 async def test_scale_preserves_public_none_return():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+
+    async def accept(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = accept
     result = await cm.scale(
         "default/my-dgd",
         [
@@ -406,10 +434,22 @@ async def test_run_with_conflict_retry_restarts_complete_operation():
 async def test_run_with_conflict_retry_reuses_replica_identity_state():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
-    connector.set_component_replicas_with_result.side_effect = [
-        client.ApiException(status=409),
-        ReplicaUpdateResult(accepted=True, applied=True),
-    ]
+    attempts = 0
+
+    async def conflict_then_accept(_targets, *, blocking, retry_state):
+        nonlocal attempts
+        attempts += 1
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        if attempts == 1:
+            raise client.ApiException(status=409)
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = conflict_then_accept
     targets = [
         TargetReplica(
             sub_component_type=SubComponentType.PREFILL,
@@ -433,13 +473,38 @@ async def test_run_with_conflict_retry_reuses_replica_identity_state():
 
 
 @pytest.mark.asyncio
-async def test_wait_for_ready_calls_connector():
+async def test_wait_for_ready_uses_accepted_replica_transaction():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
 
+    async def accept(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = accept
+    await cm.scale_with_result(
+        "default/my-dgd",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                desired_replicas=2,
+            )
+        ],
+        blocking=False,
+    )
+
     await cm.wait_for_ready("default/my-dgd")
 
-    connector.wait_for_deployment_ready.assert_awaited_once_with()
+    connector.wait_for_replica_targets.assert_awaited_once_with(
+        expected_dgd_uid="dgd-uid",
+        expected_targets={"prefill-svc": 2},
+        expected_authorities={"prefill-svc": (False, None)},
+    )
 
 
 # ---------------------------------------------------------------------------- #
@@ -669,7 +734,7 @@ def test_observe_never_seen_deployment_ignores_terminal_pods():
     assert not cm.participant_exists("default/missing")
 
 
-def test_observe_deleted_deployment_retains_uncertain_ceiling_capacity():
+def test_observe_deleted_deployment_fails_closed_after_prior_observation():
     cm = KubernetesCapacityManager("default")
     deployment = _dgd_spec(2, 1)
     connector = _install_connector(
@@ -681,43 +746,30 @@ def test_observe_deleted_deployment_retains_uncertain_ceiling_capacity():
     ]
 
     initial = cm.observe(require_complete=True)
-    retained = cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="descendant capacity cannot be bounded"):
+        cm.observe(require_complete=True)
 
-    assert retained["default/model"]["prefill"].current_replicas == 2
-    assert retained["default/model"]["decode"].current_replicas == 1
-    assert not retained["default/model"]["prefill"].available
-    assert not retained["default/model"]["decode"].available
-    assert initial["default/model"]["prefill"].available
+    assert initial["default/model"]["prefill"].current_replicas == 2
     assert not cm.participant_exists("default/model")
 
 
-@pytest.mark.asyncio
-async def test_deleted_deployment_retains_last_accepted_replica_target():
+def test_observe_same_name_replacement_fails_closed():
     cm = KubernetesCapacityManager("default")
     deployment = _dgd_spec(1, 1)
+    replacement = deepcopy(deployment)
+    replacement["metadata"]["uid"] = "replacement-uid"
     connector = _install_connector(
         cm, "default/model", deployment, parent_dgd_name="model"
     )
     connector.kube_api.get_graph_deployment.side_effect = [
         deployment,
-        DynamoGraphDeploymentNotFoundError("model", "default"),
+        replacement,
     ]
     cm.observe(require_complete=True)
 
-    await cm.scale_with_result(
-        "default/model",
-        [
-            TargetReplica(
-                sub_component_type=SubComponentType.PREFILL,
-                desired_replicas=3,
-            )
-        ],
-        blocking=False,
-    )
-    retained = cm.observe(require_complete=True)
+    with pytest.raises(RuntimeError, match="DGD identity changed"):
+        cm.observe(require_complete=True)
 
-    assert retained["default/model"]["prefill"].current_replicas == 3
-    assert not retained["default/model"]["prefill"].available
     assert not cm.participant_exists("default/model")
 
 

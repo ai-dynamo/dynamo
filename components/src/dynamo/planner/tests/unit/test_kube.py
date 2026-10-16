@@ -1090,7 +1090,11 @@ def _stable_worker_dgd(
 ) -> Dict[str, Any]:
     """Production-shaped DGD: stable replica counts, explicit generation lag."""
     return {
-        "metadata": {"name": dgd_name, "generation": generation},
+        "metadata": {
+            "name": dgd_name,
+            "uid": "dgd-uid",
+            "generation": generation,
+        },
         "spec": {
             "components": [
                 {
@@ -1123,11 +1127,13 @@ def _stable_worker_dgd(
                     "gpuPowerLimitWatts": decode_watts,
                     "gpusPerEngine": 1,
                     "gpusPerReplica": 1,
+                    "replicas": 2,
                     "readyReplicas": 2,
                     "updatedReplicas": 2,
                     "availableReplicas": 2,
                 },
                 "Planner": {
+                    "replicas": 0,
                     "readyReplicas": 0,
                     "updatedReplicas": 0,
                     "availableReplicas": 0,
@@ -1138,11 +1144,16 @@ def _stable_worker_dgd(
 
 
 def _owned_scaling_adapter(
-    component_name: str, *, replicas: int, dgd_name: str = "test-deployment"
+    component_name: str,
+    *,
+    replicas: int,
+    dgd_name: str = "test-deployment",
+    uid: str = "adapter-uid",
 ) -> Dict[str, Any]:
     return {
         "metadata": {
             "name": f"{dgd_name}-{component_name.lower()}",
+            "uid": uid,
             "ownerReferences": [
                 {
                     "apiVersion": "nvidia.com/v1beta1",
@@ -1311,6 +1322,88 @@ async def test_wait_exclude_planner_uses_adapter_target_after_cold_restart(k8s_a
 
     assert settled is deployment
     get_adapter.assert_called_once_with("test-deployment", "worker")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_ignores_stale_ready_condition(
+    k8s_api, mock_core_api
+):
+    stale = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale["spec"]["components"][0]["replicas"] = 1
+    stale["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    settled = deepcopy(stale)
+    settled_status = settled["status"]["components"]["decode"]
+    settled_status.update(
+        {
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        }
+    )
+    _mock_pod_list(mock_core_api, [_make_pod("decode-0")])
+
+    with patch.object(
+        k8s_api, "get_graph_deployment", side_effect=[stale, settled]
+    ) as get_dgd:
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            expected_dgd_uid="dgd-uid",
+            expected_replica_targets={"decode": 1},
+            expected_replica_authorities={"decode": (False, None)},
+            max_attempts=2,
+            delay_seconds=0,
+        )
+
+    assert got is settled
+    assert get_dgd.call_count == 2
+    mock_core_api.list_namespaced_pod.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_replaced_dgd(k8s_api, mock_core_api):
+    replacement = _stable_worker_dgd(generation=2, observed_generation=2)
+    replacement["metadata"]["uid"] = "replacement-uid"
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=replacement):
+        with pytest.raises(RuntimeError, match="DGD identity changed"):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+    mock_core_api.list_namespaced_pod.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_replaced_adapter(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    replacement = _owned_scaling_adapter(
+        "decode", replicas=2, uid="replacement-adapter-uid"
+    )
+
+    with (
+        patch.object(k8s_api, "get_graph_deployment", return_value=deployment),
+        patch.object(k8s_api, "get_service_scaling_adapter", return_value=replacement),
+    ):
+        with pytest.raises(RuntimeError, match="DGDSA identity"):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (True, "adapter-uid")},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+    mock_core_api.list_namespaced_pod.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

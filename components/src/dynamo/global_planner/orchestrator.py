@@ -100,19 +100,6 @@ class ScaleOutcome:
     current_replicas: dict = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class _GpuBounds:
-    """Known-live minimum and conservative possible maximum GPU capacity."""
-
-    minimum: int
-    maximum: int
-
-    def describe(self) -> str:
-        if self.minimum == self.maximum:
-            return str(self.minimum)
-        return f"[{self.minimum}, {self.maximum}]"
-
-
 class _ParticipantMutationBusy(Exception):
     """Signal that a prior response still owns one participant readback."""
 
@@ -737,7 +724,7 @@ class Orchestrator:
         net_delta = self.net_delta_gpu(targets, pools)
         internally_paired = self.is_internally_paired(targets, pools)
 
-        standalone_bounds = self._gpu_bounds_from_snapshot(
+        total_standalone = self._total_gpus_from_snapshot(
             all_pools, standalone_overrides
         )
 
@@ -746,15 +733,14 @@ class Orchestrator:
             pools[t.sub_component_type.value]
             for t in targets
             if t.sub_component_type.value in pools
-            and pools[t.sub_component_type.value].available
             and t.desired_replicas != pools[t.sub_component_type.value].current_replicas
         ]
         standalone_tolerance = self._internal_pair_tolerance(changing_request_pools)
 
         # Internally-paired requests get tolerance even without an external
         # partner.
-        standalone_ok, standalone_reason = self._bounds_for_gpu_range(
-            standalone_bounds, internally_paired, standalone_tolerance
+        standalone_ok, standalone_reason = self._bounds_for_total(
+            total_standalone, internally_paired, standalone_tolerance
         )
 
         # TODO(global-planner): Rework boundary and partner selection to allow
@@ -767,7 +753,7 @@ class Orchestrator:
         # needed.
         (
             selected_partners,
-            paired_bounds,
+            total_paired,
             paired_tolerance,
         ) = self._find_pair_partner_set(
             participant_id,
@@ -797,7 +783,7 @@ class Orchestrator:
                 f"{len(selected_partners)} partner(s)) for "
                 f"{log_deployment_name}: "
                 f"request {sorted(request_pool_keys)} + "
-                f"[{partners_desc}]; total {paired_bounds.describe()} GPUs "
+                f"[{partners_desc}]; total {total_paired} GPUs "
                 f"(bounds "
                 f"[{self.min_total_gpus if self.min_total_gpus >= 0 else '-inf'} - {paired_tolerance}, "
                 f"{self.max_total_gpus if self.max_total_gpus >= 0 else '+inf'}])"
@@ -806,7 +792,7 @@ class Orchestrator:
         elif standalone_ok:
             logger.info(
                 f"Standalone scale request for {log_deployment_name}: "
-                f"total {standalone_bounds.describe()} GPUs "
+                f"total {total_standalone} GPUs "
                 f"(internally_paired={internally_paired})"
             )
             return MediationResult(approved=True, selected_partners=[])
@@ -833,33 +819,20 @@ class Orchestrator:
         all_pools: PoolSnapshot,
         overrides: dict[tuple[str, str], int],
     ) -> int:
-        """Compute the conservative maximum across all known participants.
+        """Compute total GPUs across all known participants from a snapshot.
 
         ``overrides`` maps ``(participant_id, sub_type)`` to the replica count to
         use in place of the current count. Entries not in ``overrides`` use the
-        current replica count. Overrides never apply to unavailable pools.
+        current replica count.
         """
-        return self._gpu_bounds_from_snapshot(all_pools, overrides).maximum
-
-    def _gpu_bounds_from_snapshot(
-        self,
-        all_pools: PoolSnapshot,
-        overrides: dict[tuple[str, str], int],
-    ) -> _GpuBounds:
-        """Return known-live and conservatively possible GPU totals."""
-
-        minimum = 0
-        maximum = 0
+        total_gpus = 0
         for key, pools in all_pools.items():
             for sub_type, spec in pools.items():
                 if spec.gpu_per_replica == 0:
                     continue
-                replicas = spec.current_replicas
-                if spec.available:
-                    replicas = overrides.get((key, sub_type), replicas)
-                    minimum += replicas * spec.gpu_per_replica
-                maximum += replicas * spec.gpu_per_replica
-        return _GpuBounds(minimum=minimum, maximum=maximum)
+                replicas = overrides.get((key, sub_type), spec.current_replicas)
+                total_gpus += replicas * spec.gpu_per_replica
+        return total_gpus
 
     # ------------------------------------------------------------------ #
     # Intent cache helpers                                               #
@@ -887,9 +860,9 @@ class Orchestrator:
         now = self._now()
         for target in targets:
             sub_type = target.sub_component_type.value
-            if sub_type not in pools or not pools[sub_type].available:
-                # Unknown or unavailable pools cannot produce safe deltas or
-                # act as a later scale partner.
+            if sub_type not in pools:
+                # Unknown pool (not yet observed); skip — without gpu_per_replica
+                # we can't compute deltas or pair against it.
                 continue
             key = self._pool_cache_key(participant_id, sub_type)
             self._intent_cache[key] = PoolIntent(
@@ -955,7 +928,7 @@ class Orchestrator:
             for sub_type, spec in pools.items():
                 if (pid, sub_type) in request_pool_keys:
                     continue
-                if not spec.available or spec.gpu_per_replica == 0:
+                if spec.gpu_per_replica == 0:
                     continue
                 cache_key = self._pool_cache_key(pid, sub_type)
                 intent = self._intent_cache.get(cache_key)
@@ -1008,7 +981,7 @@ class Orchestrator:
         # Combined total assuming this candidate stays at its current count (i.e.,
         # contributes 0). The candidate is NOT in current_overrides yet, so the
         # snapshot uses its current_replicas naturally.
-        baseline_bounds = self._gpu_bounds_from_snapshot(all_pools, current_overrides)
+        baseline_total = self._total_gpus_from_snapshot(all_pools, current_overrides)
 
         if last_desired > current:
             # Scale-up candidate: pick K in [current+1, last_desired] that keeps
@@ -1017,7 +990,7 @@ class Orchestrator:
             if self.max_total_gpus < 0:
                 return last_desired
             # K <= current + (max - baseline_total) // gpu
-            headroom = self.max_total_gpus - baseline_bounds.maximum
+            headroom = self.max_total_gpus - baseline_total
             if headroom <= 0:
                 return None
             max_k = current + headroom // gpu
@@ -1030,7 +1003,7 @@ class Orchestrator:
                 return last_desired
             lower = self.min_total_gpus - tolerance
             # K >= current + ceil((lower - baseline_total) / gpu)
-            diff = lower - baseline_bounds.minimum
+            diff = lower - baseline_total
             if diff > 0:
                 # Already below floor; further scale-down impossible.
                 return None
@@ -1046,7 +1019,7 @@ class Orchestrator:
         request_net_delta_gpu: int,
         standalone_overrides: dict[tuple[str, str], int],
         changing_request_pools: list[PoolSpec],
-    ) -> tuple[list[PartnerTransfer], _GpuBounds, int]:
+    ) -> tuple[list[PartnerTransfer], int, int]:
         """Pack as many opposite-direction cached intents as fit alongside the
         request, partially consuming one over-sized candidate if needed.
 
@@ -1058,11 +1031,11 @@ class Orchestrator:
         Tolerance is computed **once** over the request's changing pools plus all
         candidates considered for inclusion, not iteratively widened.
 
-        Returns ``(selected_partners, bounds_after, tolerance)``.
+        Returns ``(selected_partners, total_after, tolerance)``.
         ``selected_partners`` is empty when no feasible packing exists.
         """
         if request_net_delta_gpu == 0:
-            return [], _GpuBounds(0, 0), 0
+            return [], 0, 0
 
         all_candidates = list(
             self._iter_pair_partners(
@@ -1073,7 +1046,7 @@ class Orchestrator:
             )
         )
         if not all_candidates:
-            return [], _GpuBounds(0, 0), 0
+            return [], 0, 0
 
         # Tolerance computed once over the universe of changing pools.
         candidate_specs = [c.spec for c in all_candidates]
@@ -1104,11 +1077,12 @@ class Orchestrator:
             # Try full inclusion.
             full_overrides = dict(overrides)
             full_overrides[(cand_pid, cand_sub)] = cand_desired
-            full_bounds = self._gpu_bounds_from_snapshot(all_pools, full_overrides)
-            in_band, _ = self._bounds_for_gpu_range(
-                full_bounds,
-                paired=True,
-                tolerance=tolerance,
+            full_total = self._total_gpus_from_snapshot(all_pools, full_overrides)
+            in_band, _ = budget.bounds_for_total(
+                full_total,
+                self.min_total_gpus,
+                self.max_total_gpus,
+                tolerance,
             )
             if in_band:
                 # Full inclusion lands in band — accept and continue. Keep
@@ -1126,11 +1100,11 @@ class Orchestrator:
             #   request_net_delta < 0 → request alone undershoots floor
             #     (approaching from below; candidates push up).
             above_ceiling = (
-                self.max_total_gpus >= 0 and full_bounds.maximum > self.max_total_gpus
+                self.max_total_gpus >= 0 and full_total > self.max_total_gpus
             )
             below_floor = (
                 self.min_total_gpus >= 0
-                and full_bounds.minimum < self.min_total_gpus - tolerance
+                and full_total < self.min_total_gpus - tolerance
             )
             still_approaching = (request_net_delta_gpu > 0 and above_ceiling) or (
                 request_net_delta_gpu < 0 and below_floor
@@ -1155,11 +1129,12 @@ class Orchestrator:
         # candidate fully reached the band, none of them crossed). Try partial of
         # the last selected candidate to land in band.
         if selected:
-            running_bounds = self._gpu_bounds_from_snapshot(all_pools, overrides)
-            running_in_band, _ = self._bounds_for_gpu_range(
-                running_bounds,
-                paired=True,
-                tolerance=tolerance,
+            running_total = self._total_gpus_from_snapshot(all_pools, overrides)
+            running_in_band, _ = budget.bounds_for_total(
+                running_total,
+                self.min_total_gpus,
+                self.max_total_gpus,
+                tolerance,
             )
             if not running_in_band:
                 last = selected[-1]
@@ -1188,18 +1163,19 @@ class Orchestrator:
                     overrides[(last_pid, last_sub)] = partial_k
 
         if not selected:
-            return [], _GpuBounds(0, 0), 0
+            return [], 0, 0
 
-        final_bounds = self._gpu_bounds_from_snapshot(all_pools, overrides)
-        ok, _ = self._bounds_for_gpu_range(
-            final_bounds,
-            paired=True,
-            tolerance=tolerance,
+        final_total = self._total_gpus_from_snapshot(all_pools, overrides)
+        ok, _ = budget.bounds_for_total(
+            final_total,
+            self.min_total_gpus,
+            self.max_total_gpus,
+            tolerance,
         )
         if not ok:
-            return [], _GpuBounds(0, 0), 0
+            return [], 0, 0
 
-        return selected, final_bounds, tolerance
+        return selected, final_total, tolerance
 
     # ------------------------------------------------------------------ #
     # Request shape helpers                                              #
@@ -1215,7 +1191,7 @@ class Orchestrator:
         for target in targets:
             sub_type = target.sub_component_type.value
             spec = pools.get(sub_type)
-            if spec is None or not spec.available or spec.gpu_per_replica == 0:
+            if spec is None or spec.gpu_per_replica == 0:
                 continue
             net += (
                 target.desired_replicas - spec.current_replicas
@@ -1233,7 +1209,7 @@ class Orchestrator:
         for target in targets:
             sub_type = target.sub_component_type.value
             spec = pools.get(sub_type)
-            if spec is None or not spec.available:
+            if spec is None:
                 continue
             direction = self._direction(target.desired_replicas, spec.current_replicas)
             if direction == "up":
@@ -1242,29 +1218,21 @@ class Orchestrator:
                 has_down = True
         return has_up and has_down
 
-    def _bounds_for_gpu_range(
+    def _bounds_for_total(
         self,
-        totals: _GpuBounds,
+        total: int,
         paired: bool,
         tolerance: int,
     ) -> tuple[bool, str]:
-        """Check known-live floor and conservative-maximum ceiling bounds.
+        """Check whether ``total`` is within the active budget bounds.
 
         Standalone (non-paired) requests use strict bounds; paired transfers get
         the tolerance band on the **lower** edge only — ``max_total_gpus`` is a
         hard cluster-capacity bound (enforced by ``budget.bounds_for_total``).
         """
-        within_ceiling, reason = budget.bounds_for_total(
-            totals.maximum,
-            -1,
-            self.max_total_gpus,
-            0,
-        )
-        if not within_ceiling:
-            return False, reason
         return budget.bounds_for_total(
-            totals.minimum,
+            total,
             self.min_total_gpus,
-            -1,
+            self.max_total_gpus,
             tolerance if paired else 0,
         )

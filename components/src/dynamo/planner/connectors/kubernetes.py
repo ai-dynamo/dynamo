@@ -627,6 +627,22 @@ class KubernetesConnector(PlannerConnector):
             require_backing_settled=False,
         )
 
+    async def wait_for_replica_targets(
+        self,
+        *,
+        expected_dgd_uid: str,
+        expected_targets: Mapping[str, int],
+        expected_authorities: Mapping[str, tuple[bool, str | None]],
+    ) -> dict:
+        """Wait until one accepted replica transaction has fully settled."""
+        return await self.kube_api.wait_for_graph_deployment_ready(
+            self.graph_deployment_name,
+            include_planner=False,
+            expected_dgd_uid=expected_dgd_uid,
+            expected_replica_targets=expected_targets,
+            expected_replica_authorities=expected_authorities,
+        )
+
     async def wait_for_settled_graph_deployment(
         self,
         include_planner: bool = False,
@@ -1534,7 +1550,9 @@ class KubernetesConnector(PlannerConnector):
         expected_dgd_uid: str | None = None
         component_name: str | None = None
         ambiguous_fence_write: AmbiguousKubernetesWriteError | None = None
-        for attempt in range(3):
+
+        def write() -> str:
+            nonlocal component_name, expected_dgd_uid
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             rejection = self._unready_recovery_dgd_rejection(deployment)
             if rejection is not None:
@@ -1574,23 +1592,18 @@ class KubernetesConnector(PlannerConnector):
                     f"cannot acquire batch writer fence: {adapter_rejection}"
                 )
 
-            try:
-                self.kube_api.patch_scaling_adapter_writer_fence(
-                    self.graph_deployment_name,
-                    component_name,
-                    writer_id,
-                    adapter=adapter,
-                )
-            except AmbiguousKubernetesWriteError as error:
-                ambiguous_fence_write = error
-                break
-            except ApiException as error:
-                if error.status == 409 and attempt < 2:
-                    continue
-                raise
-            break
-        else:
-            raise RuntimeError("failed to acquire batch writer fence after retries")
+            self.kube_api.patch_scaling_adapter_writer_fence(
+                self.graph_deployment_name,
+                component_name,
+                writer_id,
+                adapter=adapter,
+            )
+            return component_name
+
+        try:
+            component_name = retry_kubernetes_write(write)
+        except AmbiguousKubernetesWriteError as error:
+            ambiguous_fence_write = error
 
         refreshed_deployment = self.kube_api.get_graph_deployment(
             self.graph_deployment_name

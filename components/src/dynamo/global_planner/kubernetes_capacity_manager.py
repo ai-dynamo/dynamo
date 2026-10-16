@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Optional, TypeVar
 
@@ -52,6 +52,15 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+@dataclass(frozen=True)
+class _ReplicaSettlement:
+    """Accepted replica transaction that must settle before dependent writes."""
+
+    dgd_uid: str
+    targets: dict[str, int]
+    authorities: dict[str, tuple[bool, str | None]]
+
+
 class KubernetesCapacityManager(CapacityManager):
     """Observe / scale capacity via ``KubernetesConnector`` per deployment.
 
@@ -74,10 +83,12 @@ class KubernetesCapacityManager(CapacityManager):
         # tombstones remain recreation probes and are checked for Pods each pass.
         self._missing_participants: set[str] = set()
         self._last_observed_pools: dict[str, dict[str, PoolSpec]] = {}
+        self._observed_uids: dict[str, str] = {}
         self._replica_retry_states: ContextVar[
             dict[str, ReplicaUpdateRetryState] | None
         ] = ContextVar("global_planner_replica_retry_states", default=None)
         self._replica_uids: dict[str, str] = {}
+        self._replica_settlements: dict[str, _ReplicaSettlement] = {}
 
     # ------------------------------------------------------------------ #
     # Discovery / registration                                           #
@@ -126,11 +137,13 @@ class KubernetesCapacityManager(CapacityManager):
             except Exception as error:
                 logger.warning(f"Failed to discover existing deployments: {error}")
                 return []
-            deployment_names = [
-                name
-                for dgd in dgds
-                if (name := dgd.get("metadata", {}).get("name", ""))
-            ]
+            deployment_names = []
+            for dgd in dgds:
+                name = dgd.get("metadata", {}).get("name", "")
+                if not name:
+                    continue
+                self._record_observed_identity(f"{self.namespace}/{name}", dgd)
+                deployment_names.append(name)
         else:
             self._inventory_api = None
             deployment_names = []
@@ -141,7 +154,8 @@ class KubernetesCapacityManager(CapacityManager):
                     connector = self._new_connector("discovered", self.namespace, name)
                     self.connectors[participant_id] = connector
                 try:
-                    connector.kube_api.get_graph_deployment(name)
+                    deployment = connector.kube_api.get_graph_deployment(name)
+                    self._record_observed_identity(participant_id, deployment)
                 except DynamoGraphDeploymentNotFoundError:
                     drain_error = self._deployment_drain_error(
                         participant_id, connector, retain=True
@@ -200,12 +214,34 @@ class KubernetesCapacityManager(CapacityManager):
             self._component_roles.pop(participant_id, None)
             self._missing_participants.discard(participant_id)
             self._last_observed_pools.pop(participant_id, None)
+            self._observed_uids.pop(participant_id, None)
             self._replica_uids.pop(participant_id, None)
+            self._replica_settlements.pop(participant_id, None)
 
     def _get_inventory_api(self) -> KubernetesAPI:
         if self._inventory_api is None:
             self._inventory_api = KubernetesAPI(self.namespace)
         return self._inventory_api
+
+    def _record_observed_identity(
+        self,
+        participant_id: str,
+        deployment: dict,
+    ) -> None:
+        metadata = deployment.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise ValueError("DGD metadata is malformed")
+        uid = metadata.get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise ValueError("DGD metadata.uid is unavailable")
+        observed_uid = self._observed_uids.get(participant_id)
+        if observed_uid is not None and uid != observed_uid:
+            self._missing_participants.add(participant_id)
+            raise RuntimeError(
+                f"DGD identity changed from {observed_uid!r} to {uid!r}; "
+                "descendant capacity cannot be bounded"
+            )
+        self._observed_uids[participant_id] = uid
 
     def _record_observed_pools(
         self, participant_id: str, pools: dict[str, PoolSpec]
@@ -307,15 +343,16 @@ class KubernetesCapacityManager(CapacityManager):
                         ),
                         require_complete,
                     )
-                elif key in self._last_observed_pools:
-                    # Pod absence alone cannot prove all workload controllers
-                    # have disappeared. Preserve the last desired-state charge
-                    # for the ceiling, but do not let an absent participant
-                    # satisfy the floor or become a scale partner.
-                    all_pools[key] = {
-                        pool_key: replace(pool, available=False)
-                        for pool_key, pool in self._last_observed_pools[key].items()
-                    }
+                elif key in self._observed_uids:
+                    self._record_observation_failure(
+                        all_pools,
+                        key,
+                        RuntimeError(
+                            "DGD disappeared after it was observed; descendant "
+                            "capacity cannot be bounded"
+                        ),
+                        require_complete,
+                    )
                 elif retain:
                     # An allowlisted DGD may legitimately be created after the
                     # planner. Keep probing it without charging unknown usage.
@@ -375,9 +412,8 @@ class KubernetesCapacityManager(CapacityManager):
             missing: list[tuple[str, KubernetesConnector, bool]] = []
             for key, connector in connectors_snapshot:
                 try:
-                    all_pools[key] = self._record_observed_pools(
-                        key,
-                        self._read_pools(connector, self._component_roles.get(key)),
+                    all_pools[key] = self._read_pools(
+                        key, connector, self._component_roles.get(key)
                     )
                     if self.connectors.get(key) is connector:
                         self._missing_participants.discard(key)
@@ -453,9 +489,8 @@ class KubernetesCapacityManager(CapacityManager):
                 local_missing.append((key, connector, False))
                 continue
             try:
-                all_pools[key] = self._record_observed_pools(
-                    key,
-                    self._read_pools(connector, self._component_roles.get(key)),
+                all_pools[key] = self._read_pools(
+                    key, connector, self._component_roles.get(key)
                 )
                 if self.connectors.get(key) is connector:
                     self._missing_participants.discard(key)
@@ -477,6 +512,7 @@ class KubernetesCapacityManager(CapacityManager):
         for key, deployment in deployments_by_key.items():
             connector = self.connectors[key]
             try:
+                self._record_observed_identity(key, deployment)
                 all_pools[key] = self._record_observed_pools(
                     key,
                     self._pools_from_deployment(
@@ -551,12 +587,15 @@ class KubernetesCapacityManager(CapacityManager):
 
     def _read_pools(
         self,
+        participant_id: str,
         connector: KubernetesConnector,
         role_hints: Optional[dict[str, str]] = None,
     ) -> dict[str, PoolSpec]:
         """Read and parse the current pool state for one deployment."""
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
-        return self._pools_from_deployment(connector, deployment, role_hints)
+        self._record_observed_identity(participant_id, deployment)
+        pools = self._pools_from_deployment(connector, deployment, role_hints)
+        return self._record_observed_pools(participant_id, pools)
 
     def _pools_from_deployment(
         self,
@@ -640,12 +679,14 @@ class KubernetesCapacityManager(CapacityManager):
         rejection.
         """
         connector = self.connectors[participant_id]
+        self._replica_settlements.pop(participant_id, None)
+        observed_uid = self._observed_uids.get(participant_id)
         retry_states = self._replica_retry_states.get()
         if retry_states is None:
-            retry_state = ReplicaUpdateRetryState()
+            retry_state = ReplicaUpdateRetryState(dgd_uid=observed_uid)
         else:
             retry_state = retry_states.setdefault(
-                participant_id, ReplicaUpdateRetryState()
+                participant_id, ReplicaUpdateRetryState(dgd_uid=observed_uid)
             )
         result = await connector.set_component_replicas_with_result(
             targets,
@@ -655,15 +696,36 @@ class KubernetesCapacityManager(CapacityManager):
         if retry_state.dgd_uid is not None:
             self._replica_uids[participant_id] = retry_state.dgd_uid
         if result.accepted:
+            if retry_state.dgd_uid is None:
+                raise RuntimeError("accepted replica update has no DGD identity")
+            settled_targets: dict[str, int] = {}
+            settled_authorities: dict[str, tuple[bool, str | None]] = {}
             pools = self._last_observed_pools.get(participant_id)
-            if pools is not None:
-                for target in targets:
-                    selector = (
-                        target.sub_component_type.value,
-                        target.component_name,
+            for target in targets:
+                selector = (
+                    target.sub_component_type.value,
+                    target.component_name,
+                )
+                authority = retry_state.authorities.get(selector)
+                if authority is None:
+                    raise RuntimeError(
+                        f"accepted replica update for {selector!r} has no authority"
                     )
-                    authority = retry_state.authorities.get(selector)
-                    resolved_component = authority[0] if authority else None
+                resolved_component, is_adapter, authority_uid = authority
+                previous_target = settled_targets.get(resolved_component)
+                if (
+                    previous_target is not None
+                    and previous_target != target.desired_replicas
+                ):
+                    raise RuntimeError(
+                        f"component {resolved_component!r} has conflicting targets"
+                    )
+                settled_targets[resolved_component] = target.desired_replicas
+                settled_authorities[resolved_component] = (
+                    is_adapter,
+                    authority_uid,
+                )
+                if pools is not None:
                     pool_key = next(
                         (
                             key
@@ -678,6 +740,11 @@ class KubernetesCapacityManager(CapacityManager):
                     pools[pool_key] = replace(
                         pool, current_replicas=target.desired_replicas
                     )
+            self._replica_settlements[participant_id] = _ReplicaSettlement(
+                dgd_uid=retry_state.dgd_uid,
+                targets=settled_targets,
+                authorities=settled_authorities,
+            )
         return result
 
     def supports_split_readiness(self) -> bool:
@@ -686,7 +753,18 @@ class KubernetesCapacityManager(CapacityManager):
     async def wait_for_ready(self, participant_id: str) -> None:
         """Wait for one participant without repeating its accepted write."""
         connector = self.connectors[participant_id]
-        await connector.wait_for_deployment_ready()
+        settlement = self._replica_settlements.get(participant_id)
+        if settlement is None:
+            raise RuntimeError(
+                f"participant {participant_id!r} has no accepted replica settlement"
+            )
+        await connector.wait_for_replica_targets(
+            expected_dgd_uid=settlement.dgd_uid,
+            expected_targets=settlement.targets,
+            expected_authorities=settlement.authorities,
+        )
+        if self._replica_settlements.get(participant_id) is settlement:
+            self._replica_settlements.pop(participant_id, None)
 
     async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Re-run the complete budget transaction after a Kubernetes conflict."""

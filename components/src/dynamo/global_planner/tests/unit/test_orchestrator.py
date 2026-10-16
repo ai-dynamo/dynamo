@@ -115,29 +115,6 @@ def test_floor_rejects_unpaired_scale_down():
     assert "budget breach" in (res.reject_message or "").lower()
 
 
-def test_unavailable_capacity_does_not_satisfy_floor():
-    orch = _decider(min_total_gpus=3)
-    pools = _pools(nsA__a=(None, 2, 1), nsB__b=(None, 2, 1))
-    pools["nsA/a"]["decode"].available = False
-
-    res = _mediate(orch, "nsB/b", _targets(decode=1), pools)
-
-    assert not res.approved
-    assert "below floor" in (res.reject_message or "")
-
-
-def test_unavailable_capacity_is_not_selected_as_partner():
-    orch = _decider(max_total_gpus=4)
-    live_pools = _pools(nsA__a=(None, 2, 1), nsB__b=(None, 2, 1))
-    assert _mediate(orch, "nsA/a", _targets(decode=1), live_pools).approved
-
-    live_pools["nsA/a"]["decode"].available = False
-    res = _mediate(orch, "nsB/b", _targets(decode=3), live_pools)
-
-    assert not res.approved
-    assert res.selected_partners == []
-
-
 def test_floor_pairs_scale_down_across_participants():
     orch = _decider(max_total_gpus=4, min_total_gpus=4)
     pools = _pools(nsA__a=(None, 2, 1), nsB__b=(None, 2, 1))  # fixed total 4

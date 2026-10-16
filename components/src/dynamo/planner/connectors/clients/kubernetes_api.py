@@ -775,7 +775,11 @@ class KubernetesAPI:
                 not_ready.append(component_name)
         return not not_ready, not_ready
 
-    def fetch_authoritative_replica_targets(self, deployment: dict) -> dict:
+    def fetch_authoritative_replica_targets(
+        self,
+        deployment: dict,
+        expected_authorities: Mapping[str, tuple[bool, str | None]] | None = None,
+    ) -> dict:
         """Overlay declared DGDSA targets onto a DGD settlement snapshot.
 
         ``spec.components[].replicas`` is only an initial seed for a component
@@ -784,6 +788,19 @@ class KubernetesAPI:
         has legitimately reached zero.
         """
         components = get_components_by_name(deployment)
+        expected_authorities = expected_authorities or {}
+        for component_name, (expects_adapter, _) in expected_authorities.items():
+            component = components.get(component_name)
+            if component is None:
+                raise RuntimeError(
+                    f"component {component_name!r} disappeared during replica settlement"
+                )
+            has_adapter = "scalingAdapter" in component
+            if has_adapter != expects_adapter:
+                raise RuntimeError(
+                    f"component {component_name!r} changed replica authority "
+                    "during settlement"
+                )
         adapter_components = [
             name
             for name, component in components.items()
@@ -811,10 +828,56 @@ class KubernetesAPI:
             )
             if rejection is not None:
                 raise ValueError(rejection)
+            expected_authority = expected_authorities.get(component_name)
+            if expected_authority is not None:
+                expected_uid = expected_authority[1]
+                adapter_uid = (adapter.get("metadata", {}) or {}).get("uid")
+                if adapter_uid != expected_uid:
+                    raise RuntimeError(
+                        f"DGDSA identity for component {component_name!r} changed "
+                        "during replica settlement"
+                    )
             authoritative_components[component_name][
                 "replicas"
             ] = self.get_scaling_adapter_desired_replicas(adapter)
         return authoritative
+
+    def replica_targets_stable(
+        self,
+        deployment: dict,
+        expected_targets: Mapping[str, int],
+    ) -> tuple[bool, list[str]]:
+        """Verify exact accepted targets and fully settled component status."""
+        components = get_components_by_name(deployment)
+        for component_name, expected in expected_targets.items():
+            component = components.get(component_name)
+            if component is None:
+                raise RuntimeError(
+                    f"component {component_name!r} disappeared during replica settlement"
+                )
+            actual = Service(name=component_name, service=component).number_replicas()
+            if actual != expected:
+                raise RuntimeError(
+                    f"replica target for component {component_name!r} changed "
+                    f"from {expected} to {actual} during settlement"
+                )
+
+        unsettled: list[str] = []
+        statuses = deployment.get("status", {}).get("components", {})
+        for component_name, component in components.items():
+            if get_component_type(component) == "planner":
+                continue
+            desired = Service(name=component_name, service=component).number_replicas()
+            status = statuses.get(component_name, {})
+            replicas = status.get("replicas")
+            updated = status.get("updatedReplicas")
+            available = status.get("availableReplicas")
+            serving = (
+                available if available is not None else status.get("readyReplicas")
+            )
+            if replicas != desired or updated != desired or serving != desired:
+                unsettled.append(component_name)
+        return not unsettled, unsettled
 
     def scaling_adapter_identity_rejection(
         self,
@@ -1100,6 +1163,10 @@ class KubernetesAPI:
         require_decode: bool = True,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
+        expected_dgd_uid: str | None = None,
+        expected_replica_targets: Mapping[str, int] | None = None,
+        expected_replica_authorities: Mapping[str, tuple[bool, str | None]]
+        | None = None,
     ) -> dict:
         """Wait for a graph deployment to be ready; return the ready snapshot.
 
@@ -1130,6 +1197,11 @@ class KubernetesAPI:
                 ``require_backing_settled`` is True so settlement covers the
                 same workers the power resolver will read (including untyped
                 named workers).
+            expected_dgd_uid / expected_replica_targets /
+                expected_replica_authorities: When targets are supplied, wait
+                for that exact accepted replica transaction instead of trusting
+                the DGD Ready condition. Identity or authority changes are
+                terminal; rollout, status, and Pod convergence are polled.
 
         Returns:
             The DGD dict that satisfied the readiness criteria (same object
@@ -1141,6 +1213,67 @@ class KubernetesAPI:
             graph_deployment = await asyncio.to_thread(
                 self.get_graph_deployment, graph_deployment_name
             )
+
+            if expected_replica_targets is not None:
+                if not isinstance(expected_dgd_uid, str) or not expected_dgd_uid:
+                    raise ValueError(
+                        "expected DGD UID is required for replica settlement"
+                    )
+                current_uid = graph_deployment.get("metadata", {}).get("uid")
+                if current_uid != expected_dgd_uid:
+                    raise RuntimeError("DGD identity changed during replica settlement")
+                if expected_replica_authorities is None:
+                    raise ValueError(
+                        "expected replica authorities are required for settlement"
+                    )
+
+                rolling = graph_deployment.get("status", {}).get("rollingUpdate") or {}
+                if rolling.get("phase") == "Failed":
+                    raise RolloutFailedError(
+                        deployment_name=graph_deployment_name,
+                        reason=rolling.get("message", ""),
+                    )
+                settlement_deployment = await asyncio.to_thread(
+                    self.fetch_authoritative_replica_targets,
+                    graph_deployment,
+                    expected_replica_authorities,
+                )
+                targets_stable, unsettled = self.replica_targets_stable(
+                    settlement_deployment, expected_replica_targets
+                )
+                generation_observed = self.is_spec_generation_observed(graph_deployment)
+                (
+                    blocking_rollout,
+                    rollout_reason,
+                ) = self.is_rolling_update_blocking_settlement(graph_deployment)
+                if not targets_stable or not generation_observed or blocking_rollout:
+                    logger.info(
+                        "[Attempt %d/%d] Waiting for accepted replica targets: "
+                        "unsettled=%s, observed=%s, rollout=%s",
+                        attempt + 1,
+                        max_attempts,
+                        unsettled,
+                        generation_observed,
+                        rollout_reason or "settled",
+                    )
+                    continue
+
+                pods = await asyncio.to_thread(
+                    self.list_pods_for_graph, graph_deployment_name
+                )
+                pods = self.exclude_checkpoint_capture_pods(pods)
+                if self.has_terminating_pods(
+                    pods
+                ) or not self.pcsg_pods_within_desired_replicas(
+                    settlement_deployment, pods
+                ):
+                    logger.info(
+                        "[Attempt %d/%d] Waiting for replica Pods to drain",
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    continue
+                return graph_deployment
 
             # Failed is a terminal rollout state; retrying until timeout (up to
             # 30 min) serves no purpose. Raise immediately so the operator can
