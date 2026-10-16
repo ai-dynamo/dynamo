@@ -76,7 +76,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         unavailable_reasons: dict[str, str] = {}
 
         if self._prefill_fpm_sub is not None:
-            stats, reason = self._decode_fpm_bytes(self._prefill_fpm_sub, "prefill")
+            stats, reason = self._collect_healthy_fpm(self._prefill_fpm_sub, "prefill")
             if reason:
                 unavailable_reasons["prefill"] = reason
             if stats:
@@ -85,7 +85,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
                 prefill_stats = stats
 
         if self._decode_fpm_sub is not None:
-            stats, reason = self._decode_fpm_bytes(self._decode_fpm_sub, "decode")
+            stats, reason = self._collect_healthy_fpm(self._decode_fpm_sub, "decode")
             if reason:
                 unavailable_reasons["decode"] = reason
             if stats:
@@ -171,7 +171,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
             f"{runtime_namespace}.{worker_info.component_name}.{worker_info.endpoint}"
         )
         sub = FpmEventSubscriber(endpoint)
-        sub.start_tracking()
+        sub.start_tracking(max_age_seconds=self.max_fpm_age_seconds)
         logger.info(
             "FPM tracker started for %s.%s.%s",
             runtime_namespace,
@@ -189,33 +189,27 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         self._decode_fpm_sub = None
         self._unjoined_workers.clear()
 
-    def _decode_fpm_bytes(
+    def _collect_healthy_fpm(
         self, subscriber, component: str
     ) -> tuple[dict[tuple[str, int], ForwardPassMetrics], Optional[str]]:
-        (
-            snapshot,
-            unjoined,
-            stale_count,
-            missing_count,
-        ) = subscriber.get_recent_stats_with_health(self.max_fpm_age_seconds)
-        identities = tuple(unjoined)
+        health = subscriber.get_recent_stats_with_health()
+        identities = tuple(health.unjoined_worker_ids)
         if identities and identities != self._unjoined_workers.get(component):
             logger.warning("FPM worker join failure for %s: %s", component, identities)
         self._unjoined_workers[component] = identities
-        reason = (
-            "worker_join_failure"
-            if unjoined
-            else "stale_fpm"
-            if stale_count
-            else "missing_fpm"
-            if missing_count
-            else None
-        )
+        if identities:
+            reason = "worker_join_failure"
+        elif health.stale_rank_count:
+            reason = "stale_fpm"
+        elif health.missing_rank_count:
+            reason = "missing_fpm"
+        else:
+            reason = None
         if reason:
             # A fresh subset, especially one DP rank, cannot prove the pool is idle.
             return {}, reason
         result = {}
-        for key, raw_bytes in snapshot.items():
+        for key, raw_bytes in health.snapshot.items():
             fpm = decode_fpm(raw_bytes)
             if fpm is None:
                 return {}, "invalid_fpm"

@@ -4,8 +4,16 @@
 import logging
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.types import ScheduledTick, TickInput, WorkerCapabilities
-from dynamo.planner.monitoring.planner_metrics import PluginFrameworkMetrics
+from dynamo.planner.core.types import (
+    ScheduledTick,
+    TickDiagnostics,
+    TickInput,
+    WorkerCapabilities,
+)
+from dynamo.planner.monitoring.planner_metrics import (
+    SIGNAL_DEGRADATION_OBSERVATIONS,
+    PluginFrameworkMetrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +33,18 @@ class PlannerSignalHealth:
             self._metrics.signal_unavailable.labels(
                 component=component, signal=signal
             ).set(int(unavailable))
-        if current == 3:
+        if current == SIGNAL_DEGRADATION_OBSERVATIONS:
             logger.warning(
-                "Planner degraded signal: component=%s signal=%s unavailable for 3 consecutive observations",
+                "Planner degraded signal: component=%s signal=%s unavailable for %s consecutive observations",
                 component,
                 signal,
+                SIGNAL_DEGRADATION_OBSERVATIONS,
             )
             if self._metrics is not None:
                 self._metrics.degraded_signals_total.labels(
                     component=component, signal=signal
                 ).inc()
-        elif previous >= 3 and current == 0:
+        elif previous >= SIGNAL_DEGRADATION_OBSERVATIONS and current == 0:
             logger.info(
                 "Planner signal recovered: component=%s signal=%s", component, signal
             )
@@ -45,6 +54,7 @@ class PlannerSignalHealth:
         scheduled: ScheduledTick,
         inputs: TickInput,
         capabilities: WorkerCapabilities,
+        diagnostics: TickDiagnostics,
     ) -> None:
         if scheduled.need_traffic_metrics and scheduled.use_full_traffic_metrics:
             self._record("fleet", "traffic", inputs.traffic is None)
@@ -86,27 +96,19 @@ class PlannerSignalHealth:
             self._record(component, "fpm", expected and not stats)
             for rejected in ("stale_fpm", "worker_join_failure", "invalid_fpm"):
                 self._record(component, rejected, expected and reason == rejected)
-            if (
-                self._config.enable_load_scaling
-                or self._config.optimization_target == "sla"
+            for path, ran, unavailable_reason in (
+                ("load", scheduled.run_load_scaling, "insufficient_data"),
+                ("throughput", scheduled.run_throughput_scaling, "model_not_ready"),
             ):
-                if component == "decode":
-                    missing_capacity = (
-                        caps is None
-                        or not caps.max_kv_tokens
-                        or (
-                            self._config.mode == "agg"
-                            and self._config.optimization_target == "sla"
-                            and not caps.max_num_batched_tokens
-                        )
+                decision_reason = getattr(
+                    diagnostics, f"{path}_decision_reason_{component}"
+                ) or getattr(diagnostics, f"{path}_decision_reason")
+                if ran and decision_reason is not None:
+                    self._record(
+                        component,
+                        f"{path}_inputs",
+                        expected and decision_reason == unavailable_reason,
                     )
-                elif self._config.optimization_target == "sla":
-                    missing_capacity = caps is None or not caps.max_num_batched_tokens
-                else:
-                    missing_capacity = False
-                self._record(
-                    component, "engine_capacity", expected and missing_capacity
-                )
             if component == "decode" and scheduled.need_traffic_metrics:
                 speculative = self._config.speculative_nextn or (
                     caps.speculative_nextn if caps is not None else 0

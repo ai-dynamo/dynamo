@@ -374,6 +374,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::fpm::FpmEventRelay>()?;
     m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
+    m.add_class::<llm::fpm::FpmHealthSnapshot>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;

@@ -4,6 +4,7 @@
 from prometheus_client import CollectorRegistry, Counter, Enum, Gauge, Histogram
 
 PREFIX = "dynamo_planner"
+SIGNAL_DEGRADATION_OBSERVATIONS = 3
 
 LOAD_DECISION_STATES = [
     "unset",
@@ -245,7 +246,8 @@ class PluginFrameworkMetrics:
         )
         self.degraded_signals_total = Counter(
             f"{PREFIX}_degraded_signals_total",
-            "Episodes with a required input unavailable for three consecutive observations",
+            "Episodes with a required input unavailable for "
+            f"{SIGNAL_DEGRADATION_OBSERVATIONS} consecutive observations",
             labelnames=["component", "signal"],
             **kw,
         )

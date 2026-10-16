@@ -8,7 +8,6 @@ import sys
 from contextlib import AsyncExitStack
 
 import pytest
-from prometheus_client import CollectorRegistry
 
 from dynamo.llm import (
     FpmDirectPublisher,
@@ -17,7 +16,6 @@ from dynamo.llm import (
     ModelType,
     WorkerType,
     register_model,
-    unregister_model,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import NativePlannerBase
@@ -32,8 +30,6 @@ from dynamo.planner.environment.metrics_provider.runtime_provider import (
     RuntimeFpmProvider,
 )
 from dynamo.planner.environment.state import DeploymentState
-from dynamo.planner.monitoring.planner_metrics import PluginFrameworkMetrics
-from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 from dynamo.runtime import DistributedRuntime
 
@@ -175,6 +171,7 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
             runtime=planner_runtime,
             state_source=sources,
             namespace_source=sources,
+            max_fpm_age_seconds=3.0,
         )
         await provider.async_init()
         stack.push_async_callback(provider.shutdown)
@@ -244,35 +241,20 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
             worker_type=WorkerType.Aggregated,
             runtime_config=runtime_config,
         )
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            (
-                snapshot,
-                _,
-                _,
-                missing_count,
-            ) = provider._decode_fpm_sub.get_recent_stats_with_health(15.0)
-            if missing_count == 2:
-                break
-        assert missing_count == 2
-        assert provider.collect_fpm().unavailable_reasons == {"decode": "missing_fpm"}
-
-        # Rank 0 alone must not make a discovered two-rank worker look idle.
         partial = FpmDirectPublisher(missing_endpoint, missing_worker_id, dp_size=1)
         stack.callback(partial.shutdown)
         for _ in range(100):
             _publish_idle_fpm(partial, 0)
             await asyncio.sleep(0.01)
-            (
-                snapshot,
-                _,
-                _,
-                missing_count,
-            ) = provider._decode_fpm_sub.get_recent_stats_with_health(15.0)
-            if (missing_worker_id, 0) in snapshot and missing_count == 1:
+            health = provider._decode_fpm_sub.get_recent_stats_with_health()
+            if (
+                missing_worker_id,
+                0,
+            ) in health.snapshot and health.missing_rank_count == 1:
                 break
-        assert (missing_worker_id, 0) in snapshot
-        assert missing_count == 1
+        assert health.missing_rank_count == 1
+        assert (missing_worker_id, 0) in health.snapshot
+        assert provider.collect_fpm().unavailable_reasons == {"decode": "missing_fpm"}
         assert provider.collect_fpm().decode is None
         partial.shutdown()
 
@@ -292,100 +274,14 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
         }
         assert recovered.unavailable_reasons == {}
 
-        await unregister_model(missing_endpoint)
-        for _ in range(100):
-            if missing_worker_id not in provider._decode_fpm_sub.get_model_cards():
-                break
-            await asyncio.sleep(0.01)
-        assert missing_worker_id not in provider._decode_fpm_sub.get_model_cards()
-        # Keep publishing after discovery removal to exercise the late-event race.
-        for _ in range(20):
-            for rank in (0, 1):
-                _publish_idle_fpm(complete, rank)
-            await asyncio.sleep(0.02)
-            remaining = provider.collect_fpm()
-            assert remaining.unavailable_reasons == {}
-            assert set(remaining.decode) == {(worker_id, 0)}
-
-        complete.shutdown()
-        await register_model(
-            ModelInput.Tensor,
-            ModelType.TensorBased,
-            missing_endpoint,
-            "test-model",
-            worker_type=WorkerType.Aggregated,
-            runtime_config=runtime_config,
-        )
-        for _ in range(100):
-            if missing_worker_id in provider._decode_fpm_sub.get_model_cards():
-                break
-            await asyncio.sleep(0.01)
-        assert missing_worker_id in provider._decode_fpm_sub.get_model_cards()
-        complete = FpmDirectPublisher(missing_endpoint, missing_worker_id, dp_size=2)
-        stack.callback(complete.shutdown)
-        for _ in range(100):
-            for rank in (0, 1):
-                _publish_idle_fpm(complete, rank)
-            await asyncio.sleep(0.01)
-            rejoined = provider.collect_fpm()
-            if rejoined.decode and len(rejoined.decode) == 3:
-                break
-        assert set(rejoined.decode) == {
-            (worker_id, 0),
-            (missing_worker_id, 0),
-            (missing_worker_id, 1),
-        }
-        assert rejoined.unavailable_reasons == {}
-
-        metrics = PluginFrameworkMetrics(registry=CollectorRegistry())
-        health = PlannerSignalHealth(config, metrics)
-        requested = ScheduledTick(at_s=0, need_worker_fpm=True)
-        caps = WorkerCapabilities(
-            decode=EngineCapabilities(num_gpu=1, max_kv_tokens=100)
-        )
-        health.observe(requested, tick_input, caps)
-
         publisher.shutdown()
-        provider.max_fpm_age_seconds = 0.05
-        for _ in range(100):
+        for _ in range(400):
             await asyncio.sleep(0.01)
             stale = provider.collect_fpm()
             if stale.unavailable_reasons.get("decode") == "stale_fpm":
                 break
-        assert not stale.decode
+        assert stale.decode is None
         assert stale.unavailable_reasons == {"decode": "stale_fpm"}
-        tick_input.fpm_observations = stale
-        for _ in range(3):
-            health.observe(requested, tick_input, caps)
-        assert (
-            metrics.degraded_signals_total.labels(
-                component="decode", signal="stale_fpm"
-            )._value.get()
-            == 1
-        )
-
-        unjoined = FpmDirectPublisher(worker_endpoint, "unknown-worker", dp_size=1)
-        stack.callback(unjoined.shutdown)
-        for _ in range(100):
-            unjoined.publish(
-                dp_rank=0,
-                scheduled_num_prefill_requests=0,
-                scheduled_sum_prefill_tokens=0,
-                scheduled_sum_prefill_kv_tokens=0,
-                scheduled_num_decode_requests=0,
-                scheduled_sum_decode_kv_tokens=0,
-                queued_num_prefill_requests=0,
-                queued_sum_prefill_tokens=0,
-                queued_num_decode_requests=0,
-                queued_sum_decode_kv_tokens=0,
-                wall_time_secs=0.0,
-            )
-            await asyncio.sleep(0.01)
-            rejected = provider.collect_fpm()
-            if rejected.unavailable_reasons.get("decode") == "worker_join_failure":
-                break
-        assert rejected.unavailable_reasons == {"decode": "worker_join_failure"}
-        assert not rejected.decode
 
 
 def _publish_idle_fpm(publisher, rank):

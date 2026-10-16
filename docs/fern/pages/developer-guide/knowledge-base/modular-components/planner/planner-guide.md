@@ -241,15 +241,19 @@ The Replica Counts plot overlays actual prefill/decode replicas with discrete re
 ### Unavailable Scaling Inputs
 
 `dynamo_planner_signal_unavailable{component,signal}` reports missing inputs on
-their most recent scheduled observation. After three consecutive unavailable
-observations, the Planner logs `Planner degraded signal` and increments
+their most recent scheduled observation. After the consecutive-observation
+threshold defined by `SIGNAL_DEGRADATION_OBSERVATIONS` in
+[planner_metrics.py](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/monitoring/planner_metrics.py)
+is reached, the Planner logs `Planner degraded signal` and increments
 `dynamo_planner_degraded_signals_total{component,signal}` once for that episode.
 A successful observation clears the gauge and allows a later outage to produce
 a new alert. Ticks that do not request a signal do not count as missing samples.
 
 The signals distinguish missing FPM, stale FPM, worker discovery join failures,
-missing engine capacity, missing speculative accept length, and unavailable
-traffic observations. Runtime FPM samples expire after three load-adjustment
+missing speculative accept length, and unavailable traffic observations.
+`load_inputs` and `throughput_inputs` report unavailable inputs from the scaling
+paths' own decision reasons, including insufficient model data or engine metadata.
+Runtime FPM samples expire after three load-adjustment
 intervals measured from local receipt. Idle heartbeats refresh that receipt
 time. Samples from workers absent from discovery are excluded and logged with
 their worker IDs.

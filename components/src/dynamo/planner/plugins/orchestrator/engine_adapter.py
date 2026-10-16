@@ -576,10 +576,6 @@ class OrchestratorEngineAdapter:
         if tick_input.worker_counts is not None:
             self._scaling_state.observe_worker_counts(tick_input.worker_counts)
 
-        self._signal_health.observe(
-            scheduled_tick, tick_input, self._scaling_state._capabilities
-        )
-
         # 1. Observe FPM into regressions before load proposal consumes
         #    the fitted perf models.
         is_easy = self._config.optimization_target != "sla"
@@ -657,6 +653,10 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
+
+        self._signal_health.observe(
+            scheduled_tick, tick_input, self._capabilities, diagnostics
+        )
 
         return PlannerEffects(
             scale_to=scale_to,

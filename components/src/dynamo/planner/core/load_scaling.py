@@ -53,22 +53,8 @@ class LoadScalingMixin:
     ) -> Optional[int]:
         if self._config.optimization_target != "sla" or not fpm_stats:
             return None
-        for fpm in fpm_stats.values():
-            scheduled, queued = fpm.scheduled_requests, fpm.queued_requests
-            if any(
-                (
-                    scheduled.num_prefill_requests,
-                    scheduled.sum_prefill_tokens,
-                    scheduled.sum_prefill_kv_tokens,
-                    scheduled.num_decode_requests,
-                    scheduled.sum_decode_kv_tokens,
-                    queued.num_prefill_requests,
-                    queued.sum_prefill_tokens,
-                    queued.num_decode_requests,
-                    queued.sum_decode_kv_tokens,
-                )
-            ):
-                return None
+        if not all(fpm.is_idle() for fpm in fpm_stats.values()):
+            return None
         # This FPM-driven path cannot wake a pool after its last publisher exits.
         return max(1, resolve_min_endpoint(self._config, component), num_workers - 1)
 
@@ -389,7 +375,7 @@ class LoadScalingMixin:
                 and not self._pending_num_d
             ):
                 return None
-            logger.info(f"Agg easy-mode scaling: {num_workers} -> {desired}")
+            logger.info("Agg load scaling: %s -> %s", num_workers, desired)
             return ScalingDecision(num_decode=desired)
 
         if not self._agg_regression.has_sufficient_data():

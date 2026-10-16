@@ -219,63 +219,67 @@ class ThroughputScalingMixin:
         osl: float,
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[ScalingDecision]:
-        d_caps = self._capabilities.decode
-        max_tokens = d_caps.max_num_batched_tokens if d_caps else None
-        max_tokens_available = bool(max_tokens and max_tokens > 0)
-        if not max_tokens_available and demand_rps != 0:
-            logger.warning("max_num_batched_tokens not available for agg throughput")
-        capacity = (
-            self._agg_regression.find_engine_capacity_rps(
-                isl=isl,
-                osl=osl,
-                ttft_sla_ms=self._config.ttft_ms,
-                itl_sla_ms=self._config.itl_ms,
-                kv_hit_rate=kv_hit_rate,
-                accept_length=self._current_decode_accept_length(),
-            )
-            if max_tokens_available and demand_rps != 0
-            else None
-        )
-        engine_rps = capacity.rps if capacity is not None else 0.0
-        model_not_ready = demand_rps != 0 and (capacity is None or engine_rps <= 0)
+        model_not_ready = False
         if demand_rps == 0:
             desired = max(1, resolve_min_endpoint(self._config, "decode"))
-        elif capacity is None or engine_rps <= 0:
-            # No capacity estimate, so the demand division below cannot run;
-            # hold at the current count so the endpoint floor still applies.
-            logger.warning(
-                "Agg perf model not ready, holding at the current replica count "
-                "and enforcing the endpoint floor"
-            )
-            self._diag_throughput_reason = "model_not_ready"
-            desired = self._num_d_workers
         else:
-            actual_ttft = capacity.ttft_ms or 0.0
-            actual_itl = capacity.itl_ms or 0.0
-            if (
-                not capacity.eligible
-                or actual_ttft > self._config.ttft_ms
-                or actual_itl > self._config.itl_ms
-            ):
+            d_caps = self._capabilities.decode
+            max_tokens = d_caps.max_num_batched_tokens if d_caps else None
+            max_tokens_available = bool(max_tokens and max_tokens > 0)
+            if not max_tokens_available:
                 logger.warning(
-                    "Agg SLA not fully met: TTFT=%.1fms, ITL=%.1fms",
-                    actual_ttft,
-                    actual_itl,
+                    "max_num_batched_tokens not available for agg throughput"
                 )
-
-            self._diag_engine_rps_prefill = engine_rps
-            self._diag_engine_rps_decode = engine_rps
-
-            desired = max(
-                math.ceil(demand_rps / engine_rps),
-                resolve_min_endpoint(self._config, "decode"),
+            capacity = (
+                self._agg_regression.find_engine_capacity_rps(
+                    isl=isl,
+                    osl=osl,
+                    ttft_sla_ms=self._config.ttft_ms,
+                    itl_sla_ms=self._config.itl_ms,
+                    kv_hit_rate=kv_hit_rate,
+                    accept_length=self._current_decode_accept_length(),
+                )
+                if max_tokens_available
+                else None
             )
-            logger.info(
-                "Agg: %.2f rps / %.2f engine_rps = %s replicas",
-                demand_rps,
-                engine_rps,
-                desired,
-            )
+            engine_rps = capacity.rps if capacity is not None else 0.0
+            if capacity is None or engine_rps <= 0:
+                model_not_ready = True
+                # No capacity estimate, so the demand division below cannot run;
+                # hold at the current count so the endpoint floor still applies.
+                logger.warning(
+                    "Agg perf model not ready, holding at the current replica count "
+                    "and enforcing the endpoint floor"
+                )
+                self._diag_throughput_reason = "model_not_ready"
+                desired = self._num_d_workers
+            else:
+                actual_ttft = capacity.ttft_ms or 0.0
+                actual_itl = capacity.itl_ms or 0.0
+                if (
+                    not capacity.eligible
+                    or actual_ttft > self._config.ttft_ms
+                    or actual_itl > self._config.itl_ms
+                ):
+                    logger.warning(
+                        "Agg SLA not fully met: TTFT=%.1fms, ITL=%.1fms",
+                        actual_ttft,
+                        actual_itl,
+                    )
+
+                self._diag_engine_rps_prefill = engine_rps
+                self._diag_engine_rps_decode = engine_rps
+
+                desired = max(
+                    math.ceil(demand_rps / engine_rps),
+                    resolve_min_endpoint(self._config, "decode"),
+                )
+                logger.info(
+                    "Agg: %.2f rps / %.2f engine_rps = %s replicas",
+                    demand_rps,
+                    engine_rps,
+                    desired,
+                )
         desired = self._cap_throughput_replicas(
             desired, self._num_d_workers, "aggregated"
         )
