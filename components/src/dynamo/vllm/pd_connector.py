@@ -85,6 +85,8 @@ class PdConnector(MultiConnector):
     - The second connector must be NIXL and will be used by decode worker to get KV blocks from prefill worker.
     """
 
+    _extra_async_saves: dict[str, int]
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
