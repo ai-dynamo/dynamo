@@ -20,7 +20,7 @@ pub use crate::plugins::worker_selection::{
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows,
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInfo, WorkerInputRows,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
@@ -263,11 +263,6 @@ fn worker_input_row(
     } else {
         0
     };
-    let worker_load = if inputs.contains(WorkerInputs::LOAD) {
-        request.worker_loads.get(&worker).copied()
-    } else {
-        None
-    };
     let cache = if inputs.contains(WorkerInputs::CACHE) {
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
         let reported_device_overlap_blocks = request
@@ -303,14 +298,9 @@ fn worker_input_row(
         WorkerCacheData::default()
     };
     let load = if inputs.contains(WorkerInputs::LOAD) {
-        let available = worker_load.is_some();
-        let worker_load = worker_load.unwrap_or_else(|| request.worker_load_for(worker));
-        WorkerLoadInput {
-            available,
-            active_prefill_tokens: worker_load.active_prefill_tokens,
-            decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
-            active_requests: worker_load.active_requests,
-        }
+        WorkerLoadInput::for_worker(&request.worker_loads, worker, || {
+            request.unobserved_worker_load()
+        })
     } else {
         WorkerLoadInput::default()
     };
@@ -334,7 +324,9 @@ pub(crate) fn worker_input_rows<C: WorkerConfigLike>(
     let materialize_preferred_taint =
         eligibility.pinned_worker().is_none() && inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let mut rows = Vec::new();
+    let mut capacities = Vec::new();
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
+        capacities.push(WorkerCapacity::of(config));
         let preferred_taint_multiplier = if materialize_preferred_taint {
             request
                 .routing_constraints
@@ -351,7 +343,18 @@ pub(crate) fn worker_input_rows<C: WorkerConfigLike>(
         ));
         false
     });
-    WorkerInputRows::new(inputs, rows, cache_snapshot(request))
+    WorkerInputRows::new(inputs, rows, capacities, cache_snapshot(request))
+}
+
+/// Static info for a rank of `workers`, looked up only when a component asks for it.
+fn worker_info<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    worker: WorkerWithDpRank,
+) -> WorkerInfo {
+    workers.get(&worker.worker_id).map_or_else(
+        || WorkerInfo::new(worker, WorkerCapacity::default()),
+        |config| WorkerInfo::of(worker, config),
+    )
 }
 
 fn selection_result(
@@ -579,6 +582,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     !picker_inputs.contains(WorkerInputs::LOAD)
                         || load_inputs.len() == candidates.len()
                 );
+                let candidates: &[ScoredWorkerCandidate] = candidates;
+                let info = |row: usize| worker_info(workers, candidates[row].worker);
                 let picker_input = WorkerInputView {
                     candidates,
                     cache: picker_inputs.contains(WorkerInputs::CACHE).then_some(
@@ -590,6 +595,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
+                    info: &info,
                 };
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {

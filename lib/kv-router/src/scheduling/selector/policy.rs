@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use super::DefaultWorkerPicker;
 use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
+    worker_info,
 };
 
 use crate::protocols::{
@@ -19,8 +20,8 @@ use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelect
 
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
-    WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext,
+    WorkerCandidates, WorkerFilter, WorkerInfo, WorkerInputs, WorkerLoadInput, WorkerPicker,
+    WorkerScorer, WorkerSelectionContext,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
@@ -262,10 +263,11 @@ impl ComposedPolicyState {
         }
     }
 
-    fn score_candidates(
+    fn score_candidates<C: WorkerConfigLike>(
         &mut self,
         context: &WorkerSelectionContext<'_>,
         cache_snapshot: &CacheSnapshot<'_>,
+        workers: &HashMap<WorkerId, C>,
     ) -> Result<(), KvSchedulerError> {
         let Self {
             scorers,
@@ -277,13 +279,15 @@ impl ComposedPolicyState {
         if unscored_candidates.is_empty() {
             return Ok(());
         }
+        let unscored_candidates: &[CandidateData] = unscored_candidates;
+        let info = |row: usize| worker_info(workers, unscored_candidates[row].worker);
         debug_assert_eq!(unscored_candidates.len(), candidates.len());
         score_contributions.resize(candidates.len(), f64::NAN);
         for (scorer_index, (inputs, scorer)) in scorers.iter_mut().enumerate() {
             score_contributions.fill(f64::NAN);
             scorer.score(
                 context,
-                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot),
+                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot, &info),
                 score_contributions,
             )?;
             for (row, (contribution, scored)) in score_contributions
@@ -337,7 +341,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             state.push_candidate(candidate);
             false
         });
-        state.score_candidates(&input.context, &input.cache_snapshot)?;
+        state.score_candidates(&input.context, &input.cache_snapshot, workers)?;
         return Ok(!state.candidates.is_empty());
     }
 
@@ -362,10 +366,11 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             filter_preferred_taint_multiplier,
             state.filter_inputs,
         );
+        let info = |_: usize| WorkerInfo::of(worker, config);
         for (inputs, filter) in &mut state.filters {
             match filter.keep(
                 &input.context,
-                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot),
+                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot, &info),
             ) {
                 Ok(true) => {}
                 Ok(false) => return false,
@@ -396,7 +401,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     if let Some(error) = error {
         return Err(error);
     }
-    state.score_candidates(&input.context, &input.cache_snapshot)?;
+    state.score_candidates(&input.context, &input.cache_snapshot, workers)?;
     Ok(has_eligible_worker)
 }
 
@@ -718,6 +723,93 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn worker_info_reaches_every_component_without_declaration() {
+        struct ReportedKvFilter;
+        impl WorkerFilter for ReportedKvFilter {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                let info = candidate.info();
+                assert_eq!(info.worker(), candidate.worker());
+                Ok(info.total_kv_blocks().is_some())
+            }
+        }
+
+        struct BatchBudgetScorer;
+        impl WorkerScorer for BatchBudgetScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    let info = candidate.info();
+                    assert_eq!(info.worker(), candidate.worker());
+                    *cost = info.max_num_batched_tokens().unwrap_or(0) as f64;
+                }
+                Ok(())
+            }
+        }
+
+        struct LargestKvPicker;
+        impl WorkerPicker for LargestKvPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let rows = input.candidates().len();
+                assert!(input.info(rows).is_none());
+                for (row, candidate) in input.candidates().iter().enumerate() {
+                    let info = input.info(row).expect("in-range row");
+                    assert_eq!(info.worker(), candidate.worker());
+                    assert_eq!(
+                        info.max_num_batched_tokens().unwrap_or(0) as f64,
+                        candidate.cost()
+                    );
+                }
+                Ok((0..rows)
+                    .max_by_key(|&row| input.info(row).and_then(|info| info.total_kv_blocks()))
+                    .expect("eligible candidate"))
+            }
+        }
+
+        let config =
+            |max_num_batched_tokens, total_kv_blocks| crate::test_utils::SimpleWorkerConfig {
+                max_num_batched_tokens,
+                total_kv_blocks,
+                ..Default::default()
+            };
+        // Worker 2 reports no KV capacity, so the filter drops it.
+        let workers = HashMap::from([
+            (0, config(Some(64), Some(10))),
+            (1, config(None, Some(20))),
+            (2, config(Some(64), None)),
+        ]);
+        let request = base_request(16);
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(ReportedKvFilter)],
+            vec![Box::new(BatchBudgetScorer)],
+            Box::new(LargestKvPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(1));
     }
 
     #[test]

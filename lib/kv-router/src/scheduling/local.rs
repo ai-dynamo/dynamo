@@ -960,9 +960,9 @@ mod tests {
     use super::*;
     use crate::plugins::worker_selection::WorkerCandidates;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-    use crate::scheduling::PrefillLoadEstimator;
     use crate::scheduling::request_classifier::ClassifyFuture;
     use crate::scheduling::selector::DefaultWorkerSelector;
+    use crate::scheduling::{BusyThresholds, PrefillLoadEstimator};
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_reads_declared_worker_inputs() {
-        type Row = (WorkerWithDpRank, f64, bool, usize);
+        type Row = (WorkerWithDpRank, f64, bool, usize, bool);
         struct InputsClassifier(Arc<parking_lot::Mutex<Option<Vec<Row>>>>);
         impl RequestClassifier for InputsClassifier {
             fn required_worker_inputs(&self) -> WorkerInputs {
@@ -1512,6 +1512,11 @@ mod tests {
                 request: ClassifyRequest,
                 workers: WorkerCandidates<'_>,
             ) -> ClassifyFuture {
+                // The queue's capacity check, run on the classifier's own rows.
+                let thresholds = BusyThresholds {
+                    prefill_busy_threshold_frac: Some(0.5),
+                    ..Default::default()
+                };
                 *self.0.lock() = Some(
                     workers
                         .iter()
@@ -1525,6 +1530,7 @@ mod tests {
                                     .device_overlap_blocks(),
                                 load.is_available(),
                                 load.active_requests(),
+                                thresholds.has_room(load, candidate.info().capacity()),
                             )
                         })
                         .collect(),
@@ -1535,10 +1541,11 @@ mod tests {
 
         let cached = WorkerWithDpRank::new(0, 0);
         let busy = WorkerWithDpRank::new(1, 0);
-        let workers = HashMap::from([
-            (0, SimpleWorkerConfig::default()),
-            (1, SimpleWorkerConfig::default()),
-        ]);
+        let worker_config = SimpleWorkerConfig {
+            max_num_batched_tokens: Some(100),
+            ..Default::default()
+        };
+        let workers = HashMap::from([(0, worker_config.clone()), (1, worker_config)]);
         let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let rows = Arc::new(parking_lot::Mutex::new(None));
         assert!(scheduler.install_request_classifier(
@@ -1551,7 +1558,10 @@ mod tests {
                 token_sequence: None,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: Some(crate::protocols::PrefillLoadHint {
+                    initial_effective_prefill_tokens: 64,
+                    expected_prefill_duration: None,
+                }),
                 worker: busy,
                 lora_name: None,
             })
@@ -1579,7 +1589,10 @@ mod tests {
             .take()
             .expect("declared inputs must reach the classifier");
         rows.sort_by_key(|row| row.0);
-        assert_eq!(rows, vec![(cached, 2.0, true, 0), (busy, 0.0, true, 1)]);
+        assert_eq!(
+            rows,
+            vec![(cached, 2.0, true, 0, true), (busy, 0.0, true, 1, false)]
+        );
         cancel_token.cancel();
     }
 

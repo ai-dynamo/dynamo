@@ -273,6 +273,8 @@ Dynamo builds these rows with the same code that worker selection uses, so `CACH
 - `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns, so a deferred classification holds none of them. Copy into the returned future whatever it needs, and do not treat that copy as current load when the request is admitted later.
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 
+Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `BusyThresholds::has_room` with the row's `load()` and `info().capacity()`. The policy-class queue runs the same function on the same row to decide when queued requests wait.
+
 ### Admission Decisions
 
 | Setter | Effect |
