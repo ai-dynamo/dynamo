@@ -26,7 +26,7 @@
 //! .await?;
 //! let mut pools = discovery.pools.list_and_watch(Some(cancel.clone())).await?;
 //! // WatchEvent::{Added, Removed, Resync} update the GlobalViewRuntime's pool set.
-//! // RelayListener::accept checks each Relay with discovery.authenticator
+//! // StateReceiver::accept checks each Relay with discovery.authenticator
 //! // and admit(&*discovery.pools, ..).
 //! ```
 //!
@@ -35,7 +35,7 @@
 //! ```ignore
 //! let replicas = EndpointSliceReplicaDirectory::imported(local, &router, mcs);
 //! let mut events = replicas.list_and_watch(Some(cancel.clone())).await?;
-//! // Added(replica): dialer.dial(&replica, &pool_key, cancel.clone())
+//! // Added(replica): broadcaster.dial(&replica, &pool_key, cancel.clone())
 //! // Removed(id): close that connection
 //! ```
 
