@@ -71,3 +71,4 @@ def test_nemotron_recipe_uses_selected_wheel_kubernetes_requirement() -> None:
     assert 'requires("kubernetes")' in dockerfile
     assert '"${DYNAMO_PYDANTIC_REQUIREMENT}"' in dockerfile
     assert '"${KUBERNETES_PYDANTIC_REQUIREMENT}"' in dockerfile
+    assert '"pydantic<2.13"' not in dockerfile

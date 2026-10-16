@@ -115,6 +115,29 @@ def test_floor_rejects_unpaired_scale_down():
     assert "budget breach" in (res.reject_message or "").lower()
 
 
+def test_unavailable_capacity_does_not_satisfy_floor():
+    orch = _decider(min_total_gpus=3)
+    pools = _pools(nsA__a=(None, 2, 1), nsB__b=(None, 2, 1))
+    pools["nsA/a"]["decode"].available = False
+
+    res = _mediate(orch, "nsB/b", _targets(decode=1), pools)
+
+    assert not res.approved
+    assert "below floor" in (res.reject_message or "")
+
+
+def test_unavailable_capacity_is_not_selected_as_partner():
+    orch = _decider(max_total_gpus=4)
+    live_pools = _pools(nsA__a=(None, 2, 1), nsB__b=(None, 2, 1))
+    assert _mediate(orch, "nsA/a", _targets(decode=1), live_pools).approved
+
+    live_pools["nsA/a"]["decode"].available = False
+    res = _mediate(orch, "nsB/b", _targets(decode=3), live_pools)
+
+    assert not res.approved
+    assert res.selected_partners == []
+
+
 def test_floor_pairs_scale_down_across_participants():
     orch = _decider(max_total_gpus=4, min_total_gpus=4)
     pools = _pools(nsA__a=(None, 2, 1), nsB__b=(None, 2, 1))  # fixed total 4
@@ -1013,6 +1036,56 @@ async def test_post_write_readback_serializes_same_participant():
     second_result = await asyncio.wait_for(second, 1)
     assert first_result.current_replicas["prefill"] == 2
     assert second_result.current_replicas["prefill"] == 3
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admitted_request_finishes_participant_wait():
+    class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.readback_started = Event()
+            self.release_readback = Event()
+            self.readback_calls = 0
+            self.scale_calls = 0
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_calls += 1
+            return await super().scale(participant_id, targets, blocking)
+
+        def current_replicas(self, participant_id):
+            self.readback_calls += 1
+            if self.readback_calls == 1:
+                self.readback_started.set()
+                self.release_readback.wait()
+            return super().current_replicas(participant_id)
+
+    cm = BlockingFirstReadbackCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm, max_gpus=10)
+    first = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=2)))
+    assert await asyncio.to_thread(cm.readback_started.wait, 1)
+
+    second = asyncio.create_task(_submit(orch, "default/a", _targets(prefill=3)))
+    try:
+        for _ in range(100):
+            intent = orch._intent_cache.get("default/a/prefill")
+            if intent is not None and intent.last_desired == 3:
+                break
+            await asyncio.sleep(0)
+        assert intent is not None and intent.last_desired == 3
+        assert cm.scale_calls == 1
+
+        second.cancel()
+        await asyncio.sleep(0)
+        assert not second.done()
+    finally:
+        cm.release_readback.set()
+
+    assert (await asyncio.wait_for(first, 1)).status == ScaleStatus.SUCCESS
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(second, 1)
+    assert cm.scale_calls == 2
+    assert cm.pools["default/a"]["prefill"][0] == 3
 
 
 @pytest.mark.asyncio

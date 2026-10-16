@@ -33,13 +33,17 @@ class PoolSpec:
     and ``gpu_per_replica``. ``component_name`` is an opaque backend handle for
     the pool (empty for backends that don't need one); it round-trips through the
     orchestrator so a paired scale can target the right component. Pools with
-    ``gpu_per_replica == 0`` contribute 0 to budget totals.
+    ``gpu_per_replica == 0`` contribute 0 to budget totals. ``available`` is
+    false when a backend retains uncertain capacity for ceiling accounting but
+    cannot prove that the pool still exists. Such pools must not satisfy the
+    floor or be selected for scaling.
     """
 
     sub_type: str
     current_replicas: int
     gpu_per_replica: int
     component_name: str = ""
+    available: bool = True
 
 
 # participant_id -> (sub_type -> PoolSpec)

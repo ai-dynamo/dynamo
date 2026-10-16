@@ -308,11 +308,14 @@ class KubernetesCapacityManager(CapacityManager):
                         require_complete,
                     )
                 elif key in self._last_observed_pools:
-                    # Keep the last complete desired-state charge after drain.
                     # Pod absence alone cannot prove all workload controllers
-                    # have disappeared, so releasing this capacity would make
-                    # the hard ceiling optimistic.
-                    all_pools[key] = dict(self._last_observed_pools[key])
+                    # have disappeared. Preserve the last desired-state charge
+                    # for the ceiling, but do not let an absent participant
+                    # satisfy the floor or become a scale partner.
+                    all_pools[key] = {
+                        pool_key: replace(pool, available=False)
+                        for pool_key, pool in self._last_observed_pools[key].items()
+                    }
                 elif retain:
                     # An allowlisted DGD may legitimately be created after the
                     # planner. Keep probing it without charging unknown usage.

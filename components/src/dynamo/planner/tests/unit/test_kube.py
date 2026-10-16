@@ -184,6 +184,24 @@ def test_list_graph_deployments_follows_continue_tokens(k8s_api, mock_custom_api
     )
 
 
+def test_list_graph_deployments_restarts_expired_pagination(k8s_api, mock_custom_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh_first = {"metadata": {"name": "fresh-first"}}
+    fresh_second = {"metadata": {"name": "fresh-second"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [stale], "metadata": {"continue": "expired-page"}},
+        client.ApiException(status=410, reason="ResourceExpired"),
+        {"items": [fresh_first], "metadata": {"continue": "fresh-page"}},
+        {"items": [fresh_second], "metadata": {}},
+    ]
+
+    assert k8s_api.list_graph_deployments() == [fresh_first, fresh_second]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [None, "expired-page", None, "fresh-page"]
+
+
 def _dgd_json_patch_bodies(mock_custom_api):
     calls = mock_custom_api.patch_namespaced_custom_object.call_args_list
     for api_call in calls:
@@ -1969,6 +1987,28 @@ def test_list_graph_pods_follows_continue_tokens(k8s_api, mock_core_api):
         call.kwargs["_continue"]
         for call in mock_core_api.list_namespaced_pod.call_args_list
     ] == [None, "next-page"]
+
+
+def test_list_graph_pods_restarts_expired_pagination(k8s_api, mock_core_api):
+    stale = _make_pod("stale", component="prefill")
+    fresh_first = _make_pod("fresh-first", component="prefill")
+    fresh_second = _make_pod("fresh-second", component="decode")
+    mock_core_api.list_namespaced_pod.side_effect = [
+        SimpleNamespace(
+            items=[stale], metadata=SimpleNamespace(_continue="expired-page")
+        ),
+        client.ApiException(status=410, reason="ResourceExpired"),
+        SimpleNamespace(
+            items=[fresh_first], metadata=SimpleNamespace(_continue="fresh-page")
+        ),
+        SimpleNamespace(items=[fresh_second], metadata=SimpleNamespace(_continue=None)),
+    ]
+
+    assert k8s_api.list_graph_pods() == [fresh_first, fresh_second]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_core_api.list_namespaced_pod.call_args_list
+    ] == [None, "expired-page", None, "fresh-page"]
 
 
 def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(

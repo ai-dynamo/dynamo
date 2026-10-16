@@ -669,7 +669,7 @@ def test_observe_never_seen_deployment_ignores_terminal_pods():
     assert not cm.participant_exists("default/missing")
 
 
-def test_observe_deleted_deployment_retains_last_complete_capacity():
+def test_observe_deleted_deployment_retains_uncertain_ceiling_capacity():
     cm = KubernetesCapacityManager("default")
     deployment = _dgd_spec(2, 1)
     connector = _install_connector(
@@ -683,9 +683,11 @@ def test_observe_deleted_deployment_retains_last_complete_capacity():
     initial = cm.observe(require_complete=True)
     retained = cm.observe(require_complete=True)
 
-    assert retained == initial
     assert retained["default/model"]["prefill"].current_replicas == 2
     assert retained["default/model"]["decode"].current_replicas == 1
+    assert not retained["default/model"]["prefill"].available
+    assert not retained["default/model"]["decode"].available
+    assert initial["default/model"]["prefill"].available
     assert not cm.participant_exists("default/model")
 
 
@@ -715,6 +717,7 @@ async def test_deleted_deployment_retains_last_accepted_replica_target():
     retained = cm.observe(require_complete=True)
 
     assert retained["default/model"]["prefill"].current_replicas == 3
+    assert not retained["default/model"]["prefill"].available
     assert not cm.participant_exists("default/model")
 
 

@@ -40,10 +40,11 @@ RUN pip install --no-cache-dir --no-deps \
 # (`ai-dynamo-runtime`) that the Python package imports natively. Read the
 # Kubernetes constraint from the selected wheel so DYNAMO_VERSION overrides
 # cannot silently install an incompatible client. Intersect the selected Dynamo
-# and Kubernetes Pydantic constraints; older metadata retains the recipe pin.
+# and Kubernetes Pydantic constraints. The runtime wheel supplies Dynamo's
+# bound when the pure-Python wheel does not declare Pydantic directly.
 RUN KUBERNETES_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next(r for r in requires("ai-dynamo") or () if re.match(r"^kubernetes(?:\[|\s|[<>=!~])", r, re.IGNORECASE)))')" \
     && pip install --no-cache-dir --no-deps "${KUBERNETES_REQUIREMENT}" \
-    && DYNAMO_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("ai-dynamo") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic<2.13"))')" \
+    && DYNAMO_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("ai-dynamo") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic"))')" \
     && KUBERNETES_PYDANTIC_REQUIREMENT="$(python -c 'import re; from importlib.metadata import requires; print(next((r for r in requires("kubernetes") or () if re.match(r"^pydantic(?:\[|\s|[<>=!~])", r, re.IGNORECASE)), "pydantic"))')" \
     && pip install --no-cache-dir \
       --extra-index-url https://pypi.nvidia.com \

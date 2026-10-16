@@ -21,6 +21,7 @@ from typing import Optional
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
+from kubernetes.utils.retry import DEFAULT_BACKOFF, on_error
 
 from dynamo.common.kubernetes import (
     AmbiguousKubernetesWriteError,
@@ -77,6 +78,10 @@ def _as_custom_object(value: object, resource: str) -> dict:
     return value
 
 
+def _is_resource_expired(error: Exception) -> bool:
+    return isinstance(error, client.ApiException) and error.status == 410
+
+
 def get_current_k8s_namespace() -> str:
     """Get the current namespace if running inside a k8s cluster"""
     try:
@@ -118,6 +123,14 @@ class KubernetesAPI:
 
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
+        return on_error(
+            DEFAULT_BACKOFF,
+            _is_resource_expired,
+            self._list_graph_deployments_once,
+        )
+
+    def _list_graph_deployments_once(self) -> list[dict]:
+        """Read one internally consistent paginated DGD snapshot."""
         deployments: list[dict] = []
         continue_token: str | None = None
         seen_tokens: set[str] = set()
@@ -948,6 +961,24 @@ class KubernetesAPI:
         *,
         metadata_only: bool = False,
     ) -> list:
+        return on_error(
+            DEFAULT_BACKOFF,
+            _is_resource_expired,
+            lambda: self._list_graph_pods_once(
+                label_selector,
+                field_selector,
+                metadata_only=metadata_only,
+            ),
+        )
+
+    def _list_graph_pods_once(
+        self,
+        label_selector: str,
+        field_selector: str | None = None,
+        *,
+        metadata_only: bool = False,
+    ) -> list:
+        """Read one internally consistent paginated Pod snapshot."""
         pods: list = []
         continue_token: str | None = None
         seen_tokens: set[str] = set()
