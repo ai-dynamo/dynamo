@@ -2662,6 +2662,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-appender",
+ "url",
  "uuid",
  "xxhash-rust",
  "zeroize",

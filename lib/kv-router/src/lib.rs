@@ -16,6 +16,7 @@ pub mod identity;
 pub mod indexer;
 pub mod kv_hints;
 pub mod plugins;
+pub mod pool_discovery;
 pub mod protocols;
 pub mod recovery;
 pub mod scheduling;
