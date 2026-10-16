@@ -22,6 +22,29 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# Reject Helm transitions that skip one or more Dynamo minor releases. The check reads the
+# installed operator Deployment before Helm applies the new release.
+upgradePreflight:
+  # -- Image containing Python 3 (standard library only). Override for an internal registry.
+  image: docker.io/library/python:3.12-slim
+  # -- Existing pull secrets for the version preflight image.
+  imagePullSecrets: []
+  # -- Maximum Job duration in seconds, including retries.
+  activeDeadlineSeconds: 120
+  # -- Independent preflight affinity. Does not inherit controllerManager.affinity.
+  affinity: {}
+  # -- Full replacement of the preflight pod security context. Null uses secure defaults.
+  # Omit runAsUser on OpenShift for admission to assign the namespace UID.
+  podSecurityContext: null
+
+# -- Installed minor (N.M) allowed to make one otherwise unsupported forward upgrade.
+# The value is ignored after the installed minor changes.
+unsupportedUpgradeOverride: ""
+
+# -- Installed minor (N.M) allowed to make one otherwise unsupported downgrade.
+# The value is ignored after the installed minor changes.
+unsupportedDowngradeOverride: ""
+
 # The LPX scheduler and its CRDs must be installed separately.
 lpx:
   # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the

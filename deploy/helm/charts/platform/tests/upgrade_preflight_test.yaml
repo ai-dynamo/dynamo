@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Dynamo version preflight
+templates:
+  - charts/dynamo-operator/templates/upgrade-preflight.yaml
+tests:
+  - it: preserves the first hook resource apiVersion
+    documentSelector: {path: kind, value: ServiceAccount}
+    asserts:
+      - equal: {path: apiVersion, value: v1}
+
+  - it: runs a bounded compatibility check before install and upgrade
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: metadata.name, value: RELEASE-NAME-dynamo-operator-check-dynamo-version}
+      - equal: {path: 'metadata.annotations["helm.sh/hook"]', value: 'pre-install,pre-upgrade'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-10'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
+      - equal: {path: spec.activeDeadlineSeconds, value: 120}
+      - equal: {path: spec.backoffLimit, value: 2}
+      - equal: {path: 'spec.template.spec.containers[0].args[3]', value: "1.6.0"}
+      - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def kubernetes_client\('}
+      - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
+
+  - it: gives the check read access only to the operator Deployment
+    documentSelector: {path: kind, value: Role}
+    asserts:
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-20'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: before-hook-creation}
+      - equal: {path: 'rules[0].resources', value: [deployments]}
+      - equal: {path: 'rules[0].resourceNames', value: [RELEASE-NAME-dynamo-operator-controller-manager]}
+      - equal: {path: 'rules[0].verbs', value: [get]}
+
+  - it: passes source-bound upgrade and downgrade overrides to the check
+    set:
+      dynamo-operator.unsupportedUpgradeOverride: "1.2"
+      dynamo-operator.unsupportedDowngradeOverride: "1.5"
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: 'spec.template.spec.containers[0].args[4]', value: "1.2"}
+      - equal: {path: 'spec.template.spec.containers[0].args[5]', value: "1.5"}
+
+  - it: retains secure pod defaults
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile: {type: RuntimeDefault}
+
+  - it: lets OpenShift assign the UID while retaining other security defaults
+    set:
+      dynamo-operator.upgradePreflight.podSecurityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.securityContext.runAsUser}
+      - equal: {path: spec.template.spec.securityContext.runAsNonRoot, value: true}
+      - equal: {path: spec.template.spec.securityContext.seccompProfile.type, value: RuntimeDefault}
+
+  - it: does not inherit controller-specific required pod affinity
+    set:
+      dynamo-operator.controllerManager.affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {control-plane: controller-manager}
+              topologyKey: kubernetes.io/hostname
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.affinity}
+
+  - it: uses independently configured preflight affinity
+    set:
+      dynamo-operator.upgradePreflight.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: kubernetes.io/os, operator: In, values: [linux]}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value: {key: kubernetes.io/os, operator: In, values: [linux]}
+
+  - it: keeps the compatibility check visible in long hook names
+    set:
+      dynamo-operator.fullnameOverride: a-very-long-operator-name-that-needs-truncation-for-the-hook
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - matchRegex: {path: metadata.name, pattern: '^.{1,42}-check-dynamo-version$'}
