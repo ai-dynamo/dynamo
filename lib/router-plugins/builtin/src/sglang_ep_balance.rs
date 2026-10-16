@@ -38,10 +38,10 @@ struct Parameters {
     /// balancing only decides among them. Values above 1.0 disable the gate.
     cache_affinity_min_fraction: f64,
     /// A session bound to a rank (the host's advisory affinity target) moves only if that lowers
-    /// the group's slowest-rank context by more than this many times the request's own context
-    /// times the move cost (see [`affinity_row`]). 0 moves whenever another rank is better; a
-    /// large value (e.g. 1e9) gives hard stickiness.
-    affinity_min_imbalance_reduction: f64,
+    /// the total DP idle time by more than this many times the request's own context times the
+    /// move cost (see [`affinity_row`]). 0 moves whenever another rank is better; a large value
+    /// (e.g. 1e9) gives hard stickiness.
+    affinity_min_dp_idle_saving: f64,
     /// DP ranks per physical host, numbered contiguously within a worker (ranks
     /// `[k * n, (k + 1) * n)` share host `k`). 0 means unknown: every move costs a full transfer.
     dp_ranks_per_host: u32,
@@ -56,7 +56,7 @@ impl Default for Parameters {
         Self {
             group_load_tolerance: 0.1,
             cache_affinity_min_fraction: 0.5,
-            affinity_min_imbalance_reduction: 0.5,
+            affinity_min_dp_idle_saving: 0.5,
             dp_ranks_per_host: 0,
             same_host_move_cost: 50.0 / 225.0,
         }
@@ -72,8 +72,8 @@ impl Parameters {
                 self.cache_affinity_min_fraction,
             ),
             (
-                "affinity_min_imbalance_reduction",
-                self.affinity_min_imbalance_reduction,
+                "affinity_min_dp_idle_saving",
+                self.affinity_min_dp_idle_saving,
             ),
             ("same_host_move_cost", self.same_host_move_cost),
         ] {
@@ -166,18 +166,17 @@ impl<'a> Candidates<'a> {
         this
     }
 
-    /// Rise in the group's ranks × slowest-rank context when the request lands on `row`. With
-    /// attention time linear in context, a group's barrier wait Σ_r(max − att_r) is
-    /// ranks·max − Σ_r att_r, and the sum does not depend on placement, so this is the change in
-    /// total wait.
-    fn barrier_increase(&self, row: usize, request_blocks: usize) -> f64 {
+    /// Rise in total DP idle time when the request lands on `row`. With attention time linear in
+    /// context, a group's idle time Σ_r(max − att_r) is ranks·max − Σ_r att_r. The sum grows by
+    /// the request wherever it lands, so only ranks·max changes with placement.
+    fn dp_idle_increase(&self, row: usize, request_blocks: usize) -> f64 {
         let group = &self.groups[self.group_of[row]];
         group.ranks as f64
             * (self.blocks[row] + request_blocks).saturating_sub(group.max_blocks) as f64
     }
 
-    /// The bound row, or the row whose saving (slowest-rank context saved, as a fraction of the
-    /// request) beats the threshold times its move cost by the most. A huge request makes any
+    /// The bound row, or the row whose DP idle time saving (as a fraction of the request's
+    /// context) beats the threshold times its move cost by the most. A huge request makes any
     /// destination the new straggler, so it saves little and stays.
     fn affinity_row(&self, bound_row: usize, request_blocks: usize) -> usize {
         let parameters = self.parameters;
@@ -195,18 +194,18 @@ impl<'a> Candidates<'a> {
                 1.0
             }
         };
-        let stay = self.barrier_increase(bound_row, request_blocks);
+        let stay = self.dp_idle_increase(bound_row, request_blocks);
         let scale =
             self.groups[self.group_of[bound_row]].ranks as f64 * request_blocks.max(1) as f64;
         (0..self.workers.len())
             .filter(|row| *row != bound_row)
             .map(|row| {
-                let saved = (stay - self.barrier_increase(row, request_blocks)) / scale;
+                let saved = (stay - self.dp_idle_increase(row, request_blocks)) / scale;
                 let cost = move_cost(row);
                 // The threshold term is non-negative, so a positive net implies a real saving.
                 (
                     row,
-                    saved - parameters.affinity_min_imbalance_reduction * cost,
+                    saved - parameters.affinity_min_dp_idle_saving * cost,
                     cost,
                 )
             })
@@ -227,7 +226,7 @@ impl<'a> Candidates<'a> {
     }
 }
 
-/// Bound session rank unless moving lowers the attention barrier enough; otherwise sticky cached
+/// Bound session rank unless moving lowers the total DP idle time enough; otherwise sticky cached
 /// prefixes, then the least-loaded EP groups (within tolerance), then the rank with the least
 /// context after admission.
 fn pick_row(
@@ -525,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_session_moves_only_when_that_lowers_the_barrier() {
+    fn bound_session_moves_only_when_that_lowers_dp_idle_time() {
         let near_even = [[(4, 40, 1), (4, 40, 1)], [(4, 40, 1), (4, 40, 1)]];
         assert_eq!(
             select_with_affinity(&near_even, &[], Some((0, 1)), 8, Parameters::default()),
@@ -551,7 +550,7 @@ mod tests {
                 Some((0, 1)),
                 40,
                 Parameters {
-                    affinity_min_imbalance_reduction: 1e9,
+                    affinity_min_dp_idle_saving: 1e9,
                     ..Parameters::default()
                 }
             ),
@@ -564,7 +563,7 @@ mod tests {
         // Bound rank 1 is the straggler.
         let skewed = [[(4, 100, 1), (4, 140, 1)], [(4, 100, 1), (4, 100, 1)]];
         let threshold = Parameters {
-            affinity_min_imbalance_reduction: 1.5,
+            affinity_min_dp_idle_saving: 1.5,
             ..Parameters::default()
         };
         // Saving 40 of a 40-block request (1.0) is below a full-cost threshold of 1.5.
