@@ -52,6 +52,8 @@ providers:
     name: OpenAI
   qwen:
     name: Qwen
+  reflection:
+    name: Reflection
   skt:
     name: SK Telecom
   thinkingmachines:
