@@ -136,6 +136,8 @@ runs:
             --server=https://127.0.0.1:8443 \
             --print > "${KUBECONFIG_TMP}"; then
             mv "${KUBECONFIG_TMP}" "${KUBECONFIG_PATH}"
+            # Keep the tunnel available for failure diagnostics.
+            trap - EXIT
             break
           fi
 
