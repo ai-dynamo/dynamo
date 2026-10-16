@@ -622,7 +622,7 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
       # prod-tester-amd-v2 does not start the MinIO service, so the MinIO artifact
-      # tests run in vllm-test instead. Re-enable once #16667 is fixed in the runner template.
+      # tests run in vllm-test instead. Re-enable once OPS-8947 is fixed in the runner template.
       minio_service: false
     secrets: inherit
 
