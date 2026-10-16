@@ -375,7 +375,7 @@ async fn handler(
         dispatch(
             selection.engine,
             context,
-            request_id,
+            model,
             state.clone(),
             stream_handle,
             streaming,
@@ -399,19 +399,20 @@ async fn handler(
 async fn dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
-    request_id: String,
+    model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
     streaming: bool,
     trace_state: Option<RequestEndTraceState>,
 ) -> Response {
-    let model = context.model.clone();
+    let request_context = context.context();
+    let request_id = request_context.id();
     let metric_model = state.manager().metric_model_for(&model);
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         metric_model,
         super::metrics::Endpoint::Generate,
         streaming,
-        &request_id,
+        request_id,
     );
     let mut metric_collector = GenerateMetricCollector::new(
         state.metrics_clone(),
@@ -419,7 +420,6 @@ async fn dispatch(
         context.tracker.clone().unwrap_or_default(),
         context.token_ids.len(),
     );
-    let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
             Some(result) => result,
@@ -593,7 +593,7 @@ mod tests {
         let response = dispatch(
             engine,
             dispatch_test_context(),
-            "req-sglang-worker-unavailable".to_string(),
+            "test-model".to_string(),
             state.clone(),
             ConnectionHandle::create_disabled(tx),
             true,
@@ -780,7 +780,7 @@ mod tests {
         let response = dispatch(
             engine,
             context,
-            "req-deadline".to_string(),
+            "test-model".to_string(),
             state.clone(),
             stream_handle,
             true,
@@ -979,7 +979,7 @@ mod tests {
             let response = dispatch(
                 Arc::new(ReplayEngine(observed_outputs())),
                 context,
-                "req-sglang-metrics".to_string(),
+                "test-model".to_string(),
                 state.clone(),
                 ConnectionHandle::create_disabled(tx),
                 streaming,
@@ -1075,7 +1075,7 @@ mod tests {
             let response = dispatch(
                 Arc::new(ReplayEngine(observed_outputs())),
                 context,
-                request_id.clone(),
+                "test-model".to_string(),
                 state,
                 ConnectionHandle::create_disabled(tx),
                 streaming,
@@ -1125,7 +1125,7 @@ mod tests {
         let response = dispatch(
             Arc::new(FirstChunkThenPendingEngine),
             context,
-            request_id.to_string(),
+            "test-model".to_string(),
             state.clone(),
             ConnectionHandle::create_disabled(tx),
             true,
@@ -1185,7 +1185,7 @@ mod tests {
             let response = dispatch(
                 Arc::new(ReplayEngine(outputs)),
                 dispatch_test_context(),
-                "req-unary".to_string(),
+                "test-model".to_string(),
                 state,
                 ConnectionHandle::create_disabled(tx),
                 false,
