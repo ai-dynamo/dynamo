@@ -41,22 +41,35 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
-Dynamo supports Helm upgrades within the installed minor release and from minor `N.M` to
-`N.(M+1)` only. Upgrade through every intermediate minor release; skipping a minor release is
-unsupported.
+Dynamo supports Helm transitions within the installed minor release and between adjacent minor
+releases: `N.M` to `N.(M+1)` for upgrades and `N.(M+1)` to `N.M` for downgrades. Move through every
+intermediate minor release; skipping a minor release is unsupported.
 
-The chart runs an upgrade preflight Job before changing the release. It reads the installed
-operator version and rejects skipped minor releases, major-version changes, and earlier minor
-releases. Use `helm rollback` for rollbacks. To bypass the check after validating the complete
-upgrade path separately, set:
+The chart runs a read-only `pre-install,pre-upgrade` Job before changing the operator Deployment. A
+first installation passes because no existing Deployment is present. Helm and Flux execute the
+hook directly; Argo CD maps it to PreSync. Raw `kubectl apply`, Argo CD selective sync, or disabled
+hooks do not enforce the check.
+
+The Job reads the installed operator version and rejects larger minor jumps and major-version
+changes. After separately validating an unsupported transition, authorize only that source minor
+with the matching override:
 
 ```yaml
 dynamo-operator:
-  upgradePreflight:
-    enabled: false
+  # For a forward upgrade starting from 1.2.x:
+  unsupportedUpgradeOverride: "1.2"
+  # For a downgrade starting from 1.5.x:
+  unsupportedDowngradeOverride: "1.5"
 ```
 
-Disabling the preflight does not make a skipped-minor upgrade supported.
+The value must match the currently installed `N.M` version. It is ignored after the installed minor
+changes, so it cannot authorize a later unsupported transition. An override does not make the path
+supported.
+
+The Job uses Python's standard library and read-only Deployment access. Configure
+`dynamo-operator.upgradePreflight.image` and `imagePullSecrets` for an internal registry. Failed
+Jobs are retained for log inspection. The supporting ServiceAccount, Role, and RoleBinding persist
+until the next attempt and require manual removal when retiring the release.
 
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
@@ -565,10 +578,13 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
-| dynamo-operator.upgradePreflight.enabled | bool | `true` | Whether to reject Helm upgrades outside the installed minor or its immediate successor. |
-| dynamo-operator.upgradePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image used by the upgrade preflight Job. |
-| dynamo-operator.upgradePreflight.imagePullSecrets | list | `[]` | Image pull secrets used by the upgrade preflight Job. |
-| dynamo-operator.upgradePreflight.activeDeadlineSeconds | int | `120` | Maximum runtime in seconds for the upgrade preflight Job. |
+| dynamo-operator.upgradePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
+| dynamo-operator.upgradePreflight.imagePullSecrets | list | `[]` | Existing pull secrets for the version preflight image. |
+| dynamo-operator.upgradePreflight.activeDeadlineSeconds | int | `120` | Maximum Job duration in seconds, including retries. |
+| dynamo-operator.upgradePreflight.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
+| dynamo-operator.upgradePreflight.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null uses secure defaults. Omit runAsUser on OpenShift for admission to assign the namespace UID. |
+| dynamo-operator.unsupportedUpgradeOverride | string | `""` | Installed minor (N.M) allowed to make one otherwise unsupported forward upgrade. The value is ignored after the installed minor changes. |
+| dynamo-operator.unsupportedDowngradeOverride | string | `""` | Installed minor (N.M) allowed to make one otherwise unsupported downgrade. The value is ignored after the installed minor changes. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
