@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
+use tracing::Span;
+
 use crate::envoy_helpers::{self, metadata};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
@@ -29,6 +31,15 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use dynamo_runtime::logging::{inject_trace_headers_into_map, make_request_span_from_headers};
+
+/// W3C Trace Context headers the EPP re-issues toward the backend worker so
+/// the worker-side Frontend's spans join this EPP stream's trace (issue
+/// #16590). The EPP is the authoritative producer: any client-supplied values
+/// are replaced, and they are stripped below so they cannot reach the backend
+/// unchanged.
+const TRACEPARENT_HEADER_KEY: &str = "traceparent";
+const TRACESTATE_HEADER_KEY: &str = "tracestate";
 
 /// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +94,15 @@ struct RequestContext {
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
+
+    /// The per-stream root span, minted in [`Self::mint_request_span`]. It is
+    /// the `epp-request` span that carries the inbound `traceparent` as its
+    /// parent, so the EPP's routing spans and the worker-side Frontend's spans
+    /// all hang off one trace (issue #16590). Held (not entered) across the
+    /// stream; routing code re-enters it via [`Span::in_scope`]. `None` only
+    /// for streams that never reached a header phase (e.g. a protocol
+    /// rejection before any request headers were seen).
+    request_span: Option<Span>,
 }
 
 impl RequestContext {
@@ -112,7 +132,42 @@ impl RequestContext {
             resp_trailer_resp: None,
             parsed_usage: None,
             sse_usage_buf: Vec::new(),
+            request_span: None,
         }
+    }
+
+    /// Mint the per-stream root `epp-request` span once we have the request
+    /// headers (and thus the inbound `traceparent`) and a resolved request id.
+    ///
+    /// The ext_proc message is not an HTTP request, so the span fields that a
+    /// real frontend would populate from the request (method/uri/version) use
+    /// stable placeholders; the routing decision is recorded on child spans and
+    /// on `decode_worker_id` / `prefill_worker_id` here as the pick completes.
+    fn mint_request_span(&mut self) {
+        if self.request_span.is_some() {
+            return;
+        }
+        let span = make_request_span_from_headers(
+            &self.request_headers,
+            "POST",
+            "/ext-proc/stream",
+            "HTTP/2",
+            &self.request_id,
+        );
+        // Synchronously enter-and-exit the root span so the
+        // `DistributedTraceIdLayer` finalizes its W3C context (in particular its
+        // own `span_id`) and the OTel layer builds the span. The closure has no
+        // `.await`, so the `Entered` guard never crosses an await point in this
+        // spawned stream task (issue #16590). The root's span_id is what the
+        // phase children parent under, and what we later inject downstream as
+        // the worker's `traceparent`.
+        span.in_scope(|| {});
+        self.request_span = Some(span);
+    }
+
+    /// The per-stream root span, if minted.
+    fn request_span(&self) -> Option<Span> {
+        self.request_span.clone()
     }
 
     /// Advance the state machine and collect responses that are ready to send.
@@ -244,6 +299,44 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 ctx.request_id.clone(),
             ));
         }
+
+        // With the request headers (and thus the inbound `traceparent`) and the
+        // request id now resolved, mint the per-stream root span. The span
+        // adopts the inbound W3C context as its parent, so this EPP stream joins
+        // the gateway-originated trace (issue #16590).
+        ctx.mint_request_span();
+    }
+
+    /// Append the W3C Trace Context headers (`traceparent`, `tracestate`)
+    /// derived from this stream's root span to the picker's routing headers.
+    ///
+    /// Re-issuing `traceparent` (rather than passing the inbound one through
+    /// unchanged) is what makes the EPP's own span the parent of the
+    /// worker-side Frontend's spans: the `span_id` is rewritten to the EPP
+    /// span's while the `trace_id` is preserved, so a single request through the
+    /// Gateway yields one trace with the EPP spans nested above the worker
+    /// spans (issue #16590). A no-op when no span was minted (e.g. the protocol
+    /// was rejected before request headers were seen) or when the runtime
+    /// logging layer did not populate a distributed context for the span.
+    fn with_trace_headers(
+        ctx: &RequestContext,
+        mut headers: Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
+        let Some(span) = ctx.request_span() else {
+            return headers;
+        };
+        let mut trace_headers = HashMap::new();
+        span.in_scope(|| inject_trace_headers_into_map(&mut trace_headers));
+        for key in [TRACEPARENT_HEADER_KEY, TRACESTATE_HEADER_KEY] {
+            if let Some(value) = trace_headers.remove(key) {
+                // Strip any client-supplied value so the EPP's is authoritative,
+                // then append ours. `build_request_header_response` issues
+                // `OverwriteIfExistsOrAdd`, so the backend receives exactly this.
+                headers.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+                headers.push((key.to_string(), value));
+            }
+        }
+        headers
     }
 
     /// Handle a header-only request (EndOfStream on headers, no body).
@@ -258,6 +351,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             body: Bytes::new(),
             model: String::new(),
             candidate_subset: vec![],
+            parent_span: ctx.request_span(),
         };
 
         let result = picker
@@ -267,10 +361,11 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
         ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
+        let headers = Self::with_trace_headers(ctx, result.headers);
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
             &result.endpoint,
             None,
-            &result.headers,
+            &headers,
             result.selected_prefill_endpoint.as_deref(),
         ));
         Ok(())
@@ -295,6 +390,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             body: raw_body.clone(),
             model: model.clone(),
             candidate_subset,
+            parent_span: ctx.request_span(),
         };
 
         let result = picker
@@ -307,6 +403,11 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
+        // The routing decision itself (chosen workers, dp ranks) is recorded on
+        // the `epp-*` phase spans the picker created, not on the root span:
+        // the root's `decode_worker_id`/`prefill_worker_id`/`model` fields are
+        // the frontend's, typed u64/String, and `Span::record` panics on a
+        // type change (issue #16590).
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
@@ -317,14 +418,18 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             tracing::debug!(key = %k, value = %v, "[MUTATION] Routing header going into ext_proc set_headers");
         }
 
-        // Only send NEW headers (routing headers from the picker) in the
-        // ext_proc header mutation. Do NOT re-send original request headers —
-        // they already exist on the request and Envoy rejects mutations that
-        // try to set restricted headers (x-envoy-*, x-forwarded-*, pseudo-headers).
+        // Re-issue `traceparent`/`tracestate` from this stream's root span so
+        // the worker-side Frontend's spans nest under the EPP's (issue #16590),
+        // then only send NEW headers (routing headers from the picker plus the
+        // trace headers) in the ext_proc header mutation. Do NOT re-send
+        // original request headers — they already exist on the request and
+        // Envoy rejects mutations that try to set restricted headers
+        // (x-envoy-*, x-forwarded-*, pseudo-headers).
+        let headers = Self::with_trace_headers(ctx, result.headers);
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
             &result.endpoint,
             Some(ctx.request_size),
-            &result.headers,
+            &headers,
             result.selected_prefill_endpoint.as_deref(),
         ));
 
@@ -1033,6 +1138,28 @@ mod tests {
             response_body_mode,
             send_body_without_waiting_for_header_response,
         }
+    }
+
+    /// `with_trace_headers` is a no-op when the stream never minted a root span
+    /// (e.g. the protocol was rejected before request headers were seen), so the
+    /// picker's routing headers are returned untouched and no client-supplied
+    /// `traceparent` survives.
+    #[test]
+    fn with_trace_headers_is_a_noop_without_a_root_span() {
+        let ctx = RequestContext::new();
+        let headers = vec![
+            ("x-dynamo-worker-instance-id".to_string(), "1".to_string()),
+            ("traceparent".to_string(), "00-client-client-client-client-client-01".to_string()),
+        ];
+        let out = ExtProcServer::<Tracker>::with_trace_headers(&ctx, headers);
+        assert_eq!(
+            out,
+            vec![
+                ("x-dynamo-worker-instance-id".to_string(), "1".to_string()),
+                ("traceparent".to_string(), "00-client-client-client-client-client-01".to_string()),
+            ],
+            "no root span → no trace headers added, nothing stripped"
+        );
     }
 
     #[test]

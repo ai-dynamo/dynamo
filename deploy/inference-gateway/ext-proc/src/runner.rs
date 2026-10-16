@@ -141,13 +141,19 @@ pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Resu
     run_inner(mode, policy_registry.unwrap_or_default()).await
 }
 
+/// Initialize tracing through the shared Dynamo runtime logging module.
+///
+/// This is the same initializer the Frontend uses: it honors `DYN_LOG` /
+/// `DYN_LOGGING_CONFIG_PATH` for console filtering and, when
+/// `OTEL_EXPORT_ENABLED` is set, wires the `tracing` spans to OpenTelemetry
+/// with an OTLP exporter driven by the standard `OTEL_*` environment
+/// variables (endpoint, protocol, headers, sampler). The per-request spans
+/// the ext_proc server creates (see `server.rs`) and the routing spans the
+/// pickers create (see `epp.rs`) are exported under the same settings as the
+/// Frontend, and each honors an incoming W3C `traceparent` header so a
+/// gateway-originated request joins a single trace end to end.
 fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+    dynamo_runtime::logging::init();
 }
 
 /// Wait for SIGTERM (kubelet pod termination) or SIGINT (Ctrl-C).

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use dynamo_llm::http::service::metadata::MetadataHeaderError;
+use tracing::Span;
 
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, last_non_empty_trimmed_value};
 
@@ -37,7 +38,10 @@ impl Endpoint {
 }
 
 /// Metadata about the incoming HTTP request.
-#[derive(Debug, Clone)]
+///
+/// `Clone` only (not `Debug`): `tracing::Span` is `Clone` but not `Debug`, so a
+/// struct holding a span cannot derive `Debug`.
+#[derive(Clone)]
 pub struct RequestInfo {
     /// Unique request ID (from `x-request-id` header or generated UUID).
     /// Used for router bookkeeping (add_request / free_request).
@@ -53,6 +57,12 @@ pub struct RequestInfo {
     pub model: String,
     /// From x-gateway-destination-endpoint-subset metadata
     pub candidate_subset: Vec<String>,
+    /// The per-stream root `epp-request` span the pickers mint their routing
+    /// spans under. `pick()` runs as its own future, so it does not inherit the
+    /// server's current span through async-locals; the server passes the span
+    /// explicitly and the picker sets each routing span's parent from it.
+    /// `None` when no span was minted (protocol rejected before headers).
+    pub parent_span: Option<Span>,
 }
 
 /// How `PickResult.cache_namespace` is written into the forwarded request body.

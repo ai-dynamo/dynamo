@@ -31,6 +31,7 @@ use dynamo_runtime::discovery::{
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
@@ -1450,6 +1451,20 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
+        // Each routing phase is wrapped in its own span, created inside
+        // `root.in_scope(...)` (issue #16590). Creating the span while the root
+        // is the *current* span is what makes both the exported OTLP trace (the
+        // OTel layer builds the child from the current context) and the JSON
+        // trace context (`DistributedTraceIdLayer` inherits the root's W3C ids)
+        // nest the phase under the root — the same mechanism the frontend's
+        // nested spans use. The `in_scope` closure is synchronous (no `.await`
+        // inside), so the `Entered` guard it holds never crosses an await point
+        // in this spawned (Send) `pick` future. The span is then started
+        // synchronously via `span.context()` (stamping its start time) and its
+        // async work runs with no guard held; the handle drops at block end,
+        // ending the span, so its duration covers the tokenize/pick work.
+
+        // Phase 1: tokenize.
         let TokenizeResult {
             tokens,
             cache_namespace,
@@ -1457,10 +1472,37 @@ impl EndpointPicker for Router {
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
-        } = self
-            .tokenize(body_str, &req.headers)
-            .await
-            .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
+        } = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-tokenize",
+                        input_tokens = tracing::field::Empty,
+                        cache_namespace = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-tokenize",
+                    input_tokens = tracing::field::Empty,
+                    cache_namespace = tracing::field::Empty,
+                ),
+            };
+            // Start the OTel span now (synchronously) so its duration covers the
+            // tokenize work below, without entering it across the await.
+            let _ = span.context();
+            let result = self
+                .tokenize(body_str, &req.headers)
+                .await
+                .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
+            span.record("input_tokens", result.tokens.len() as u64);
+            span.record(
+                "cache_namespace",
+                result.cache_namespace.as_deref().unwrap_or(""),
+            );
+            result
+        };
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
 
@@ -1468,18 +1510,49 @@ impl EndpointPicker for Router {
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
-        let prefill_booking = self
-            .route_prefill(
-                &format!("epp-prefill/{reservation_id}"),
-                &tokens,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class.clone(),
-                allowed_worker_ids.clone(),
-                routing_constraints.clone(),
-            )
-            .await;
+        let prefill_booking = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-prefill-pick",
+                        prefill_worker_id = tracing::field::Empty,
+                        prefill_dp_rank = tracing::field::Empty,
+                        reserved = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-prefill-pick",
+                    prefill_worker_id = tracing::field::Empty,
+                    prefill_dp_rank = tracing::field::Empty,
+                    reserved = tracing::field::Empty,
+                ),
+            };
+            let _ = span.context();
+            let booking = self
+                .route_prefill(
+                    &format!("epp-prefill/{reservation_id}"),
+                    &tokens,
+                    cache_namespace.clone(),
+                    priority_jump,
+                    strict_priority,
+                    policy_class.clone(),
+                    allowed_worker_ids.clone(),
+                    routing_constraints.clone(),
+                )
+                .await;
+            span.record(
+                "prefill_worker_id",
+                booking.as_ref().map(|b| b.worker_id()).unwrap_or(0),
+            );
+            span.record(
+                "prefill_dp_rank",
+                booking.as_ref().and_then(|b| b.dp_rank()).unwrap_or(0),
+            );
+            span.record("reserved", booking.is_ok());
+            booking
+        };
 
         let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
@@ -1492,19 +1565,44 @@ impl EndpointPicker for Router {
             }
         };
 
-        let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
-                is_disaggregated,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+        let (decode_worker, _overlap) = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-decode-pick",
+                        decode_worker_id = tracing::field::Empty,
+                        dp_rank = tracing::field::Empty,
+                        overlap_blocks = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-decode-pick",
+                    decode_worker_id = tracing::field::Empty,
+                    dp_rank = tracing::field::Empty,
+                    overlap_blocks = tracing::field::Empty,
+                ),
+            };
+            let _ = span.context();
+            let (worker, overlap_blocks) = self
+                .route_decode(
+                    &tokens,
+                    is_disaggregated,
+                    cache_namespace.clone(),
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    allowed_worker_ids,
+                    routing_constraints,
+                )
+                .await
+                .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            span.record("decode_worker_id", worker.worker_id);
+            span.record("dp_rank", worker.dp_rank);
+            span.record("overlap_blocks", overlap_blocks);
+            (worker, overlap_blocks)
+        };
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.

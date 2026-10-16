@@ -142,6 +142,24 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			})
 		}
 
+		// The native Rust EPP initializes its logger through the shared Dynamo
+		// runtime logging module, which filters on DYN_LOG (not RUST_LOG) and
+		// honors the standard OTEL_* variables for OpenTelemetry export. A
+		// distinct OTEL_SERVICE_NAME keeps the EPP's spans (epp-request,
+		// epp-tokenize, epp-prefill-pick, epp-decode-pick) attributable as a
+		// separate node in a trace alongside the worker-side Frontend spans,
+		// which report as the "dynamo" default or the frontend's own name.
+		container.Env = append(container.Env, []corev1.EnvVar{
+			{
+				Name:  "DYN_LOG",
+				Value: "info",
+			},
+			{
+				Name:  "OTEL_SERVICE_NAME",
+				Value: "dynamo-epp",
+			},
+		}...)
+
 		// Native Rust EPP: configured through DYN_* env vars, serves
 		// ext_proc/health on fixed ports, takes no CLI flags, and reads no
 		// config file. Leave Args empty and let the image ENTRYPOINT run.

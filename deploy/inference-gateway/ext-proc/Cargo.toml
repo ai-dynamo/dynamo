@@ -53,7 +53,10 @@ tokio-stream = { workspace = true, features = ["net", "sync"] }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["fmt"] }
+# Same workspace version as `dynamo-runtime`, so `OpenTelemetrySpanExt::context()`
+# (used to start the EPP's routing spans without entering them across an await)
+# operates on the spans the runtime logging layer creates.
+tracing-opentelemetry = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 

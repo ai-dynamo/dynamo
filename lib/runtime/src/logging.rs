@@ -539,6 +539,16 @@ impl GenericHeaders for std::collections::HashMap<String, String> {
     }
 }
 
+// Ordered header pairs (the ext_proc EPP's per-message header map). Case-
+// insensitive on the key, first occurrence wins — matching HTTP header semantics.
+impl GenericHeaders for [(String, String)] {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 struct GenericHeaderExtractor<'a, H>(&'a H);
 
 impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
@@ -693,6 +703,58 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
         x_request_id = trace_parent.x_request_id,
         request_id = %request_id,
         model = tracing::field::Empty,
+        input_tokens = tracing::field::Empty,
+        output_tokens = tracing::field::Empty,
+        image_count = tracing::field::Empty,
+        video_count = tracing::field::Empty,
+        audio_count = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
+    );
+
+    if let Some(context) = otel_context {
+        let _ = span.set_parent(context);
+    }
+
+    span
+}
+
+/// Create a request span from a generic header list and a caller-supplied request
+/// ID.
+///
+/// `make_inference_request_span` and `make_system_request_span` build the span
+/// from a full `axum::http::Request`, but a gRPC ext_proc handler sees only the
+/// per-message header map — there is no HTTP `Request` object. This variant
+/// accepts ordered `(key, value)` header pairs so the EPP can mint the exact
+/// same `target: "request_span"` root span (W3C `traceparent` extraction,
+/// `set_parent`, and the `request_id` field the `DistributedTraceIdLayer` reads
+///) as the frontend's HTTP path. `method`/`uri`/`version` are carried as span
+/// fields only; the EPP passes stable placeholders since the ext_proc message
+/// has no real method/uri.
+pub fn make_request_span_from_headers(
+    headers: &[(String, String)],
+    method: &str,
+    uri: &str,
+    version: &str,
+    request_id: &str,
+) -> Span {
+    let (trace_parent, otel_context) = extract_trace_parent(headers);
+
+    let span = tracing::info_span!(
+        target: "request_span",
+        "http-request",
+        method = method,
+        uri = uri,
+        version = version,
+        trace_id = trace_parent.trace_id,
+        parent_id = trace_parent.parent_id,
+        trace_flags = trace_parent.trace_flags,
+        x_request_id = trace_parent.x_request_id,
+        request_id = request_id,
+        model = tracing::field::Empty,
+        "request.outcome" = tracing::field::Empty,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
         image_count = tracing::field::Empty,
@@ -2522,6 +2584,78 @@ pub mod tests {
         assert_eq!(
             headers.get("traceparent").map(String::as_str),
             Some("00-11111111111111111111111111111111-3333333333333333-00")
+        );
+    }
+
+    /// The EPP mints its per-stream root span from a header list (there is no
+    /// HTTP `Request` in a gRPC ext_proc stream) and then mints its routing
+    /// phase spans *inside* `root.in_scope(...)` so they inherit the root's W3C
+    /// trace context. This proves both: the root carries the inbound
+    /// `traceparent`'s ids, and a child created in the root's scope inherits
+    /// `trace_id` + `parent_id` (the mechanism the EPP relies on, issue #16590).
+    ///
+    /// `get_distributed_tracing_context()` reads the *current* span, so each
+    /// context is read inside its own `in_scope`.
+    #[test]
+    fn request_span_from_headers_and_in_scope_child_inherit_w3c_context() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .build();
+        let tracer = provider.tracer("test");
+        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
+        // installing the global `log` LogTracer, which would poison a later
+        // `logging::init()` with SetLoggerError. Includes the OTel layer the
+        // way `setup_logging` does, so spans finalize their OtelData on enter.
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(DistributedTraceIdLayer),
+        );
+
+        let trace_id = "11111111111111111111111111111111";
+        let inbound_parent_span_id = "2222222222222222";
+        let headers = vec![(
+            "traceparent".to_string(),
+            format!("00-{trace_id}-{inbound_parent_span_id}-01"),
+        )];
+        let request_id = "123e4567-e89b-12d3-a456-426614174000";
+        let root = make_request_span_from_headers(
+            &headers,
+            "POST",
+            "/ext-proc",
+            "HTTP/2",
+            request_id,
+        );
+
+        // While the root is current, read its finalized W3C context.
+        let root_ctx = root
+            .in_scope(|| get_distributed_tracing_context())
+            .expect("root span finalizes a W3C context");
+        assert_eq!(root_ctx.trace_id, trace_id);
+        assert_eq!(root_ctx.parent_id.as_deref(), Some(inbound_parent_span_id));
+        assert_eq!(root_ctx.request_id.as_deref(), Some(request_id));
+        assert_ne!(
+            root_ctx.span_id, inbound_parent_span_id,
+            "the root span gets its own span_id, not the inbound parent's"
+        );
+        let root_span_id = root_ctx.span_id.clone();
+
+        // A child created in the root's scope (exactly how the EPP pickers mint their
+        // phase spans) must inherit the root's W3C context: same trace_id,
+        // parent_id = the root's own span_id, and the root's request_id.
+        let child_ctx = root.in_scope(|| {
+            let child =
+                tracing::info_span!("epp-tokenize", input_tokens = tracing::field::Empty);
+            child
+                .in_scope(get_distributed_tracing_context)
+                .expect("child span finalizes a W3C context")
+        });
+        assert_eq!(child_ctx.trace_id, trace_id);
+        assert_eq!(child_ctx.parent_id.as_deref(), Some(root_span_id.as_str()));
+        assert_eq!(
+            child_ctx.request_id.as_deref(),
+            Some(request_id),
+            "request_id propagates to children"
         );
     }
 

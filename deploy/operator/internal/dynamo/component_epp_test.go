@@ -70,6 +70,38 @@ func TestEPPCacheMountTracksHome(t *testing.T) {
 	})
 }
 
+// The native Rust EPP initializes logging through the shared runtime module,
+// which filters on DYN_LOG (not RUST_LOG) and reads OTEL_SERVICE_NAME to label
+// its exported spans. The operator must therefore set both for the native
+// contract; the legacy Go EPP predates that logging path and must not gain
+// them (adding env would re-render a deprecated, being-removed component).
+func TestEPPTracingEnvSetForNativeOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		eppConfig *nvidiacomv1beta1.EPPConfig
+		wantEnv   bool
+	}{
+		"native": {eppConfig: nil, wantEnv: true},
+		"legacy": {eppConfig: &nvidiacomv1beta1.EPPConfig{}, wantEnv: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			container := eppContainerFor(t, tc.eppConfig)
+
+			dynLog, hasDynLog := envValueNamed(container, "DYN_LOG")
+			svcName, hasSvcName := envValueNamed(container, "OTEL_SERVICE_NAME")
+
+			if tc.wantEnv {
+				require.True(t, hasDynLog, "native EPP must set DYN_LOG for the runtime logging filter")
+				assert.Equal(t, "info", dynLog)
+				require.True(t, hasSvcName, "native EPP must set OTEL_SERVICE_NAME to attribute its spans")
+				assert.Equal(t, "dynamo-epp", svcName)
+			} else {
+				assert.False(t, hasDynLog, "legacy EPP must not gain DYN_LOG")
+				assert.False(t, hasSvcName, "legacy EPP must not gain OTEL_SERVICE_NAME")
+			}
+		})
+	}
+}
+
 // The volume must exist wherever the mount does, or the pod is rejected
 // outright, and must be absent wherever nothing mounts it.
 func TestEPPCacheVolumeMatchesTheMount(t *testing.T) {
