@@ -3488,11 +3488,14 @@ fn transfer_hint_for_selection(
     candidates: Option<&KvTransferCandidates>,
 ) -> Option<KvSourceLocationsPayload> {
     let candidates = candidates?;
-    let source = crate::kv_hints::KvTransferSourceSummary::new(candidates, configs).source_for(
-        target,
-        &configs.get(&target.worker_id)?.kv_transfer_keys(),
-        target_cached_prefix_blocks as usize,
-    )?;
+    let local = target_cached_prefix_blocks as usize;
+    let target_keys = configs
+        .get(&target.worker_id)?
+        .kv_transfer_keys()
+        .target()?;
+    let scope = crate::kv_hints::KvTransferScope::of([(target_keys, local)]);
+    let source = crate::kv_hints::KvTransferSourceSummary::new(candidates, configs, scope)
+        .source_for(target, target_keys, local)?;
     transfer_hint_payload(configs, source, candidates)
 }
 

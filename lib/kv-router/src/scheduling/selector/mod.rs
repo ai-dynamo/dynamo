@@ -22,7 +22,9 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::kv_hints::{KvTransferSourceChoice, KvTransferSourceSummary};
+use crate::kv_hints::{
+    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+};
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, WorkerCacheData, WorkerTransferInput,
 };
@@ -35,9 +37,7 @@ use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_
 use reference::pick_default_worker;
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
-use super::types::{
-    KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError, transfer_local_prefix_blocks,
-};
+use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{
     SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike, WorkerId,
     WorkerSelectionResult, WorkerWithDpRank,
@@ -173,7 +173,8 @@ struct MaterializedSelectionInput<'a> {
     // Track the maximum over the eligible ranks row() already visits; no second scan.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
-    // Built on first use and shared by every row's fetch credit and the
+    has_kv_transfer_candidates: bool,
+    // Built at most once and shared by every row's fetch credit and the
     // selected worker's fetch source, so the two cannot disagree.
     kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
 }
@@ -200,28 +201,107 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .and_then(|config| config.router_temperature),
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
+            has_kv_transfer_candidates: request.kv_transfer_candidates.is_some(),
             kv_transfer_sources: OnceCell::new(),
         }
     }
 
-    /// The source `worker` would fetch from, when the request carries transfer
-    /// candidates.
-    fn kv_transfer_source<C: WorkerConfigLike>(
+    /// The request's fetch sources for the targets in `scope`, built on the
+    /// first call.
+    fn kv_transfer_sources<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        scope: impl FnOnce() -> KvTransferScope,
+    ) -> Option<&KvTransferSourceSummary> {
+        let candidates = self.request.kv_transfer_candidates.as_ref()?;
+        Some(
+            self.kv_transfer_sources
+                .get_or_init(|| KvTransferSourceSummary::new(candidates, workers, scope())),
+        )
+    }
+
+    /// A row's fetch input from sources already built. Rows that scorers read
+    /// are filled after they are all built by [`Self::fill_kv_transfer_sources`]
+    /// instead, and rows nothing reads keep `None`, so building rows costs the
+    /// same as without fetch inputs.
+    fn kv_transfer_input<C: WorkerConfigLike>(
+        &self,
+        worker: WorkerWithDpRank,
+        config: &C,
+    ) -> Option<WorkerTransferInput> {
+        if !self.has_kv_transfer_candidates {
+            return None;
+        }
+        let local_prefix_blocks = self.request.transfer_local_prefix_blocks_for(worker);
+        let source = self.kv_transfer_sources.get().and_then(|sources| {
+            sources.source_for(
+                worker,
+                config.kv_transfer_keys().target()?,
+                local_prefix_blocks as usize,
+            )
+        });
+        Some(WorkerTransferInput {
+            local_prefix_blocks,
+            source_prefix_blocks: source.map(source_prefix_blocks),
+        })
+    }
+
+    /// Fill every row's fetch input once all rows are built, so the sources
+    /// skip anything shorter than the shortest local prefix. `targets` is
+    /// index-aligned with `rows`.
+    fn fill_kv_transfer_sources<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        rows: &mut [CandidateData],
+        targets: &[Option<KvTransferTarget>],
+    ) {
+        debug_assert_eq!(rows.len(), targets.len());
+        for row in rows.iter_mut() {
+            row.transfer = Some(WorkerTransferInput {
+                local_prefix_blocks: self.request.transfer_local_prefix_blocks_for(row.worker),
+                source_prefix_blocks: None,
+            });
+        }
+        let scope = || {
+            KvTransferScope::of(rows.iter().zip(targets).filter_map(|(row, target)| {
+                Some((
+                    *target.as_ref()?,
+                    row.transfer?.local_prefix_blocks as usize,
+                ))
+            }))
+        };
+        let Some(sources) = self.kv_transfer_sources(workers, scope) else {
+            return;
+        };
+        for (row, target) in rows.iter_mut().zip(targets) {
+            if let (Some(transfer), Some(target)) = (&mut row.transfer, *target) {
+                transfer.source_prefix_blocks = sources
+                    .source_for(row.worker, target, transfer.local_prefix_blocks as usize)
+                    .map(source_prefix_blocks);
+            }
+        }
+    }
+
+    /// The source the selected worker fetches from.
+    fn selected_kv_transfer_source<C: WorkerConfigLike>(
         &self,
         workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
-        config: &C,
-        local_prefix_blocks: u32,
-    ) -> Option<Option<KvTransferSourceChoice>> {
-        let candidates = self.request.kv_transfer_candidates.as_ref()?;
-        let sources = self
-            .kv_transfer_sources
-            .get_or_init(|| KvTransferSourceSummary::new(candidates, workers));
-        Some(sources.source_for(
+    ) -> Option<KvTransferSourceChoice> {
+        if !self.has_kv_transfer_candidates {
+            return None;
+        }
+        let target = workers
+            .get(&worker.worker_id)?
+            .kv_transfer_keys()
+            .target()?;
+        let local_prefix_blocks = self.request.transfer_local_prefix_blocks_for(worker);
+        let scope = || KvTransferScope::of([(target, local_prefix_blocks as usize)]);
+        self.kv_transfer_sources(workers, scope)?.source_for(
             worker,
-            &config.kv_transfer_keys(),
+            target,
             local_prefix_blocks as usize,
-        ))
+        )
     }
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
@@ -241,18 +321,14 @@ impl<'a> MaterializedSelectionInput<'a> {
     }
 
     #[inline(always)]
-    fn row<C: WorkerConfigLike>(
+    fn row(
         &self,
-        workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
-        config: &C,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
     ) -> CandidateData {
         self.row_with_device_overlap(
-            workers,
             worker,
-            config,
             preferred_taint_multiplier,
             inputs,
             |_, device_overlap_blocks| device_overlap_blocks,
@@ -260,11 +336,9 @@ impl<'a> MaterializedSelectionInput<'a> {
     }
 
     #[inline(always)]
-    fn row_with_device_overlap<C: WorkerConfigLike>(
+    fn row_with_device_overlap(
         &self,
-        workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
-        config: &C,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
@@ -279,25 +353,31 @@ impl<'a> MaterializedSelectionInput<'a> {
         } else {
             None
         };
-        let tiers = &self.request.overlap.tier_overlap_blocks;
-        let (device_blocks, host_blocks) =
-            if inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER) {
-                (
-                    tiers.device.get(&worker).copied().unwrap_or(0),
-                    tiers.host_pinned.get(&worker).copied().unwrap_or(0),
-                )
-            } else {
-                (0, 0)
-            };
         let cache = if inputs.contains(WorkerInputs::CACHE) {
             let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
+            let reported_device_overlap_blocks = self
+                .request
+                .overlap
+                .tier_overlap_blocks
+                .device
+                .get(&worker)
+                .copied()
+                .map(|blocks| blocks as f64)
+                .unwrap_or(0.0);
             let device_overlap_blocks =
-                select_device_overlap(effective_overlap_blocks, device_blocks as f64);
+                select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
             WorkerCacheData {
                 effective_overlap_blocks,
                 estimated_cached_tokens: cached_tokens,
                 device_overlap_blocks,
-                host_overlap_blocks: host_blocks as f64,
+                host_overlap_blocks: self
+                    .request
+                    .overlap
+                    .tier_overlap_blocks
+                    .host_pinned
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0) as f64,
                 disk_overlap_blocks: self
                     .request
                     .overlap
@@ -322,27 +402,20 @@ impl<'a> MaterializedSelectionInput<'a> {
         } else {
             WorkerLoadInput::default()
         };
-        let transfer = if inputs.contains(WorkerInputs::KV_TRANSFER) {
-            let local_prefix_blocks = transfer_local_prefix_blocks(device_blocks, host_blocks);
-            self.kv_transfer_source(workers, worker, config, local_prefix_blocks)
-                .map(|source| WorkerTransferInput {
-                    local_prefix_blocks,
-                    source_prefix_blocks: source
-                        .map(|source| u32::try_from(source.prefix_blocks).unwrap_or(u32::MAX)),
-                })
-        } else {
-            None
-        };
 
         CandidateData {
             worker,
             inputs,
             cache,
             load,
-            transfer,
+            transfer: None,
             preferred_taint_multiplier,
         }
     }
+}
+
+fn source_prefix_blocks(source: KvTransferSourceChoice) -> u32 {
+    u32::try_from(source.prefix_blocks).unwrap_or(u32::MAX)
 }
 
 fn selection_result(
@@ -615,16 +688,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let kv_transfer_source = workers.get(&worker.worker_id).and_then(|config| {
-        input
-            .kv_transfer_source(
-                workers,
-                worker,
-                config,
-                request.transfer_local_prefix_blocks_for(worker),
-            )
-            .flatten()
-    });
+    let kv_transfer_source = input.selected_kv_transfer_source(workers, worker);
     let result = selection_result(
         request,
         worker,
