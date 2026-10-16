@@ -25,7 +25,6 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
-from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
 from dynamo.common import http as mm_http
@@ -192,9 +191,9 @@ async def test_fetch_bytes_maps_connection_error() -> None:
 
 def _response_error(url: str) -> aiohttp.ClientResponseError:
     return aiohttp.ClientResponseError(
-        request_info=aiohttp.RequestInfo(
-            URL(url), "GET", CIMultiDictProxy(CIMultiDict())
-        ),
+        # Any headers mapping works at runtime; multidict isn't importable in
+        # every environment that collects these tests.
+        request_info=aiohttp.RequestInfo(URL(url), "GET", {}),  # type: ignore[arg-type]
         history=(),
         status=403,
         message="Forbidden",
