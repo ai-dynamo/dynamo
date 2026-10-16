@@ -65,8 +65,15 @@ helm-unittest-install: ## Install helm-unittest plugin if not present
 	@helm plugin list | grep -q unittest || \
 		helm plugin install https://github.com/helm-unittest/helm-unittest --version $(HELM_UNITTEST_VERSION)
 
+.PHONY: sync-grove-version verify-grove-version
+sync-grove-version: ## Generate packaged Grove minimum from Chart.yaml (do not edit the output)
+	@python3 sync_grove_version.py
+
+verify-grove-version: ## Reject stale generated Grove minimum in CI
+	@python3 sync_grove_version.py --check
+
 .PHONY: charts-prep
-charts-prep: ## Package operator subchart for local testing
+charts-prep: verify-grove-version ## Package operator subchart for local testing
 	@helm package components/operator -d charts/ 2>/dev/null
 
 .PHONY: verify-operator-chart-crds
@@ -86,6 +93,7 @@ verify-operator-chart-crds: ## Verify operator CRDs are managed from the image, 
 test: helm-unittest-install charts-prep verify-operator-chart-crds ## Run helm-unittest chart tests
 	@helm unittest . components/operator
 	@python3 -m unittest discover -s components/operator/tests -p 'test_*.py'
+	@python3 -m unittest discover -s tests -p 'test_*.py'
 
 .PHONY: lint
 lint: charts-prep verify-operator-chart-crds ## Run helm lint

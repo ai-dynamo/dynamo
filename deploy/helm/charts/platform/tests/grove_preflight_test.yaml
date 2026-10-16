@@ -32,6 +32,9 @@ tests:
       - equal: {path: spec.activeDeadlineSeconds, value: 120}
       - equal: {path: spec.backoffLimit, value: 2}
       - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[1]
+          pattern: '^v?[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$'
   - it: keeps the compatibility check visible in long hook names
     set:
       global.grove.enabled: true

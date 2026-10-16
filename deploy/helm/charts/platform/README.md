@@ -156,6 +156,10 @@ With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
 `pre-install,pre-upgrade` Job verifies the Grove controller version (currently alpha.15 or
 later), completed rollout, and established CRDs before applying the operator Deployment.
 It does not verify CRD schema/version equality; upgrade Grove and matching CRDs first.
+The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
+After changing that pin, run `make sync-grove-version` to update the generated
+operator-chart file. CI rejects stale output; release packaging regenerates it before
+bundling dependencies. The standalone operator chart carries the same generated minimum.
 Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
 To resolve missing or ambiguous discovery, select the controller explicitly:
 

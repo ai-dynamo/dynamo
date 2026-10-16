@@ -13,6 +13,10 @@ SPEC.loader.exec_module(preflight)
 
 
 class GrovePreflightTest(unittest.TestCase):
+    def test_uses_the_supplied_minimum(self):
+        with self.assertRaisesRegex(ValueError, "v0.2.0 or later"):
+            preflight.check(self.get, "v0.2.0")
+
     def setUp(self):
         self.container = {
             "name": "grove-operator",
@@ -46,7 +50,7 @@ class GrovePreflightTest(unittest.TestCase):
         ):
             with self.subTest(tag=tag):
                 self.container["image"] = "registry:5000/grove:" + tag
-                preflight.check(self.get)
+                preflight.check(self.get, "v0.1.0-alpha.15")
         for image in (
             "grove:v0.1.0-alpha.9",
             "grove:v0.1.0-alpha.14",
@@ -57,36 +61,36 @@ class GrovePreflightTest(unittest.TestCase):
         ):
             with self.subTest(image=image), self.assertRaises(ValueError):
                 self.container["image"] = image
-                preflight.check(self.get)
+                preflight.check(self.get, "v0.1.0-alpha.15")
 
     def test_blocks_missing_or_ambiguous_controllers_and_incomplete_rollouts(self):
         for controllers in ([], [self.controller, self.controller]):
             with self.subTest(count=len(controllers)), self.assertRaises(ValueError):
-                preflight.check(lambda path: {"items": controllers})
+                preflight.check(lambda path: {"items": controllers}, "v0.1.0-alpha.15")
         for field in ("observedGeneration", "updatedReplicas", "availableReplicas"):
             with (
                 self.subTest(field=field),
                 self.assertRaisesRegex(ValueError, "rollout"),
             ):
                 self.controller["status"][field] = 0
-                preflight.check(self.get)
+                preflight.check(self.get, "v0.1.0-alpha.15")
             self.controller["status"][field] = 1
 
     def test_reads_each_crd_and_blocks_unestablished_crds_or_api_errors(self):
-        preflight.check(self.get)
+        preflight.check(self.get, "v0.1.0-alpha.15")
         self.assertEqual(len(self.get.call_args_list), 1 + len(preflight.CRDS))
         self.crd["status"]["conditions"] = []
         with self.assertRaisesRegex(ValueError, "not established"):
-            preflight.check(self.get)
+            preflight.check(self.get, "v0.1.0-alpha.15")
         self.get.side_effect = PermissionError("HTTP 403")
         with self.assertRaises(PermissionError):
-            preflight.check(self.get)
+            preflight.check(self.get, "v0.1.0-alpha.15")
 
     def test_explicit_controller_reference(self):
         self.get.side_effect = lambda path: (
             self.crd if "customresourcedefinitions" in path else self.controller
         )
-        preflight.check(self.get, "grove-system", "grove-operator")
+        preflight.check(self.get, "v0.1.0-alpha.15", "grove-system", "grove-operator")
         self.assertEqual(
             self.get.call_args_list[0].args,
             ("/apis/apps/v1/namespaces/grove-system/deployments/grove-operator",),

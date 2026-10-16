@@ -85,6 +85,7 @@ spec:
           args:
             - |
               {{- .Files.Get "files/grove-preflight/check.py" | nindent 14 }}
+            - {{ (.Files.Get "files/grove-preflight/minimum-version.yaml" | fromYaml).version | required "generated Grove minimum is missing; run make sync-grove-version" | quote }}
             - {{ $config.namespace | quote }}
             - {{ $config.deploymentName | quote }}
           securityContext:
