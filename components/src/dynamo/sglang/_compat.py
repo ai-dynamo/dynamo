@@ -176,8 +176,7 @@ def sglang_uses_ssm_state(model_config: Any) -> bool | None:
     try:
         from sglang.srt.mem_cache.kv_cache_builder import uses_ssm_state
     except ImportError:
-        # Fallback for XPU SGLang 0.5.11, which predates kv_cache_builder.
-        # Remove when the XPU pin is upgraded to 0.5.20+.
+        # SGLang before v0.5.19 has no uses_ssm_state.
         return None
     return bool(uses_ssm_state(model_config))
 
