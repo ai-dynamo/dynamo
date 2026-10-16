@@ -19,7 +19,7 @@ use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTok
 use crate::protocols::TokenIdType;
 use crate::tokenizers::traits::Tokenizer as RuntimeTokenizer;
 
-use super::nemotron;
+use super::{deepseek_v41, nemotron};
 
 /// No-op `Tokenizer` impl used when a model directory has no `tokenizer.json`
 /// (e.g. Kimi-K2.5 ships `tiktoken.model` instead of an HF fast tokenizer).
@@ -109,7 +109,7 @@ pub(crate) enum ImageRoutingRuntime {
 /// such as Nemotron override the request-wide or runtime-specific pieces
 /// without leaking model checks into the generic preprocessor.
 pub(super) trait ImageRoutingBackend: Send + Sync {
-    fn count_tokens(&self, width: u32, height: u32) -> usize;
+    fn count_tokens(&self, width: u32, height: u32) -> Result<usize>;
 
     fn count_tokens_for_images(
         &self,
@@ -117,10 +117,16 @@ pub(super) trait ImageRoutingBackend: Send + Sync {
         _max_model_len: usize,
         _text_prompt_len: usize,
     ) -> Result<Vec<usize>> {
-        Ok(dimensions
+        dimensions
             .iter()
             .map(|&(width, height)| self.count_tokens(width, height))
-            .collect())
+            .collect()
+    }
+
+    /// Opt in when the count changes as width and height swap, so routing
+    /// dimensions follow the backend's EXIF orientation handling.
+    fn is_orientation_sensitive(&self) -> bool {
+        false
     }
 
     fn uses_request_context_budget(&self) -> bool {
@@ -150,9 +156,14 @@ struct RegistryImageRoutingBackend {
 }
 
 impl ImageRoutingBackend for RegistryImageRoutingBackend {
-    fn count_tokens(&self, width: u32, height: u32) -> usize {
-        self.processor
-            .calculate_num_tokens(width, height, &self.config)
+    fn count_tokens(&self, width: u32, height: u32) -> Result<usize> {
+        Ok(self
+            .processor
+            .calculate_num_tokens(width, height, &self.config))
+    }
+
+    fn is_orientation_sensitive(&self) -> bool {
+        self.processor.model_name() == "kimi-k3"
     }
 
     fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
@@ -166,8 +177,8 @@ impl ImageRoutingBackend for RegistryImageRoutingBackend {
 }
 
 impl ImageRoutingProcessor {
-    /// Returns `Err` when `preprocessor_config.json` is missing or unparseable
-    /// or no registered processor matches `model_id` / `model_type`. Callers
+    /// Returns `Err` when the model's processor configuration is missing or
+    /// unparseable or no processor matches `model_id` / `model_type`. Callers
     /// should treat the error as "MM-aware routing disabled for this model"
     /// rather than failing the request.
     ///
@@ -178,6 +189,17 @@ impl ImageRoutingProcessor {
     /// Switching to async would cascade through `OpenAIPreprocessor::new`
     /// and every caller of it.
     pub fn try_new(model_id: &str, model_type: Option<&str>, model_dir: &Path) -> Result<Self> {
+        // DeepSeek V4.1 ships no preprocessor_config.json; its geometry lives
+        // in config.json.
+        if deepseek_v41::supports_model_type(model_type) {
+            return Ok(Self {
+                processor: Box::new(deepseek_v41::DeepseekV41ImageTokenCounter::from_model_dir(
+                    model_dir,
+                )?),
+                model_id: model_id.to_string(),
+            });
+        }
+
         let cfg_path = model_dir.join("preprocessor_config.json");
         let json = std::fs::read_to_string(&cfg_path).with_context(|| {
             format!(
@@ -235,8 +257,12 @@ impl ImageRoutingProcessor {
         Ok(processor)
     }
 
-    pub fn count_tokens(&self, width: u32, height: u32) -> usize {
+    pub fn count_tokens(&self, width: u32, height: u32) -> Result<usize> {
         self.processor.count_tokens(width, height)
+    }
+
+    pub fn is_orientation_sensitive(&self) -> bool {
+        self.processor.is_orientation_sensitive()
     }
 
     /// Return backend-exact image counts for one request. Nemotron shares the
@@ -373,6 +399,22 @@ fn resolve_model_token_with_config(
             model_id = %model_id,
             image_token_id = token_id,
             spec = "nemotron-nano-omni",
+            "resolved image-placeholder token id"
+        );
+        return Some(ResolvedModelToken { token_id });
+    }
+
+    // DeepSeek V4.1 declares its placeholder in config.json, so it needs no
+    // tokenizer-backed registry lookup.
+    if deepseek_v41::supports_model_type(
+        config.get("model_type").and_then(serde_json::Value::as_str),
+    ) {
+        let token_id = extract_chat_placeholder_from_config(config)?;
+        tracing::debug!(
+            target: "mm_routing",
+            model_id = %model_id,
+            image_token_id = token_id,
+            spec = "deepseek-v4.1",
             "resolved image-placeholder token id"
         );
         return Some(ResolvedModelToken { token_id });
@@ -650,7 +692,7 @@ mod tests {
 
         // 640x480 is already aligned to patch_size * merge_size (32).
         // (640 / 16) * (480 / 16) / merge_size² = 300.
-        assert_eq!(counter.count_tokens(640, 480), 300);
+        assert_eq!(counter.count_tokens(640, 480).unwrap(), 300);
     }
 
     fn write_nemotron_omni_configs(model_dir: &Path) {
@@ -801,6 +843,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(counter.routing_prompt_kind(), Some(ImagePromptKind::KimiK3));
+        assert!(counter.is_orientation_sensitive());
         let resolved = resolve_routing_tokens(
             "/models/internal-checkpoint",
             model_dir.path(),
@@ -990,6 +1033,68 @@ mod tests {
             resolve_exact_routing_image_token_id("/models/internal-checkpoint", model_dir.path()),
             Some(163605)
         );
+    }
+
+    #[test]
+    fn deepseek_v41_resolves_routing_contract_without_preprocessor_config() {
+        let model_dir = tempfile::tempdir().unwrap();
+        deepseek_v41::write_test_config(model_dir.path());
+        let model_id = "deepseek-ai/DeepSeek-V4.1-Flash";
+
+        let counter =
+            ImageRoutingProcessor::try_new(model_id, Some("deepseek_v41"), model_dir.path())
+                .unwrap();
+        assert_eq!(
+            counter.routing_prompt_kind(),
+            Some(ImagePromptKind::RepeatedPad)
+        );
+        assert!(counter.is_orientation_sensitive());
+
+        let resolved = resolve_routing_tokens(model_id, model_dir.path(), Some(&counter));
+        assert_eq!(resolved.image_token_id, Some(129264));
+        assert_eq!(resolved.chat_placeholder_token_id, Some(129264));
+        assert_eq!(
+            resolved.image_prompt_kind,
+            Some(ImagePromptKind::RepeatedPad)
+        );
+        assert_eq!(
+            resolve_exact_routing_image_token_id(model_id, model_dir.path()),
+            Some(129264)
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_checkpoints_do_not_enable_image_routing() {
+        // Text-only DSV4 and the experimental DSV4 vision checkpoint share
+        // `deepseek_v4`. Neither expands images like DSV4.1, so routing stays off.
+        let text_only = serde_json::json!({
+            "architectures": ["DeepseekV4ForCausalLM"],
+            "model_type": "deepseek_v4"
+        });
+        let vision_experiment = serde_json::json!({
+            "architectures": ["DeepseekV4ForCausalLM"],
+            "model_type": "deepseek_v4",
+            "vision_n_layers": 32,
+            "vision_patch_size": 14,
+            "vision_downsample_ratio": 3,
+            "vision_max_n_token": 384,
+            "vision_min_pixels": 147456,
+            "vision_max_wh_ratio": 8
+        });
+        for config in [text_only, vision_experiment] {
+            let model_dir = tempfile::tempdir().unwrap();
+            std::fs::write(model_dir.path().join("config.json"), config.to_string()).unwrap();
+            let model_id = "deepseek-ai/DeepSeek-V4-Flash";
+
+            assert!(
+                ImageRoutingProcessor::try_new(model_id, Some("deepseek_v4"), model_dir.path())
+                    .is_err()
+            );
+            assert_eq!(
+                resolve_exact_routing_image_token_id(model_id, model_dir.path()),
+                None
+            );
+        }
     }
 
     /// Coverage table for the VLM families we claim to support. Each row is
