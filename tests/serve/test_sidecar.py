@@ -18,7 +18,11 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.constants import DynamoPortRange
-from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
+from tests.utils.engine_metrics import (
+    EngineMetrics,
+    SGLangMetricsChecker,
+    VllmMetricsChecker,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
@@ -142,6 +146,7 @@ sidecar_configs = {
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
+        script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -149,9 +154,15 @@ sidecar_configs = {
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
-        env={"PYTHONUNBUFFERED": "1"},
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
+            "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
+        },
         request_payloads=[
-            chat_payload_default(),
+            *_aggregated_payloads(
+                SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
             OmittedMaxTokensChatPayload(
                 body={
                     "messages": [{"role": "user", "content": "Tell me about rivers."}],
@@ -263,7 +274,12 @@ sidecar_configs = {
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
-        script_args=["--disable-cuda-graph"],
+        script_args=[
+            "--disable-cuda-graph",
+            "--enable-metrics",
+            "--decode-log-interval",
+            "1",
+        ],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -279,7 +295,11 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
         },
-        request_payloads=[disaggregated_chat_payload()],
+        request_payloads=_disaggregated_payloads(
+            prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+            transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+        ),
     ),
 }
 
