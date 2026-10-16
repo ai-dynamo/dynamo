@@ -44,9 +44,7 @@ const (
 	// clientCertAnnotation publishes an agent Pod's client certificate, base64 DER.
 	clientCertAnnotation = "lpx.nvidia.com/client-cert"
 	// clientIdentityAnnotation names the identity Secret and its certificate's SHA-256 on every
-	// clique and scaling group. New keys change it, so every Pod rolls; under OnDelete the layout
-	// check compares group annotations, so the PCS is replaced whole instead of mixing Pods that
-	// hold different SSH keys.
+	// clique and scaling group. New keys change it, so Grove rolls every Pod onto them.
 	clientIdentityAnnotation = "lpx.nvidia.com/client-identity"
 	// identityVolume and identityMountPath belong to the operator in agent templates.
 	identityVolume    = "lpx-identity"

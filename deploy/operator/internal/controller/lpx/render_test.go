@@ -1243,21 +1243,22 @@ func TestStampClientIdentity(t *testing.T) {
 	require.ErrorContains(t, r.stampClientIdentity(ctx, dgd, again), "is not controlled by this DGD")
 }
 
-func TestRecreatedClientIdentityReplacesOnDeletePodCliqueSet(t *testing.T) {
+func TestRecreatedClientIdentityRollsEveryClique(t *testing.T) {
+	t.Log("Render a running workload with its client identity")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	metav1.SetMetaDataAnnotation(&dgd.ObjectMeta, consts.KubeAnnotationGroveUpdateStrategy, "OnDelete")
 	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	live := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
-	require.Equal(t, grovev1alpha1.OnDeleteStrategy, live.Spec.UpdateStrategy.Type)
 
 	t.Log("The Secret is deleted while the workload runs; the next render generates new keys under the same name")
 	require.NoError(t, r.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}}))
 	recreated := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+
+	t.Log("Every clique template changes, so Grove rolls each Pod without replacing the PodCliqueSet")
 	for i, clique := range recreated.Spec.Template.Cliques {
 		require.NotEqual(t, live.Spec.Template.Cliques[i].Annotations[clientIdentityAnnotation], clique.Annotations[clientIdentityAnnotation], clique.Name)
 	}
-	require.False(t, podCliqueSetLayoutMatches(live, recreated), "OnDelete must replace the PodCliqueSet whole")
+	require.True(t, podCliqueSetLayoutMatches(live, recreated))
 }
 
 func TestClientIdentityRejectsAuthoredVolumeOrMount(t *testing.T) {
