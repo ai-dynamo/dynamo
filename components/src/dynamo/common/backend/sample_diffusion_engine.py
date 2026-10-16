@@ -12,6 +12,12 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from dynamo._core import Context
+from dynamo.common.protocols.image_protocol import (
+    ImageAccounting,
+    ImageData,
+    ImagesResponseNvExt,
+    NvImagesResponse,
+)
 from dynamo.llm import ModelInput
 
 from .engine import DiffusionEngine, EngineConfig
@@ -31,7 +37,8 @@ class SampleDiffusionEngine(DiffusionEngine):
     returning a fixed tiny PNG after a delay — exercises the raw media pipeline
     (RawEngineAdapter + PyRawEngine) end-to-end without a GPU, and is a template
     for real engines. ``generate`` takes the OpenAI image-request dict and
-    yields one ``NvImagesResponse``-shaped dict.
+    yields one ``NvImagesResponse`` dict with the image accounting a real
+    engine reports under ``nvext.usage``; token ``usage`` is left unset.
     """
 
     def __init__(
@@ -109,22 +116,39 @@ class SampleDiffusionEngine(DiffusionEngine):
         if n < 1 or n > 10:
             raise ValueError("`n` must be between 1 and 10")
         response_format = request.get("response_format") or "url"
+        # The frontend forwards the request's nvext verbatim; echo the step
+        # count it asked for, as a vLLM-Omni worker does.
+        num_inference_steps = (request.get("nvext") or {}).get("num_inference_steps")
 
         # Simulate a single denoising step.
         if not is_probe(request):
             await asyncio.sleep(self.delay)
 
         image_bytes = base64.b64decode(_TINY_PNG_B64)
-        data: list[dict[str, Any]] = []
+        data: list[ImageData] = []
         for _ in range(n):
             if response_format == "b64_json":
-                data.append({"b64_json": base64.b64encode(image_bytes).decode("utf-8")})
+                data.append(
+                    ImageData(b64_json=base64.b64encode(image_bytes).decode("utf-8"))
+                )
             else:
                 # No object store in the sample engine; return a data URL so
                 # "url" responses are still self-contained.
-                data.append({"url": f"data:image/png;base64,{_TINY_PNG_B64}"})
+                data.append(ImageData(url=f"data:image/png;base64,{_TINY_PNG_B64}"))
 
-        yield {"created": int(time.time()), "data": data}
+        yield NvImagesResponse(
+            created=int(time.time()),
+            data=data,
+            size="1x1",
+            output_format="png",
+            nvext=ImagesResponseNvExt(
+                usage=ImageAccounting(
+                    output_images=len(data),
+                    input_images=0,
+                    num_inference_steps=num_inference_steps,
+                )
+            ),
+        ).model_dump(exclude_none=True)
 
     async def cleanup(self) -> None:
         pass

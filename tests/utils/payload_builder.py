@@ -22,6 +22,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
+    ImagesAccountingPayload,
     ImagesPayload,
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
@@ -711,6 +712,32 @@ def images_payload_default(
             "n": 1,
             "response_format": "b64_json",
         },
+        expected_response=["iVBOR"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        timeout=timeout,
+    )
+
+
+def images_accounting_payload(
+    n: int = 2,
+    num_inference_steps: int | None = None,
+    repeat_count: int = 1,
+    timeout: int = 60,
+) -> ImagesAccountingPayload:
+    """Image-generation request whose response must carry the accounting
+    contract: ``n`` images in ``data``, null token ``usage``, and
+    ``nvext.usage`` counting the images returned. With ``num_inference_steps``
+    the request asks for that step count and the accounting must echo it."""
+    body: dict[str, Any] = {
+        "prompt": "a red balloon over green hills",
+        "n": n,
+        "response_format": "b64_json",
+    }
+    if num_inference_steps is not None:
+        body["nvext"] = {"num_inference_steps": num_inference_steps}
+    return ImagesAccountingPayload(
+        body=body,
         expected_response=["iVBOR"],
         expected_log=[],
         repeat_count=repeat_count,
