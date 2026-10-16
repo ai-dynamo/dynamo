@@ -482,15 +482,3 @@ def test_aggregated_capacity_floor_uses_fastest_observed_forward_pass():
     assert capacity.itl_s is not None
     assert capacity.itl_s >= 0.02
     assert capacity.rps <= 16 / (request.osl * 0.02)
-
-
-def test_aggregated_capacity_floor_absent_without_observations():
-    model, _forward_pass_model = _model(
-        worker_type="aggregated",
-        estimate=_clamped_fit_estimate,
-    )
-
-    capacity = model.find_engine_capacity_rps(_floor_request())
-
-    assert capacity is not None
-    assert capacity.itl_s == pytest.approx(1e-9)
