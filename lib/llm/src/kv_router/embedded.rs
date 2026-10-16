@@ -508,54 +508,60 @@ mod tests {
     async fn request_capacity_native_fallback_and_override_reach_builtin_selection() {
         use dynamo_kv_router::services::selection::{SelectAndReserveRequest, SelectionError};
 
-        for (native, limit) in [(2, None), (8, Some(2))] {
-            let service = SelectionServiceBuilder::new(
-                KvRouterConfig {
-                    use_kv_events: false,
-                    ..Default::default()
-                },
-                WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
-            )
-            .build()
-            .await
-            .unwrap();
-            let config = ModelRuntimeConfig {
-                data_parallel_start_rank: 2,
-                data_parallel_size: 4,
-                max_num_seqs: Some(native),
-                engine_request_limit: limit,
+        let config = ModelRuntimeConfig {
+            data_parallel_start_rank: 2,
+            data_parallel_size: 4,
+            max_num_seqs: Some(2),
+            ..Default::default()
+        };
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let native_worker = worker_request_from_runtime_config(7, &config, &key, 4, false);
+        assert_eq!(native_worker.engine_request_limit, Some(2));
+        let override_config = ModelRuntimeConfig {
+            max_num_seqs: Some(8),
+            engine_request_limit: Some(2),
+            ..config
+        };
+        let override_worker =
+            worker_request_from_runtime_config(7, &override_config, &key, 4, false);
+        assert_eq!(override_worker.engine_request_limit, Some(2));
+
+        let service = SelectionServiceBuilder::new(
+            KvRouterConfig {
+                use_kv_events: false,
                 ..Default::default()
-            };
-            let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
-            let worker = worker_request_from_runtime_config(7, &config, &key, 4, false);
-            assert_eq!(worker.engine_request_limit, Some(2));
-            service.upsert_worker(worker).await.unwrap();
-            let request = |id| {
-                serde_json::from_value::<SelectAndReserveRequest>(serde_json::json!({
-                "model_name": "model", "selection_id": format!("request-{id}"), "token_ids": [1, 2, 3, 4]
-            })).unwrap()
-            };
-            let mut counts = [0; 4];
-            for id in 0..8 {
-                let selected = service.select_and_reserve(request(id)).await.unwrap();
-                counts[(selected.dp_rank - 2) as usize] += 1;
-            }
-            assert_eq!(counts, [2; 4]);
-            assert!(matches!(
-                service.select_and_reserve(request(8)).await,
-                Err(SelectionError::Scheduler(
-                    dynamo_kv_router::scheduling::KvSchedulerError::AllEligibleWorkersOverloaded
-                ))
-            ));
-            for id in 0..8 {
-                service
-                    .free_reservation(&format!("request-{id}"))
-                    .await
-                    .unwrap();
-            }
-            service.core().shutdown();
+            },
+            WorkerType::Aggregated,
+            dynamo_custom_policy_builtin::default_registry(),
+        )
+        .build()
+        .await
+        .unwrap();
+        service.upsert_worker(override_worker).await.unwrap();
+        let request = |id| {
+            serde_json::from_value::<SelectAndReserveRequest>(serde_json::json!({
+            "model_name": "model", "selection_id": format!("request-{id}"), "token_ids": [1, 2, 3, 4]
+        })).unwrap()
+        };
+        let mut counts = [0; 4];
+        for id in 0..8 {
+            let selected = service.select_and_reserve(request(id)).await.unwrap();
+            counts[(selected.dp_rank - 2) as usize] += 1;
         }
+        assert_eq!(counts, [2; 4]);
+        assert!(matches!(
+            service.select_and_reserve(request(8)).await,
+            Err(SelectionError::Scheduler(
+                dynamo_kv_router::scheduling::KvSchedulerError::AllEligibleWorkersOverloaded
+            ))
+        ));
+        for id in 0..8 {
+            service
+                .free_reservation(&format!("request-{id}"))
+                .await
+                .unwrap();
+        }
+        service.core().shutdown();
     }
 
     #[test]
