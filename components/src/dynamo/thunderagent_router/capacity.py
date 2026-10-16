@@ -135,6 +135,9 @@ class WorkerCapacityProvider:
         ):
             return None
         tokens = int(block_size) * int(total_blocks)
+        # TODO(rank-aware-kv-capacity): resolve device blocks per rank with provenance, and type
+        # native offload as per-rank versus shared before summing it. Do not fan a shared pool out
+        # to every DP rank or use an estimated device value as an exact admission budget.
         offloaded = get_native_offloading_capacity_tokens(
             runtime_config.get("runtime_data", {})
         )

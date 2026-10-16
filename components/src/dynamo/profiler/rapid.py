@@ -19,18 +19,18 @@ import logging
 
 import pandas as pd
 import yaml
-from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
-from aiconfigurator.generator.api import generate_backend_artifacts
-from aiconfigurator.generator.module_bridge import task_config_to_generator_config
-from aiconfigurator.generator.naive import build_naive_generator_params
-from aiconfigurator.sdk.task_v2 import Task
+from aisimulate.generator.api import generate_backend_artifacts
+from aisimulate.generator.module_bridge import task_config_to_generator_config
+from aisimulate.generator.naive import build_naive_generator_params
+from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
+from aisimulate.sdk.task_v2 import Task
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.model_cache_paths import model_cache_path_in_pvc
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
-    needs_mocker_aic_perf_model,
+    needs_mocker_ais_perf_model,
     needs_profile_data,
     resolve_model_path,
 )
@@ -139,6 +139,11 @@ def _generate_dgd_from_pick(
 # Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
 _DEFAULT_NAIVE_BACKEND = "vllm"
 
+# build_naive_generator_params seeds its own SlaConfig with these; kept only
+# to detect and report substitution, since the declared values are forwarded.
+_NAIVE_GENERATOR_DEFAULT_ISL = 4000
+_NAIVE_GENERATOR_DEFAULT_OSL = 1000
+
 
 def _run_naive_fallback(
     dgdr: DynamoGraphDeploymentRequestSpec,
@@ -146,6 +151,8 @@ def _run_naive_fallback(
     total_gpus: int,
     system: str,
     backend: str,
+    isl: int | None,
+    osl: int | None,
 ) -> dict:
     """Handle the AIC-unsupported path via naive config generation."""
     if backend == "auto":
@@ -172,11 +179,32 @@ def _run_naive_fallback(
         backend,
     )
 
+    # WorkloadSpec.isl/osl are Optional and an explicit null reaches here intact,
+    # so substitute the generator's own defaults rather than overriding with None.
+    if isl is None:
+        isl = _NAIVE_GENERATOR_DEFAULT_ISL
+    if osl is None:
+        osl = _NAIVE_GENERATOR_DEFAULT_OSL
+
+    if isl != _NAIVE_GENERATOR_DEFAULT_ISL or osl != _NAIVE_GENERATOR_DEFAULT_OSL:
+        logger.warning(
+            "Declared workload (isl=%d, osl=%d) differs from the naive generator "
+            "defaults (isl=%d, osl=%d); forwarding the declared values so the "
+            "generated worker is sized for the requested sequence length.",
+            isl,
+            osl,
+            _NAIVE_GENERATOR_DEFAULT_ISL,
+            _NAIVE_GENERATOR_DEFAULT_OSL,
+        )
+
+    # The generator derives max_seq_len from SlaConfig during generation, so the
+    # declared workload must be an input; patching the params after is too late.
     generator_params = build_naive_generator_params(
         model_name=model,
         total_gpus=total_gpus,
         system_name=system,
         backend_name=backend,
+        generator_overrides={"SlaConfig": {"isl": isl, "osl": osl}},
     )
 
     k8s_overrides = _build_k8s_overrides(dgdr, backend)
@@ -308,7 +336,7 @@ def _run_default_sim(
     # File-based interpolation and rapid mocker AIC specs both require separate
     # prefill/decode picks. If AIC picked an aggregated config, override to the
     # best available disaggregated alternative for the downstream consumer.
-    requires_disagg = needs_profile_data(dgdr) or needs_mocker_aic_perf_model(dgdr)
+    requires_disagg = needs_profile_data(dgdr) or needs_mocker_ais_perf_model(dgdr)
     if chosen == "agg" and requires_disagg:
         disagg_key = next(
             (k for k in best_configs if "disagg" in k and not best_configs[k].empty),
@@ -377,7 +405,7 @@ def run_rapid(
     ``best_config_df``, ``best_latencies``, and ``dgd_config``.
     """
     if not aic_supported:
-        return _run_naive_fallback(dgdr, model, total_gpus, system, backend)
+        return _run_naive_fallback(dgdr, model, total_gpus, system, backend, isl, osl)
     if picking_mode == "autoscale":
         return _run_autoscale_sim(
             dgdr,

@@ -50,6 +50,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // request. Quarantine it, or a migration retry can reselect the same
         // worker before discovery removal catches up.
         ErrorType::Backend(BackendError::StreamIncomplete),
+        // The addressed server has no handler for this instance: discovery is
+        // stale or the worker is shutting down. Same reasoning as above.
+        ErrorType::WorkerUnavailable,
     ];
     match_error_chain(err, INHIBITED, &[])
 }
@@ -60,6 +63,16 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 fn response_inactivity_timeout() -> Option<std::time::Duration> {
     use crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
     std::env::var(DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
+}
+
+/// Read the response-stream establish timeout from the environment.
+fn response_stream_establish_timeout() -> Option<std::time::Duration> {
+    use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
+    std::env::var(DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
@@ -170,6 +183,12 @@ where
     /// Cached response inactivity timeout. Read once at construction from
     /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
+
+    /// Cached bound on the wait for a worker's response stream after the worker
+    /// ACKs a unary request. Read once at construction from
+    /// [`environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS).
+    /// Applied only when fault detection is enabled.
+    establish_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -440,7 +459,9 @@ fn spawn_instance_removal_watcher<T, U>(
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 dispatch.on_instance_added(&eid).await;
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -531,7 +552,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
                                 indexer.remove_worker(eid.instance_id);
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Removed(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -610,6 +634,7 @@ where
             random_picker,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -620,9 +645,9 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
-    /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// the routing snapshot reports at least one free instance and the gate never rejects.
+    /// durable overload detection is driven by the monitor through
+    /// `client.set_overloaded_instances(...)`. Worker responses can also create
+    /// bounded request-path overload leases.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -679,6 +704,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
@@ -722,6 +748,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -1084,11 +1111,7 @@ where
         // Fallback resolution owns the unavailable-target decision. Allowing it
         // to see a worker already absent from discovery preserves Direct's
         // historical standalone fallback; `Deny` remains exact-target behavior.
-        let selected_is_discovered = self
-            .client
-            .instances()
-            .iter()
-            .any(|instance| instance.instance_id == instance_id);
+        let selected_is_discovered = self.client.is_instance_live(instance_id);
         if !selected_is_discovered {
             let fallback_is_available = self
                 .client
@@ -1768,7 +1791,13 @@ where
                 return Err(error);
             }
         };
-        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+        let establish_timeout = self
+            .establish_timeout
+            .filter(|_| self.fault_detection_enabled);
+        let request = request.map(|req| {
+            AddressedRequest::with_instance(req, address, instance)
+                .with_establish_timeout(establish_timeout)
+        });
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1840,19 +1869,15 @@ where
         use crate::component::TransportType;
 
         let lookup = |id: u64| {
-            self.client
-                .instances()
-                .iter()
-                .find(|i| i.instance_id == id)
-                .map(|instance| {
-                    let (addr, kind) = match &instance.transport {
-                        TransportType::Tcp(tcp_endpoint) => {
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
-                    };
-                    (addr, kind, instance.clone())
-                })
+            self.client.instance_by_id(id).map(|instance| {
+                let (addr, kind) = match &instance.transport {
+                    TransportType::Tcp(tcp_endpoint) => {
+                        (tcp_endpoint.clone(), "transport.tcp.request")
+                    }
+                    TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                };
+                (addr, kind, instance)
+            })
         };
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {
@@ -1941,11 +1966,11 @@ where
                         );
                         self.client.report_instance_down(instance_id);
                     } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
-                        // Backpressure: worker said "my queue is full,
-                        // retry later". Mark overloaded so this FE skips it on
-                        // the next selection; the next ActiveLoad event from the
-                        // worker monitor overwrites the overloaded set from fresh
-                        // metrics. This is NOT report_instance_down (fault path).
+                        // Backpressure: the worker said "my queue is full,
+                        // retry later". A bounded lease prevents an immediate
+                        // retry loop. Fresh monitor data clears the lease early.
+                        // Lease expiry permits a recovery probe when load events
+                        // remain unchanged. This is not a fault quarantine.
                         tracing::debug!(
                             "Marking instance {instance_id} overloaded due to backpressure: {err}"
                         );
@@ -2498,6 +2523,15 @@ mod tests {
             !is_inhibited(&cancelled),
             "client cancellation is not a worker fault"
         );
+    }
+
+    #[test]
+    fn worker_unavailable_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build();
+        assert!(is_inhibited(&err));
     }
 
     #[test]
@@ -3680,6 +3714,96 @@ mod tests {
         drop(unary);
 
         rt.shutdown();
+    }
+
+    /// Records the establish timeout each unary dispatch carries.
+    #[derive(Default)]
+    struct DeadlineRecordingDispatch {
+        seen: std::sync::Mutex<Vec<Option<std::time::Duration>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingDispatch<u64, TestResponse> for DeadlineRecordingDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<u64>>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(request.content().establish_timeout());
+            Ok(RecordingDispatch::canned_stream())
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            _instance: Instance,
+            _address: String,
+            _input: ManyIn<u64>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            Ok(RecordingDispatch::canned_stream())
+        }
+    }
+
+    async fn establish_timeout_seen_by_dispatch(
+        namespace: &str,
+        fault_detection_enabled: bool,
+    ) -> Option<std::time::Duration> {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        assert!(
+            poll_until(|| client.instance_ids_avail().contains(&instance_id)).await,
+            "precondition: worker should be available"
+        );
+
+        let dispatch = Arc::new(DeadlineRecordingDispatch::default());
+        let mut router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+        router.establish_timeout = Some(std::time::Duration::from_millis(200));
+        router.fault_detection_enabled = fault_detection_enabled;
+
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        let seen = dispatch.seen.lock().unwrap().clone();
+        rt.shutdown();
+        assert_eq!(seen.len(), 1, "expected exactly one unary dispatch");
+        seen[0]
+    }
+
+    /// The deadline rides on the addressed request so the transport can start
+    /// it at the worker's ACK rather than around local admission and send.
+    #[tokio::test]
+    async fn establish_timeout_is_passed_to_dispatch() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout", true).await,
+            Some(std::time::Duration::from_millis(200))
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_timeout_skipped_without_fault_detection() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout_no_fd", false).await,
+            None,
+            "routers without fault detection must not bound dispatch"
+        );
     }
 
     /// Poll a predicate until it holds or a short deadline elapses; discovery

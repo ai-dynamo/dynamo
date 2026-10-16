@@ -13,7 +13,7 @@
 use validator::Validate;
 use validator::ValidationError;
 
-use crate::vllm_render_client::parse_tokenizer_service_base_url;
+use crate::render_http::parse_render_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
@@ -67,21 +67,25 @@ impl EppMode {
     }
 }
 
-/// Wire protocol exposed by the configured tokenizer service.
+/// Render protocol spoken by the configured renderer sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenizerProtocol {
+pub enum RendererProtocol {
+    /// vLLM's `/v1/chat/completions/render` endpoint; response shape `{"token_ids": [...]}`.
     VllmRender,
+    /// SGLang renderer's `/v1/chat/completions/render` endpoint; response shape `{"input_ids": [...]}`.
+    SglangRenderer,
 }
 
-impl std::str::FromStr for TokenizerProtocol {
+impl std::str::FromStr for RendererProtocol {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "vllm-render" => Ok(Self::VllmRender),
+            "sglang-renderer" => Ok(Self::SglangRenderer),
             other => anyhow::bail!(
                 "DYN_EPP_TOKENIZER_PROTOCOL has invalid value {other:?}; \
-                 expected \"vllm-render\""
+                 expected \"vllm-render\" or \"sglang-renderer\""
             ),
         }
     }
@@ -125,8 +129,8 @@ pub struct EppStandaloneConfig {
     #[validate(length(min = 1, message = "DYN_EPP_TOKENIZER_SERVICE_URL is required"))]
     #[validate(custom(function = "validate_tokenizer_service_url"))]
     pub tokenizer_service_url: String,
-    /// Protocol spoken by the configured tokenizer service.
-    pub tokenizer_protocol: TokenizerProtocol,
+    /// Protocol spoken by the configured renderer sidecar.
+    pub renderer_protocol: RendererProtocol,
     /// Deadline for calls to the configured tokenization provider.
     #[validate(range(min = 1, message = "DYN_EPP_TOKENIZATION_TIMEOUT_MS must be >= 1"))]
     pub tokenization_timeout_ms: u64,
@@ -136,6 +140,17 @@ pub struct EppStandaloneConfig {
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
+    /// Data-parallel ranks per worker pod. Only `1` is accepted: the EPP routes
+    /// by worker and cannot convey the selected rank to the pod.
+    #[validate(range(
+        min = 1,
+        max = 1,
+        message = "DYN_EPP_DATA_PARALLEL_SIZE must be 1; multi-rank standalone serving is unsupported"
+    ))]
+    pub data_parallel_size: u32,
+    /// Port distance between consecutive data-parallel ranks' KV event ports.
+    #[validate(range(min = 1, message = "DYN_EPP_KV_EVENT_PORT_STRIDE must be >= 1"))]
+    pub kv_event_port_stride: u16,
     /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
@@ -159,6 +174,15 @@ pub struct EppStandaloneConfig {
     /// throughput throttle). Excess requests are shed with a 503, not queued.
     #[validate(range(min = 1, message = "DYN_EPP_MAX_INFLIGHT_REQUESTS must be >= 1"))]
     pub max_inflight_requests: usize,
+    /// Pin each `x-dynamo-session-id` to the worker that served it for this
+    /// long after its last request (`DYN_EPP_SESSION_AFFINITY_TTL_SECS`).
+    /// `None` disables session affinity.
+    #[validate(range(
+        min = 1.0,
+        max = 31536000.0,
+        message = "DYN_EPP_SESSION_AFFINITY_TTL_SECS must be between 1 and 31536000 seconds"
+    ))]
+    pub session_affinity_ttl_secs: Option<f64>,
 }
 
 impl EppStandaloneConfig {
@@ -171,7 +195,7 @@ impl EppStandaloneConfig {
     }
 
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
-        let tokenizer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
+        let renderer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
             .ok_or_else(|| anyhow::anyhow!("DYN_EPP_TOKENIZER_PROTOCOL is required"))?
             .parse()?;
         let peer_service = trimmed(get("DYN_EPP_PEER_SERVICE"));
@@ -203,7 +227,7 @@ impl EppStandaloneConfig {
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             tokenizer_service_url: trimmed(get("DYN_EPP_TOKENIZER_SERVICE_URL"))
                 .unwrap_or_default(),
-            tokenizer_protocol,
+            renderer_protocol,
             tokenization_timeout_ms: opt_parse::<u64>(get, "DYN_EPP_TOKENIZATION_TIMEOUT_MS")?
                 .unwrap_or(DEFAULT_TOKENIZATION_TIMEOUT_MS),
             tokenizer_max_response_bytes: opt_parse::<usize>(
@@ -212,6 +236,9 @@ impl EppStandaloneConfig {
             )?
             .unwrap_or(DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
+            data_parallel_size: opt_parse::<u32>(get, "DYN_EPP_DATA_PARALLEL_SIZE")?.unwrap_or(1),
+            kv_event_port_stride: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT_STRIDE")?
+                .unwrap_or(1),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
@@ -219,6 +246,7 @@ impl EppStandaloneConfig {
             max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
             max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
                 .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
+            session_affinity_ttl_secs: opt_parse::<f64>(get, "DYN_EPP_SESSION_AFFINITY_TTL_SECS")?,
         })
     }
 
@@ -231,8 +259,8 @@ impl EppStandaloneConfig {
 }
 
 /// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover)
-/// in standalone mode. Deferred, not a permanent restriction — see
-/// TODO(epp-standalone-container-discovery) below for what unblocks it.
+/// in standalone mode. Standalone support is planned rather than ruled out;
+/// see the note below for what it requires.
 ///
 /// Unlike `DYN_EPP_MODE=dynamo` (which already resolves per-container worker
 /// identities; see `hash_container_name` / `pod_worker_ids` in `epp.rs`),
@@ -245,11 +273,12 @@ impl EppStandaloneConfig {
 /// excluded from every worker index rather than just failing to fail over.
 /// Reject it at startup instead of shipping that silent malfunction.
 ///
-/// TODO(epp-standalone-container-discovery): replace `pod_discovery.rs`'s
-/// pod-aggregate `pod_is_ready()` gate with a per-named-container readiness
-/// check (mirroring dynamo mode's `pod_worker_ids`) so a `WorkerIndex` entry
-/// is keyed on an individual container's own `Ready` status, not the pod's.
-/// Once that lands, lift this rejection.
+/// Lifting this rejection is planned work, tracked by DEP #11661 (EPP Embedded
+/// SelectionService Interface): <https://github.com/ai-dynamo/dynamo/issues/11661>.
+/// It requires replacing `pod_discovery.rs`'s pod-aggregate `pod_is_ready()`
+/// gate with a per-named-container readiness check (mirroring dynamo mode's
+/// `pod_worker_ids`), so a `WorkerIndex` entry is keyed on an individual
+/// container's own `Ready` status rather than the pod's.
 fn reject_unsupported_container_discovery(get: &EnvGet) -> anyhow::Result<()> {
     match trimmed(get(DYN_KUBE_DISCOVERY_MODE)).as_deref() {
         Some("container") => anyhow::bail!(
@@ -268,14 +297,12 @@ fn validate_tokenizer_service_url(value: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    parse_tokenizer_service_base_url(value)
-        .map(|_| ())
-        .map_err(|_| {
-            let mut error = ValidationError::new("tokenizer_service_url_invalid");
-            error.message =
-                Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
-            error
-        })
+    parse_render_base_url(value).map(|_| ()).map_err(|_| {
+        let mut error = ValidationError::new("tokenizer_service_url_invalid");
+        error.message =
+            Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
+        error
+    })
 }
 
 /// Trim a raw value and treat empty as absent.
@@ -393,7 +420,7 @@ mod tests {
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(cfg.tokenizer_service_url, "http://vllm-render:8000");
-        assert_eq!(cfg.tokenizer_protocol, TokenizerProtocol::VllmRender);
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::VllmRender);
         assert_eq!(cfg.tokenization_timeout_ms, DEFAULT_TOKENIZATION_TIMEOUT_MS);
         assert_eq!(
             cfg.tokenizer_max_response_bytes,
@@ -535,6 +562,21 @@ mod tests {
                 ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
                 ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn data_parallel_size_above_one_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+                ("DYN_EPP_DATA_PARALLEL_SIZE", "2"),
             ])
             .is_err()
         );
@@ -696,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_protocol_is_required() {
+    fn renderer_protocol_is_required() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -710,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tokenizer_protocol_fails() {
+    fn unsupported_renderer_protocol_fails() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -725,5 +767,22 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn sglang_renderer_protocol_is_accepted() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "sglang-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            (
+                "DYN_EPP_TOKENIZER_SERVICE_URL",
+                "http://sglang-renderer:30000",
+            ),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "sglang-renderer"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ])
+        .expect("sglang-renderer protocol should be accepted");
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::SglangRenderer);
     }
 }

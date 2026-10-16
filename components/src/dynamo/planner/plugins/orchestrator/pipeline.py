@@ -104,6 +104,12 @@ class PipelineOutcome:
     reconcile_outcome: Optional[MergeOutcome] = None
     constrain_outcome: Optional[MergeOutcome] = None
     proposed_components: frozenset[ComponentKey] = field(default_factory=frozenset)
+    # Startup reversal needs both intent and evaluation provenance: an idle
+    # plugin tick is not a fresh hold, and a CONSTRAIN ceiling is not demand.
+    propose_results: Optional[list[PluginResult]] = None
+    reconcile_results: Optional[list[PluginResult]] = None
+    constrain_results: Optional[list[PluginResult]] = None
+    evaluated_proposal_plugins: Optional[frozenset[str]] = None
     audit_events: list[str] = field(default_factory=list)
 
 
@@ -390,6 +396,7 @@ async def _run_fanout_stage(
     clock: Clock,
     metrics: Optional[PluginFrameworkMetrics] = None,
     propose_results: Optional[list[ProposeResult]] = None,
+    evaluated_plugins: Optional[set[str]] = None,
 ) -> tuple[MergeOutcome, list[PluginResult]]:
     """PROPOSE / RECONCILE / CONSTRAIN fan-out-and-merge helper.
 
@@ -414,6 +421,8 @@ async def _run_fanout_stage(
     """
     active = scheduler.compute_active_set(tick_now, stage, ctx=ctx)
     plugins: list[RegisteredPlugin] = list(active.triggered)
+    if evaluated_plugins is not None:
+        evaluated_plugins.update(plugin.plugin_id for plugin in plugins)
     method = _STAGE_METHOD[stage]
     request = _stage_request(stage, ctx, proposals=propose_results)
 
@@ -791,6 +800,7 @@ async def run_pipeline(
             current_ctx = current_ctx.model_copy(update={"predictions": ca.prediction})
 
         # ---- PROPOSE stage ----
+        evaluated_proposal_plugins: set[str] = set()
         propose, propose_plugin_results = await _run_fanout_stage(
             stage="propose",
             scheduler=scheduler,
@@ -801,6 +811,7 @@ async def run_pipeline(
             set_allowed=True,
             clock=clock,
             metrics=metrics,
+            evaluated_plugins=evaluated_proposal_plugins,
         )
         proposed_components = _proposed_component_mask(propose_plugin_results)
         if propose.short_circuited:
@@ -823,7 +834,7 @@ async def run_pipeline(
         # than only seeing the post-merge ctx.proposal).
         reconcile_baseline = _proposal_to_baseline(propose.proposal, baseline)
         propose_proposals = [_to_propose_result(pr) for pr in propose_plugin_results]
-        reconcile, _ = await _run_fanout_stage(
+        reconcile, reconcile_plugin_results = await _run_fanout_stage(
             stage="reconcile",
             scheduler=scheduler,
             circuit_breaker=circuit_breaker,
@@ -834,6 +845,7 @@ async def run_pipeline(
             clock=clock,
             metrics=metrics,
             propose_results=propose_proposals,
+            evaluated_plugins=evaluated_proposal_plugins,
         )
         if reconcile.short_circuited:
             return PipelineOutcome(
@@ -854,7 +866,7 @@ async def run_pipeline(
         # ---- CONSTRAIN stage ----
         # Baseline flows from RECONCILE's output.
         constrain_baseline = _proposal_to_baseline(reconcile.proposal, baseline)
-        constrain, _ = await _run_fanout_stage(
+        constrain, constrain_plugin_results = await _run_fanout_stage(
             stage="constrain",
             scheduler=scheduler,
             circuit_breaker=circuit_breaker,
@@ -903,6 +915,10 @@ async def run_pipeline(
             reconcile_outcome=reconcile,
             constrain_outcome=constrain,
             proposed_components=proposed_components,
+            propose_results=propose_plugin_results,
+            reconcile_results=reconcile_plugin_results,
+            constrain_results=constrain_plugin_results,
+            evaluated_proposal_plugins=frozenset(evaluated_proposal_plugins),
             audit_events=audit,
         )
 

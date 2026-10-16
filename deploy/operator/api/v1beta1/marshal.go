@@ -95,6 +95,7 @@
 package v1beta1
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -111,10 +112,15 @@ import (
 // embedded encoder, which would indicate a bug in the standard library
 // rather than user input.
 func normalizeV1Beta1JSON(raw []byte, rootType reflect.Type) ([]byte, error) {
+	// Decode numbers as json.Number so re-encoding preserves full int64 precision.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := decoder.Decode(&v); err != nil {
 		return nil, err
 	}
+
+	// Strip encoder artefacts while retaining the Kubernetes object envelope.
 	stripEmptyValueStructs(rootType, v)
 	ensureRuntimeObjectMetadata(rootType, v)
 	return json.Marshal(v)

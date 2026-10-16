@@ -48,7 +48,7 @@ spec:
           env:
             - name: HF_HOME
               value: /opt/models
-    VllmPrefillWorker:
+    prefill:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -151,7 +151,7 @@ spec:
                 --tokenizer-mode deepseek_v4 \
                 --dyn-reasoning-parser deepseek_v4 \
                 --dyn-tool-call-parser deepseek_v4 \
-                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
       replicas: 1
       multinode:
         nodeCount: 2
@@ -162,7 +162,7 @@ spec:
           gpu: "4"
         claims:
           - name: compute-domain-channel
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret
@@ -227,7 +227,7 @@ spec:
             - -c
           args:
             - |
-              # See VllmPrefillWorker for the :29500 / wait-for-leader-mp rationale.
+              # See prefill for the :29500 / wait-for-leader-mp rationale.
               exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
@@ -254,7 +254,7 @@ spec:
                 --tokenizer-mode deepseek_v4 \
                 --dyn-reasoning-parser deepseek_v4 \
                 --dyn-tool-call-parser deepseek_v4 \
-                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
       replicas: 1
       multinode:
         nodeCount: 2

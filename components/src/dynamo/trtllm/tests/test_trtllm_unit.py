@@ -26,7 +26,9 @@ from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
+    _resolve_streaming_kv_events_config,
     _strip_postprocess_workers,
+    _validate_streaming_kv_events_backend,
     init_llm_worker,
 )
 
@@ -475,20 +477,88 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
     raise EngineArgsCaptured(engine_args)
 
 
+def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
+    resolved = _resolve_streaming_kv_events_config(
+        {
+            "kv_cache_config": {
+                "kv_events_config": {
+                    "enable_kv_cache_events": True,
+                    "publisher": "zmq",
+                    "endpoint": "tcp://*:6000",
+                    "topic": "kv-events",
+                }
+            }
+        }
+    )
+
+    assert resolved == {
+        "enable_kv_cache_events": True,
+        "publisher": "zmq",
+        "endpoint": "tcp://*:6000",
+        "topic": "kv-events",
+    }
+
+
+def test_streaming_kv_events_require_python_v2_cache_manager(monkeypatch):
+    monkeypatch.delenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", raising=False)
+
+    with pytest.raises(ValueError, match="TLLM_KV_CACHE_MANAGER_V2_BACKEND=python"):
+        _validate_streaming_kv_events_backend()
+
+
+def test_streaming_kv_events_accept_python_v2_cache_manager(monkeypatch):
+    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "python")
+
+    _validate_streaming_kv_events_backend()
+
+
 @pytest.mark.parametrize(
-    ("publish_flags", "expected_iter_perf_stats"),
+    ("cli_args", "fpm_port_env", "expected"),
     [
-        (["--publish-kv-events"], False),
-        (["--publish-metrics"], True),
-        (["--publish-kv-events", "--publish-metrics"], True),
-        (["--publish-events-and-metrics"], True),
+        ([], None, False),
+        (["--fpm-trace"], None, True),
+        ([], "20380", True),
+        (["--publish-kv-events"], None, False),
+        (["--publish-metrics"], None, True),
+        (["--publish-kv-events", "--publish-metrics"], None, True),
+    ],
+)
+def test_config_publish_forward_pass_metrics_opt_in(
+    monkeypatch, cli_args, fpm_port_env, expected
+):
+    """The Planner's forward-pass metrics follow the opt-in shared with vLLM
+    and SGLang, plus --publish-metrics, which already pays for the iteration
+    statistics both read. --publish-kv-events alone never enables them."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    # Config.validate writes DYN_FPM_TRACE back; setenv restores it on teardown.
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    if fpm_port_env is not None:
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
+
+    config = parse_args(["--model", "fake-model", *cli_args])
+
+    assert config.publish_forward_pass_metrics is expected
+
+
+@pytest.mark.parametrize(
+    ("publish_flags", "fpm_port_env", "expected_iter_perf_stats"),
+    [
+        (["--publish-kv-events"], None, False),
+        (["--publish-metrics"], None, True),
+        (["--fpm-trace"], None, True),
+        ([], "20380", True),
+        ([], None, False),
+        (["--publish-kv-events", "--publish-metrics"], None, True),
+        (["--publish-events-and-metrics"], None, True),
     ],
 )
 @pytest.mark.asyncio
 async def test_init_llm_worker_engine_args_without_overrides(
-    monkeypatch, publish_flags, expected_iter_perf_stats
+    monkeypatch, publish_flags, fpm_port_env, expected_iter_perf_stats
 ):
-    """KV events and metrics control their respective engine paths independently."""
+    """Iteration stats follow --publish-metrics and the forward-pass metrics
+    opt-in, never --publish-kv-events alone; the engine-level
+    return_perf_metrics default stays off regardless."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
@@ -496,6 +566,10 @@ async def test_init_llm_worker_engine_args_without_overrides(
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    if fpm_port_env is not None:
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
 
     if publish_flags == ["--publish-events-and-metrics"]:
         with pytest.warns(

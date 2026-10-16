@@ -134,6 +134,20 @@ impl LiveRunSession {
             ..
         } = self;
         let wall_time_ms = now_ms(task_ctx.start);
+        let agentic_trajectory = task_ctx.workload.as_ref().and_then(|workload| {
+            workload
+                .driver
+                .lock()
+                .ok()
+                .and_then(|driver| driver.agentic_trajectory_snapshot())
+        });
+        let agentic_graph = task_ctx.workload.as_ref().and_then(|workload| {
+            workload
+                .driver
+                .lock()
+                .ok()
+                .and_then(|driver| driver.agentic_graph_identity())
+        });
         let vllm_preemptions_total = task_ctx
             .engines
             .iter()
@@ -166,7 +180,7 @@ impl LiveRunSession {
         let report = tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("online replay cancelled"),
-            result = recorder.finish(wall_time_ms) => result?,
+            result = recorder.finish(wall_time_ms, agentic_trajectory, agentic_graph) => result?,
         };
         if cancel.is_cancelled() {
             bail!("online replay cancelled");
@@ -223,7 +237,7 @@ impl LiveRuntime {
             capture_per_request: replay_options.record_per_request,
             sla: replay_options.sla,
             num_workers,
-            gpus_per_worker: args.aic_gpus_per_worker(),
+            gpus_per_worker: args.ais_gpus_per_worker(),
         };
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
         let dp_size = usize::try_from(args.dp_size)
@@ -443,6 +457,16 @@ impl LiveRuntime {
                         ready_turn.request_uuid,
                         ready_turn.session_id,
                         ready_turn.turn_index,
+                    )?;
+                }
+                if let (Some(request_id), Some(play_id)) =
+                    (ready_turn.authored_request_id, ready_turn.play_id)
+                {
+                    session.recorder_tx.record_agentic_metadata(
+                        ready_turn.request_uuid,
+                        request_id,
+                        play_id,
+                        ready_turn.dispatched_at_ms,
                     )?;
                 }
                 if session.task_ctx.cancel.is_cancelled() {
