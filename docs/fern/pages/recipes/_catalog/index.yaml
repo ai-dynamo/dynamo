@@ -40,6 +40,7 @@ recipes:
 - k-exaone-2
 - ax-k2
 - solar-open2-250b
+- muse-spark-open-816b-a42b
 - minimax-m3
 - motif-3
 deferred_recipes:
