@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from dynamo.common.engine_monitor import EngineHealthMonitorConfig
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Upper bound on how often the watchdog thread reads the executor's fatal
 # error; the read is a cheap attribute lookup.
 _WATCHDOG_MAX_POLL_SECONDS = 0.5
+# A zero health-check interval is valid, but Event.wait(0) returns at once and
+# would spin the watchdog thread.
+_WATCHDOG_MIN_POLL_SECONDS = 0.05
 
 # Held by the first fatal-exit caller and never released, so later callers
 # return at once instead of starting a second teardown.
@@ -74,7 +78,11 @@ def exit_worker_on_fatal_error(
 
 
 def _shutdown_engine(engine: "TensorRTLLMEngine", timeout: float) -> None:
-    """Run engine shutdown on a daemon thread and wait at most ``timeout``."""
+    """Run engine shutdown on a daemon thread and wait at most ``timeout``.
+
+    Stops waiting early if the executor records a fatal error meanwhile: the
+    teardown then talks to dead ranks and will not finish.
+    """
 
     def run() -> None:
         try:
@@ -84,12 +92,29 @@ def _shutdown_engine(engine: "TensorRTLLMEngine", timeout: float) -> None:
 
     thread = threading.Thread(target=run, name="trtllm-fatal-shutdown", daemon=True)
     thread.start()
-    thread.join(timeout if timeout > 0 else None)
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    while thread.is_alive():
+        if engine.get_health_check_fatal_error() is not None:
+            logger.error(
+                "TRT-LLM engine became fatal during shutdown; exiting without waiting."
+            )
+            return
+        wait = _WATCHDOG_MAX_POLL_SECONDS
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            wait = min(wait, remaining)
+        thread.join(wait)
     if thread.is_alive():
         logger.error(
             "TRT-LLM engine shutdown did not finish within %.1f s; exiting anyway.",
             timeout,
         )
+
+
+def _watchdog_poll_seconds(interval: float) -> float:
+    return max(_WATCHDOG_MIN_POLL_SECONDS, min(interval, _WATCHDOG_MAX_POLL_SECONDS))
 
 
 class TrtllmEngineMonitor:
@@ -188,7 +213,7 @@ class TrtllmEngineMonitor:
                 break
 
     def _watch_fatal_error(self) -> None:
-        poll = min(self.interval, _WATCHDOG_MAX_POLL_SECONDS)
+        poll = _watchdog_poll_seconds(self.interval)
         while not self._stop_watchdog.wait(poll):
             if self.shutdown_event is not None and self.shutdown_event.is_set():
                 return

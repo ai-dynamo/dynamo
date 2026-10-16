@@ -277,6 +277,41 @@ async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch):
         engine.release.set()
 
 
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_monitor_stops_waiting_when_engine_dies_during_shutdown(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    engine = _HangingShutdownEngine([False])
+    runtime = _FakeRuntime()
+
+    try:
+        monitor = TrtllmEngineMonitor(
+            engine,
+            runtime=runtime,
+            interval=0.01,
+            shutdown_timeout=60.0,
+        )
+        while engine.shutdown_count == 0:
+            await asyncio.sleep(0.01)
+        engine._fatal_error = RuntimeError("MPI worker rank 0 exited unexpectedly")
+        await _wait_for_exit(exit_calls, timeout=3.0)
+        await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
+
+        assert engine.shutdown_count == 1
+        assert runtime.shutdown_count == 1
+        assert exit_calls == [1]
+    finally:
+        engine.release.set()
+
+
+@pytest.mark.parametrize(
+    ("interval", "expected"),
+    [(0.0, 0.05), (0.2, 0.2), (10.0, 0.5)],
+)
+def test_watchdog_poll_has_positive_floor_and_upper_bound(interval, expected):
+    assert engine_monitor_module._watchdog_poll_seconds(interval) == expected
+
+
 @pytest.mark.timeout(10)
 def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch):
     """A dead rank can block the loop thread in a TRT-LLM IPC send; the
