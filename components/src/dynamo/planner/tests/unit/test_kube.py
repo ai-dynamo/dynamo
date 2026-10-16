@@ -219,6 +219,7 @@ def test_list_capacity_descendants_includes_active_snapshot_job_and_source_job(
         "metadata": {
             "name": "checkpoint-model",
             "uid": "snapshot-job-uid",
+            "deletionTimestamp": "2026-01-01T00:00:00Z",
             "labels": {"nvidia.com/dynamo-graph-deployment-name": "model"},
             "annotations": {
                 "nvidia.com/dynamo-auto-checkpoint": "true",
@@ -231,6 +232,7 @@ def test_list_capacity_descendants_includes_active_snapshot_job_and_source_job(
         "metadata": {
             "name": "checkpoint-model",
             "uid": "source-job-uid",
+            "deletionTimestamp": "2026-01-01T00:00:00Z",
             "labels": {"nvidia.com/snapshot-job-uid": "snapshot-job-uid"},
             "ownerReferences": [{"uid": "snapshot-job-uid", "controller": True}],
         },
@@ -262,6 +264,131 @@ def test_list_capacity_descendants_includes_active_snapshot_job_and_source_job(
         ("SnapshotJob", "snapshot-job-uid", "model", ("dgd-uid",)),
         ("Job", "source-job-uid", "model", ("dgd-uid",)),
     ]
+
+
+def test_list_capacity_descendants_skips_unrelated_snapshot_source_job(
+    k8s_api, mock_custom_api
+):
+    unrelated_job = {
+        "metadata": {
+            "name": "other-consumer",
+            "uid": "source-job-uid",
+            "labels": {"nvidia.com/snapshot-job-uid": "foreign-snapshot-uid"},
+            "ownerReferences": [{"uid": "foreign-snapshot-uid", "controller": True}],
+        },
+        "spec": {"template": {"metadata": {"labels": {}}}},
+        "status": {"conditions": []},
+    }
+
+    def list_objects(*, group, plural, **_kwargs):
+        if group == "batch" and plural == "jobs":
+            return {"items": [unrelated_job], "metadata": {}}
+        return {"items": [], "metadata": {}}
+
+    mock_custom_api.list_namespaced_custom_object.side_effect = list_objects
+    with patch.object(k8s_api, "list_graph_pods", return_value=[]):
+        assert k8s_api.list_capacity_descendants() == []
+
+
+def test_list_capacity_descendants_resolves_legacy_owned_resources(
+    k8s_api, mock_custom_api
+):
+    resources = {
+        "disaggregatedsets": [
+            {
+                "metadata": {
+                    "name": "model-workers",
+                    "uid": "ds-uid",
+                    "labels": {"nvidia.com/dynamo-graph-deployment-name": "model"},
+                    "ownerReferences": [{"uid": "dgd-uid", "controller": True}],
+                }
+            }
+        ],
+        "leaderworkersets": [
+            {
+                "metadata": {
+                    "name": "legacy-lws",
+                    "uid": "lws-uid",
+                    "ownerReferences": [{"uid": "ds-uid", "controller": True}],
+                }
+            },
+            {
+                "metadata": {
+                    "name": "unrelated-lws",
+                    "uid": "foreign-lws-uid",
+                    "ownerReferences": [
+                        {"uid": "foreign-owner-uid", "controller": True}
+                    ],
+                }
+            },
+        ],
+        "statefulsets": [
+            {
+                "metadata": {
+                    "name": "legacy-worker",
+                    "uid": "statefulset-uid",
+                    "ownerReferences": [{"uid": "lws-uid", "controller": True}],
+                }
+            }
+        ],
+        "podcliquesets": [
+            {
+                "metadata": {
+                    "name": "model-pcs",
+                    "uid": "pcs-uid",
+                    "labels": {"nvidia.com/dynamo-graph-deployment-name": "model"},
+                    "ownerReferences": [{"uid": "dgd-uid", "controller": True}],
+                }
+            }
+        ],
+        "podcliquescalinggroups": [
+            {
+                "metadata": {
+                    "name": "legacy-pcsg",
+                    "uid": "pcsg-uid",
+                    "ownerReferences": [{"uid": "pcs-uid", "controller": True}],
+                }
+            },
+            {
+                "metadata": {
+                    "name": "legacy-lpx-pcsg",
+                    "uid": "lpx-pcsg-uid",
+                    "annotations": {"lpx.nvidia.com/deployment-name": "model"},
+                    "ownerReferences": [{"uid": "deleted-pcs-uid", "controller": True}],
+                }
+            },
+            {
+                "metadata": {
+                    "name": "unrelated-pcsg",
+                    "uid": "foreign-pcsg-uid",
+                    "ownerReferences": [{"uid": "foreign-pcs-uid", "controller": True}],
+                }
+            },
+        ],
+    }
+
+    def list_objects(*, plural, **_kwargs):
+        return {"items": resources.get(plural, []), "metadata": {}}
+
+    mock_custom_api.list_namespaced_custom_object.side_effect = list_objects
+    with patch.object(k8s_api, "list_graph_pods", return_value=[]):
+        descendants = k8s_api.list_capacity_descendants()
+
+    assert {(item.kind, item.name, item.dgd_name) for item in descendants} == {
+        ("DisaggregatedSet", "model-workers", "model"),
+        ("LeaderWorkerSet", "legacy-lws", "model"),
+        ("PodCliqueSet", "model-pcs", "model"),
+        ("PodCliqueScalingGroup", "legacy-pcsg", "model"),
+        ("PodCliqueScalingGroup", "legacy-lpx-pcsg", "model"),
+        ("StatefulSet", "legacy-worker", "model"),
+    }
+    selectors = {
+        call.kwargs["plural"]: call.kwargs["label_selector"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    }
+    assert selectors["leaderworkersets"] is None
+    assert selectors["podcliquescalinggroups"] is None
+    assert selectors["statefulsets"] is None
 
 
 def test_list_capacity_descendants_ignores_terminal_snapshot_artifacts(

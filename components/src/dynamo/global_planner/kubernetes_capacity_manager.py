@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
-from time import monotonic
+from time import monotonic, sleep
 from typing import Optional, TypeVar
 
 from kubernetes import client
@@ -63,6 +63,10 @@ class _ReplicaSettlement:
     dgd_uid: str
     targets: dict[str, int]
     authorities: dict[str, tuple[bool, str | None]]
+
+
+class _GenerationDrainPending(RuntimeError):
+    """A second clean descendant observation is still required."""
 
 
 class KubernetesCapacityManager(CapacityManager):
@@ -284,6 +288,7 @@ class KubernetesCapacityManager(CapacityManager):
         *,
         kube_api: KubernetesAPI | None = None,
         capacity_inventories: dict[str, list[CapacityObjectMetadata]] | None = None,
+        audit_current_generation: bool = False,
     ) -> None:
         metadata = deployment.get("metadata")
         if not isinstance(metadata, Mapping):
@@ -294,6 +299,27 @@ class KubernetesCapacityManager(CapacityManager):
         observed_uid = self._observed_uids.get(participant_id)
         if observed_uid == uid:
             self._pending_generation_drains.pop(participant_id, None)
+            if audit_current_generation:
+                if kube_api is None or capacity_inventories is None:
+                    raise RuntimeError(
+                        "current DGD generation cannot be audited without a "
+                        "descendant inventory"
+                    )
+                inventory = self._capacity_inventory(kube_api, capacity_inventories)
+                unsafe = self._unsafe_capacity_descendants(
+                    inventory,
+                    deployment_name=participant_id.split("/", 1)[1],
+                    old_dgd_uid=None,
+                    new_dgd_uid=uid,
+                )
+                if unsafe:
+                    summary = ", ".join(
+                        f"{item.kind}/{item.name}" for item in unsafe[:5]
+                    )
+                    raise RuntimeError(
+                        f"DGD {participant_id} has old or unclassified capacity "
+                        f"descendants: {summary}"
+                    )
             return
 
         self._missing_participants.add(participant_id)
@@ -324,7 +350,7 @@ class KubernetesCapacityManager(CapacityManager):
             old_dgd_uid=observed_uid,
             new_dgd_uid=uid,
         ):
-            raise RuntimeError(
+            raise _GenerationDrainPending(
                 f"DGD identity change from {observed_uid!r} to {uid!r} has one "
                 "clean descendant observation; awaiting drain confirmation"
             )
@@ -608,26 +634,34 @@ class KubernetesCapacityManager(CapacityManager):
         if connector is None:
             return
         inventories: dict[str, list[CapacityObjectMetadata]] = {}
-        try:
-            deployment = connector.kube_api.get_graph_deployment(
-                connector.parent_dgd_name
-            )
-        except DynamoGraphDeploymentNotFoundError:
-            drain_error = self._deployment_drain_error(
-                participant_id,
-                connector,
-                retain=True,
-                capacity_inventories=inventories,
-            )
-            if drain_error is not None:
-                raise drain_error
-            return
-        self._record_observed_identity(
-            participant_id,
-            deployment,
-            kube_api=connector.kube_api,
-            capacity_inventories=inventories,
-        )
+        for attempt in range(2):
+            try:
+                deployment = connector.kube_api.get_graph_deployment(
+                    connector.parent_dgd_name
+                )
+            except DynamoGraphDeploymentNotFoundError:
+                drain_error = self._deployment_drain_error(
+                    participant_id,
+                    connector,
+                    retain=True,
+                    capacity_inventories=inventories,
+                )
+                if drain_error is not None:
+                    raise drain_error
+                return
+            try:
+                self._record_observed_identity(
+                    participant_id,
+                    deployment,
+                    kube_api=connector.kube_api,
+                    capacity_inventories=inventories,
+                )
+                break
+            except _GenerationDrainPending:
+                if attempt != 0:
+                    raise
+                sleep(DRAIN_CONFIRMATION_SECONDS)
+                inventories.clear()
         if self.connectors.get(participant_id) is connector:
             self._missing_participants.discard(participant_id)
 
@@ -668,6 +702,7 @@ class KubernetesCapacityManager(CapacityManager):
                         connector,
                         self._component_roles.get(key),
                         capacity_inventories=capacity_inventories,
+                        audit_current_generation=require_complete,
                     )
                     if self.connectors.get(key) is connector:
                         self._missing_participants.discard(key)
@@ -692,8 +727,6 @@ class KubernetesCapacityManager(CapacityManager):
         try:
             inventory_api = self._get_inventory_api()
             deployments = inventory_api.list_graph_deployments()
-            local_pods = self._periodic_graph_pods(inventory_api)
-            local_pod_counts = self._active_graph_pod_counts(local_pods)
             deployments_by_key: dict[str, dict] = {}
             for index, deployment in enumerate(deployments):
                 metadata = deployment.get("metadata")
@@ -706,6 +739,26 @@ class KubernetesCapacityManager(CapacityManager):
                 if key in deployments_by_key:
                     raise ValueError(f"duplicate DGD {name!r} in list response")
                 deployments_by_key[key] = deployment
+
+            if require_complete:
+                inventory = self._capacity_inventory(
+                    inventory_api, capacity_inventories
+                )
+                deployment_names = {key.split("/", 1)[1] for key in deployments_by_key}
+                unknown = [
+                    item for item in inventory if item.dgd_name not in deployment_names
+                ]
+                if unknown:
+                    summary = ", ".join(
+                        f"{item.kind}/{item.name}" for item in unknown[:5]
+                    )
+                    raise RuntimeError(
+                        "capacity descendants remain for missing DGDs: " + summary
+                    )
+                local_pod_counts: dict[str, int] = {}
+            else:
+                local_pods = self._periodic_graph_pods(inventory_api)
+                local_pod_counts = self._active_graph_pod_counts(local_pods)
         except Exception as error:
             if require_complete:
                 raise RuntimeError(
@@ -754,6 +807,7 @@ class KubernetesCapacityManager(CapacityManager):
                     connector,
                     self._component_roles.get(key),
                     capacity_inventories=capacity_inventories,
+                    audit_current_generation=require_complete,
                 )
                 if self.connectors.get(key) is connector:
                     self._missing_participants.discard(key)
@@ -785,6 +839,7 @@ class KubernetesCapacityManager(CapacityManager):
                     deployment,
                     kube_api=connector.kube_api,
                     capacity_inventories=capacity_inventories,
+                    audit_current_generation=require_complete,
                 )
                 all_pools[key] = self._record_observed_pools(
                     key,
@@ -865,6 +920,7 @@ class KubernetesCapacityManager(CapacityManager):
         role_hints: Optional[dict[str, str]] = None,
         *,
         capacity_inventories: dict[str, list[CapacityObjectMetadata]] | None = None,
+        audit_current_generation: bool = False,
     ) -> dict[str, PoolSpec]:
         """Read and parse the current pool state for one deployment."""
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
@@ -873,6 +929,7 @@ class KubernetesCapacityManager(CapacityManager):
             deployment,
             kube_api=connector.kube_api if capacity_inventories is not None else None,
             capacity_inventories=capacity_inventories,
+            audit_current_generation=audit_current_generation,
         )
         pools = self._pools_from_deployment(connector, deployment, role_hints)
         return self._record_observed_pools(participant_id, pools)

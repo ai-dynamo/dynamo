@@ -1406,8 +1406,8 @@ class KubernetesConnector(PlannerConnector):
             )
 
         # Apply reductions before increases across the separate DGD and DGDSA
-        # authorities. A failed partial plan can then reduce capacity, but it
-        # cannot exceed the capacity accepted by the Global Planner.
+        # authorities. Hard-budget callers submit these as separate settled
+        # stages; this ordering only minimizes transient usage for other callers.
         adapter_mutations = [
             plan for plan in mutations if plan.scaling_adapter is not None
         ]

@@ -293,6 +293,60 @@ class Orchestrator:
             for key in [key for key in self._intent_cache if key.startswith(prefix)]:
                 del self._intent_cache[key]
 
+    def _capture_request_intents(
+        self, participant_id: str, targets: list[TargetReplica]
+    ) -> dict[str, PoolIntent | None]:
+        """Snapshot request-owned cache entries until the plan is admitted."""
+        return {
+            self._pool_cache_key(participant_id, target.sub_component_type.value): (
+                self._intent_cache.get(
+                    self._pool_cache_key(
+                        participant_id, target.sub_component_type.value
+                    )
+                )
+            )
+            for target in targets
+        }
+
+    def _restore_request_intents(self, previous: dict[str, PoolIntent | None]) -> None:
+        for key, intent in previous.items():
+            if intent is None:
+                self._intent_cache.pop(key, None)
+            else:
+                self._intent_cache[key] = intent
+
+    @staticmethod
+    def _target_pool(
+        pools: dict[str, PoolSpec], target: TargetReplica
+    ) -> PoolSpec | None:
+        if target.component_name:
+            for pool in pools.values():
+                if pool.component_name == target.component_name:
+                    return pool
+        return pools.get(target.sub_component_type.value)
+
+    def _budget_target_stages(
+        self,
+        grouped_targets: dict[str, list[TargetReplica]],
+        all_pools: PoolSnapshot,
+    ) -> list[dict[str, list[TargetReplica]]]:
+        """Split a hard-budget plan into settled reductions then increases."""
+        reductions: dict[str, list[TargetReplica]] = defaultdict(list)
+        increases: dict[str, list[TargetReplica]] = defaultdict(list)
+        for participant_id, targets in grouped_targets.items():
+            pools = all_pools.get(participant_id, {})
+            for target in targets:
+                pool = self._target_pool(pools, target)
+                if pool is None:
+                    raise RuntimeError(
+                        f"accepted target for {participant_id} has no observed pool"
+                    )
+                if target.desired_replicas < pool.current_replicas:
+                    reductions[participant_id].append(target)
+                elif target.desired_replicas > pool.current_replicas:
+                    increases[participant_id].append(target)
+        return [stage for stage in (reductions, increases) if stage]
+
     async def _scale_with_result(
         self,
         participant_id: str,
@@ -477,6 +531,7 @@ class Orchestrator:
                 await run_sync_in_thread(refresh_participant, participant_id)
             all_pools = {}
 
+        previous_intents = self._capture_request_intents(participant_id, targets)
         result = self.mediate(
             participant_id,
             targets,
@@ -499,14 +554,10 @@ class Orchestrator:
                 message=result.reject_message or "",
                 current_replicas={},
             )
-        # TODO(global-planner): Make an approved plan equivalent to execution:
-        # apply same-DGD targets atomically and confirm downscale capacity is
-        # released before dependent upscales (especially with blocking=False),
-        # so intermediate or partial state cannot exceed the hard ceiling.
         # Apply: request + selected partners (may be empty), grouped by
         # participant with at most one scale call per participant.
-        # Direction-aware order: scale-down participants first (most negative net
-        # delta), so GPUs are freed before scale-up participants submit new pods.
+        # Budgeted plans are split below so every reduction settles before any
+        # increase and the final stage settles before serialization is released.
         grouped_targets: dict[str, list[TargetReplica]] = defaultdict(list)
         grouped_targets[participant_id].extend(targets)
         for partner in result.selected_partners:
@@ -539,20 +590,36 @@ class Orchestrator:
         # Cancellation remains safe until every participant selected by this
         # observation is reserved. Once the locks are held, completion must be
         # shielded because the first Kubernetes write can commit immediately.
-        await self._reserve_participant_mutations(
-            ordered_participants, held_participant_locks
-        )
+        try:
+            await self._reserve_participant_mutations(
+                ordered_participants, held_participant_locks
+            )
+        except BaseException:
+            self._restore_request_intents(previous_intents)
+            raise
         admitted.set()
 
-        terminal, _ = await self._apply_approved_targets(
-            grouped_targets,
-            ordered_participants,
-            blocking=blocking,
-            committed_participants=committed_participants,
-            held_participant_locks=held_participant_locks,
+        stages = (
+            self._budget_target_stages(grouped_targets, all_pools)
+            if self.budget_enforcement_enabled()
+            else [grouped_targets]
         )
-        if terminal is not None:
-            return terminal
+        for stage in stages:
+            stage_order = [
+                participant
+                for participant in ordered_participants
+                if participant in stage
+            ]
+            terminal, _ = await self._apply_approved_targets(
+                stage,
+                stage_order,
+                blocking=blocking,
+                settle=self.budget_enforcement_enabled(),
+                committed_participants=committed_participants,
+                held_participant_locks=held_participant_locks,
+            )
+            if terminal is not None:
+                return terminal
         return None
 
     async def _apply_approved_targets(
@@ -561,10 +628,11 @@ class Orchestrator:
         ordered_participants: list[str],
         *,
         blocking: bool,
+        settle: bool,
         committed_participants: list[str],
         held_participant_locks: dict[str, asyncio.Lock],
     ) -> tuple[Optional[ScaleOutcome], list[str]]:
-        """Apply an admitted plan, settling each blocking step before the next."""
+        """Apply one admitted stage and settle it when capacity depends on it."""
 
         await self._reserve_participant_mutations(
             ordered_participants, held_participant_locks
@@ -601,7 +669,7 @@ class Orchestrator:
                 result = await self._scale_with_result(
                     pid,
                     tgts,
-                    blocking=blocking and not split_readiness,
+                    blocking=(blocking or settle) and not split_readiness,
                 )
             except DynamoGraphDeploymentNotReadyError as patch_err:
                 if not committed_participants:
@@ -658,7 +726,7 @@ class Orchestrator:
             completed.append(pid)
             if result.applied and pid not in committed_participants:
                 committed_participants.append(pid)
-            if blocking and split_readiness:
+            if (blocking or settle) and split_readiness:
                 try:
                     await self.capacity_manager.wait_for_ready(pid)
                 except Exception as readiness_error:

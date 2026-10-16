@@ -72,6 +72,7 @@ CHECKPOINT_AUTO_ANNOTATION = "nvidia.com/dynamo-auto-checkpoint"
 CHECKPOINT_OWNER_UID_ANNOTATION = "nvidia.com/dynamo-checkpoint-owner-uid"
 SNAPSHOT_JOB_UID_LABEL = "nvidia.com/snapshot-job-uid"
 SNAPSHOT_JOB_TERMINAL_CONDITIONS = frozenset({"Completed", "Failed"})
+LPX_DEPLOYMENT_NAME_ANNOTATION = "lpx.nvidia.com/deployment-name"
 
 # Replica-owning resources that can survive their DGD while background garbage
 # collection is still converging. The final field names the metadata source for
@@ -99,21 +100,7 @@ CAPACITY_CONTROLLER_CUSTOM_RESOURCES = (
         "DisaggregatedSet",
         "label",
     ),
-    (
-        "leaderworkerset.x-k8s.io",
-        "v1",
-        "leaderworkersets",
-        "LeaderWorkerSet",
-        "label",
-    ),
     ("grove.io", "v1alpha1", "podcliquesets", "PodCliqueSet", "label"),
-    (
-        "grove.io",
-        "v1alpha1",
-        "podcliquescalinggroups",
-        "PodCliqueScalingGroup",
-        "annotation",
-    ),
     ("grove.io", "v1alpha1", "podcliques", "PodClique", "label"),
 )
 
@@ -1135,10 +1122,35 @@ class KubernetesAPI:
                     dgd_name_source=dgd_name_source,
                 )
             )
+        identities = {item.uid: item.dgd_name for item in descendants}
+        leader_worker_sets = self._list_custom_capacity_metadata(
+            "leaderworkerset.x-k8s.io",
+            "v1",
+            "leaderworkersets",
+            "LeaderWorkerSet",
+            dgd_name_source="label",
+            label_selector=None,
+            owner_dgd_names=identities,
+            skip_unidentified=True,
+        )
+        descendants.extend(leader_worker_sets)
+        identities.update((item.uid, item.dgd_name) for item in leader_worker_sets)
+        scaling_groups = self._list_custom_capacity_metadata(
+            "grove.io",
+            "v1alpha1",
+            "podcliquescalinggroups",
+            "PodCliqueScalingGroup",
+            dgd_name_source="annotation",
+            label_selector=None,
+            owner_dgd_names=identities,
+            fallback_annotation_keys=(LPX_DEPLOYMENT_NAME_ANNOTATION,),
+            skip_unidentified=True,
+        )
+        descendants.extend(scaling_groups)
+        identities.update((item.uid, item.dgd_name) for item in scaling_groups)
         for plural, kind in (
             ("deployments", "Deployment"),
             ("replicasets", "ReplicaSet"),
-            ("statefulsets", "StatefulSet"),
         ):
             descendants.extend(
                 self._list_custom_capacity_metadata(
@@ -1149,6 +1161,18 @@ class KubernetesAPI:
                     dgd_name_source="label",
                 )
             )
+        descendants.extend(
+            self._list_custom_capacity_metadata(
+                "apps",
+                "v1",
+                "statefulsets",
+                "StatefulSet",
+                dgd_name_source="label",
+                label_selector=None,
+                owner_dgd_names=identities,
+                skip_unidentified=True,
+            )
+        )
         descendants.extend(self._list_snapshot_source_job_capacity(snapshot_owners))
         descendants.extend(
             self._capacity_metadata_from_items(self.list_graph_pods(), "Pod")
@@ -1195,8 +1219,6 @@ class KubernetesAPI:
                         f"SnapshotJob item {index} has no usable {field_name}"
                     )
             owners[uid] = (dgd_name, dgd_uid)
-            if metadata.get("deletionTimestamp") is not None:
-                continue
             if self._has_terminal_condition(job, SNAPSHOT_JOB_TERMINAL_CONDITIONS):
                 continue
             active.append(
@@ -1229,8 +1251,6 @@ class KubernetesAPI:
             metadata = job.get("metadata")
             if not isinstance(metadata, Mapping):
                 raise TypeError(f"Job item {index} metadata is not an object")
-            if metadata.get("deletionTimestamp") is not None:
-                continue
             if self._has_terminal_condition(job, frozenset({"Complete", "Failed"})):
                 continue
             labels = metadata.get("labels") or {}
@@ -1251,7 +1271,7 @@ class KubernetesAPI:
                 else template_labels.get(DYNAMO_DGD_NAME_LABEL)
             )
             if not isinstance(dgd_name, str) or not dgd_name:
-                raise ValueError(f"Job item {index} has no usable DGD identity")
+                continue
             owner_uids = (
                 (snapshot_owner[1],)
                 if snapshot_owner is not None
@@ -1299,15 +1319,21 @@ class KubernetesAPI:
         kind: str,
         *,
         dgd_name_source: str,
+        label_selector: str | None = None,
+        owner_dgd_names: Mapping[str, str] | None = None,
+        fallback_annotation_keys: tuple[str, ...] = (),
+        skip_unidentified: bool = False,
     ) -> list[CapacityObjectMetadata]:
+        if label_selector is None and owner_dgd_names is None:
+            label_selector = (
+                DYNAMO_DGD_NAME_LABEL if dgd_name_source == "label" else None
+            )
         items = self._list_custom_objects(
             group,
             version,
             plural,
             kind,
-            label_selector=(
-                DYNAMO_DGD_NAME_LABEL if dgd_name_source == "label" else None
-            ),
+            label_selector=label_selector,
             metadata_only=True,
             optional=group not in {"apps", "batch"},
         )
@@ -1315,6 +1341,9 @@ class KubernetesAPI:
             items,
             kind,
             dgd_name_source=dgd_name_source,
+            owner_dgd_names=owner_dgd_names,
+            fallback_annotation_keys=fallback_annotation_keys,
+            skip_unidentified=skip_unidentified,
         )
 
     def _list_custom_objects(
@@ -1406,6 +1435,9 @@ class KubernetesAPI:
         kind: str,
         *,
         dgd_name_source: str = "label",
+        owner_dgd_names: Mapping[str, str] | None = None,
+        fallback_annotation_keys: tuple[str, ...] = (),
+        skip_unidentified: bool = False,
     ) -> list[CapacityObjectMetadata]:
         metadata_items: list[CapacityObjectMetadata] = []
         for index, item in enumerate(items):
@@ -1450,7 +1482,38 @@ class KubernetesAPI:
                 dgd_name = labels.get(DYNAMO_DGD_NAME_LABEL)
             else:
                 raise ValueError(f"unknown DGD name source {dgd_name_source!r}")
+
+            for annotation_key in fallback_annotation_keys:
+                fallback_name = annotations.get(annotation_key)
+                if fallback_name is None:
+                    continue
+                if not isinstance(fallback_name, str) or not fallback_name:
+                    raise ValueError(
+                        f"{kind} {name!r} has an unusable {annotation_key!r} annotation"
+                    )
+                if dgd_name is not None and dgd_name != fallback_name:
+                    raise ValueError(f"{kind} {name!r} has conflicting DGD identities")
+                dgd_name = fallback_name
+
+            inherited_names = {
+                owner_dgd_names[owner_uid]
+                for owner_uid in owner_uids
+                if owner_dgd_names is not None and owner_uid in owner_dgd_names
+            }
+            if len(inherited_names) > 1:
+                raise ValueError(
+                    f"{kind} {name!r} has controller owners from multiple DGDs"
+                )
+            if inherited_names:
+                inherited_name = inherited_names.pop()
+                if dgd_name is not None and dgd_name != inherited_name:
+                    raise ValueError(
+                        f"{kind} {name!r} disagrees with its controller owner DGD"
+                    )
+                dgd_name = inherited_name
             if not isinstance(dgd_name, str) or not dgd_name:
+                if skip_unidentified:
+                    continue
                 raise ValueError(f"{kind} {name!r} has no usable DGD identity")
             if any(
                 not isinstance(owner_uid, str) or not owner_uid

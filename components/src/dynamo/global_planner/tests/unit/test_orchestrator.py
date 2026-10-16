@@ -261,7 +261,7 @@ async def test_submit_approves_and_actuates(use_lock):
 async def test_cancelled_request_waiting_for_participant_reservation_never_scales():
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
-    orch = _orch(cm)
+    orch = _orch(cm, max_gpus=10)
     reservation = orch._participant_mutation_locks.setdefault(
         "default/a", asyncio.Lock()
     )
@@ -284,6 +284,7 @@ async def test_cancelled_request_waiting_for_participant_reservation_never_scale
         reservation.release()
 
     assert cm.pools["default/a"]["prefill"][0] == 1
+    assert "default/a/prefill" not in orch._intent_cache
 
 
 @pytest.mark.asyncio
@@ -690,7 +691,7 @@ async def test_cancelled_cross_participant_transfer_finishes_admitted_plan():
 
 
 @pytest.mark.asyncio
-async def test_blocking_transfer_settles_downscale_before_upscale():
+async def test_budget_transfer_settles_downscale_before_nonblocking_upscale():
     class BlockingDownscaleSettlementCapacityManager(FakeCapacityManager):
         def __init__(self):
             super().__init__()
@@ -714,7 +715,7 @@ async def test_blocking_transfer_settles_downscale_before_upscale():
         orch.submit(
             "default/b",
             _targets(decode=3),
-            blocking=True,
+            blocking=False,
             deployment_name="default/b",
             caller_name="default/b",
         )
@@ -727,6 +728,45 @@ async def test_blocking_transfer_settles_downscale_before_upscale():
     result = await transfer
     assert result.status == ScaleStatus.SUCCESS
     assert cm.pools["default/b"]["decode"][0] == 3
+
+
+@pytest.mark.asyncio
+async def test_budget_same_participant_settles_reduction_before_increase():
+    class BlockingReductionCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.reduction_wait_started = asyncio.Event()
+            self.release_reduction = asyncio.Event()
+            self.wait_calls = 0
+
+        async def wait_for_ready(self, participant_id):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                self.reduction_wait_started.set()
+                await self.release_reduction.wait()
+
+    cm = BlockingReductionCapacityManager()
+    cm.add("default/a", prefill=1, decode=3)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+
+    transfer = asyncio.create_task(
+        orch.submit(
+            "default/a",
+            _targets(prefill=2, decode=2),
+            blocking=False,
+            deployment_name="default/a",
+            caller_name="default/a",
+        )
+    )
+    await cm.reduction_wait_started.wait()
+    assert cm.pools["default/a"]["decode"][0] == 2
+    assert cm.pools["default/a"]["prefill"][0] == 1
+
+    cm.release_reduction.set()
+    result = await transfer
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.pools["default/a"]["prefill"][0] == 2
+    assert cm.wait_calls == 2
 
 
 @pytest.mark.asyncio
@@ -1080,7 +1120,7 @@ async def test_post_write_readback_serializes_same_participant():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_admitted_request_finishes_participant_wait():
+async def test_cancelled_pre_admission_request_stops_at_participant_wait():
     class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
         def __init__(self):
             super().__init__()
@@ -1117,16 +1157,15 @@ async def test_cancelled_admitted_request_finishes_participant_wait():
         assert cm.scale_calls == 1
 
         second.cancel()
-        await asyncio.sleep(0)
-        assert not second.done()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(second, 1)
     finally:
         cm.release_readback.set()
 
     assert (await asyncio.wait_for(first, 1)).status == ScaleStatus.SUCCESS
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(second, 1)
-    assert cm.scale_calls == 2
-    assert cm.pools["default/a"]["prefill"][0] == 3
+    assert cm.scale_calls == 1
+    assert cm.pools["default/a"]["prefill"][0] == 2
+    assert orch._intent_cache["default/a/prefill"].last_desired == 2
 
 
 @pytest.mark.asyncio

@@ -202,6 +202,28 @@ def _age_pending_drain(cm, key):
     )
 
 
+def test_refresh_participant_confirms_first_identity_in_one_request():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+        seed_identity=False,
+    )
+
+    with patch(
+        "dynamo.global_planner.kubernetes_capacity_manager.DRAIN_CONFIRMATION_SECONDS",
+        0.0,
+    ):
+        cm.refresh_participant("default/model")
+
+    assert cm._observed_uids["default/model"] == "dgd-uid"
+    assert connector.kube_api.get_graph_deployment.call_count == 2
+    assert connector.kube_api.list_capacity_descendants.call_count == 2
+
+
 # ---------------------------------------------------------------------------- #
 # Deployment-name derivation (K8s operator convention)                         #
 # ---------------------------------------------------------------------------- #
@@ -895,6 +917,7 @@ def test_observe_same_name_replacement_waits_for_old_owner_chain():
         replacement,
     ]
     connector.kube_api.list_capacity_descendants.side_effect = [
+        [],
         [
             _capacity_object(
                 "Deployment",
@@ -946,6 +969,25 @@ def test_observe_same_name_replacement_waits_for_old_owner_chain():
     assert cm._observed_uids["default/model"] == "replacement-uid"
     assert cm.consume_invalidated_participants() == {"default/model"}
     assert cm.participant_exists("default/model")
+
+
+def test_observe_current_generation_rejects_late_old_descendant():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    connector = _install_connector(
+        cm, "default/model", deployment, parent_dgd_name="model"
+    )
+    connector.kube_api.list_capacity_descendants.return_value = [
+        _capacity_object(
+            "Deployment",
+            "late-old-worker",
+            "late-old-deployment-uid",
+            owner_uids=("retired-dgd-uid",),
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="old or unclassified capacity"):
+        cm.observe(require_complete=True)
 
 
 def test_observe_first_seen_identity_rejects_unclassified_old_owner_chain():
@@ -1164,7 +1206,7 @@ def test_observe_implicit_mode_refreshes_complete_inventory():
     assert snapshot["default/second"]["prefill"].current_replicas == 2
     assert refreshed_snapshot["default/first"]["prefill"].current_replicas == 3
     assert first.kube_api.list_graph_deployments.call_count == 2
-    assert first.kube_api.list_graph_pods.call_count == 1
+    assert first.kube_api.list_graph_pods.call_count == 2
     second.kube_api.list_graph_deployments.assert_not_called()
     first.kube_api.get_graph_deployment.assert_not_called()
     second.kube_api.get_graph_deployment.assert_not_called()
@@ -1226,7 +1268,7 @@ def test_observe_implicit_mode_fails_closed_for_orphan_active_pods():
     connector.kube_api.list_graph_pods.return_value = [_pod("Running", "model")]
     cm._inventory_api = connector.kube_api
 
-    with pytest.raises(RuntimeError, match="nonterminal labeled Pods remain"):
+    with pytest.raises(RuntimeError, match="capacity descendants remain"):
         cm.observe(require_complete=True)
 
     assert not cm.participant_exists("default/model")

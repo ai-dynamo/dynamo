@@ -251,8 +251,9 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 				require.Equal(t, child.Namespace, service.Namespace)
 				require.Equal(t, "inference", service.Labels["example.com/team"])
 				require.Equal(t, map[string]string{
-					"example.com/description":    "serving",
-					lpx.DeploymentNameAnnotation: child.Name,
+					"example.com/description":                 "serving",
+					lpx.DeploymentNameAnnotation:              child.Name,
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
 				}, service.Annotations)
 				require.Equal(t, string(child.UID), service.Labels[deploymentUIDLabel])
 				require.Equal(t, consts.KubeLabelValueTrue, service.Labels[consts.KubeLabelDynamoDiscoveryEnabled])
@@ -497,6 +498,7 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	}
 	for _, annotations := range annotationMaps {
 		require.Equal(t, child.Name, annotations[lpx.DeploymentNameAnnotation])
+		require.Equal(t, dgd.Name, annotations[consts.KubeLabelDynamoGraphDeploymentName])
 		require.NotContains(t, annotations, "lpx.nvidia.com/deployment-uid")
 		require.NotContains(t, annotations, "scheduling.lpu.nvidia.com/dgd-uid")
 		require.NotContains(t, annotations, "lpx.nvidia.com/deployment-generation")

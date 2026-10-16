@@ -15,6 +15,7 @@ from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleRequest
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
+from dynamo.planner.monitoring.dgd_services import get_component_from_type_or_name
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -23,6 +24,29 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.filterwarnings("ignore::pydantic.warnings.PydanticDeprecatedSince20"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _no_generation_confirmation_delay(monkeypatch):
+    monkeypatch.setattr(
+        "dynamo.global_planner.kubernetes_capacity_manager.DRAIN_CONFIRMATION_SECONDS",
+        0.0,
+    )
+
+
+def _accepted_replica_update(deployment):
+    async def accept(targets, *, retry_state, **_kwargs):
+        retry_state.dgd_uid = deployment["metadata"]["uid"]
+        for target in targets:
+            service = get_component_from_type_or_name(
+                deployment, target.sub_component_type, target.component_name
+            )
+            selector = (target.sub_component_type.value, target.component_name)
+            retry_state.authorities[selector] = (service.name, False, None)
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    return accept
+
 
 # TODO(global-planner): Add invariant coverage for HA/shared state, cancellation
 # and intermediate PATCH failure, out-of-bound recovery, selected-only tolerance,
@@ -57,19 +81,21 @@ async def test_handler_authorization_success(mock_runtime):
     with patch(
         "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
+        deployment = _dgd_spec(prefill_replicas=3, decode_replicas=5)
         mock_connector = AsyncMock(spec=KubernetesConnector)
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas_with_result = AsyncMock(
-            return_value=ReplicaUpdateResult(accepted=True, applied=True)
+            side_effect=_accepted_replica_update(deployment)
         )
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value=_dgd_spec(prefill_replicas=3, decode_replicas=5)
+            return_value=deployment
         )
+        mock_connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector.kube_api.list_graph_deployments.return_value = [
-            _listed_dgd(_dgd_spec(prefill_replicas=3, decode_replicas=5), "my-dgd")
+            _listed_dgd(deployment, "my-dgd")
         ]
 
         # Process request (pass as dict to match endpoint behavior)
@@ -149,17 +175,19 @@ async def test_handler_multiple_dgds(mock_runtime):
     with patch(
         "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
+        deployment = _dgd_spec(prefill_replicas=4, decode_replicas=0)
         mock_connector = AsyncMock(spec=KubernetesConnector)
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas_with_result = AsyncMock(
-            return_value=ReplicaUpdateResult(accepted=True, applied=True)
+            side_effect=_accepted_replica_update(deployment)
         )
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={"spec": {"components": []}}
+            return_value=deployment
         )
+        mock_connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector.kube_api.list_graph_deployments.return_value = []
 
         # Process both requests
@@ -195,6 +223,7 @@ async def test_handler_error_handling(mock_runtime):
     with patch(
         "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
+        deployment = _dgd_spec(prefill_replicas=3, decode_replicas=0)
         mock_connector = AsyncMock(spec=KubernetesConnector)
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
@@ -202,6 +231,10 @@ async def test_handler_error_handling(mock_runtime):
         mock_connector.set_component_replicas_with_result = AsyncMock(
             side_effect=Exception("Scaling failed")
         )
+        mock_connector.kube_api = MagicMock()
+        mock_connector.kube_api.current_namespace = "default"
+        mock_connector.kube_api.get_graph_deployment.return_value = deployment
+        mock_connector.kube_api.list_capacity_descendants.return_value = []
 
         # Process request (pass as dict to match endpoint behavior)
         results = []
@@ -304,17 +337,19 @@ async def test_handler_blocking_mode(mock_runtime):
     with patch(
         "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
+        deployment = _dgd_spec(prefill_replicas=3, decode_replicas=0)
         mock_connector = AsyncMock(spec=KubernetesConnector)
         mock_connector_cls.return_value = mock_connector
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas_with_result = AsyncMock(
-            return_value=ReplicaUpdateResult(accepted=True, applied=True)
+            side_effect=_accepted_replica_update(deployment)
         )
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={"spec": {"components": []}}
+            return_value=deployment
         )
+        mock_connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector.kube_api.list_graph_deployments.return_value = []
 
         # Process request (pass as dict to match endpoint behavior)
@@ -325,7 +360,11 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector.set_component_replicas_with_result.assert_called_once()
         call_args = mock_connector.set_component_replicas_with_result.call_args
         assert call_args[1]["blocking"] is False
-        mock_connector.wait_for_deployment_ready.assert_awaited_once_with()
+        mock_connector.wait_for_replica_targets.assert_awaited_once_with(
+            expected_dgd_uid="test-dgd-uid",
+            expected_targets={"prefill-svc": 3},
+            expected_authorities={"prefill-svc": (False, None)},
+        )
 
 
 # ---------------------------------------------------------------------------- #
@@ -457,12 +496,13 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
     connector = AsyncMock(spec=KubernetesConnector)
     connector._async_init = AsyncMock()
     connector.set_component_replicas_with_result = AsyncMock(
-        return_value=ReplicaUpdateResult(accepted=True, applied=True)
+        side_effect=_accepted_replica_update(dgd_spec_dict)
     )
     connector.parent_dgd_name = parent_dgd_name
     connector.kube_api = MagicMock()
     connector.kube_api.current_namespace = dgd_key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=dgd_spec_dict)
+    connector.kube_api.list_capacity_descendants.return_value = []
     connector._test_deployment = dgd_spec_dict
     connector.kube_api.list_graph_deployments = MagicMock(
         side_effect=lambda: _listed_deployments(
@@ -470,6 +510,9 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
         )
     )
     handler.orchestrator.capacity_manager.connectors[dgd_key] = connector
+    handler.orchestrator.capacity_manager._observed_uids[dgd_key] = dgd_spec_dict[
+        "metadata"
+    ]["uid"]
     return connector
 
 
@@ -488,9 +531,13 @@ def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my
     connector.kube_api.list_graph_deployments.side_effect = lambda: _listed_deployments(
         handler, connector.kube_api.current_namespace
     )
+    connector.kube_api.list_capacity_descendants.return_value = []
     connector.kube_api.is_deployment_ready.return_value = True
     connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()
     handler.orchestrator.capacity_manager.connectors[dgd_key] = connector
+    handler.orchestrator.capacity_manager._observed_uids[dgd_key] = dgd_spec_dict[
+        "metadata"
+    ]["uid"]
     return connector
 
 
