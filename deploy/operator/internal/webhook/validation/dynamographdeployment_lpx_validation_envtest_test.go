@@ -19,6 +19,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
 	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
+	const lpxOnDeleteErr = `metadata.annotations[nvidia.com/grove-update-strategy]: Invalid value: "OnDelete": must be "Coherent" or "RollingRecreate" when LPX components are configured`
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
@@ -68,6 +69,73 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+
+		// OnDelete leaves LPX Pods on stale templates, so LPX accepts only Grove-driven replacement.
+		{
+			name: "LPX rejects the OnDelete update strategy",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name: "v1alpha1 LPX rejects the OnDelete update strategy after conversion",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name: "adding an LPX component rejects a stored OnDelete strategy",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Spec.Components = append(dgd.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name: "LPX accepts the RollingRecreate update strategy",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate"}
+			}),
+		},
+		{
+			name:               "LPX rejects an unrelated update while a stored OnDelete strategy remains",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Labels = map[string]string{"team": "lpx"}
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name:               "LPX admits removing a stored OnDelete strategy",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete", "example.com/team": "lpx"}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{"example.com/team": "lpx"}
+			}),
+		},
+		{
+			name:               "LPX admits finalizer removal while a stored OnDelete strategy remains",
+			seedWithoutWebhook: true,
+			terminating:        true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Finalizers = []string{dgdTerminatingFinalizer}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
 		},
 
 		{

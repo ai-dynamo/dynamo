@@ -126,6 +126,12 @@ SPDX-License-Identifier: Apache-2.0
   A replacement error preserves the existing workload, even if its digest differs.
 - For incompatible layouts or OnDelete build changes, foreground-delete the PCS
   and recreate it after garbage collection. Grove rolls compatible layouts.
+- Admission rejects OnDelete for LPX DGDs: Grove would leave running Pods on
+  stale templates, which the LPX scheduler treats as dependency loss. Keep the
+  OnDelete replacement path for a DGD that kept the annotation from before this
+  rule; layout matching follows the desired strategy, and Grove ends OnDelete
+  updates immediately. Removing the annotation changes only the strategy and
+  does not replace Pods that are already stale.
 - Grove makes PCS clique composition and scaling-group `CliqueNames` immutable.
   Model removal therefore requires PCS replacement. Do not trim group membership
   while retaining templates; those templates can become standalone cliques.
