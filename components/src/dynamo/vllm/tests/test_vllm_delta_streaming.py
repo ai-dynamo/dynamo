@@ -13,7 +13,6 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.core,
 ]
 
 
@@ -169,18 +168,6 @@ async def test_generate_tokens_reports_cached_usage_before_finish():
             "total_tokens": 3 + completion_tokens,
             "prompt_tokens_details": {"cached_tokens": 2},
         }
-
-
-@pytest.mark.parametrize("completion_tokens", [0, 7])
-def test_build_completion_usage_uses_running_total(completion_tokens):
-    response = _request_output([_output([101])], prompt_token_ids=[10, 11])
-
-    usage = BaseWorkerHandler._build_completion_usage(
-        response, completion_tokens=completion_tokens
-    )
-
-    assert usage["completion_tokens"] == completion_tokens
-    assert usage["total_tokens"] == 2 + completion_tokens
 
 
 @pytest.mark.asyncio

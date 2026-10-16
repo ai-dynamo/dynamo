@@ -50,6 +50,7 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     as_error_envelope,
     backend_invalid_argument_to_http_error,
@@ -1253,10 +1254,6 @@ class VllmProcessor:
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
         usage_metadata: dict[str, Any] = {}
-        stream_options = request.get("stream_options") or {}
-        continuous_usage = stream_options.get(
-            "include_usage", False
-        ) and stream_options.get("continuous_usage_stats", False)
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -1333,13 +1330,7 @@ class VllmProcessor:
                 # Workers send prompt/cache metadata only when it changes. Capture
                 # it even if a tool/reasoning parser suppresses this chunk's text.
                 if backend_usage := engine_response.get("completion_usage"):
-                    for field in (
-                        "prompt_tokens",
-                        "prompt_tokens_details",
-                        "completion_tokens_details",
-                    ):
-                        if backend_usage.get(field) is not None:
-                            usage_metadata[field] = backend_usage[field]
+                    update_usage_metadata(usage_metadata, backend_usage)
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -1439,20 +1430,13 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage_metadata and (
-                        raw_finish_reason
-                        or continuous_usage
-                        or not request.get("stream", False)
+                    if usage := response_usage(
+                        request,
+                        usage_metadata,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=bool(raw_finish_reason),
                     ):
-                        prompt_tokens = usage_metadata.get(
-                            "prompt_tokens", input_tokens
-                        )
-                        usage = {
-                            **usage_metadata,
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": cumulative_output_tokens,
-                            "total_tokens": prompt_tokens + cumulative_output_tokens,
-                        }
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 

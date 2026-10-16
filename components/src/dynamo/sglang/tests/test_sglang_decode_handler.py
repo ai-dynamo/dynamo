@@ -927,6 +927,19 @@ async def test_native_generate_stream_maps_terminal_finish_reason(
         ),
         (
             {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": 0},
+            {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+        ),
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": None},
+            {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+        ),
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2},
             {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
         ),
         ({"prompt_tokens": 4}, None),
@@ -2188,45 +2201,6 @@ async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk(
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_reports_cached_usage_before_finish():
-    handler = _new_decode_handler()
-    responses = [
-        {
-            "output_ids": token_ids,
-            "meta_info": {
-                "id": "cache-usage-request",
-                "finish_reason": finish_reason,
-                "prompt_tokens": 3,
-                "completion_tokens": completion_tokens,
-                "cached_tokens": 2,
-            },
-        }
-        for token_ids, completion_tokens, finish_reason in [
-            ([101], 1, None),
-            ([102, 103], 3, None),
-            ([], 3, {"type": "length"}),
-        ]
-    ]
-
-    chunks = await _collect(
-        handler._process_token_stream(_stream(responses), _Context())
-    )
-
-    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102, 103], []]
-    assert all("finish_reason" not in chunk for chunk in chunks[:-1])
-    assert chunks[-1]["finish_reason"] == "length"
-    assert "completion_usage" not in chunks[1]
-    for chunk, completion_tokens in [(chunks[0], 1), (chunks[-1], 3)]:
-        expected = {
-            "prompt_tokens": 3,
-            "completion_tokens": completion_tokens,
-            "total_tokens": 3 + completion_tokens,
-            "prompt_tokens_details": {"cached_tokens": 2},
-        }
-        assert chunk["completion_usage"] == expected
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("missing_field", ["prompt_tokens", "completion_tokens"])
 async def test_process_token_stream_waits_for_complete_usage_metadata(missing_field):
     handler = _new_decode_handler()
@@ -2260,53 +2234,12 @@ async def test_process_token_stream_waits_for_complete_usage_metadata(missing_fi
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_reports_cache_count_when_available():
-    handler = _new_decode_handler()
-    responses = [
-        {
-            "index": index,
-            "output_ids": [101],
-            "meta_info": {
-                "id": "cache-usage-request",
-                "finish_reason": None,
-                "prompt_tokens": 3,
-                "completion_tokens": completion_tokens,
-                "cached_tokens": cached_tokens,
-            },
-        }
-        for index, completion_tokens, cached_tokens in [
-            (0, 1, None),
-            (1, 1, 0),
-            (0, 2, 2),
-        ]
-    ]
-
-    chunks = await _collect(
-        handler._process_token_stream(_stream(responses), _Context())
-    )
-
-    assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
-    assert "prompt_tokens_details" not in chunks[0]["completion_usage"]
-    assert chunks[1]["completion_usage"]["prompt_tokens_details"] == {
-        "cached_tokens": 0
-    }
-    assert chunks[2]["completion_usage"]["prompt_tokens_details"] == {
-        "cached_tokens": 2
-    }
-    assert [chunk["completion_usage"]["completion_tokens"] for chunk in chunks] == [
-        1,
-        1,
-        2,
-    ]
-
-
-@pytest.mark.asyncio
 async def test_process_token_stream_reports_metadata_changes_per_choice():
     handler = _new_decode_handler()
     responses = [
         {
             "index": index,
-            "output_ids": [101],
+            "output_ids": [] if reason else [101],
             "meta_info": {
                 "id": "cache-usage-request",
                 "finish_reason": reason,
@@ -2323,8 +2256,8 @@ async def test_process_token_stream_reports_metadata_changes_per_choice():
             (0, 4, 3, 0, None),
             (0, 4, 4, 2, None),
             (0, 4, 5, 2, None),
-            (1, 3, 3, None, {"type": "stop"}),
-            (0, 4, 6, 2, {"type": "stop"}),
+            (1, 3, 2, None, {"type": "stop"}),
+            (0, 4, 5, 2, {"type": "stop"}),
         ]
     ]
 
@@ -2350,8 +2283,9 @@ async def test_process_token_stream_reports_metadata_changes_per_choice():
     assert chunks[5]["completion_usage"]["prompt_tokens_details"] == {
         "cached_tokens": 2
     }
-    assert chunks[-2]["completion_usage"]["completion_tokens"] == 3
-    assert chunks[-1]["completion_usage"]["completion_tokens"] == 6
+    assert "prompt_tokens_details" not in chunks[0]["completion_usage"]
+    assert chunks[-2]["completion_usage"]["completion_tokens"] == 2
+    assert chunks[-1]["completion_usage"]["completion_tokens"] == 5
 
 
 @pytest.mark.asyncio

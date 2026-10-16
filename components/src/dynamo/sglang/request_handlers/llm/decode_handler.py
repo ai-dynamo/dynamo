@@ -207,7 +207,7 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | None:
-    """Build Dynamo's completion_usage from SGLang's terminal meta_info."""
+    """Build Dynamo's completion_usage from SGLang metadata."""
     prompt_tokens = meta_info.get("prompt_tokens")
     completion_tokens = meta_info.get("completion_tokens")
     if prompt_tokens is None or completion_tokens is None:
@@ -218,7 +218,7 @@ def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | N
         "total_tokens": prompt_tokens + completion_tokens,
     }
     cached_tokens = meta_info.get("cached_tokens")
-    if cached_tokens is not None and cached_tokens > 0:
+    if cached_tokens is not None:
         usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
     return usage
 
@@ -1149,16 +1149,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         or usage_metadata_by_index.get(output_idx) != usage_metadata
                     )
                 ):
-                    completion_usage = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                    }
-                    if cached_tokens is not None:
-                        completion_usage["prompt_tokens_details"] = {
-                            "cached_tokens": cached_tokens
-                        }
-                    out["completion_usage"] = completion_usage
+                    out["completion_usage"] = _sglang_completion_usage(meta_info)
                     usage_metadata_by_index[output_idx] = usage_metadata
 
                 if finish_reason:

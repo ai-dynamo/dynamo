@@ -1915,7 +1915,7 @@ class TestRoutedEnginePath:
             intermediate_usage,
             intermediate_usage,
             intermediate_usage,
-            True,
+            not stream or bool((stream_options or {}).get("include_usage")),
         ]
         expected_counts = [(3, 1, 0), (3, 3, 0), (4, 4, 2), (4, 5, 2), (4, 5, 2)]
         for chunk, (prompt, completion, cached) in zip(chunks, expected_counts):

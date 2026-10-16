@@ -42,6 +42,7 @@ from .sglang_prepost import (
 )
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
     as_error_envelope,
@@ -783,10 +784,6 @@ class SglangProcessor:
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
         stream_interval = self.stream_interval
-        stream_options = request.get("stream_options") or {}
-        continuous_usage = stream_options.get(
-            "include_usage", False
-        ) and stream_options.get("continuous_usage_stats", False)
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -800,7 +797,7 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
-            latest_usage: dict[str, Any] | None = None
+            latest_usage: dict[str, Any] = {}
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -844,7 +841,7 @@ class SglangProcessor:
 
                 choice = post.process_output(mapped_response)
 
-                if post.locally_finished and latest_usage is None:
+                if post.locally_finished and not latest_usage:
                     latest_usage = {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": cumulative_output_tokens,
@@ -866,18 +863,14 @@ class SglangProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if latest_usage and (
-                        finish_reason
-                        or post.locally_finished
-                        or continuous_usage
-                        or not request.get("stream", False)
+                    if usage := response_usage(
+                        request,
+                        latest_usage,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=bool(finish_reason or post.locally_finished),
                     ):
-                        prompt_tokens = latest_usage.get("prompt_tokens", input_tokens)
-                        dynamo_out["usage"] = {
-                            **latest_usage,
-                            "completion_tokens": cumulative_output_tokens,
-                            "total_tokens": prompt_tokens + cumulative_output_tokens,
-                        }
+                        dynamo_out["usage"] = usage
                     response_nvext: dict[str, Any] = {}
                     effective_stop_reason = (
                         stop_reason
@@ -986,14 +979,7 @@ class SglangProcessor:
 
                 if usage := engine_response.get("completion_usage"):
                     # Cache reports can be sparse and arrive on buffered chunks.
-                    latest_usage = {
-                        **(latest_usage or {}),
-                        **{
-                            key: value
-                            for key, value in usage.items()
-                            if value is not None
-                        },
-                    }
+                    update_usage_metadata(latest_usage, usage)
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)

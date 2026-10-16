@@ -158,6 +158,7 @@ def _load_processor_module(module_stubs):
     install_module, remove_module = module_stubs
     _install_sglang_stubs(install_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
+    # Importing common.utils initializes native bindings absent from this fixture.
     _install_module(
         install_module,
         "dynamo.common.utils.input_params",
@@ -389,7 +390,11 @@ def test_sparse_usage_survives_flushes(
         expected_cache = 0 if index == 0 else 2
         assert item["data"]["llm_metrics"]["cached_tokens"] == expected_cache
         assert ("usage" in item["data"]) == (
-            intermediate_usage or index == len(items) - 1
+            intermediate_usage
+            or (
+                index == len(items) - 1
+                and bool((stream_options or {}).get("include_usage"))
+            )
         )
         if "usage" in item["data"]:
             usage = item["data"]["usage"]
