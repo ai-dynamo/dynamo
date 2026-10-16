@@ -22,6 +22,7 @@ import (
 	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grove "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
@@ -227,7 +228,7 @@ func TestOperatorUpgradeReplayIntentionalChangeAndRetry(t *testing.T) {
 			return delegate.Get(ctx, key, obj, opts...)
 		},
 		Update: func(ctx context.Context, delegate client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if failWrite && obj.GetObjectKind().GroupVersionKind().Kind == "PodCliqueSet" {
+			if failWrite && obj.GetObjectKind().GroupVersionKind().Kind == groveconstants.KindPodCliqueSet {
 				failWrite = false
 				return injected
 			}
