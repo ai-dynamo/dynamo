@@ -9,10 +9,14 @@ Dynamo's runtime images ship a deliberately small media stack. The in-tree FFmpe
 
 Two input classes are already covered without installing anything:
 
-- **VP8 and VP9 video** decode through the in-tree FFmpeg.
-- **H.264 and H.265 video** decode on the GPU through NVDEC, which every backend uses by default. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](video-decode-gpu-requirements.md) for the hardware and capability matrix.
+- **VP8 and VP9 video** decode through the in-tree FFmpeg when frontend
+  decoding is enabled on vLLM, or SGLang on CUDA.
+- **H.264 and H.265 video** decode on the GPU through NVDEC on supported backend paths. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](video-decode-gpu-requirements.md) for the hardware and capability matrix.
 
-Installing an additional decoder package covers what remains:
+Without frontend decoding, the backend worker owns VP8/VP9 decoding. Follow the
+[same-version replacement procedure](#notes-and-limits) for vLLM video; other
+backends need the corresponding package from the table below. Installing an
+additional decoder package also covers:
 
 - **AAC and other compressed audio**, which NVDEC does not decode at all.
 - **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.
@@ -98,7 +102,7 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 - For H.264 and H.265, prefer NVDEC. Granting the container the `video` driver capability decodes those formats on the GPU with no extra package. Install a software decoder when that is not an option, or when the input is audio.
 - Installing a decoder package brings in that wheel's bundled media libraries. The runtime images are scanned for media components at build time; a package installed afterwards is not covered by that scan. Review what your deployment ships — a baked image layer keeps the change visible and reviewable.
 - On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 already decode there through NVDEC, so install it only for a host where NVDEC is unavailable.
-- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Video input on vLLM goes through NVDEC. To decode video in software instead, swap that build for the PyPI wheel of the same version:
+- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Backend video input on vLLM goes through NVDEC. To decode video in software instead, swap that build for the PyPI wheel of the same version:
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
@@ -116,3 +120,4 @@ pip install --no-deps --force-reinstall --only-binary opencv-python-headless "$S
 `--force-reinstall --only-binary` replaces the source build even when its version already satisfies pip. Pinning preserves the image's OpenCV version; with neither metadata nor an importable `cv2`, the command falls back to the bounded range, which is what the bundled installer does too. The wheel restores bundled FFmpeg and codecs, so review it against your distribution policy. The bundled vLLM installer performs this replacement and installs missing PyAV.
 
 - The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.
+- The vLLM sidecar runs vLLM's native gRPC server (`vllm-rs`), which decodes video by running the in-tree `ffprobe` and `ffmpeg`. Neither NVDEC nor an installed Python package is used on that path. VP8 and VP9 decode there; H.264 and H.265 do not, because the in-tree FFmpeg has no software decoder for them. Such a request fails with HTTP 500 and a worker log that contains `Unknown encoder 'png'`, because `vllm-rs` reports only the error from its last fallback. Serve such input through the Dynamo vLLM worker with NVDEC, or re-encode it to VP9 before you send it. The in-tree `ffmpeg` cannot decode H.264 or H.265. Run the command above with an FFmpeg that can decode them and encode VP9.

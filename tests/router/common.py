@@ -569,133 +569,146 @@ def _test_frontend_kv_routing(
     ]
 
     async def run_test() -> None:
-        with managed_runtime() as runtime:
-            worker_ids = sorted(
-                await poll_for_worker_instances(
-                    runtime.endpoint(f"{namespace}.backend.generate"), len(system_ports)
-                )
-            )
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
+            deadline = time.monotonic() + 60
+            worker_ids = []
+            while time.monotonic() < deadline:
+                try:
+                    async with session.get(
+                        f"http://localhost:{frontend_port}/health",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as response:
+                        if response.status == 200:
+                            health = await response.json()
+                            worker_ids = sorted(
+                                {
+                                    instance["instance_id"]
+                                    for instance in health["instances"]
+                                    if instance["namespace"] == namespace
+                                    and instance["component"] == "backend"
+                                    and instance["endpoint"] == "generate"
+                                }
+                            )
+                            if len(worker_ids) >= len(system_ports):
+                                break
+                except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                    pass
+                await asyncio.sleep(0.25)
             assert len(worker_ids) == len(system_ports), worker_ids
             targets = [
                 (worker_id, rank) for worker_id in worker_ids for rank in dp_ranks
             ]
 
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as session:
-
-                async def send(
-                    prompt: str,
-                    *,
-                    is_query_only: bool = False,
-                    target: tuple[int, int] | None = None,
-                ) -> tuple[tuple[int, int], float | None]:
-                    """Send one request and return its selected target and KV hit rate."""
-                    payload = {
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 8,
-                        "temperature": 0,
-                        "stream": True,
-                        "nvext": {
-                            "extra_fields": ["worker_id", "timing"],
-                            "annotations": ["query_instance_id:"]
-                            if is_query_only
-                            else [],
-                        },
+            async def send(
+                prompt: str,
+                *,
+                is_query_only: bool = False,
+                target: tuple[int, int] | None = None,
+            ) -> tuple[tuple[int, int], float | None]:
+                """Send one request and return its selected target and KV hit rate."""
+                payload = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 8,
+                    "temperature": 0,
+                    "stream": True,
+                    "nvext": {
+                        "extra_fields": ["worker_id", "timing"],
+                        "annotations": ["query_instance_id:"] if is_query_only else [],
+                    },
+                }
+                headers = (
+                    {
+                        "x-dynamo-worker-instance-id": str(target[0]),
+                        "x-dynamo-dp-rank": str(target[1]),
                     }
-                    headers = (
-                        {
-                            "x-dynamo-worker-instance-id": str(target[0]),
-                            "x-dynamo-dp-rank": str(target[1]),
-                        }
-                        if target is not None
-                        else None
-                    )
-                    nvext, has_generated_text = await send_router_chat_request(
-                        session, url, payload, headers
-                    )
-                    selected = require_router_worker_id({"nvext": nvext})
-                    selected_target = (
-                        selected["decode_worker_id"],
-                        selected["decode_dp_rank"],
-                    )
-                    assert selected_target in targets, selected
+                    if target is not None
+                    else None
+                )
+                nvext, has_generated_text = await send_router_chat_request(
+                    session, url, payload, headers
+                )
+                selected = require_router_worker_id({"nvext": nvext})
+                selected_target = (
+                    selected["decode_worker_id"],
+                    selected["decode_dp_rank"],
+                )
+                assert selected_target in targets, selected
+                assert (
+                    selected["prefill_worker_id"],
+                    selected["prefill_dp_rank"],
+                ) == selected_target, selected
+                hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
+                if is_query_only:
+                    assert not has_generated_text, nvext
+                    assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
+                else:
                     assert (
-                        selected["prefill_worker_id"],
-                        selected["prefill_dp_rank"],
-                    ) == selected_target, selected
-                    hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
-                    if is_query_only:
-                        assert not has_generated_text, nvext
-                        assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
-                    else:
-                        assert (
-                            has_generated_text
-                        ), "Request completed without generating text"
-                        assert isinstance(hit_rate, (int, float)), nvext
-                        assert 0 <= hit_rate <= 1, nvext
-                    return selected_target, hit_rate
+                        has_generated_text
+                    ), "Request completed without generating text"
+                    assert isinstance(hit_rate, (int, float)), nvext
+                    assert 0 <= hit_rate <= 1, nvext
+                return selected_target, hit_rate
 
-                baselines = {
+            baselines = {
+                port: await get_stored_kv_event_counts(session, port)
+                for port in system_ports
+            }
+            for prompt in prompts:
+                await send(prompt, is_query_only=True)
+            for prompt, target in zip(prompts, targets):
+                selected, _ = await send(prompt, target=target)
+                assert selected == target, (selected, target)
+
+            deadline = time.monotonic() + 60
+            observed = []
+            counts = {}
+            while time.monotonic() < deadline:
+                # Pinned completions expose timing without warming the other target.
+                observed = [
+                    await send(prompt, target=target)
+                    for prompt, target in zip(prompts, targets)
+                ]
+                counts = {
                     port: await get_stored_kv_event_counts(session, port)
                     for port in system_ports
                 }
-                for prompt in prompts:
-                    await send(prompt, is_query_only=True)
-                for prompt, target in zip(prompts, targets):
-                    selected, _ = await send(prompt, target=target)
-                    assert selected == target, (selected, target)
-
-                deadline = time.monotonic() + 60
-                observed = []
-                counts = {}
-                while time.monotonic() < deadline:
-                    # Pinned completions expose timing without warming the other target.
-                    observed = [
-                        await send(prompt, target=target)
-                        for prompt, target in zip(prompts, targets)
-                    ]
-                    counts = {
-                        port: await get_stored_kv_event_counts(session, port)
-                        for port in system_ports
-                    }
-                    if all(
-                        selected == expected
-                        and hit_rate is not None
-                        and hit_rate >= 0.5
-                        for (selected, hit_rate), expected in zip(observed, targets)
-                    ) and all(
-                        all(
-                            current > baseline
-                            for current, baseline in zip(counts[port], baselines[port])
-                        )
-                        for port in system_ports
-                    ):
-                        break
-                    await asyncio.sleep(0.1)
-                else:
-                    raise AssertionError(
-                        f"KV events did not converge: expected targets={targets}, "
-                        f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+                if all(
+                    selected == expected and hit_rate is not None and hit_rate >= 0.5
+                    for (selected, hit_rate), expected in zip(observed, targets)
+                ) and all(
+                    all(
+                        current > baseline
+                        for current, baseline in zip(counts[port], baselines[port])
                     )
+                    for port in system_ports
+                ):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError(
+                    f"KV events did not converge: expected targets={targets}, "
+                    f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+                )
 
-                for prompt, target in zip(prompts, targets):
-                    selected, _ = await send(prompt, is_query_only=True)
-                    assert selected == target, (selected, target)
+            for prompt, target in zip(prompts, targets):
+                selected, _ = await send(prompt, is_query_only=True)
+                assert selected == target, (selected, target)
 
-                for prompt_index in (0, 0, 1, 0, 1, 1):
-                    selected, hit_rate = await send(prompts[prompt_index])
-                    assert selected == targets[prompt_index], (
-                        prompt_index,
-                        selected,
-                        targets,
-                    )
-                    assert hit_rate is not None and hit_rate >= 0.5, (
-                        prompt_index,
-                        selected,
-                        hit_rate,
-                    )
+            for prompt_index in (0, 0, 1, 0, 1, 1):
+                selected, hit_rate = await send(prompts[prompt_index])
+                assert selected == targets[prompt_index], (
+                    prompt_index,
+                    selected,
+                    targets,
+                )
+                assert hit_rate is not None and hit_rate >= 0.5, (
+                    prompt_index,
+                    selected,
+                    hit_rate,
+                )
 
     asyncio.run(run_test())
 
@@ -2409,6 +2422,7 @@ def _test_router_decisions_disagg(
     request_plane: str = "nats",
     router_ais_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
+    require_kv_hit: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -2431,6 +2445,10 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         router_ais_config: Optional AIS router perf-model config for frontend KV routing.
+        require_kv_hit: If True, also assert the router predicted a KV cache hit
+            (nvext.timing.kv_hit_rate > 0) for requests 2-4, which share a prefix
+            with the previous request. This catches worker/router block-hash
+            mismatches that routing to the same worker alone would not.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2542,6 +2560,13 @@ def _test_router_decisions_disagg(
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
                         verify_response_timing(timing_info, disagg=not enable_bootstrap)
+                        if require_kv_hit and i > 0:
+                            kv_hit_rate = timing_info.get("kv_hit_rate")
+                            assert kv_hit_rate is not None and kv_hit_rate > 0, (
+                                f"Request {i + 1}: expected kv_hit_rate > 0 on a shared "
+                                f"prefix, got {kv_hit_rate}; worker KV event hashes "
+                                f"may not match the router's"
+                            )
 
                     # Small delay between requests
                     await asyncio.sleep(1)

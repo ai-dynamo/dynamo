@@ -461,6 +461,8 @@ pub enum FindBestMatchOutcome {
         overlap_blocks: u32,
         effective_overlap_blocks: f64,
         cached_tokens: usize,
+        selected_raw_cached_tokens: Option<usize>,
+        max_raw_cached_tokens: Option<usize>,
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
         kv_hint: Option<KvHint>,
@@ -826,6 +828,10 @@ impl KvRouter {
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        let client_for_registration = client.clone();
+        let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
+            Arc::new(move || client_for_registration.available_instance_ids());
+
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
@@ -873,6 +879,7 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 available_worker_provider,
+                registration_availability_provider,
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
                 lora_worker_filter: None,
@@ -884,7 +891,7 @@ impl KvRouter {
                 policy_factory,
             },
             workers_with_configs.clone(),
-            Some(Arc::new(request_leases.clone())),
+            Some(request_leases.replica_observer()),
             cancellation_token.child_token(),
         )
         .await?;
@@ -1404,7 +1411,7 @@ impl KvRouter {
             Err(error) => return Err(error.into()),
         };
         let Selected {
-            response,
+            mut response,
             advisory_load,
             isl_tokens,
             kv_hint,
@@ -1415,6 +1422,13 @@ impl KvRouter {
         } = selected;
         if update_states && is_admitted_routing && booking.is_none() {
             anyhow::bail!("booked selection returned no booking handle");
+        }
+        // Publish the selection trace here, on the routing task and before any
+        // awaited bookkeeping (the session prefix refresh below can be cancelled),
+        // so every caller of this method (routing hosts, prefill reservations, the
+        // Python binding) emits exactly one row.
+        if let (Some(request_id), Some(trace)) = (context_id, response.selection_trace.take()) {
+            crate::request_trace::emit_router_selection(request_id, self.worker_type(), trace);
         }
         // Indexing failures never affect routing.
         if let (Some(session_id), Some(block_hashes)) =
@@ -1517,6 +1531,8 @@ impl KvRouter {
                 overlap_blocks,
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
+                selected_raw_cached_tokens: response.selected_raw_cached_tokens,
+                max_raw_cached_tokens: response.max_raw_cached_tokens,
                 potential_decode_blocks: response.potential_decode_blocks as u64,
                 routing_hashes,
                 kv_hint,
@@ -1694,14 +1710,15 @@ impl KvRouter {
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    pub(crate) async fn enqueue_output_block_if_booking(
+    pub(crate) async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.selection
             .scheduler()
-            .enqueue_output_block_if_booking(booking, decay_fraction)
+            .add_output_blocks_if_booking(booking, num_blocks, decay_fraction)
             .await
     }
 
@@ -2602,7 +2619,7 @@ mod tests {
 
     /// Three default-config workers under the registry policy, with
     /// `router_track_active_blocks` on so bookings send tracking hashes.
-    async fn tracked_router(name: &str) -> KvRouter {
+    pub(super) async fn tracked_router(name: &str) -> KvRouter {
         // Prefill load decays with wall time and would let near-ties flip
         // between two runs microseconds apart.
         let config = KvRouterConfig {

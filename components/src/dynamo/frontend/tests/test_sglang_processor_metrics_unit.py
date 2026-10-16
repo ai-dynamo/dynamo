@@ -76,6 +76,9 @@ def _install_sglang_stubs(install_module):
     class _JsonArrayParser:
         pass
 
+    class _GptOssDetector:
+        pass
+
     class _ReasoningParser:
         pass
 
@@ -128,6 +131,7 @@ def _install_sglang_stubs(install_module):
         install_module,
         "sglang.srt.parser.reasoning_parser",
         ReasoningParser=_ReasoningParser,
+        GptOssDetector=_GptOssDetector,
     )
     _install_module(install_module, "sglang.srt.utils")
     _install_module(
@@ -154,6 +158,11 @@ def _load_processor_module(module_stubs):
     install_module, remove_module = module_stubs
     _install_sglang_stubs(install_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
+    _install_module(
+        install_module,
+        "dynamo.common.utils.input_params",
+        resolve_thinking_token_budget=lambda *_args, **_kwargs: None,
+    )
     _install_module(install_module, "dynamo.common.multimodal")
     _install_module(
         install_module,

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kimi-k25-disagg-kv-eagle-bench
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      priorityClassName: ci-nightly-high-priority
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: user-workload
+        effect: NoExecute
+      containers:
+      - name: perf
+        resources:
+          requests:
+            ephemeral-storage: 2Gi
+          limits:
+            ephemeral-storage: 16Gi
+        env:
+        - name: AIPERF_OUTPUT_DIR
+          value: /aiperf
+        - name: ROOT_ARTIFACT_DIR
+          value: /aiperf/results
+        - name: CONCURRENCIES
+          value: "512"
+        - name: BENCHMARK_DURATION
+          value: "60"
+        volumeMounts:
+        - name: aiperf-output
+          mountPath: /aiperf
+      volumes:
+      - name: aiperf-output
+        emptyDir:
+          sizeLimit: 16Gi
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache

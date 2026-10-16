@@ -19,7 +19,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
-from dynamo.vllm.realtime.serving import build_realtime_serving
+from dynamo.vllm.realtime.factories import build_realtime_serving
 
 from .args import OmniConfig
 from .utils import streaming_sampling_params

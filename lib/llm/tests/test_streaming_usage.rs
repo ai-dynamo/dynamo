@@ -153,6 +153,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(ct),
+                    ..Default::default()
                 }),
                 completion_tokens_details: None,
             }),
@@ -774,6 +775,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        no_stop_trim: None,
         unsupported_fields: Default::default(),
     }
 }

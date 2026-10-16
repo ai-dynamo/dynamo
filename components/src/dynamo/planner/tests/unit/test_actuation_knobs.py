@@ -3,8 +3,8 @@
 
 """Power actuation is DGD-owned: read/resolve, never mutate.
 
-The planner reads per-GPU caps from the DGD worker podTemplate annotations and
-projects a power budget. It does NOT patch Pods. These tests pin the
+The operator projects DGD-owned per-GPU caps into component status; the Planner
+projects a power budget from that status. It does NOT patch Pods. These tests pin the
 read/resolve path — ``KubernetesConnector.get_component_power_configs``
 resolves per-role ``ComponentPowerConfig`` from a DGD dict (disagg + agg) and
 propagates the typed parser errors. The no-mutation guarantee is enforced by
@@ -74,7 +74,23 @@ def _worker(name, comp_type, watts, gpus):
 
 
 def _dgd(*components):
-    return {"spec": {"components": list(components)}}
+    statuses = {}
+    for component in components:
+        template = component.get("podTemplate", {})
+        annotations = template.get("metadata", {}).get("annotations", {})
+        container = template.get("spec", {}).get("containers", [{}])[0]
+        gpu = int(
+            container.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
+        )
+        status = {"gpusPerEngine": gpu, "gpusPerReplica": gpu}
+        if POWER_ANNOTATION_KEY in annotations:
+            status["gpuPowerLimitWatts"] = annotations[POWER_ANNOTATION_KEY]
+        statuses[component["name"]] = status
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": list(components)},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
 
 
 # ---------------------------------------------------------------------------

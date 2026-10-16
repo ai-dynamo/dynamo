@@ -154,7 +154,7 @@ func createLegacyGroveWorkerHashSuffixTestDGD(
 
 	legacyPCS := &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Name:      dynamo.PCSNameForDGD(dgd, nil),
 			Namespace: dgd.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
@@ -265,7 +265,7 @@ func checkGroveWorkerHashSuffixes(
 ) (bool, string) {
 	t.Helper()
 	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Name:      dynamo.PCSNameForDGD(dgd, nil),
 		Namespace: dgd.Namespace,
 	}
 	pcs := &grovev1alpha1.PodCliqueSet{}
@@ -317,7 +317,7 @@ func waitForGroveFrontendEnv(
 ) {
 	t.Helper()
 	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Name:      dynamo.PCSNameForDGD(dgd, nil),
 		Namespace: dgd.Namespace,
 	}
 	dynamotesting.Eventually(t, func() (bool, string) {
