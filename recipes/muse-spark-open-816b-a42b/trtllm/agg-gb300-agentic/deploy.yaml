@@ -63,7 +63,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/0886876425485018/pinedrift-dev/dynamo-tensorrtllm-runtime:rc4-arm64-no-fi-aot-20261015@sha256:af77713116acf4bbd06a0d21c0b80dbd36634718bb0e584026e257e53739a328
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-muse-spark-open-dev.1@sha256:af77713116acf4bbd06a0d21c0b80dbd36634718bb0e584026e257e53739a328
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -103,7 +103,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/0886876425485018/pinedrift-dev/dynamo-tensorrtllm-runtime:rc4-arm64-no-fi-aot-20261015@sha256:af77713116acf4bbd06a0d21c0b80dbd36634718bb0e584026e257e53739a328
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-muse-spark-open-dev.1@sha256:af77713116acf4bbd06a0d21c0b80dbd36634718bb0e584026e257e53739a328
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: [python3]
