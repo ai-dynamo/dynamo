@@ -20,6 +20,7 @@ from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
 from dynamo.global_planner.orchestrator import Orchestrator, _ParticipantMutationBusy
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
+from dynamo.planner.connectors.kubernetes import ReplicaUpdateFailure
 from dynamo.planner.connectors.protocol import ScaleStatus
 from dynamo.planner.errors import EmptyTargetReplicasError
 
@@ -961,7 +962,11 @@ async def test_nonblocking_uncertain_write_forces_settlement_before_return():
 
         async def wait_for_ready(self, participant_id):
             self.wait_calls += 1
-            raise RuntimeError("ambiguous write did not settle")
+            raise ReplicaUpdateFailure(
+                RuntimeError("adapter ownership lost"),
+                [],
+                [],
+            )
 
     cm = UncertainCapacityManager()
     cm.add("default/a", decode=1)
@@ -976,7 +981,8 @@ async def test_nonblocking_uncertain_write_forces_settlement_before_return():
     )
 
     assert result.status == ScaleStatus.ERROR
-    assert "ambiguous write did not settle" in result.message
+    assert "partial application; refusing to retry" in result.message
+    assert "adapter ownership lost" in result.message
     assert cm.wait_calls == 1
 
 

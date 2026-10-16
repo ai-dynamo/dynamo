@@ -140,7 +140,14 @@ def mock_core_api():
 
 
 @pytest.fixture
-def k8s_api(mock_custom_api, mock_core_api, mock_config, mock_namespace):
+def k8s_api(
+    mock_custom_api,
+    mock_core_api,
+    mock_config,
+    mock_namespace,
+    mock_api_client,
+):
+    mock_core_api.metadata_api_client = mock_api_client
     return KubernetesAPI()
 
 
@@ -1362,6 +1369,13 @@ def _mock_pod_list(mock_core_api, pods: list, *, component: str = "decode"):
     result.items = pods
     result.metadata._continue = None
     mock_core_api.list_namespaced_pod.return_value = result
+    response = MagicMock()
+    api_client = mock_core_api.metadata_api_client
+    api_client.param_serialize.return_value = ("serialized", "request")
+    api_client.call_api.return_value = response
+    api_client.response_deserialize.return_value = SimpleNamespace(
+        data={"items": pods, "metadata": {}}
+    )
 
 
 def test_is_spec_generation_observed_requires_catch_up(k8s_api):
@@ -1532,7 +1546,10 @@ async def test_wait_for_replica_targets_ignores_stale_ready_condition(
 
     assert got is settled
     assert get_dgd.call_count == 3
-    mock_core_api.list_namespaced_pod.assert_called_once()
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
 
 
 @pytest.mark.asyncio
@@ -1564,7 +1581,10 @@ async def test_wait_for_replica_targets_requires_current_workload_ready(
 
     assert got is settled
     assert get_dgd.call_count == 3
-    mock_core_api.list_namespaced_pod.assert_called_once()
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
 
 
 @pytest.mark.asyncio
@@ -1590,7 +1610,10 @@ async def test_wait_for_replica_targets_excludes_planner_readiness(
         )
 
     assert got is settled_workers
-    mock_core_api.list_namespaced_pod.assert_called_once()
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
 
 
 @pytest.mark.asyncio
@@ -1638,7 +1661,10 @@ async def test_wait_for_replica_targets_waits_for_adapter_projection(
     assert got is settled
     assert get_dgd.call_count == 3
     assert get_adapter.call_count == 3
-    mock_core_api.list_namespaced_pod.assert_called_once()
+    mock_core_api.list_namespaced_pod.assert_not_called()
+    mock_core_api.metadata_api_client.call_api.assert_called_once_with(
+        "serialized", "request"
+    )
 
 
 @pytest.mark.asyncio
@@ -1668,6 +1694,26 @@ async def test_wait_for_replica_targets_rejects_pods_from_replaced_dgd(
     stale_pod = _make_pod("decode-old")
     _mock_pod_list(mock_core_api, [stale_pod])
     stale_pod.metadata.labels["nvidia.com/dynamo-graph-deployment-uid"] = "old-dgd-uid"
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_rejects_removed_component_pods(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    stale_pod = _make_pod("removed-worker-0", component="removed-worker")
+    _mock_pod_list(mock_core_api, [stale_pod], component="removed-worker")
 
     with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
         with pytest.raises(TimeoutError):
@@ -2395,20 +2441,21 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
 
 
 def test_list_nonterminal_pods_for_graph_filters_at_server(k8s_api, mock_core_api):
-    result = MagicMock()
-    result.items = [_make_pod("decode-0", component="decode")]
-    result.metadata._continue = None
-    mock_core_api.list_namespaced_pod.return_value = result
+    pod = {"metadata": {"name": "decode-0"}}
 
-    assert k8s_api.list_nonterminal_pods_for_graph("my-dgd") == result.items
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [pod], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_nonterminal_pods_for_graph("my-dgd") == [pod]
 
-    mock_core_api.list_namespaced_pod.assert_called_once_with(
-        namespace="default",
+    read_page.assert_called_once_with(
         label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
         field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
-        limit=KUBERNETES_LIST_PAGE_SIZE,
-        _continue=None,
+        continue_token=None,
     )
+    mock_core_api.list_namespaced_pod.assert_not_called()
 
 
 def test_list_graph_pods_uses_untyped_metadata_request(k8s_api):
@@ -2421,6 +2468,20 @@ def test_list_graph_pods_uses_untyped_metadata_request(k8s_api):
         assert k8s_api.list_graph_pods() == [pod]
     read_page.assert_called_once_with(
         label_selector="nvidia.com/dynamo-graph-deployment-name",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        continue_token=None,
+    )
+
+
+def test_list_graph_pods_filters_selected_deployments(k8s_api):
+    with patch.object(
+        k8s_api,
+        "_read_core_pod_metadata_page",
+        return_value={"items": [], "metadata": {}},
+    ) as read_page:
+        assert k8s_api.list_graph_pods({"model-b", "model-a"}) == []
+    read_page.assert_called_once_with(
+        label_selector=("nvidia.com/dynamo-graph-deployment-name in (model-a,model-b)"),
         field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
         continue_token=None,
     )
@@ -2472,6 +2533,14 @@ def test_partial_metadata_pods_work_with_settlement_helpers(k8s_api):
     ]
 
     deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    assert k8s_api.pod_component_mismatches([serving], deployment) == []
+    stale_component = deepcopy(serving)
+    stale_component["metadata"]["labels"][
+        "nvidia.com/dynamo-component"
+    ] = "removed-worker"
+    assert k8s_api.pod_component_mismatches([stale_component], deployment) == [
+        "decode-0"
+    ]
     deployment["status"]["components"]["decode"][
         "componentKind"
     ] = "PodCliqueScalingGroup"
@@ -2504,6 +2573,84 @@ def test_read_core_pod_metadata_page_uses_public_untyped_api_client(k8s_api):
         response,
         {"200": "object"},
     )
+
+
+def test_read_custom_object_metadata_page_uses_public_untyped_api_client(k8s_api):
+    response = MagicMock()
+    payload = {"items": [{"metadata": {"name": "model"}}], "metadata": {}}
+    k8s_api.api_client.param_serialize.return_value = ("serialized", "request")
+    k8s_api.api_client.call_api.return_value = response
+    k8s_api.api_client.response_deserialize.return_value = SimpleNamespace(data=payload)
+
+    result = k8s_api._read_custom_object_metadata_page(
+        plural="dynamographdeployments",
+        continue_token="next-page",
+    )
+
+    assert result == payload
+    request = k8s_api.api_client.param_serialize.call_args.kwargs
+    assert request["method"] == "GET"
+    assert request["resource_path"] == (
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}"
+    )
+    assert request["path_params"] == {
+        "group": "nvidia.com",
+        "version": "v1beta1",
+        "namespace": "default",
+        "plural": "dynamographdeployments",
+    }
+    assert request["header_params"] == {"Accept": PARTIAL_OBJECT_METADATA_ACCEPT}
+    assert ("continue", "next-page") in request["query_params"]
+    k8s_api.api_client.call_api.assert_called_once_with("serialized", "request")
+    response.read.assert_called_once_with()
+
+
+def test_list_custom_object_metadata_follows_continue_tokens(k8s_api):
+    first = {"metadata": {"name": "first"}}
+    second = {"metadata": {"name": "second"}}
+    with patch.object(
+        k8s_api,
+        "_read_custom_object_metadata_page",
+        side_effect=[
+            {"items": [first], "metadata": {"continue": "next-page"}},
+            {"items": [second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_deployment_metadata() == [first, second]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "next-page",
+    ]
+
+
+def test_list_custom_object_metadata_restarts_expired_pagination(k8s_api):
+    stale = {"metadata": {"name": "stale"}}
+    fresh_first = {"metadata": {"name": "fresh-first"}}
+    fresh_second = {"metadata": {"name": "fresh-second"}}
+    expired = client.ApiException(status=410, reason="ResourceExpired")
+    with patch.object(
+        k8s_api,
+        "_read_custom_object_metadata_page",
+        side_effect=[
+            {"items": [stale], "metadata": {"continue": "expired-page"}},
+            expired,
+            {
+                "items": [fresh_first],
+                "metadata": {"continue": "fresh-page"},
+            },
+            {"items": [fresh_second], "metadata": {}},
+        ],
+    ) as read_page:
+        assert k8s_api.list_graph_deployment_metadata() == [
+            fresh_first,
+            fresh_second,
+        ]
+    assert [call.kwargs["continue_token"] for call in read_page.call_args_list] == [
+        None,
+        "expired-page",
+        None,
+        "fresh-page",
+    ]
 
 
 def test_list_graph_pods_follows_continue_tokens(k8s_api):

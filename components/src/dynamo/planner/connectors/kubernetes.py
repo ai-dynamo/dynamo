@@ -142,7 +142,8 @@ class ReplicaUpdateFailure(RuntimeError):
         uncertain: list[ReplicaUpdateAttempt],
     ) -> None:
         super().__init__(
-            "replica update stopped after partial application; refusing to retry"
+            "replica update stopped after partial application; refusing to retry: "
+            f"{cause}"
         )
         self.cause = cause
         self.committed = tuple(committed)

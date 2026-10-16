@@ -16,7 +16,7 @@
 import asyncio
 import copy
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Optional
 
 from kubernetes import client, config
@@ -158,6 +158,20 @@ class KubernetesAPI:
             "DynamoGraphDeploymentScalingAdapter",
         )
 
+    def list_graph_deployment_metadata(self) -> list[dict]:
+        """List DGD identity metadata without downloading specs or status."""
+        return self._list_namespaced_custom_object_metadata(
+            DGD_PLURAL,
+            "DynamoGraphDeployment",
+        )
+
+    def list_scaling_adapter_metadata(self) -> list[dict]:
+        """List DGDSA identity metadata without downloading specs or status."""
+        return self._list_namespaced_custom_object_metadata(
+            DGDSA_PLURAL,
+            "DynamoGraphDeploymentScalingAdapter",
+        )
+
     def _list_namespaced_custom_objects(self, plural: str, resource: str) -> list[dict]:
         return on_error(
             DEFAULT_BACKOFF,
@@ -169,11 +183,9 @@ class KubernetesAPI:
         self, plural: str, resource: str
     ) -> list[dict]:
         """Read one internally consistent paginated custom-resource snapshot."""
-        objects: list[dict] = []
-        continue_token: str | None = None
-        seen_tokens: set[str] = set()
-        while True:
-            result = _as_custom_object(
+        return self._collect_paginated_custom_objects(
+            resource,
+            lambda continue_token: _as_custom_object(
                 self.custom_api.list_namespaced_custom_object(
                     group=NVIDIA_API_GROUP,
                     version=DYNAMO_API_VERSION,
@@ -183,7 +195,20 @@ class KubernetesAPI:
                     _continue=continue_token,
                 ),
                 f"{resource} list",
-            )
+            ),
+        )
+
+    @staticmethod
+    def _collect_paginated_custom_objects(
+        resource: str,
+        read_page: Callable[[str | None], dict],
+    ) -> list[dict]:
+        """Collect and validate one paginated custom-resource snapshot."""
+        objects: list[dict] = []
+        continue_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            result = read_page(continue_token)
             items = result.get("items")
             if not isinstance(items, list):
                 raise TypeError(
@@ -218,6 +243,66 @@ class KubernetesAPI:
                 )
             seen_tokens.add(raw_token)
             continue_token = raw_token
+
+    def _list_namespaced_custom_object_metadata(
+        self,
+        plural: str,
+        resource: str,
+    ) -> list[dict]:
+        return on_error(
+            DEFAULT_BACKOFF,
+            _is_resource_expired,
+            lambda: self._list_namespaced_custom_object_metadata_once(
+                plural,
+                resource,
+            ),
+        )
+
+    def _list_namespaced_custom_object_metadata_once(
+        self,
+        plural: str,
+        resource: str,
+    ) -> list[dict]:
+        """Read one paginated PartialObjectMetadata snapshot for a CRD."""
+        return self._collect_paginated_custom_objects(
+            f"{resource} metadata",
+            lambda continue_token: self._read_custom_object_metadata_page(
+                plural=plural,
+                continue_token=continue_token,
+            ),
+        )
+
+    def _read_custom_object_metadata_page(
+        self,
+        *,
+        plural: str,
+        continue_token: str | None,
+    ) -> dict:
+        """Read one untyped PartialObjectMetadata page for a namespaced CRD."""
+        query_params = [("limit", KUBERNETES_LIST_PAGE_SIZE)]
+        if continue_token is not None:
+            query_params.append(("continue", continue_token))
+        request = self.api_client.param_serialize(
+            method="GET",
+            resource_path="/apis/{group}/{version}/namespaces/{namespace}/{plural}",
+            path_params={
+                "group": NVIDIA_API_GROUP,
+                "version": DYNAMO_API_VERSION,
+                "namespace": self.current_namespace,
+                "plural": plural,
+            },
+            query_params=query_params,
+            header_params={"Accept": PARTIAL_OBJECT_METADATA_ACCEPT},
+            auth_settings=["BearerToken"],
+            collection_formats={},
+        )
+        response = self.api_client.call_api(*request)
+        response.read()
+        result = self.api_client.response_deserialize(
+            response,
+            {"200": "object"},
+        ).data
+        return _as_custom_object(result, f"{plural} metadata list")
 
     def list_worker_metadata(self) -> list[dict]:
         """List all DynamoWorkerMetadata resources in the current namespace."""
@@ -1129,12 +1214,20 @@ class KubernetesAPI:
         return self._list_graph_pods(
             f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
             field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+            metadata_only=True,
         )
 
-    def list_graph_pods(self) -> list:
-        """List nonterminal Pods carrying the stable DGD label."""
+    def list_graph_pods(self, dgd_names: Collection[str] | None = None) -> list:
+        """List nonterminal DGD Pods, optionally scoped to selected graphs."""
+        if dgd_names is None:
+            label_selector = DYNAMO_DGD_NAME_LABEL
+        else:
+            names = sorted(set(dgd_names))
+            if not names:
+                return []
+            label_selector = f"{DYNAMO_DGD_NAME_LABEL} in ({','.join(names)})"
         return self._list_graph_pods(
-            DYNAMO_DGD_NAME_LABEL,
+            label_selector,
             field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
             metadata_only=True,
         )
@@ -1276,6 +1369,18 @@ class KubernetesAPI:
         mismatches: list[str] = []
         for pod in pods:
             if _pod_labels(pod).get(DYNAMO_DGD_UID_LABEL) == expected_uid:
+                continue
+            name = _object_field(_pod_metadata(pod), "name")
+            mismatches.append(str(name or "<unknown>"))
+        return mismatches
+
+    @staticmethod
+    def pod_component_mismatches(pods: list, deployment: dict) -> list[str]:
+        """Return Pods whose component label is absent from the current DGD."""
+        component_names = set(get_components_by_name(deployment))
+        mismatches: list[str] = []
+        for pod in pods:
+            if _pod_labels(pod).get(DYNAMO_COMPONENT_LABEL) in component_names:
                 continue
             name = _object_field(_pod_metadata(pod), "name")
             mismatches.append(str(name or "<unknown>"))
@@ -1496,8 +1601,13 @@ class KubernetesAPI:
                 identity_mismatches = self.pod_graph_uid_mismatches(
                     pods, expected_dgd_uid
                 )
+                component_mismatches = self.pod_component_mismatches(
+                    pods,
+                    settlement_deployment,
+                )
                 if (
                     identity_mismatches
+                    or component_mismatches
                     or self.has_terminating_pods(pods)
                     or not self.pcsg_pods_within_desired_replicas(
                         settlement_deployment, pods
@@ -1505,10 +1615,11 @@ class KubernetesAPI:
                 ):
                     logger.info(
                         "[Attempt %d/%d] Waiting for replica Pods to drain: "
-                        "identity_mismatches=%s",
+                        "identity_mismatches=%s, component_mismatches=%s",
                         attempt + 1,
                         max_attempts,
                         identity_mismatches,
+                        component_mismatches,
                     )
                     continue
 
