@@ -25,12 +25,20 @@ tests:
     set: {global.grove.enabled: true}
     documentSelector: {path: kind, value: Job}
     asserts:
+      - equal: {path: metadata.name, value: RELEASE-NAME-dynamo-operator-check-grove-compatibility}
       - equal: {path: 'metadata.annotations["helm.sh/hook"]', value: 'pre-install,pre-upgrade'}
       - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-10'}
       - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
       - equal: {path: spec.activeDeadlineSeconds, value: 120}
       - equal: {path: spec.backoffLimit, value: 2}
       - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
+  - it: keeps the compatibility check visible in long hook names
+    set:
+      global.grove.enabled: true
+      dynamo-operator.fullnameOverride: a-very-long-operator-name-that-needs-truncation-for-the-hook
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - matchRegex: {path: metadata.name, pattern: '^.{1,37}-check-grove-compatibility$'}
   - it: prepares only read permissions before the Job and retains them until the next attempt
     set: {global.grove.enabled: true}
     documentSelector: {path: kind, value: ClusterRole}
