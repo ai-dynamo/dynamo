@@ -2188,6 +2188,75 @@ async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
+)
+@pytest.mark.parametrize(
+    "prompt_count,expected_tokens", [(0, {"17"}), (1, {"17", "65"})]
+)
+async def test_generate_limits_prompt_logprobs_independently(
+    monkeypatch, mode, prompt_count, expected_tokens
+):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+    handler = _new_decode_handler(serving_mode=mode)
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    alternatives = [(-0.1, 65, "A"), (-0.2, 66, "B"), (-0.3, 67, "C")]
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(
+            return_value=_stream(
+                [
+                    {
+                        "output_ids": [65],
+                        "meta_info": {
+                            "id": "sample-0",
+                            "finish_reason": {"type": "length"},
+                            "input_token_logprobs": [(None, 1, None), (-0.5, 17, "p")],
+                            "input_top_logprobs": [None, alternatives],
+                            "output_token_logprobs": [alternatives[0]],
+                            "output_top_logprobs": [alternatives],
+                        },
+                    }
+                ]
+            )
+        )
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "token_ids": [1, 17],
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {"prompt_logprobs": prompt_count, "logprobs": 3},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    chunks = await _collect(handler.generate(request, context))
+
+    assert len(chunks) == 1
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    assert kwargs["top_logprobs_num"] == 3
+    assert kwargs["logprob_start_len"] == 0
+    prompt_logprobs = chunks[0]["engine_data"]["prompt_logprobs"]
+    assert prompt_logprobs[0] is None
+    assert set(prompt_logprobs[1]) == expected_tokens
+    assert prompt_logprobs[1]["17"] == {"logprob": -0.5, "decoded_token": "p"}
+    assert len(chunks[0]["top_logprobs"][0]) == 3
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 

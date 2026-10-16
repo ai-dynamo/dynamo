@@ -41,7 +41,11 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
-from dynamo.common.backend.logprobs import build_sglang_logprob_kwargs
+from dynamo.common.backend.logprobs import (
+    build_sglang_logprob_kwargs,
+    extract_from_sglang_meta,
+    extract_prompt_logprobs_from_sglang_meta,
+)
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -4662,36 +4666,75 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         return asyncio.run(collect())
 
     @pytest.mark.parametrize(
-        "logprobs,top_logprobs,expected_top_count",
-        [(None, None, None), (False, None, None), (True, 0, 0), (True, 1, 1)],
+        "prompt_count,logprobs,top_logprobs,expected_top_count",
+        [
+            (0, None, None, None),
+            (0, False, None, None),
+            (0, True, 0, 0),
+            (3, True, 1, 1),
+            (0, True, 3, 3),
+            (1, True, 3, 3),
+        ],
     )
-    def test_prompt_logprobs_do_not_enable_extra_completion_logprobs(
-        self, logprobs, top_logprobs, expected_top_count
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_prompt_and_completion_logprob_counts_are_independent(
+        self, prompt_count, logprobs, top_logprobs, expected_top_count, stream
     ):
-        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        request = {
+            "model": MODEL,
+            "prompt_logprobs": prompt_count,
+            "logprobs": logprobs,
+            "top_logprobs": top_logprobs,
+            "stream": stream,
+            "nvext": {"extra_fields": ["prompt_logprobs"]},
+        }
+        preproc = _build_dynamo_preproc(request, [1, 17], MODEL, None)
+        options = preproc["output_options"]
+        kwargs = build_sglang_logprob_kwargs(options, allow_top_logprobs=True)
+        assert kwargs["top_logprobs_num"] == max(prompt_count, expected_top_count or 0)
+        alternatives = [
+            (-0.1, ord("A"), "A"),
+            (-0.2, ord("B"), "B"),
+            (-0.3, ord("C"), "C"),
+        ][: kwargs["top_logprobs_num"]]
+        meta = {
+            "input_token_logprobs": [(None, 1, None), (-0.5, 17, "p")],
+            "input_top_logprobs": [None, alternatives],
+            "output_token_logprobs": [(-0.1, ord("A"), "A")],
+            "output_top_logprobs": [alternatives],
+        }
+        payload = extract_prompt_logprobs_from_sglang_meta(
+            meta, prompt_logprobs_count=options["prompt_logprobs"]
+        )
+        log_probs, output_top_logprobs = extract_from_sglang_meta(meta)
         chunks = self._run_logprob_stream(
             [
                 {
                     "token_ids": [ord("A")],
-                    "log_probs": [-0.1],
-                    "top_logprobs": [
-                        [
-                            {"token_id": ord("A"), "logprob": -0.1},
-                            {"token_id": ord("B"), "logprob": -0.2},
-                        ]
-                    ],
+                    "log_probs": log_probs,
+                    "top_logprobs": output_top_logprobs,
                     "finish_reason": "stop",
                     "engine_data": {"prompt_logprobs": payload},
                 }
             ],
-            request={
-                "model": MODEL,
-                "prompt_logprobs": 0,
-                "logprobs": logprobs,
-                "top_logprobs": top_logprobs,
-            },
+            request=request,
         )
-        assert chunks[0]["prompt_logprobs"] == payload
+        expected_prompt = [
+            None,
+            {
+                "17": {"logprob": -0.5, "decoded_token": "p"},
+                **{
+                    str(token_id): {"logprob": lp, "decoded_token": token}
+                    for lp, token_id, token in alternatives[:prompt_count]
+                },
+            },
+        ]
+        assert len(chunks) == 1
+        assert chunks[0]["nvext"]["prompt_logprobs"] == expected_prompt
+        if stream:
+            assert "prompt_logprobs" not in chunks[0]
+        else:
+            assert chunks[0]["prompt_logprobs"] == expected_prompt
         completion_logprobs = chunks[0]["choices"][0]["logprobs"]
         if expected_top_count is None:
             assert completion_logprobs is None

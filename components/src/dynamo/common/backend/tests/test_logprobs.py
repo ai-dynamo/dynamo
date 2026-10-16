@@ -308,21 +308,37 @@ def test_prompt_logprobs_sglang_preserves_engine_bos_none():
     ]
 
 
-def test_prompt_logprobs_sglang_merges_input_top_logprobs():
+@pytest.mark.parametrize(
+    "count,actual_token,expected_tokens",
+    [
+        (None, 7, {"7", "70", "71"}),
+        (0, 70, {"70"}),
+        (1, 7, {"7"}),
+        (1, 70, {"7", "70"}),
+        (3, 99, {"7", "70", "71", "99"}),
+    ],
+)
+def test_prompt_logprobs_sglang_merges_input_top_logprobs(
+    count, actual_token, expected_tokens
+):
     meta = {
         "input_token_logprobs": [
             (None, 6, None),
-            (-0.5, 7, "a"),
+            (-0.7, actual_token, "actual"),
         ],
         "input_top_logprobs": [
             None,
-            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+            [(-0.5, 7, "a"), (-1.5, 70, "A"), (-2.5, 71, "b")],
         ],
     }
-    payload = extract_prompt_logprobs_from_sglang_meta(meta)
-    assert payload[1] == {
-        "7": {"logprob": -0.5, "decoded_token": "a"},
-        "70": {"logprob": -1.5, "decoded_token": "A"},
+    payload = extract_prompt_logprobs_from_sglang_meta(
+        meta, prompt_logprobs_count=count
+    )
+    assert payload[0] is None
+    assert set(payload[1]) == expected_tokens
+    assert payload[1][str(actual_token)] == {
+        "logprob": -0.7,
+        "decoded_token": "actual",
     }
 
 

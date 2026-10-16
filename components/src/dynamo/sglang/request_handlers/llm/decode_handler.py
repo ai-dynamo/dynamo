@@ -753,6 +753,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
+        _, prompt_logprobs_count = _shared_logprobs.parse_logprob_options(
+            output_options
+        )
         return_tokens_as_token_ids = bool(
             output_options.get("return_tokens_as_token_ids")
         )
@@ -825,6 +828,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    prompt_logprobs_count=prompt_logprobs_count,
                     report_kv_cache_hit=not _has_parallel_prefix_warmup(
                         sampling_params
                     ),
@@ -925,6 +929,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    prompt_logprobs_count=prompt_logprobs_count,
                     report_kv_cache_hit=not _has_parallel_prefix_warmup(
                         sampling_params
                     ),
@@ -1037,6 +1042,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
         report_kv_cache_hit: bool = True,
+        prompt_logprobs_count: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -1137,7 +1143,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if finish_reason:
                     prompt_payload = (
                         _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
-                            meta_info
+                            meta_info, prompt_logprobs_count=prompt_logprobs_count
                         )
                     )
                     if prompt_payload is not None and metadata_uploader is None:
