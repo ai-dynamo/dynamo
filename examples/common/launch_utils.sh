@@ -28,6 +28,7 @@
 # Requires: bash 4.3+ (wait -n)
 #
 # Functions:
+#   resolve_sidecar        Select a native binary or Python module command
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
 #   wait_any_exit          Wait for any background process to exit, propagate its code
@@ -39,6 +40,69 @@ fi
 
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"
+
+# Usage: resolve_sidecar <backend> <command-array>
+resolve_sidecar() {
+    local backend="$1"
+    local -n sidecar_command="$2"
+    local name="dynamo-${backend}-sidecar"
+    local native_binary
+
+    if [[ -v DYNAMO_SIDECAR_BIN ]]; then
+        if [[ "$DYNAMO_SIDECAR_BIN" != /* || ! -f "$DYNAMO_SIDECAR_BIN" || ! -x "$DYNAMO_SIDECAR_BIN" ]]; then
+            echo "ERROR: DYNAMO_SIDECAR_BIN must name an executable file at an absolute path: $DYNAMO_SIDECAR_BIN" >&2
+            return 1
+        fi
+        sidecar_command=("$DYNAMO_SIDECAR_BIN")
+    elif native_binary=$(type -P "$name"); then
+        sidecar_command=("$native_binary")
+    else
+        echo "WARNING: $name not found; falling back to python3 -m dynamo.${backend}.sidecar" >&2
+        sidecar_command=(python3 -m "dynamo.${backend}.sidecar")
+    fi
+}
+
+# Resolve an indexed managed port, retaining a standalone fallback.
+# Usage: dyn_port DYN_SYSTEM_PORT 1 8081
+dyn_port() {
+    local prefix="$1"
+    local index="$2"
+    local fallback="$3"
+    local variable="${prefix}${index}"
+    local value="${!variable:-}"
+    local minimum_port=1
+    local maximum_port=65535
+
+    if [[ "${prefix}" == "DYN_SYSTEM_PORT" ]]; then
+        minimum_port=0
+        maximum_port=32767
+    fi
+
+    local selected="${value:-${fallback}}"
+
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+            echo "Missing or invalid managed port ${variable}: ${value:-<unset>}" >&2
+            return 1
+        fi
+        if (( 10#${value} < minimum_port || 10#${value} > maximum_port )); then
+            echo "Managed port ${variable} is out of range: ${value}" >&2
+            return 1
+        fi
+        printf '%s\n' "${value}"
+        return 0
+    fi
+
+    if [[ -n "${value}" && ! "${value}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid port ${variable}: ${value}" >&2
+        return 1
+    fi
+    if [[ ! "${selected}" =~ ^[0-9]+$ ]] || (( 10#${selected} < minimum_port || 10#${selected} > maximum_port )); then
+        echo "Port ${variable} is out of range: ${selected}" >&2
+        return 1
+    fi
+    printf '%s\n' "${selected}"
+}
 
 # wait_any_exit
 #
@@ -235,39 +299,34 @@ wait_for_ready() {
     return 1
 }
 
-# pick_worker_module <legacy_module> <unified_module> "$@"
-#
-# Strips `--unified` from argv and selects the matching `python -m <module>`
-# target. Sets two globals:
-#
-#   WORKER_MODULE    The chosen module (legacy by default; unified if --unified seen).
-#   REMAINING_ARGS   Array of surviving argv. Caller does `set -- "${REMAINING_ARGS[@]}"`.
-#
-# Why this lives here:
-#   Every disagg launch script needs the same switch. Inlining it three times
-#   means three places to keep in sync; centralising here means the
-#   "consume --unified BEFORE installing the EXIT trap" discipline is enforced
-#   by construction. Other flags (--enable-otel, --model-name, ...) stay in
-#   the caller's own arg loop so engine-specific options keep working.
-#
-# Usage:
-#   pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
-#   set -- "${REMAINING_ARGS[@]}"
-#   trap 'echo Cleaning up...; kill 0' EXIT
-#   # ... caller's own argument parsing on the surviving $@ ...
-pick_worker_module() {
-    local _legacy="$1"
-    local _unified="$2"
-    shift 2
-    WORKER_MODULE="$_legacy"
-    REMAINING_ARGS=()
-    for _arg in "$@"; do
-        if [[ "$_arg" == "--unified" ]]; then
-            WORKER_MODULE="$_unified"
-        else
-            REMAINING_ARGS+=("$_arg")
-        fi
-    done
+allocate_free_port() {
+    python3 - <<'PY'
+import random
+import socket
+
+PORT_MIN = 1024
+PORT_MAX = 49151
+MAX_ATTEMPTS = 256
+
+for _ in range(MAX_ATTEMPTS):
+    port = random.randint(PORT_MIN, PORT_MAX)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        continue
+
+    try:
+        print(port)
+        break
+    finally:
+        sock.close()
+else:
+    raise RuntimeError(
+        f"could not find a free port in the registered range {PORT_MIN}-{PORT_MAX}"
+    )
+PY
 }
 
 # print_curl_footer

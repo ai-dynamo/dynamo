@@ -12,7 +12,98 @@ use std::fmt;
 use std::sync::OnceLock;
 use validator::Validate;
 
+#[doc(hidden)]
+pub mod env_config;
 pub mod environment_names;
+
+/// Parser generation shared by startup validation and frontend routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParserVersion {
+    Auto,
+    V1,
+    V2,
+}
+
+impl TryFrom<Option<&str>> for ParserVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Option<&str>) -> Result<Self> {
+        use environment_names::llm::DYN_PARSER_VERSION;
+        match value {
+            Some("1") => Ok(Self::V1),
+            Some("2") => Ok(Self::V2),
+            Some("auto") | None => Ok(Self::Auto),
+            Some(value) => {
+                anyhow::bail!("{DYN_PARSER_VERSION} must be unset, auto, 1, or 2; got {value:?}")
+            }
+        }
+    }
+}
+
+/// Read parser startup configuration once so request routing cannot diverge from it.
+pub fn selected_parser_version() -> Result<ParserVersion> {
+    use environment_names::llm::{DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION};
+    static VERSION: OnceLock<Result<ParserVersion, String>> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let version = match std::env::var(DYN_PARSER_VERSION) {
+                Ok(value) => ParserVersion::try_from(Some(value.as_str())),
+                Err(std::env::VarError::NotPresent) => ParserVersion::try_from(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+                    "{DYN_PARSER_VERSION} must be unset, auto, 1, or 2; value is not valid UTF-8"
+                )),
+            };
+            let experimental = std::env::var_os(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2);
+            let enabled = experimental
+                .as_ref()
+                .map(|value| {
+                    let value = value.to_str().ok_or_else(|| {
+                        anyhow::anyhow!("value is not valid UTF-8")
+                    })?;
+                    parse_bool(value).map_err(|error| {
+                        anyhow::anyhow!("{DYN_ENABLE_EXPERIMENTAL_PARSERS_V2}={value:?} is not a valid boolean: {error}")
+                    })
+                })
+                .transpose();
+
+            let selection = match (enabled, version) {
+                (Ok(Some(true)), Ok(ParserVersion::V1))
+                | (Ok(Some(false)), Ok(ParserVersion::V2)) => Err(anyhow::anyhow!(
+                    "conflicting parser settings: {DYN_ENABLE_EXPERIMENTAL_PARSERS_V2}={:?} conflicts with {DYN_PARSER_VERSION}={:?}",
+                    experimental.as_ref().map(|value| value.to_string_lossy()),
+                    std::env::var_os(DYN_PARSER_VERSION)
+                        .map(|value| value.to_string_lossy().into_owned())
+                )),
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Ok(Some(true)), Ok(ParserVersion::Auto)) => Ok(ParserVersion::V2),
+                (Ok(Some(false)) | Ok(None), Ok(ParserVersion::Auto)) => Ok(ParserVersion::Auto),
+                (Ok(Some(false)), Ok(ParserVersion::V1)) => Ok(ParserVersion::V1),
+                (Ok(Some(true)), Ok(ParserVersion::V2)) => Ok(ParserVersion::V2),
+                (Ok(None), Ok(ParserVersion::V1)) => Ok(ParserVersion::V1),
+                (Ok(None), Ok(ParserVersion::V2)) => Ok(ParserVersion::V2),
+            };
+
+            if let Some(raw_value) = experimental.as_ref() {
+                let value = raw_value.to_str().unwrap_or("<non-UTF-8>");
+                let resolved = selection
+                    .as_ref()
+                    .map(|selection| format!("{selection:?}"))
+                    .unwrap_or_else(|_| "invalid or conflicting settings".to_string());
+                tracing::warn!(
+                    target: "dynamo_unified",
+                    value,
+                    resolved_selection = %resolved,
+                    "experimental V2 parser routing setting is present"
+                );
+            }
+
+            selection.map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .copied()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
 
 /// Default system host for health and metrics endpoints
 const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
@@ -83,8 +174,13 @@ pub struct RuntimeConfig {
 
     /// Maximum number of blocking threads
     /// Blocking threads are used for blocking operations, this value must be greater than 0.
-    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS. Defaults to
-    /// 512.
+    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS.
+    ///
+    /// Defaults to the core count (`impl Default`). The `#[builder(default = "512")]` below
+    /// applies only when building through `RuntimeConfigBuilder` without setting this field.
+    ///
+    /// This is a ceiling, not a preallocation: Tokio spawns blocking threads on demand and reaps
+    /// them when idle, so measure at steady state under load.
     #[validate(range(min = 1))]
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -313,6 +409,7 @@ impl RuntimeConfig {
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         use environment_names::runtime::system as env_system;
+        Self::validate_parser_environment()?;
         // Check for deprecated environment variables
         if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
             tracing::warn!(
@@ -333,6 +430,10 @@ impl RuntimeConfig {
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate_parser_environment() -> Result<()> {
+        selected_parser_version().map(|_| ())
     }
 
     /// Check if System server should be enabled
@@ -364,8 +465,13 @@ impl RuntimeConfig {
         }
     }
 
-    /// Create a new default runtime configuration
-    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+    /// The Tokio builder for this config, not yet built.
+    ///
+    /// Separate from [`Self::create_runtime`] because the pyo3 bridge builds its own runtime:
+    /// `pyo3_async_runtimes::tokio::init` takes a builder and calls `build()` later. Handing it
+    /// this builder is the only way to bound that runtime's size. Both paths go through here so
+    /// they cannot drift apart.
+    pub fn tokio_builder(&self) -> tokio::runtime::Builder {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder
             .worker_threads(
@@ -381,7 +487,12 @@ impl RuntimeConfig {
             );
             builder.enable_metrics_poll_time_histogram();
         }
-        builder.build()
+        builder
+    }
+
+    /// Create a new default runtime configuration
+    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+        self.tokio_builder().build()
     }
 }
 
@@ -418,55 +529,79 @@ impl RuntimeConfigBuilder {
     }
 }
 
-/// Check if a string is truthy
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value.
-pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+// Canonical truthy/falsy/bool parsing for user-supplied configuration
+// (environment variables, headers, config values). The single implementation
+// lives in the zero-dependency `dynamo-truthy` crate so that crates which
+// cannot depend on `dynamo-runtime` share it too; this re-export is the
+// canonical import path for everything that can.
+pub use dynamo_truthy::{
+    env_is_falsey, env_is_truthy, is_falsey, is_truthy, parse_bool, parse_bool_opt,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLogFormat {
+    Readable,
+    Jsonl,
 }
 
-pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
-    if is_truthy(val) {
-        Ok(true)
-    } else if is_falsey(val) {
-        Ok(false)
-    } else {
-        anyhow::bail!(
-            "Invalid boolean value: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
-            val
-        )
+impl ConsoleLogFormat {
+    fn from_env_value(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "readable" => Some(Self::Readable),
+            "jsonl" => Some(Self::Jsonl),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Readable => "readable",
+            Self::Jsonl => "jsonl",
+        }
     }
 }
 
-/// Check if a string is falsey
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value (opposite of is_truthy).
-pub fn is_falsey(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no")
-}
-
-/// Check if an environment variable is truthy
-pub fn env_is_truthy(env: &str) -> bool {
-    match std::env::var(env) {
-        Ok(val) => is_truthy(val.as_str()),
-        Err(_) => false,
-    }
-}
-
-/// Check if an environment variable is falsey
-pub fn env_is_falsey(env: &str) -> bool {
-    match std::env::var(env) {
-        Ok(val) => is_falsey(val.as_str()),
-        Err(_) => false,
-    }
-}
-
-/// Check whether JSONL logging enabled
-/// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
-pub fn jsonl_logging_enabled() -> bool {
+/// Return whether the legacy `DYN_LOGGING_JSONL` switch is enabled.
+///
+/// This remains a separate compatibility signal because older deployments
+/// also use it to enable local trace-context propagation.
+pub(crate) fn legacy_jsonl_logging_enabled() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOGGING_JSONL)
+}
+
+/// Return the console log format.
+///
+/// `DYN_LOGGING_CONSOLE_FORMAT` takes precedence. `DYN_LOGGING_JSONL` remains
+/// supported as a legacy fallback when the new setting is unset or blank.
+pub fn console_log_format() -> ConsoleLogFormat {
+    let legacy_format = || {
+        if legacy_jsonl_logging_enabled() {
+            ConsoleLogFormat::Jsonl
+        } else {
+            ConsoleLogFormat::Readable
+        }
+    };
+
+    match std::env::var(environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT) {
+        Ok(value) if value.trim().is_empty() => legacy_format(),
+        Ok(value) => match ConsoleLogFormat::from_env_value(value.trim()) {
+            Some(format) => format,
+            None => {
+                eprintln!(
+                    "Invalid {} value '{}'; using readable console logs",
+                    environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT,
+                    value
+                );
+                ConsoleLogFormat::Readable
+            }
+        },
+        Err(_) => legacy_format(),
+    }
+}
+
+/// Return whether the effective console log format is JSONL.
+pub fn jsonl_logging_enabled() -> bool {
+    console_log_format() == ConsoleLogFormat::Jsonl
 }
 
 /// Check whether logging with ANSI terminal escape codes and colors is disabled.
@@ -504,6 +639,307 @@ mod tests {
         assert_eq!(config.system_host, "127.0.0.1");
         assert_eq!(config.system_port, 9090);
         Ok(())
+    }
+
+    /// Both thread-pool variables must survive `from_settings()`.
+    ///
+    /// Covers parsing on its own, so if a frontend's thread count ignores
+    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` the cause is wiring rather than parsing.
+    ///
+    /// `temp_env::with_vars` restores the old values on the way out, including on panic.
+    #[test]
+    fn test_from_settings_reads_both_thread_env_vars() {
+        const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
+        const BLOCKING: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+        temp_env::with_vars([(WORKERS, Some("7")), (BLOCKING, Some("11"))], || {
+            let config = RuntimeConfig::from_settings().expect("from_settings failed");
+            assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
+            assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
+        });
+    }
+
+    #[test]
+    fn parser_selection_configuration_table() {
+        const CHILD: &str = "DYNAMO_PARSER_SELECTION_TEST_CHILD";
+        const EXPECTED: &str = "DYNAMO_PARSER_SELECTION_EXPECTED";
+        use environment_names::llm::{DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION};
+
+        if std::env::var_os(CHILD).is_some() {
+            let expected = std::env::var(EXPECTED).expect("expected selection");
+            let result = selected_parser_version();
+            match expected.as_str() {
+                "Auto" => assert_eq!(result.unwrap(), ParserVersion::Auto),
+                "V1" => assert_eq!(result.unwrap(), ParserVersion::V1),
+                "V2" => assert_eq!(result.unwrap(), ParserVersion::V2),
+                "conflict" => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2));
+                    assert!(error.contains(DYN_PARSER_VERSION));
+                }
+                "invalid" => {
+                    assert!(result.is_err());
+                    assert!(RuntimeConfig::from_settings().is_err());
+                }
+                other => panic!("unexpected expected selection: {other}"),
+            }
+            return;
+        }
+
+        let cases = [
+            (None, None, "Auto"),
+            (Some("false"), None, "Auto"),
+            (Some("0"), None, "Auto"),
+            (Some("off"), None, "Auto"),
+            (Some("no"), None, "Auto"),
+            (Some(""), None, "Auto"),
+            (Some("true"), None, "V2"),
+            (Some("1"), None, "V2"),
+            (Some("on"), None, "V2"),
+            (Some("yes"), None, "V2"),
+            (None, Some("auto"), "Auto"),
+            (None, Some("1"), "V1"),
+            (None, Some("v1"), "invalid"),
+            (None, Some("2"), "V2"),
+            (None, Some("v2"), "invalid"),
+            (Some("false"), Some("auto"), "Auto"),
+            (Some("true"), Some("auto"), "V2"),
+            (Some("false"), Some("1"), "V1"),
+            (Some("false"), Some("2"), "conflict"),
+            (Some("true"), Some("1"), "conflict"),
+            (Some("true"), Some("2"), "V2"),
+            (Some("false"), Some("v1"), "invalid"),
+            (Some("false"), Some("v2"), "invalid"),
+            (Some("true"), Some("v1"), "invalid"),
+            (Some("true"), Some("v2"), "invalid"),
+            (Some("perhaps"), None, "invalid"),
+            (None, Some(""), "invalid"),
+            (None, Some("3"), "invalid"),
+        ];
+        for (experimental, version, expected) in cases {
+            let mut command = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_configuration_table",
+            );
+            command.env(CHILD, "1").env(EXPECTED, expected).env(
+                DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+                experimental.unwrap_or(""),
+            );
+            if experimental.is_none() {
+                command.env_remove(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2);
+            }
+            if let Some(version) = version {
+                command.env(DYN_PARSER_VERSION, version);
+            } else {
+                command.env_remove(DYN_PARSER_VERSION);
+            }
+            let output = command
+                .output()
+                .expect("run isolated parser selection test");
+            crate::test_utils::assert_isolated_success(&output);
+        }
+    }
+
+    #[test]
+    fn parser_selection_is_cached_for_process_lifetime() {
+        const CHILD: &str = "DYNAMO_PARSER_SELECTION_CACHE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_is_cached_for_process_lifetime",
+            )
+            .env(CHILD, "1")
+            .env(
+                environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+                "true",
+            )
+            .output()
+            .expect("run isolated parser cache test");
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+
+        assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+        temp_env::with_vars(
+            [
+                (
+                    environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+                    None,
+                ),
+                (environment_names::llm::DYN_PARSER_VERSION, Some("1")),
+            ],
+            || {
+                assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+            },
+        );
+    }
+
+    #[test]
+    fn parser_selection_warning_is_emitted_once_and_startup_rejects_conflicts() {
+        const CHILD: &str = "DYNAMO_PARSER_SELECTION_WARNING_CHILD";
+        const MODE: &str = "DYNAMO_PARSER_SELECTION_WARNING_MODE";
+        if std::env::var_os(CHILD).is_none() {
+            let warning = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_warning_is_emitted_once_and_startup_rejects_conflicts",
+            )
+            .env(CHILD, "1")
+            .env(MODE, "warning")
+            .env(environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")
+            .output()
+            .expect("run isolated parser warning test");
+            crate::test_utils::assert_isolated_success(&warning);
+            let stderr = String::from_utf8_lossy(&warning.stderr);
+            assert_eq!(
+                stderr
+                    .matches("experimental V2 parser routing setting is present")
+                    .count(),
+                1,
+                "{stderr}"
+            );
+            assert!(stderr.contains("value=\"true\""), "{stderr}");
+            assert!(stderr.contains("resolved_selection=V2"), "{stderr}");
+
+            let conflict = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_warning_is_emitted_once_and_startup_rejects_conflicts",
+            )
+            .env(CHILD, "1")
+            .env(MODE, "conflict")
+            .env(environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")
+            .env(environment_names::llm::DYN_PARSER_VERSION, "1")
+            .output()
+            .expect("run isolated parser startup conflict test");
+            crate::test_utils::assert_isolated_success(&conflict);
+            let stderr = String::from_utf8_lossy(&conflict.stderr);
+            assert_eq!(
+                stderr
+                    .matches("experimental V2 parser routing setting is present")
+                    .count(),
+                1,
+                "{stderr}"
+            );
+            return;
+        }
+
+        match std::env::var(MODE).as_deref() {
+            Ok("warning") => {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+                    assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+                });
+            }
+            Ok("conflict") => {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    let error = RuntimeConfig::from_settings().unwrap_err().to_string();
+                    assert!(error.contains("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2"));
+                    assert!(error.contains("DYN_PARSER_VERSION"));
+                });
+            }
+            value => panic!("unexpected test mode: {value:?}"),
+        }
+    }
+
+    /// The builder given to the pyo3 bridge must carry the configured worker count.
+    ///
+    /// The bridge calls `build()` itself, so nothing on our side sees the resulting runtime. If
+    /// this stopped applying the config, a bridge-built runtime would quietly go back to one
+    /// worker per CPU — the original bug, in a place no other test looks.
+    #[test]
+    fn test_tokio_builder_applies_configured_worker_threads() -> Result<()> {
+        let config = RuntimeConfig::builder()
+            .num_worker_threads(Some(3))
+            .max_blocking_threads(5)
+            .build()?;
+
+        let runtime = config.tokio_builder().build()?;
+        assert_eq!(runtime.metrics().num_workers(), 3);
+        Ok(())
+    }
+
+    /// With `num_worker_threads` unset, the builder falls back to the core count.
+    #[test]
+    fn test_tokio_builder_defaults_worker_threads_to_core_count() -> Result<()> {
+        let config = RuntimeConfig {
+            num_worker_threads: None,
+            ..RuntimeConfig::default()
+        };
+
+        let runtime = config.tokio_builder().build()?;
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            std::thread::available_parallelism()?.get()
+        );
+        Ok(())
+    }
+
+    /// `max_blocking_threads` must actually cap concurrent blocking work.
+    ///
+    /// This is the setting whose effect on a frontend's thread count could not be observed, and
+    /// `num_workers()` cannot show it — Tokio counts blocking threads separately and only
+    /// exposes that count under `tokio_unstable`. Measuring concurrency works on stable instead:
+    /// blocking threads are spawned on demand up to the cap, so queueing more tasks than the cap
+    /// must serialize them.
+    ///
+    /// Only the upper bound is asserted. A missing cap shows up as a peak near the task count,
+    /// while asserting a lower bound would make the test depend on the scheduler overlapping
+    /// tasks, which a loaded CI machine need not do.
+    #[test]
+    fn test_tokio_builder_applies_max_blocking_threads() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const CAP: usize = 2;
+
+        let config = RuntimeConfig::builder()
+            .num_worker_threads(Some(2))
+            .max_blocking_threads(CAP)
+            .build()?;
+        let runtime = config.tokio_builder().build()?;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        runtime.block_on(async {
+            let tasks: Vec<_> = (0..CAP * 4)
+                .map(|_| {
+                    let in_flight = Arc::clone(&in_flight);
+                    let peak = Arc::clone(&peak);
+                    tokio::task::spawn_blocking(move || {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        // Long enough that tasks overlap if the cap allows it.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                    })
+                })
+                .collect();
+
+            for task in tasks {
+                task.await.expect("blocking task panicked");
+            }
+        });
+
+        let observed = peak.load(Ordering::SeqCst);
+        assert!(
+            observed <= CAP,
+            "{observed} blocking tasks ran at once, but the cap was {CAP}"
+        );
+        Ok(())
+    }
+
+    /// `Default` sets `max_blocking_threads` to the core count, not the `#[builder(default)]`
+    /// of 512 — that applies only when building through `RuntimeConfigBuilder`.
+    #[test]
+    fn test_default_max_blocking_threads_is_core_count() {
+        let cores = std::thread::available_parallelism().unwrap().get();
+        let config = RuntimeConfig::default();
+        assert_eq!(config.max_blocking_threads, cores);
+        assert_eq!(config.num_worker_threads, Some(cores));
     }
 
     #[test]
@@ -547,5 +983,36 @@ mod tests {
         // Test opposite behavior
         assert!(!is_truthy("0"));
         assert!(!is_falsey("1"));
+    }
+
+    #[test]
+    fn test_console_log_format() {
+        use environment_names::logging;
+
+        for (console_format, legacy_jsonl, expected) in [
+            (None, None, ConsoleLogFormat::Readable),
+            (None, Some("true"), ConsoleLogFormat::Jsonl),
+            (Some(""), Some("true"), ConsoleLogFormat::Jsonl),
+            (Some("   "), Some("true"), ConsoleLogFormat::Jsonl),
+            (Some(" jsonl "), Some("false"), ConsoleLogFormat::Jsonl),
+            (Some("readable"), Some("true"), ConsoleLogFormat::Readable),
+            (Some("jsonl"), Some("false"), ConsoleLogFormat::Jsonl),
+            (
+                Some("unsupported"),
+                Some("true"),
+                ConsoleLogFormat::Readable,
+            ),
+        ] {
+            temp_env::with_vars(
+                [
+                    (logging::DYN_LOGGING_CONSOLE_FORMAT, console_format),
+                    (logging::DYN_LOGGING_JSONL, legacy_jsonl),
+                ],
+                || {
+                    assert_eq!(console_log_format(), expected);
+                    assert_eq!(jsonl_logging_enabled(), expected == ConsoleLogFormat::Jsonl);
+                },
+            );
+        }
     }
 }

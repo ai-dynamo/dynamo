@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -12,10 +13,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiohttp
-import nats
 
 from dynamo.llm import KvRouter
+from dynamo.prometheus_names import kv_publisher, name_prefix
 from dynamo.runtime import DistributedRuntime
+from tests.utils.prometheus import sum_metric_samples
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +25,67 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
-def _nats_server() -> str:
-    # Prefer dynamically-started NATS from per-test fixtures when present.
-    return os.environ.get("NATS_SERVER", "nats://localhost:4222")
+def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
+    """Decode JSON objects from single-line SSE data fields."""
+    chunks = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, dict):
+            chunks.append(chunk)
+    return chunks
+
+
+async def send_router_chat_request(
+    session: aiohttp.ClientSession,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Return merged routing metadata and whether a streaming request generated text."""
+    async with session.post(url, json=payload, headers=headers) as response:
+        body = await response.text()
+        assert response.status == 200, body
+
+    assert "data: [DONE]" in body, f"Incomplete SSE response: {body}"
+    nvext: dict[str, Any] = {}
+    has_generated_text = False
+    for chunk in parse_sse_json_chunks(body):
+        assert "error" not in chunk, chunk
+        nvext.update(chunk.get("nvext") or {})
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta") or {}
+            has_generated_text |= any(
+                delta.get(field)
+                for field in ("content", "reasoning_content", "reasoning")
+            )
+    return nvext, has_generated_text
+
+
+async def get_stored_kv_event_counts(
+    session: aiohttp.ClientSession, system_port: int
+) -> tuple[float, float]:
+    """Read one worker's received and accepted Stored-event counters."""
+    async with session.get(f"http://localhost:{system_port}/metrics") as response:
+        response.raise_for_status()
+        metrics = await response.text()
+    metric_name = f"{name_prefix.COMPONENT}_{kv_publisher.ZMQ_EVENTS_TOTAL}"
+    return (
+        sum_metric_samples(
+            metrics, metric_name, {"stage": "received", "event_type": "stored"}
+        ),
+        sum_metric_samples(
+            metrics, metric_name, {"stage": "accepted", "event_type": "stored"}
+        ),
+    )
 
 
 def generate_random_suffix() -> str:
@@ -323,6 +383,38 @@ async def wait_for_frontend_ready(
         await asyncio.sleep(1)
 
 
+async def wait_for_model_absent(
+    frontend_url: str,
+    model_name: str,
+    timeout: float = 30,
+) -> None:
+    """Wait until a removed model no longer appears in the frontend model list."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    models_url = f"{frontend_url}/v1/models"
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(models_url) as response:
+                    if response.status == 200:
+                        payload = await response.json()
+                        model_ids = {
+                            model.get("id")
+                            for model in payload.get("data", [])
+                            if isinstance(model, dict)
+                        }
+                        if model_name not in model_ids:
+                            return
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                pass
+
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    f"Timeout waiting for model {model_name!r} to leave {models_url}"
+                )
+            await asyncio.sleep(0.1)
+
+
 async def poll_for_worker_instances(
     endpoint,
     expected_num_workers: int,
@@ -346,9 +438,12 @@ async def poll_for_worker_instances(
     instance_ids: list[int] = []
     start_time = asyncio.get_running_loop().time()
 
+    last_logged = None
     while len(instance_ids) < expected_num_workers:
         instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+        if len(instance_ids) != last_logged:
+            logger.info("Found %d instance(s): %s", len(instance_ids), instance_ids)
+            last_logged = len(instance_ids)
 
         if len(instance_ids) >= expected_num_workers:
             break
@@ -358,7 +453,10 @@ async def poll_for_worker_instances(
                 f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
             )
 
-        await asyncio.sleep(1.0)
+        # Registration takes a few seconds; a coarse poll adds up to a full
+        # interval of dead time to every mocker launch. Log only on change so
+        # the finer poll does not flood the test log.
+        await asyncio.sleep(0.25)
 
     return instance_ids
 
@@ -585,47 +683,17 @@ def get_runtime(
     )
 
 
-async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
-    """Check NATS consumers for the KV events stream.
-
-    Args:
-        namespace: The namespace to check consumers for
-        expected_count: Optional expected number of consumers. If provided, asserts if count doesn't match.
-
-    Returns:
-        List of consumer names
-    """
-    component_subject = f"namespace.{namespace}.component.mocker"
-    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-    stream_name = f"{slugified}-kv-events"
-    logger.info(f"Checking consumers for stream: {stream_name}")
-
-    nc = await nats.connect(servers=_nats_server())
+@contextlib.contextmanager
+def managed_runtime(
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+    event_plane: Optional[str] = None,
+):
+    runtime = get_runtime(store_backend, request_plane, event_plane)
     try:
-        js = nc.jetstream()
-        consumer_infos = await js.consumers_info(stream_name)
-        consumer_names = [info.name for info in consumer_infos]
-        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
-
-        # Log detailed consumer info
-        for info in consumer_infos:
-            logger.info(
-                f"Consumer {info.name}: "
-                f"num_pending={info.num_pending}, "
-                f"num_ack_pending={info.num_ack_pending}, "
-                f"ack_floor={info.ack_floor}, "
-                f"delivered={info.delivered}"
-            )
-
-        if expected_count is not None:
-            assert (
-                len(consumer_names) == expected_count
-            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
-            logger.info(f"✓ Verified {expected_count} durable consumers exist")
-
-        return consumer_names
+        yield runtime
     finally:
-        await nc.close()
+        runtime.shutdown()
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):

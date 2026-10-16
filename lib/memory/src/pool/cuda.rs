@@ -73,7 +73,17 @@ impl CudaMemPoolBuilder {
         let mut props: CUmemPoolProps = unsafe { std::mem::zeroed() };
         props.allocType = CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
         props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.id = self.context.cu_device();
+        // CUDA 13.2 moved `id` into an anonymous union inside CUmemLocation;
+        // the field path depends on the toolkit (see build.rs).
+        #[cfg(not(cuda_mem_location_union))]
+        {
+            props.location.id = self.context.cu_device();
+        }
+        #[cfg(cuda_mem_location_union)]
+        {
+            // Writing to a union field is safe; only reads are `unsafe`.
+            props.location.__bindgen_anon_1.id = self.context.cu_device();
+        }
 
         let mut pool: CUmemoryPool = ptr::null_mut();
 

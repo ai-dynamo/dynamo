@@ -115,6 +115,8 @@ fn backend_outputs(count: usize) -> Vec<BackendOutput> {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            encoder_result: None,
+            jailed_text: None,
         })
         .collect()
 }
@@ -138,6 +140,7 @@ async fn consume_postprocessor_stream(trace_finish_metadata: bool) -> usize {
         false,
         false,
         trace_finish_metadata.then(SharedFinishReasonMetadata::default),
+        Default::default(),
     );
 
     stream.collect::<Vec<_>>().await.len()

@@ -56,8 +56,7 @@ print_launch_banner "Launching Disaggregated + KV Routing (4 GPUs)" "$MODEL" "$H
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,

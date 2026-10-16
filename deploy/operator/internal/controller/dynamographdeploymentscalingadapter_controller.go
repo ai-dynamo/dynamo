@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,14 +40,13 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 // DynamoGraphDeploymentScalingAdapterReconciler reconciles a DynamoGraphDeploymentScalingAdapter object
 type DynamoGraphDeploymentScalingAdapterReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
 }
@@ -97,6 +96,12 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"availableComponents", getComponentNames(dgd.Spec.Components))
 		return ctrl.Result{}, nil
 	}
+	if component.ScalingAdapter == nil {
+		logger.V(1).Info("Component no longer uses a scaling adapter; skipping replica propagation",
+			"component", componentName,
+			"dgd", dgd.Name)
+		return ctrl.Result{}, nil
+	}
 
 	// Get current replicas from DGD (default to 1 if not set)
 	currentReplicas := int32(1)
@@ -111,7 +116,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 		if err := r.Update(ctx, dgd); err != nil {
 			logger.Error(err, "Failed to update DGD")
-			r.Recorder.Eventf(adapter, corev1.EventTypeWarning, "UpdateFailed",
+			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "UpdateFailed", "Update",
 				"Failed to update DGD %s: %v", dgd.Name, err)
 			return ctrl.Result{}, err
 		}
@@ -122,7 +127,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"from", currentReplicas,
 			"to", adapter.Spec.Replicas)
 
-		r.Recorder.Eventf(adapter, corev1.EventTypeNormal, "Scaled",
+		r.Recorder.Eventf(adapter, dgd, corev1.EventTypeNormal, "Scaled", "Scale",
 			"Scaled component %s from %d to %d replicas", componentName, currentReplicas, adapter.Spec.Replicas)
 
 		// Record scaling event
@@ -181,7 +186,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 			}),
 		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
-		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentScalingAdapter))
+		Complete(r)
 }
 
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests.

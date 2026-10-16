@@ -46,7 +46,7 @@
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
 //! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
@@ -90,10 +90,6 @@ pub mod name_prefix {
 
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
-
-    /// Prefix for request admission/rejection control metrics (e.g.
-    /// `dynamo_rejection_request_total`).
-    pub const REJECTION: &str = "dynamo_rejection";
 
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
@@ -143,6 +139,11 @@ pub mod labels {
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
+    /// Label for where a booked request is in its lifecycle: "prefill" until it is
+    /// marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    /// the serving leg ("aggregated", "prefill", "decode").
+    pub const REQUEST_PHASE: &str = "request_phase";
+
     /// Label for router instance (discovery.instance_id() of the frontend)
     pub const ROUTER_ID: &str = "router_id";
 }
@@ -171,11 +172,23 @@ pub mod frontend_service {
     /// Environment variable that overrides the default metric prefix
     pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
 
+    /// Whether the frontend can route at least one inference request for a model
+    pub const MODEL_READY: &str = "model_ready";
+
+    /// Number of discovered physical workers by router admission state
+    pub const ROUTER_WORKERS: &str = "router_workers";
+
+    /// Current router admission state and reason for a discovered worker
+    pub const ROUTER_WORKER_STATE: &str = "router_worker_state";
+
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
+
+    /// Total number of terminal semantic request failures.
+    pub const FAILURES_TOTAL: &str = "failures_total";
 
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
@@ -203,6 +216,17 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
+    /// Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "kv_worker_reused_tokens_total";
+
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
 
@@ -211,6 +235,12 @@ pub mod frontend_service {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
+
+    /// Scheduler selections with less overlap than another eligible worker
+    pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "non_max_overlap_selections_total";
+
+    /// Effective KV overlap blocks lost by non-max-overlap selections
+    pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
 
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
@@ -231,6 +261,18 @@ pub mod frontend_service {
     /// Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
     /// pooling-model latencies (sub-second) without sacrificing resolution.
     pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
+
+    /// Number of `image_url` content parts per request (histogram)
+    pub const IMAGES_PER_REQUEST: &str = "images_per_request";
+
+    /// Number of `video_url` content parts per request (histogram)
+    pub const VIDEOS_PER_REQUEST: &str = "videos_per_request";
+
+    /// Number of `audio_url` content parts per request (histogram)
+    pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
+
+    /// Calculated image-placeholder token count per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
 
     /// Model configuration metrics
     ///
@@ -257,6 +299,9 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Time from detecting a migratable failure until recovery, terminal failure, or cancellation
+    pub const MODEL_MIGRATION_DURATION_SECONDS: &str = "model_migration_duration_seconds";
+
     /// Total number of times migration was disabled because the sequence length
     /// exceeded the configured max_seq_len limit
     pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
@@ -275,6 +320,10 @@ pub mod frontend_service {
     /// Active prefill tokens per worker
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
+
+    /// Active requests booked per worker, labeled by request phase
+    /// Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    pub const WORKER_ACTIVE_REQUESTS: &str = "worker_active_requests";
 
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
@@ -321,6 +370,9 @@ pub mod frontend_service {
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
+    /// Label name for the outcome of a migration
+    pub const MIGRATION_OUTCOME_LABEL: &str = "outcome";
+
     /// Label name for tokenizer operation
     pub const OPERATION_LABEL: &str = "operation";
 
@@ -340,6 +392,18 @@ pub mod frontend_service {
 
         /// Migration during ongoing request (stream disconnected)
         pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
+
+    /// Migration outcome label values
+    pub mod migration_outcome {
+        /// Migration recovered on another worker
+        pub const SUCCESS: &str = "success";
+
+        /// Migration ended without recovery
+        pub const FAILURE: &str = "failure";
+
+        /// Migration ended because the request was cancelled
+        pub const CANCELLED: &str = "cancelled";
     }
 
     /// Status label values
@@ -427,9 +491,8 @@ pub mod work_handler {
     /// Configured capacity of the bounded work queue (gauge, static)
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
-    /// Total times enqueuing work failed because the dispatcher channel was closed.
-    /// Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
-    /// this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
+    /// Requests rejected before TCP worker dispatch because the bounded work queue
+    /// was full or the dispatcher channel was closed.
     pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
@@ -580,11 +643,11 @@ pub mod routing_overhead {
     /// Time spent querying the shared KV cache (Mooncake)
     pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
 
-    /// Total shared cache query errors (timeouts, HTTP failures)
+    /// Total shared cache failures (query and subscriber failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (component-scoped aggregate histograms + counters)
 ///
 /// These constants are the suffix portions of full metric names, combined with
 /// [`name_prefix::COMPONENT`] to form the complete name, e.g.
@@ -592,6 +655,9 @@ pub mod routing_overhead {
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod router {
+    /// Total number of requests admitted by the router scheduler
+    pub const REQUESTS_STARTED_TOTAL: &str = "router_requests_started_total";
+
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
@@ -621,11 +687,28 @@ pub mod router {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
 
+    /// Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank (counter)
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens (counter)
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "router_kv_worker_reused_tokens_total";
+
     /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Scheduler selections with less overlap than another eligible worker
+    pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "router_non_max_overlap_selections_total";
+
+    /// Effective KV overlap blocks lost by non-max-overlap selections
+    pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";
@@ -652,6 +735,10 @@ pub mod frontend_perf {
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
     /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
+    /// Tokens returned from the L1 tokenizer prefix cache (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_CACHED_TOKENS_TOTAL: &str = "tokenizer_cache_cached_tokens_total";
+    /// Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL: &str = "tokenizer_cache_uncached_tokens_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -672,6 +759,7 @@ pub mod tokio_perf {
     pub const WORKER_LOCAL_QUEUE_DEPTH: &str = "worker_local_queue_depth";
     pub const WORKER_STEAL_COUNT_TOTAL: &str = "worker_steal_count_total";
     pub const WORKER_OVERFLOW_COUNT_TOTAL: &str = "worker_overflow_count_total";
+    pub const QUEUE_OVERLOAD_WARNINGS_TOTAL: &str = "queue_overload_warnings_total";
     pub const BLOCKING_THREADS: &str = "blocking_threads";
     pub const BLOCKING_IDLE_THREADS: &str = "blocking_idle_threads";
     pub const BLOCKING_QUEUE_DEPTH: &str = "blocking_queue_depth";
@@ -717,6 +805,9 @@ pub mod transport {
         pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
         pub const ERRORS_TOTAL: &str = "tcp_errors_total";
         pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
+        /// Response-server accept failures that triggered a descriptor- or memory-exhaustion
+        /// backoff sleep; counts per failed accept, not per backoff episode
+        pub const ACCEPT_BACKOFF_TOTAL: &str = "tcp_accept_backoff_total";
     }
     pub mod nats {
         pub const ERRORS_TOTAL: &str = "nats_errors_total";
@@ -793,12 +884,22 @@ pub mod kvstats {
 
     /// GPU cache usage as a percentage (0.0-1.0)
     pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+
+    /// Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    pub const KV_CACHE_HIT_RATE: &str = "kv_cache_hit_rate";
 }
 
 // Model information metrics
 pub mod model_info {
     /// Model load time in seconds
     pub const LOAD_TIME_SECONDS: &str = "model_load_time_seconds";
+}
+
+// Worker-lifecycle timing gauges. Set once per worker run by the framework, not by the engine.
+pub mod lifecycle {
+    pub const CLEANUP_TIME_SECONDS: &str = "cleanup_time_seconds";
+
+    pub const DRAIN_TIME_SECONDS: &str = "drain_time_seconds";
 }
 
 // Shared regex patterns for Prometheus sanitization

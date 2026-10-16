@@ -1,0 +1,288 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template-time validation of image.tag and image.digest. Pins the
+# power-agent.validateImageTag and power-agent.imageRef helpers in
+# templates/_helpers.tpl.
+#
+# Failure modes the helper guards (PR #9682 review + follow-ups):
+#
+#   1. Unset image.tag AND image.digest — chart has no default;
+#      PR #9682 deliberately removed the `:latest` fallback.
+#   2. image.tag explicitly set to "latest" (in any case).
+#   3. image.tag and image.digest BOTH set (mutually exclusive).
+#   4. image.tag or image.digest with leading/trailing whitespace
+#      — pre-fix the helper trimmed for the latest comparison but
+#      rendered the raw value, so `--set-string 'image.tag= v1.1.0 '`
+#      produced `repo: v1.1.0 ` (invalid OCI ref). PR9682 follow-up.
+#   5. image.tag starting with `sha256:` — catches the original
+#      PR #9682 bug of putting a digest on the tag field (which
+#      rendered `repo:sha256:...`, not the canonical `repo@sha256:...`).
+#   6. image.digest not exactly `sha256:<64 hex>` — SHA-256 is
+#      always 64 hex chars (32 bytes × 2 nybbles). Pre-fix the
+#      regex was `{32,}` which accepted half-digests. PR9682
+#      follow-up tightened it to exactly 64.
+#
+# Happy paths verify:
+#   * pinned release tags still render `{repo}:{tag}`
+#   * 64-char hex digests render `{repo}@{digest}` (canonical OCI form)
+#   * release-tag strings that *contain* "latest" (e.g.
+#     `v1.0.0-latest-rc`) are accepted — the guard compares the
+#     canonical form against the literal "latest", not a substring.
+
+suite: image.tag / image.digest validation
+templates:
+  - templates/daemonset.yaml
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  # ---------------------------------------------------------------
+  # Validation failures
+  # ---------------------------------------------------------------
+
+  - it: should reject when neither image.tag nor image.digest is set
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.tag or image.digest is required"
+
+  - it: should reject empty image.tag and empty image.digest
+    set:
+      image.tag: ""
+      image.digest: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.tag or image.digest is required"
+
+  - it: should reject image.tag=latest (lowercase)
+    set:
+      image.tag: latest
+    asserts:
+      - failedTemplate:
+          # The error message names the offending value so operators
+          # don't have to guess what triggered it.
+          errorPattern: 'image.tag=.*latest.*is not supported'
+
+  - it: should reject image.tag=LATEST (uppercase typo)
+    set:
+      image.tag: LATEST
+    asserts:
+      - failedTemplate:
+          errorPattern: 'is not supported'
+
+  - it: should reject image.tag=Latest (mixed case)
+    set:
+      image.tag: Latest
+    asserts:
+      - failedTemplate:
+          errorPattern: 'is not supported'
+
+  - it: should reject image.tag with leading whitespace (any value)
+    set:
+      # Pre-fix the helper trimmed for the `latest` comparison but
+      # rendered the raw value, so `--set-string 'image.tag= v1.1.0 '`
+      # produced `repo: v1.1.0 ` — an invalid image reference. PR9682
+      # follow-up: reject whitespace anywhere rather than silently
+      # normalizing it. PR9790 follow-up: regexMatch \s catches any
+      # whitespace, including internal — covered by dedicated cases
+      # below.
+      image.tag: " v1.1.0"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject image.tag with trailing whitespace
+    set:
+      image.tag: "v1.1.0 "
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject image.tag with internal whitespace (PR9790 follow-up)
+    set:
+      # Pre-fix `ne $tag (trim $tag)` only caught edge whitespace.
+      # An internally-spaced value like `v1 .1.0` (copy/paste typo
+      # or YAML-quoted input) slipped through and rendered an
+      # invalid OCI image reference at runtime, deferring failure
+      # from template time to kubelet pull time. The strict regex
+      # variant catches it at install time with a clear message.
+      image.tag: "v1 .1.0"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject image.tag with an embedded tab character
+    set:
+      # Tab is whitespace too; `\s` covers space / tab / newline.
+      image.tag: "v1.1.0\textra"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject image.tag=' latest ' on the whitespace check (fails first)
+    set:
+      # Whitespace check runs before the `latest` check, so the
+      # error names whitespace not `latest`. Either error tells the
+      # operator the input is wrong; this just pins the order.
+      image.tag: " latest "
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject both image.tag and image.digest set simultaneously
+    set:
+      image.tag: v1.1.0
+      # Full 64-char digest so this test exercises ONLY the mutex
+      # check, not the format check too.
+      image.digest: "sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+    asserts:
+      - failedTemplate:
+          errorPattern: "mutually exclusive"
+
+  - it: should reject digest values smuggled into image.tag (PR9682 regression guard)
+    set:
+      # This is the EXACT pre-fix PR #9682 bug: an operator following
+      # outdated docs sets a digest on image.tag. Pre-fix this would
+      # have rendered `repo:sha256:abc...` — an invalid OCI image
+      # reference. The new validator catches `sha256:`-prefixed tags
+      # and points the operator at the dedicated image.digest field.
+      image.tag: "sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.tag=.*looks like a digest"
+
+  - it: should reject non-digest values on image.digest (operator confusion guard)
+    set:
+      # Inverse error: operator puts a release tag on image.digest.
+      image.tag: ""
+      image.digest: "v1.1.0"
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.digest=.*is not a valid SHA-256 digest"
+
+  - it: should reject digest values lacking the sha256 prefix (even with 64 hex chars)
+    set:
+      # Bare 64-char hex without the algorithm prefix - common in
+      # `docker images --digests` output that strips the prefix.
+      image.digest: "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+    asserts:
+      - failedTemplate:
+          errorPattern: "not a valid SHA-256 digest"
+
+  - it: should reject digest values with non-hex characters
+    set:
+      image.digest: "sha256:not-a-hex-string-not-a-hex-string-not-a-hex-string-not-a-hex-st"
+    asserts:
+      - failedTemplate:
+          errorPattern: "not a valid SHA-256 digest"
+
+  - it: should reject very short digest values (clearly truncated)
+    set:
+      image.digest: "sha256:abc"
+    asserts:
+      - failedTemplate:
+          errorPattern: "not a valid SHA-256 digest"
+
+  - it: should reject 32-hex-char digests (half a SHA-256 - PR9682 follow-up)
+    set:
+      # Pre-fix the regex accepted `[0-9a-fA-F]{32,}` which let
+      # half-digests slip through. SHA-256 is exactly 64 hex chars
+      # (32 bytes * 2 nybbles); anything shorter is a truncation
+      # or a different hash algorithm and must be rejected.
+      image.digest: "sha256:abc123def4567890abc123def4567890"
+    asserts:
+      - failedTemplate:
+          errorPattern: "not a valid SHA-256 digest"
+
+  - it: should reject 63-hex-char digests (off-by-one truncation)
+    set:
+      # One nybble short - the regex must be exact, not >=.
+      image.digest: "sha256:abc123def4567890abc123def4567890abc123def4567890abc123def456789"
+    asserts:
+      - failedTemplate:
+          errorPattern: "not a valid SHA-256 digest"
+
+  - it: should reject 65-hex-char digests (off-by-one overrun)
+    set:
+      # One nybble too many.
+      image.digest: "sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890a"
+    asserts:
+      - failedTemplate:
+          errorPattern: "not a valid SHA-256 digest"
+
+  - it: should reject digest values with leading/trailing whitespace
+    set:
+      # Pre-fix the renderer silently trimmed whitespace. Now we
+      # reject — silent normalization masks operator errors.
+      image.digest: " sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890 "
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject digest values with internal whitespace (PR9790 follow-up)
+    set:
+      # The strict sha256 regex below would reject this too (a space
+      # is not a hex char), but the dedicated whitespace check fires
+      # first and gives the operator a clearer "you have whitespace
+      # in the value" diagnosis instead of the more cryptic "not a
+      # valid SHA-256 digest". Symmetric with the image.tag fix.
+      image.digest: "sha256:abc 123def4567890abc123def4567890abc123def4567890abc123def4567890"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  # ---------------------------------------------------------------
+  # Happy paths: pinned tag form
+  # ---------------------------------------------------------------
+
+  - it: should accept a pinned release tag and render repo:tag
+    set:
+      image.tag: v1.1.0
+    asserts:
+      - notFailedTemplate: {}
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/power-agent:v1.1.0
+
+  - it: should accept release tags that contain the substring "latest"
+    set:
+      # Realistic case: a release candidate or marker tag that happens
+      # to include "latest". The guard compares the canonical form
+      # against the literal "latest", NOT a substring search, so this
+      # must pass.
+      image.tag: v1.0.0-latest-rc
+    asserts:
+      - notFailedTemplate: {}
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/power-agent:v1.0.0-latest-rc
+
+  # ---------------------------------------------------------------
+  # Happy paths: digest form renders the canonical repo@digest
+  # ---------------------------------------------------------------
+
+  - it: should accept a sha256 digest and render repo@sha256:... (canonical OCI form)
+    set:
+      image.tag: ""
+      # 64-char hex string — what a real `docker manifest inspect`
+      # would emit. The renderer must produce the `@` form, NOT
+      # `repo:sha256:...` (which was the PR #9682 bug).
+      image.digest: "sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+    asserts:
+      - notFailedTemplate: {}
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/power-agent@sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890
+
+  - it: should render uppercase-hex digests verbatim (sha256 prefix is lowercase)
+    set:
+      image.tag: ""
+      # Some registries emit uppercase hex; the OCI spec accepts both
+      # cases on the hex portion. Pin that we don't lowercase it.
+      image.digest: "sha256:ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890"
+    asserts:
+      - notFailedTemplate: {}
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/power-agent@sha256:ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890

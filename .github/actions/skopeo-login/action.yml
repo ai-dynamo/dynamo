@@ -5,8 +5,8 @@ inputs:
   aws_default_region:
     description: 'AWS Default Region'
     required: false
-  aws_account_id:
-    description: 'AWS Account ID'
+  ecr_registry:
+    description: 'ECR registry hostname'
     required: false
   azure_acr_hostname:
     description: 'Azure ACR hostname'
@@ -43,12 +43,10 @@ runs:
 
     - name: ECR Login
       shell: bash
-      if: ${{ inputs.aws_default_region != '' && inputs.aws_account_id != '' }}
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      if: ${{ inputs.aws_default_region != '' && inputs.ecr_registry != '' }}
       run: |
         set -euo pipefail
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | skopeo login --username AWS --password-stdin "${ECR_HOSTNAME}"
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | skopeo login --username AWS --password-stdin "${{ inputs.ecr_registry }}"
 
     - name: ACR Login
       shell: bash

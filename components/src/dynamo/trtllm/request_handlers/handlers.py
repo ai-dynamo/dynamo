@@ -9,6 +9,8 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -17,6 +19,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 configure_dynamo_logging()
 
@@ -66,9 +69,13 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        # EncodeHelper bypasses HandlerBase input preparation.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
@@ -115,7 +122,12 @@ class PrefillHandler(HandlerBase):
         if self.encode_client is None:
             raise RuntimeError("Encode client is not configured.")
         encode_response = None
-        async for res in await self.encode_client.round_robin(request, context=context):
+        # The encode worker may sit behind a JSON codec, which would spell a packed
+        # buffer out one byte per element; forward a list.
+        forwarded = normalize_request_token_ids(dict(request))
+        async for res in await self.encode_client.round_robin(
+            forwarded, context=context
+        ):
             encode_response = res.data()
             break
 
@@ -129,6 +141,8 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -136,6 +150,9 @@ class PrefillHandler(HandlerBase):
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
         """
+        # Reject before optional remote encoder/cache work. HandlerBase keeps a
+        # second guard as a backstop for paths without these early side effects.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"Prefill Request ID: {context.id()}")
         request_token_ids = request.get("token_ids")
         logging.debug(
@@ -147,15 +164,11 @@ class PrefillHandler(HandlerBase):
         ep_disaggregated_params = None
 
         if self.multimodal_processor:
-            # Extract messages from extra_args (set by Rust preprocessor) or fall back to direct field
-            messages = request.get("extra_args", {}).get(
-                "messages", request.get("messages", [])
-            )
             (
                 _,
                 image_urls,
                 embedding_paths,
-            ) = self.multimodal_processor.extract_prompt_and_media(messages)
+            ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
@@ -213,6 +226,8 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:

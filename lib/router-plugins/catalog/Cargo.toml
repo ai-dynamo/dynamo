@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-worker-selection-policy-catalog"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Default build-time worker-selection policy catalog for Dynamo"
+
+[dependencies]
+dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }

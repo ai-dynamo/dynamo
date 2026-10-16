@@ -9,18 +9,19 @@
 //!
 //! # Router parity
 //!
-//! For requests with no extra `salt`, this function reproduces the seed used by
-//! `dynamo_kv_router::protocols::compute_block_hash_for_seq`
-//! (`lib/kv-router/src/protocols.rs:79-82`):
+//! This function is the shared seed derivation used by
+//! `dynamo_kv_router::protocols::compute_block_hash_for_seq` and canonical
+//! pre-hashed producers:
 //!
 //! ```text
 //!   (salt=None, lora=None)         → CHAIN_XXH3_SEED
 //!   (salt=None, lora=Some(name))   → CHAIN_XXH3_SEED.wrapping_add(xxh3_64(name))
+//!   (salt=Some(value), ...)        → seed.wrapping_add(xxh3_64_with_seed(value, 1))
 //! ```
 //!
 //! Producer events whose `block_hash` is `compute_block_hash(tokens, salt_hash)` therefore
-//! match the router's `compute_block_hash_for_seq(tokens, _, BlockHashOptions { lora_name })`
-//! byte-for-byte on the no-salt path — required for kv-router's indexers (which key on
+//! match the router's `compute_block_hash_for_seq(tokens, _, BlockHashOptions { .. })`
+//! byte-for-byte — required for kv-router's indexers (which key on
 //! both `tokens_hash` and the `seq_hash` chain) to find matches against consolidator-emitted
 //! events.
 //!
@@ -57,8 +58,8 @@ pub fn compute_salt_hash(
         seed = seed.wrapping_add(compute_hash_v2(name.as_bytes(), 0));
     }
     if let Some(s) = salt {
-        // Router has no concept of caller-supplied salt; mix orthogonally to lora so
-        // salt-isolated requests stay distinct from both no-salt and lora-only requests.
+        // Mix salt orthogonally to lora so salt-isolated requests stay distinct from
+        // both no-salt and lora-only requests.
         // The 1 vs 0 inner seed (and outer wrapping_add) keeps every (salt, lora) pair
         // separable: same lora + different salts diverge, and a future `(salt=lora_bytes,
         // lora=None)` request will not collide with `(salt=None, lora=lora_bytes)`.

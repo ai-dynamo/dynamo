@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,6 +48,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 		expectedStatusReplicas int32
 		expectError            bool
 		expectMissingComponent bool
+		expectSkipped          bool
 		expectRequeue          bool
 	}{
 		{
@@ -73,8 +74,9 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName: "Frontend",
-							Replicas:      ptr.To(int32(2)),
+							ComponentName:  "Frontend",
+							Replicas:       ptr.To(int32(2)),
+							ScalingAdapter: &v1beta1.ScalingAdapter{},
 						},
 					},
 				},
@@ -106,8 +108,9 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName: "Frontend",
-							Replicas:      ptr.To(int32(3)),
+							ComponentName:  "Frontend",
+							Replicas:       ptr.To(int32(3)),
+							ScalingAdapter: &v1beta1.ScalingAdapter{},
 						},
 					},
 				},
@@ -138,7 +141,10 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-						{ComponentName: "worker"}, // no replicas set
+						{
+							ComponentName:  "worker",
+							ScalingAdapter: &v1beta1.ScalingAdapter{},
+						}, // no replicas set
 					},
 				},
 			},
@@ -178,6 +184,38 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			expectError:            false,
 			expectMissingComponent: true,
 		},
+		{
+			name: "does not propagate replicas after component opts out",
+			adapter: &v1beta1.DynamoGraphDeploymentScalingAdapter{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd-frontend",
+					Namespace: "default",
+				},
+				Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+					Replicas: 5,
+					DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+						Name:          "test-dgd",
+						ComponentName: "Frontend",
+					},
+				},
+			},
+			dgd: &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+						{
+							ComponentName: "Frontend",
+							Replicas:      ptr.To(int32(2)),
+						},
+					},
+				},
+			},
+			expectedDGDReplicas: 2,
+			expectSkipped:       true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -197,7 +235,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			r := &DynamoGraphDeploymentScalingAdapterReconciler{
 				Client:   fakeClient,
 				Scheme:   scheme.Scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			// Run Reconcile
@@ -266,6 +304,14 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				t.Fatalf("Failed to get updated adapter: %v", err)
 			}
 
+			if tt.expectSkipped {
+				t.Log("Verify adapter status remains unchanged after component opt-out")
+				if updatedAdapter.Status.Selector != "" || updatedAdapter.Status.Replicas != 0 {
+					t.Errorf("Adapter status was updated after opt-out: %+v", updatedAdapter.Status)
+				}
+				return
+			}
+
 			if updatedAdapter.Status.Replicas != tt.expectedStatusReplicas {
 				t.Errorf("Adapter status.replicas = %d, expected %d", updatedAdapter.Status.Replicas, tt.expectedStatusReplicas)
 			}
@@ -295,7 +341,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *tes
 	r := &DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme.Scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ctx := context.Background()
@@ -344,7 +390,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_DGDNotFound(t *
 	r := &DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme.Scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ctx := context.Background()
@@ -408,7 +454,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 	r := &DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme.Scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ctx := context.Background()

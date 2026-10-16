@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Multimodal LoRA Deployment with MinIO on Kubernetes
 
 This guide explains how to deploy multimodal (vision-language) LoRA-enabled vLLM inference with S3-compatible storage backend on Kubernetes.
@@ -6,12 +11,15 @@ This guide explains how to deploy multimodal (vision-language) LoRA-enabled vLLM
 
 This deployment pattern enables dynamic LoRA adapter loading from S3-compatible storage (MinIO) for vision-language models in a Kubernetes environment. It uses the aggregated single-worker architecture where the Rust OpenAIPreprocessor in the Frontend handles image URLs directly.
 
+The DynamoGraphDeployment (DGD) manifest uses `nvidia.com/v1beta1`. `DynamoModel` does not have a
+`v1beta1` API and continues to use `nvidia.com/v1alpha1`.
+
 ## Prerequisites
 
 - Kubernetes cluster with GPU support
 - Helm 3.x installed
 - `kubectl` configured to access your cluster
-- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../../docs/kubernetes/installation-guide.md))
+- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md))
 - HuggingFace token for downloading base and LoRA adapters
 
 ## Files in This Directory
@@ -22,6 +30,9 @@ This deployment pattern enables dynamic LoRA adapter loading from S3-compatible 
 | `minio-secret.yaml` | Kubernetes secret for MinIO credentials |
 | `sync-lora-job.yaml` | Job to download LoRA from HuggingFace and upload to MinIO |
 | `lora-model.yaml` | DynamoModel CRD for registering LoRA adapters |
+
+The Intel XPU deployment manifest is
+[`../../xpu/agg_qwen_lora_xpu_dra.yaml`](../../xpu/agg_qwen_lora_xpu_dra.yaml).
 
 ---
 
@@ -160,13 +171,34 @@ Edit `agg_qwen_lora.yaml` to use your container image:
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' v1beta1/agg_qwen_lora.yaml > v1beta1/agg_qwen_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' agg_qwen_lora.yaml > agg_qwen_lora_updated.yaml
 ```
 
 ### Deploy the LoRA-enabled Multimodal Graph
 
 ```bash
-kubectl apply -f v1beta1/agg_qwen_lora_updated.yaml -n ${NAMESPACE}
+export DEPLOYMENT_NAME=agg-qwen-multimodal-lora
+kubectl apply -f agg_qwen_lora_updated.yaml -n ${NAMESPACE}
+```
+
+### Deploy on Intel XPU with DRA
+
+Use `../../xpu/agg_qwen_lora_xpu_dra.yaml` instead of
+`agg_qwen_lora_updated.yaml` to deploy on Intel XPU. Before applying
+the manifest, complete Steps 1-4 above to create `hf-token-secret` and
+`minio-secret`, deploy MinIO, and upload the adapter.
+
+Use Kubernetes v1.34 or newer with DRA API v1 and the Intel resource drivers
+for Kubernetes installed. Replace the Frontend
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` image and the worker
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag` image with images available
+to the cluster. See the
+[Intel XPU Deployment Examples](../../xpu/README.md) for the XPU image build
+commands and additional requirements.
+
+```bash
+export DEPLOYMENT_NAME=agg-qwen-multimodal-lora-xpu-dra
+kubectl apply -f ../../xpu/agg_qwen_lora_xpu_dra.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment
@@ -176,7 +208,8 @@ kubectl apply -f v1beta1/agg_qwen_lora_updated.yaml -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
-kubectl logs -f deployment/agg-qwen-multimodal-lora-vllmworker -n ${NAMESPACE}
+kubectl logs -f -n "${NAMESPACE}" \
+  -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -185,7 +218,7 @@ Wait for the worker to show "Application startup complete".
 
 ```bash
 # Port-forward the frontend
-kubectl port-forward svc/agg-qwen-multimodal-lora-frontend -n ${NAMESPACE} 8000:8000 &
+kubectl port-forward svc/${DEPLOYMENT_NAME}-frontend -n ${NAMESPACE} 8000:8000 &
 
 # List available models
 curl http://localhost:8000/v1/models | jq .
@@ -278,8 +311,14 @@ curl -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: applica
 
 ### Remove vLLM Deployment
 
+Delete the manifest that you applied:
+
 ```bash
-kubectl delete -f agg_qwen_lora.yaml -n ${NAMESPACE}
+# Standard v1beta1 deployment
+kubectl delete -f agg_qwen_lora_updated.yaml -n ${NAMESPACE}
+
+# Intel XPU deployment
+kubectl delete -f ../../xpu/agg_qwen_lora_xpu_dra.yaml -n ${NAMESPACE}
 ```
 
 ### Remove DynamoModel CRD
@@ -311,11 +350,18 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 ## Troubleshooting
 
+Set `DEPLOYMENT_NAME` to `agg-qwen-multimodal-lora` for the standard deployment
+or `agg-qwen-multimodal-lora-xpu-dra` for the Intel XPU deployment before
+running these commands.
+
 ### LoRA Fails to Load
 
 1. **Check MinIO connectivity from worker**:
    ```bash
-   kubectl exec -it deployment/agg-qwen-multimodal-lora-vllmworker -n ${NAMESPACE} -- \
+   WORKER_POD=$(kubectl get pods -n "${NAMESPACE}" \
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker" \
+     -o jsonpath='{.items[0].metadata.name}')
+   kubectl exec -it -n "${NAMESPACE}" "${WORKER_POD}" -- \
      curl http://minio:9000/minio/health/live
    ```
 
@@ -327,7 +373,8 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 3. **Check worker logs**:
    ```bash
-   kubectl logs deployment/agg-qwen-multimodal-lora-vllmworker -n ${NAMESPACE}
+   kubectl logs -n "${NAMESPACE}" \
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
    ```
 
 4. **Verify adapter compatibility**: Ensure the LoRA adapter was trained for the same base model architecture (Qwen3-VL-2B) and that `max-lora-rank` (default 64) is >= the adapter's rank.
@@ -366,5 +413,5 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 - [Multimodal LoRA Launch Guide](../../../launch/lora/multimodal/README.md) - Local launch with shell scripts
 - [LLM LoRA Deployment](../README.md) - Text-only LoRA deployment pattern
-- [Dynamo Kubernetes Guide](../../../../../../docs/kubernetes/README.md) - Platform setup
-- [Installation Guide](../../../../../../docs/kubernetes/installation-guide.md) - Platform installation
+- [Dynamo Kubernetes Guide](../../../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx) - Platform setup
+- [Installation Guide](../../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md) - Platform installation

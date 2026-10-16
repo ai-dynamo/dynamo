@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
-use futures::{Stream, StreamExt};
+use dynamo_runtime::error::DynamoError;
+use futures::{Stream, StreamExt, TryStreamExt};
 
 use super::NvCreateCompletionResponse;
 use crate::protocols::{
@@ -15,7 +15,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-/// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].
+/// Aggregates a stream of `CompletionResponse`s into a single `CompletionResponse`.
 pub struct DeltaAggregator {
     id: String,
     model: String,
@@ -23,7 +23,6 @@ pub struct DeltaAggregator {
     usage: Option<dynamo_protocols::types::CompletionUsage>,
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
-    error: Option<String>,
     nvext: Option<serde_json::Value>,
 }
 
@@ -49,30 +48,20 @@ impl DeltaAggregator {
             usage: None,
             system_fingerprint: None,
             choices: HashMap::new(),
-            error: None,
             nvext: None,
         }
     }
 
-    /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
+    /// Aggregates a stream of `Annotated<CompletionResponse>`s into a single `CompletionResponse`.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         tracing::debug!("Tool Call Parser: {:?}", parsing_options.tool_call_parser); // TODO: remove this once completion has tool call support
         let aggregator = stream
-            .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
-                let delta = match delta.ok() {
-                    Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
-                        return aggregator;
-                    }
-                };
-
-                if aggregator.error.is_none()
-                    && let Some(delta) = delta.data
-                {
+            .map(Annotated::into_data)
+            .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
+                if let Some(delta) = delta {
                     // TODO(#14) - Aggregate Annotation
 
                     // these are cheap to move so we do it every time since we are consuming the delta
@@ -137,16 +126,9 @@ impl DeltaAggregator {
                         }
                     }
                 }
-                aggregator
+                Ok(aggregator)
             })
-            .await;
-
-        // If we have an error, return it
-        let aggregator = if let Some(error) = aggregator.error {
-            return Err(anyhow::anyhow!(error));
-        } else {
-            aggregator
-        };
+            .await?;
 
         // extra the aggregated deltas and sort by index
         let mut choices: Vec<_> = aggregator
@@ -193,7 +175,7 @@ impl NvCreateCompletionResponse {
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateCompletionResponse>(stream);
         NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
@@ -201,7 +183,7 @@ impl NvCreateCompletionResponse {
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         DeltaAggregator::apply(stream, parsing_options).await
     }
 }
@@ -462,5 +444,34 @@ mod tests {
             choice1.finish_reason,
             Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_error_after_partial_output() {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("unsupported logprobs")
+            .build();
+        let stream = stream::iter(vec![
+            create_test_delta(0, "partial", None, None),
+            Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            },
+        ]);
+
+        let error = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "unsupported logprobs");
     }
 }

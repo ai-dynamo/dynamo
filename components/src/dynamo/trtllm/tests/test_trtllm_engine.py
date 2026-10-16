@@ -1,157 +1,77 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for ``TrtllmLLMEngine`` — the TensorRT-LLM LLMEngine
-implementation for the unified backend.
+"""Unit tests for the TRTLLM engine wrapper."""
 
-Only tests that exercise actual logic — see vllm/tests/test_engine.py for
-the rationale.  The lower-level ``TensorRTLLMEngine`` wrapper in
-``engine.py`` is intentionally out of scope; it is exercised indirectly
-via ``TrtllmLLMEngine.start()``.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import importlib.util
-from typing import cast
+from unittest import mock
 
 import pytest
-import pytest_asyncio
+import torch
 
-from tests.utils.gpu_args import build_trtllm_override_args
-
-MODEL_ID = "Qwen/Qwen3-0.6B"
-_BASE_ARGV = [
-    "--model-path",
-    MODEL_ID,
-    "--free-gpu-memory-fraction",
-    "0.3",
-    "--max-seq-len",
-    "1024",
-    "--max-batch-size",
-    "4",
-]
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
+from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 
 pytestmark = [
-    pytest.mark.asyncio(loop_scope="module"),
-    pytest.mark.integration,
+    pytest.mark.unit,
     pytest.mark.trtllm,
-    pytest.mark.unified,
+    # NOTE: these tests use no GPU, but importing tensorrt_llm needs one, and the
+    # gpu_0 stage also runs on GPU-less runners.
     pytest.mark.gpu_1,
-    pytest.mark.timeout(320),  # 3x ~104s (trtllm gpu_1 log)
-    pytest.mark.skipif(
-        importlib.util.find_spec("tensorrt_llm") is None,
-        reason="tensorrt_llm not installed in this container",
-    ),
+    pytest.mark.pre_merge,
 ]
 
+# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
+# sequential GPU stage so TensorRT-LLM initialization is shared.
 
-class _FakeContext:
-    """Duck-typed ``dynamo._core.Context``. ``TrtllmLLMEngine`` calls
-    ``context.id()`` plus ``context.trace_headers()``; the latter returns
-    ``None`` here so propagation is a no-op."""
-
-    def __init__(self, request_id: str = "unit-test-req") -> None:
-        self._id = request_id
-
-    def id(self) -> str:
-        return self._id
-
-    def trace_headers(self) -> dict[str, str] | None:
-        return None
-
-    def is_stopped(self) -> bool:
-        return False
-
-    async def async_killed_or_stopped(self) -> None:
-        await asyncio.Event().wait()
+_PYTORCH_LLM_CLS_NAME = "dynamo.trtllm.engine.LLM"
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def started_engine():
-    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+class TestTensorRTLLMEngine:
+    @pytest.mark.parametrize("backend", ["foo", "bar", "cpp", "_autodeploy"])
+    def test_raises_on_unsupported_backends(self, backend):
+        with pytest.raises(ValueError, match="Unsupported backend"):
+            TensorRTLLMEngine(engine_args={"backend": backend})
 
-    engine, _ = await TrtllmLLMEngine.from_args(
-        [*_BASE_ARGV, *build_trtllm_override_args()]
-    )
-    try:
-        # Worker_id 0 is fine for tests — `disagg_machine_id` is derived
-        # from worker_id but unused outside disagg PREFILL/DECODE roles.
-        engine_config = await engine.start(0)
-        yield engine, engine_config
-    finally:
-        await engine.cleanup()
+    @pytest.mark.asyncio
+    async def test_picks_expected_llm_cls(self):
+        with mock.patch(_PYTORCH_LLM_CLS_NAME) as mocked_cls:
+            engine = TensorRTLLMEngine(engine_args={"backend": "pytorch"})
+            await engine.initialize()
 
+        mocked_cls.assert_called_once()
 
-@pytest.mark.pre_merge
-@pytest.mark.profiled_vram_gib(3.9)
-@pytest.mark.requested_trtllm_kv_tokens(2592)
-@pytest.mark.core
-@pytest.mark.model(MODEL_ID)
-async def test_trtllm_engine_all(started_engine):
-    """Run the TRT-LLM engine pre-merge checks under one engine startup."""
-    await _check_start_populates_registration_metadata(started_engine)
-    await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
-    await _check_abort_and_cleanup_are_safe_before_start()
-    await _check_abort_unknown_request_on_running_engine(started_engine)
+    def test_get_kv_cache_capacity_delegates_to_llm(self):
+        capacity = {
+            "maxNumBlocks": 123,
+            "tokensPerBlock": 64,
+            "maxNumTokens": 7872,
+        }
+        engine = TensorRTLLMEngine(engine_args={})
+        engine._llm = mock.Mock()
+        engine._llm.get_kv_cache_capacity.return_value = capacity
 
+        assert engine.get_kv_cache_capacity() == capacity
+        engine._llm.get_kv_cache_capacity.assert_called_once_with()
 
-async def _check_start_populates_registration_metadata(started_engine):
-    """``start`` threads ``max_seq_len`` / ``kv_block_size`` / ``max_batch_size``
-    from ``from_args``'s parsed config through to ``EngineConfig`` —
-    mismatches here surface as incorrect Rust-side routing decisions."""
-    _engine, cfg = started_engine
-    assert cfg.llm is not None
-    assert cfg.llm.context_length == 1024
-    assert cfg.llm.kv_cache_block_size > 0
-    assert cfg.llm.max_num_seqs == 4
+    def test_get_kv_cache_capacity_returns_empty_when_api_is_unavailable(self):
+        engine = TensorRTLLMEngine(engine_args={})
+        engine._llm = mock.Mock(spec=[])
+
+        assert engine.get_kv_cache_capacity() == {}
 
 
-async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):
-    engine, _ = started_engine
-    ctx = _FakeContext("gen-1")
+@pytest.mark.asyncio
+async def test_get_llm_engine_forwards_backend():
+    engine_args = {"foo": mock.Mock(), "backend": "pytorch"}
+    with mock.patch(
+        "dynamo.trtllm.engine.TensorRTLLMEngine", return_value=mock.AsyncMock()
+    ) as mocked_engine:
+        async with get_llm_engine(engine_args=engine_args):
+            pass
 
-    chunks = []
-    async for chunk in engine.generate(
-        cast(
-            dict,
-            {
-                "token_ids": [1, 2, 3, 4, 5],
-                "stop_conditions": {"max_tokens": 16},
-                "sampling_options": {"temperature": 0.0},
-            },
-        ),
-        cast(object, ctx),  # type: ignore[arg-type]
-    ):
-        chunks.append(chunk)
-        assert "token_ids" in chunk
-
-    final = chunks[-1]
-    assert "finish_reason" in final
-    usage = final["completion_usage"]
-    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
-
-
-async def _check_abort_and_cleanup_are_safe_before_start():
-    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-
-    engine, _ = await TrtllmLLMEngine.from_args(
-        [*_BASE_ARGV, *build_trtllm_override_args()]
-    )
-    await engine.abort(cast(object, _FakeContext()))  # type: ignore[arg-type]
-    await engine.cleanup()
-    await engine.cleanup()
-
-
-async def _check_abort_unknown_request_on_running_engine(started_engine):
-    """``_active_requests`` is only populated during ``generate``.  An unknown
-    request id is silently ignored rather than raised."""
-    engine, _ = started_engine
-    await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
-
-    # NOTE: TRT-LLM deliberately has no `is_quiescent` override (it inherits the
-    # base `None`), so there is nothing to unit-test here. See the rationale in
-    # `TrtllmLLMEngine` — there's no reliable prefill-transfer quiescence signal,
-    # so the framework drains for the full budget. SGLang's counter-based
-    # override is covered by its own engine tests.
+    mocked_engine.assert_called_once_with(engine_args, None)

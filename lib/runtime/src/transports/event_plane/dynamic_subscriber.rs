@@ -32,11 +32,20 @@ pub struct DynamicSubscriber {
 
 impl DynamicSubscriber {
     pub fn new(discovery: Arc<dyn Discovery>, query: DiscoveryQuery, topic: String) -> Self {
+        Self::with_cancel_token(discovery, query, topic, CancellationToken::new())
+    }
+
+    pub fn with_cancel_token(
+        discovery: Arc<dyn Discovery>,
+        query: DiscoveryQuery,
+        topic: String,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             discovery,
             query,
             topic,
-            cancel_token: CancellationToken::new(),
+            cancel_token,
         }
     }
 
@@ -80,8 +89,12 @@ impl DynamicSubscriber {
                 "Attempting to start discovery watch"
             );
 
-            // Don't pass the cancel token to list_and_watch - we'll handle cancellation ourselves
-            let mut watch_stream = match discovery.list_and_watch(query.clone(), None).await {
+            // Pass cancellation through so the discovery backend can stop any
+            // task that it owns in addition to the consumer loop below.
+            let mut watch_stream = match discovery
+                .list_and_watch(query.clone(), Some(cancel_token.clone()))
+                .await
+            {
                 Ok(stream) => {
                     tracing::debug!("Successfully obtained discovery watch stream");
                     stream
@@ -94,12 +107,21 @@ impl DynamicSubscriber {
 
             tracing::info!(?query, "Started dynamic discovery watch for ZMQ publishers");
 
-            while let Some(event_result) = watch_stream.next().await {
+            loop {
+                let event_result = tokio::select! {
+                    biased;
+
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("Dynamic subscriber cancelled, stopping watch");
+                        break;
+                    }
+                    result = watch_stream.next() => match result {
+                        Some(result) => result,
+                        None => break,
+                    },
+                };
+
                 tracing::debug!("Received discovery event: {:?}", event_result);
-                if cancel_token.is_cancelled() {
-                    tracing::info!("Dynamic subscriber cancelled, stopping watch");
-                    break;
-                }
 
                 match event_result {
                     Ok(DiscoveryEvent::Added(instance)) => {
@@ -138,7 +160,7 @@ impl DynamicSubscriber {
                                     &endpoint_clone,
                                     &zmq_topic_clone,
                                     event_tx_clone,
-                                    endpoint_cancel,
+                                    &endpoint_cancel,
                                 )
                                 .await
                                 {
@@ -148,8 +170,12 @@ impl DynamicSubscriber {
                                         "Error consuming ZMQ endpoint stream"
                                     );
                                 }
-                                // Clean up on stream termination
-                                endpoints_clone.write().await.remove(&instance_id_clone);
+                                // A cancelled token means the watcher already handled this
+                                // entry, and the ID may now belong to a newer stream.
+                                let mut endpoints_guard = endpoints_clone.write().await;
+                                if !endpoint_cancel.is_cancelled() {
+                                    endpoints_guard.remove(&instance_id_clone);
+                                }
                             });
                         } else {
                             tracing::debug!(
@@ -159,6 +185,8 @@ impl DynamicSubscriber {
                             );
                         }
                     }
+                    Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => {}
+                    Ok(DiscoveryEvent::Resync(_)) => {}
                     Ok(DiscoveryEvent::Removed(instance_id)) => {
                         let is_expected_topic = matches!(
                             &instance_id,
@@ -238,7 +266,7 @@ impl DynamicSubscriber {
         endpoint: &str,
         zmq_topic: &str,
         event_tx: mpsc::Sender<Bytes>,
-        cancel_token: CancellationToken,
+        cancel_token: &CancellationToken,
     ) -> Result<()> {
         // Connect to the endpoint
         let sub_transport = ZmqSubTransport::connect(endpoint, zmq_topic).await?;
@@ -305,11 +333,59 @@ impl Drop for DynamicSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{
+        DiscoverySpec, DiscoveryStream, EventChannelQuery, EventScope, MockDiscovery,
+        SharedMockRegistry,
+    };
+    use crate::transports::event_plane::{Codec, EventTransportTx, ZmqPubTransport};
+    use tokio::sync::Notify;
+    use tokio::time::{Duration, timeout};
+
+    struct CancellationAwareDiscovery {
+        backend_stopped: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Discovery for CancellationAwareDiscovery {
+        fn instance_id(&self) -> u64 {
+            1
+        }
+
+        async fn register_internal(&self, _spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            anyhow::bail!("register is not supported by this test discovery")
+        }
+
+        async fn unregister(&self, _instance: DiscoveryInstance) -> Result<()> {
+            anyhow::bail!("unregister is not supported by this test discovery")
+        }
+
+        async fn list(&self, _query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_and_watch(
+            &self,
+            _query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            let cancel_token = cancel_token
+                .ok_or_else(|| anyhow::anyhow!("dynamic subscriber must pass cancellation"))?;
+            let backend_stopped = Arc::clone(&self.backend_stopped);
+            tokio::spawn(async move {
+                cancel_token.cancelled().await;
+                backend_stopped.notify_one();
+            });
+
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
 
     fn event_channel(topic: &str, transport: EventTransport) -> DiscoveryInstance {
         DiscoveryInstance::EventChannel {
-            namespace: "test-ns".to_string(),
-            component: "test-component".to_string(),
+            scope: EventScope::Component {
+                namespace: "test-ns".to_string(),
+                component: "test-component".to_string(),
+            },
             topic: topic.to_string(),
             instance_id: 1,
             transport,
@@ -336,6 +412,146 @@ mod tests {
         assert_eq!(
             DynamicSubscriber::extract_zmq_endpoint(&wrong_transport, "kv-events"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_idle_discovery_watch() {
+        let backend_stopped = Arc::new(Notify::new());
+        let discovery = Arc::new(CancellationAwareDiscovery {
+            backend_stopped: Arc::clone(&backend_stopped),
+        });
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test-ns",
+            "test-component",
+            "kv-events",
+        ));
+        let subscriber = Arc::new(DynamicSubscriber::new(
+            discovery,
+            query,
+            "kv-events".to_string(),
+        ));
+        let mut stream = Arc::clone(&subscriber).start_zmq().await.unwrap();
+
+        tokio::task::yield_now().await;
+        subscriber.cancel();
+
+        let next = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("subscriber stream should close promptly after cancellation");
+        assert!(next.is_none());
+
+        timeout(Duration::from_secs(1), backend_stopped.notified())
+            .await
+            .expect("discovery backend should receive cancellation");
+    }
+
+    #[tokio::test]
+    async fn dropping_returned_stream_cancels_idle_discovery_watch() {
+        let backend_stopped = Arc::new(Notify::new());
+        let discovery = Arc::new(CancellationAwareDiscovery {
+            backend_stopped: Arc::clone(&backend_stopped),
+        });
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test-ns",
+            "test-component",
+            "kv-events",
+        ));
+        let parent_token = CancellationToken::new();
+        let subscriber = Arc::new(DynamicSubscriber::with_cancel_token(
+            discovery,
+            query,
+            "kv-events".to_string(),
+            parent_token.child_token(),
+        ));
+        let weak_subscriber = Arc::downgrade(&subscriber);
+        let stream = subscriber.start_zmq().await.unwrap();
+
+        assert!(
+            weak_subscriber.upgrade().is_some(),
+            "returned stream should retain the dynamic subscriber"
+        );
+        drop(stream);
+        assert!(
+            weak_subscriber.upgrade().is_none(),
+            "dropping the returned stream should release the dynamic subscriber"
+        );
+        assert!(
+            !parent_token.is_cancelled(),
+            "dropping a subscriber must not cancel its parent token"
+        );
+
+        timeout(Duration::from_secs(1), backend_stopped.notified())
+            .await
+            .expect("dropping the stream should cancel the discovery backend");
+    }
+
+    #[tokio::test]
+    async fn reregistered_publisher_stops_on_next_removal() {
+        let topic = "kv-events";
+        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
+            .await
+            .unwrap();
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test-ns",
+            "test-component",
+            topic,
+        ));
+        let mut stream = Arc::new(DynamicSubscriber::new(
+            Arc::clone(&discovery),
+            query,
+            topic.to_string(),
+        ))
+        .start_zmq()
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        let spec = DiscoverySpec::EventChannel {
+            scope: EventScope::Component {
+                namespace: "test-ns".to_string(),
+                component: "test-component".to_string(),
+            },
+            topic: topic.to_string(),
+            publisher_id: 7,
+            transport: EventTransport::zmq(endpoint),
+        };
+        // The watcher handles all three changes before the first endpoint task runs.
+        let instance = discovery.register(spec.clone()).await.unwrap();
+        discovery.unregister(instance).await.unwrap();
+        let instance = discovery.register(spec).await.unwrap();
+
+        let codec = Codec::default();
+        let ready = codec
+            .encode_envelope_parts(7, 1, 1, topic, b"ready")
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                publisher.publish(topic, ready.clone()).await.unwrap();
+                if let Ok(Some(_)) = timeout(Duration::from_millis(25), stream.next()).await {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("re-registered publisher should deliver events");
+
+        discovery.unregister(instance).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let removed = codec
+            .encode_envelope_parts(7, 2, 2, topic, b"removed")
+            .unwrap();
+        publisher.publish(topic, removed.clone()).await.unwrap();
+        let delivered = timeout(Duration::from_millis(250), async {
+            while stream.next().await.unwrap().unwrap() != removed {}
+        })
+        .await;
+        assert!(
+            delivered.is_err(),
+            "removed publisher still delivered events"
         );
     }
 }

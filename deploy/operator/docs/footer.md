@@ -84,24 +84,15 @@ The operator applies different default health probes based on the component type
 
 ### Frontend Components
 
-Frontend components receive the following probe configurations:
+Frontend components receive the following HTTP GET probes on port `http` (8000):
 
-**Liveness Probe:**
-- **Type**: HTTP GET
-- **Path**: `/health`
-- **Port**: `http` (8000)
-- **Initial Delay**: 60 seconds
-- **Period**: 60 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 10
+| Probe | Path | Initial delay | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- | --- |
+| Liveness | `/live` | 15 seconds | 10 seconds | 1 second | 3 |
+| Readiness | `/health` | 10 seconds | 10 seconds | 3 seconds | 3 |
+| Startup (runtime 1.6.0 and later) | `/live` | 0 seconds | 10 seconds | 1 second | 30 |
 
-**Readiness Probe:**
-- **Type**: Exec command
-- **Command**: `curl -s http://localhost:${DYNAMO_PORT}/health | jq -e ".status == \"healthy\""`
-- **Initial Delay**: 60 seconds
-- **Period**: 60 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 10
+The startup probe allows five minutes for the sequential NATS and etcd connection waits and initialization. It also applies to colocated frontends. Older runtimes and images whose runtime version cannot be resolved do not receive a default startup probe. User-specified probes replace these defaults. If you raise `NATS_STARTUP_CONNECT_TIMEOUT_SECONDS` or `ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS`, raise the startup probe allowance to cover the combined connection windows and initialization.
 
 ### Worker Components
 
@@ -131,9 +122,8 @@ Worker components receive the following probe configurations:
 - **Timeout**: 5 seconds
 - **Failure Threshold**: 720 (allows up to 2 hours for startup: 10s × 720 = 7200s)
 
-:::{note}
-For larger models (typically >70B parameters) or slower storage systems, you may need to increase the `failureThreshold` to allow more time for model loading. Calculate the required threshold based on your expected startup time: `failureThreshold = (expected_startup_seconds / period)`. Override the startup probe in your component specification if the default 2-hour window is insufficient.
-:::
+> [!NOTE]
+> For larger models (typically >70B parameters) or slower storage systems, you may need to increase the `failureThreshold` to allow more time for model loading. Calculate the required threshold based on your expected startup time: `failureThreshold = (expected_startup_seconds / period)`. Override the startup probe in your component specification if the default 2-hour window is insufficient.
 
 ### Multinode Deployment Probe Modifications
 
@@ -141,12 +131,17 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 #### VLLM Backend
 
-The operator automatically selects between two deployment modes based on parallelism configuration:
+The operator automatically applies distributed execution configuration based on parallelism settings:
 
-**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
-- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
-- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
-- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
+**Tensor/Pipeline Parallel Mode (Recommended)** (when `world_size > GPUs_per_node`):
+- Uses PyTorch multiprocessing (mp) backend for distributed execution (`--distributed-executor-backend mp`)
+- Supports multi-node deployments with PyTorch's native distributed initialization
+- **All nodes**: Run vLLM with proper `--nnodes`, `--node-rank`, `--master-addr` flags injected
+- **Probes**: Worker probes adjusted; leader probes remain active
+
+**Ray Backend**:
+- Used for use cases such as Elastic EP
+- Install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -202,6 +197,17 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYNAMO_PORT` | HTTP port the frontend listens on | `8000` | `int` |
 | `DYN_HTTP_PORT` | HTTP port for the frontend service (alias) | `8000` | `int` |
 | `DYN_NAMESPACE_PREFIX` | Namespace prefix used for frontend request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to the base namespace, eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation | `true` for supported runtimes; otherwise unset | `string` (boolean) |
+
+DGDs named `foo` and `foo-bar` in the same Kubernetes namespace can cross-discover workers: the frontend in `foo` can route requests to workers in `foo-bar`. Strict matching excludes the other deployment for ordinary overlapping names. This issue affects deployments sharing a name prefix in the same Kubernetes namespace.
+
+Runtime image 1.6.0 introduces `DYN_NAMESPACE_PREFIX_STRICT`. Upgrade both the operator and affected frontend and native Rust EPP images to 1.6.0 or later; the operator enables strict matching for supported images. An operator-only upgrade leaves older runtime images affected. With a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on those containers after upgrading their images. For custom images, set `runtimeVersionOverride` to the image's Dynamo runtime version when the tag does not identify it.
+
+For frontend sidecars, support is determined from the sidecar's own image tag. The component's `runtimeVersionOverride` applies only to its runtime container. If a sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that sidecar's environment when its image contains this fix.
+
+Manual namespace prefixes retain literal matching unless strict mode is enabled. Exact frontend `DYN_NAMESPACE` selection and global frontend discovery are unchanged. EPP uses exact `DYN_NAMESPACE` selection when no prefix is provided, except that `dynamo` selects global discovery.
+
+This filter follows the operator's namespace naming contract. A separate deployment whose name ends in an accepted worker-generation suffix can still produce an indistinguishable namespace, so do not use this filter as an authorization boundary.
 
 ### Worker Components
 
@@ -211,7 +217,7 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints whose health status is used for readiness | `["generate"]` | `string` (JSON array) |
 | `DYN_SYSTEM_PORT` | Port for the system HTTP server (health, metrics) | `9090` | `int` |
 | `DYN_HEALTH_CHECK_ENABLED` | Disables the legacy health check mechanism in favor of the system server | `false` | `string` (boolean) |
-| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection | `n` | `string` | Options: `y`, `n` |
+| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection. Case-insensitive options: `y`, `1`, `yes`, `on`, `true`, `enable`, `n`, `0`, `no`, `off`, `false`, `disable`. Unrecognized values fail SGLang admission or worker validation. Use `y` to opt in to SGLang operator rank port declarations. | `n` | `string` |
 | `NIXL_TELEMETRY_EXPORTER` | Telemetry exporter format for NIXL metrics | `prometheus` | `string` |
 | `NIXL_TELEMETRY_PROMETHEUS_PORT` | Port for NIXL Prometheus metrics endpoint | `19090` | `int` |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Hash suffix appended to worker namespace for rolling updates | — | `string` | Only set during rolling update transitions |
@@ -227,7 +233,9 @@ These are injected into all components when the corresponding infrastructure ser
 | Variable | Purpose | Default | Type |
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
-| `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
+| `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
+| `DYN_NAMESPACE_PREFIX` | Namespace prefix used for EPP request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to operator worker-generation namespaces; does not modify exact `DYN_NAMESPACE` selection | `true` for supported runtimes; otherwise unset | `string` (boolean) |
 
 ### VLLM Backend
 
@@ -310,7 +318,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **MP Master Port**: 29500 (for PyTorch distributed multinode TP/PP deployments with mp backend)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang
@@ -339,7 +348,6 @@ For users who want to understand the implementation details or contribute to the
 - **Checkpoint / Restore**:
   - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
   - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
-  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes

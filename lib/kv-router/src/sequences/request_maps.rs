@@ -3,14 +3,37 @@
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::single::RequestId;
 use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::AttemptId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RequestBooking {
+    pub(super) worker: WorkerWithDpRank,
+    pub(super) attempt_id: AttemptId,
+}
+
+/// Booking plus whether `request_to_lora` holds an entry for the request, so
+/// lifecycle paths skip the LoRA map entirely for requests without an adapter.
+#[derive(Debug, Clone, Copy)]
+struct BookingEntry {
+    booking: RequestBooking,
+    has_lora: bool,
+}
+
+/// A booking removed from the index together with the LoRA name it carried.
+#[derive(Debug)]
+pub(super) struct RemovedBooking {
+    pub(super) lora_name: Option<String>,
+}
 
 #[derive(Debug, Default)]
 pub(super) struct RequestIndex {
-    request_to_worker: DashMap<RequestId, WorkerWithDpRank>,
+    request_to_booking: DashMap<RequestId, BookingEntry>,
     request_to_lora: DashMap<RequestId, String>,
+    next_attempt_id: AtomicU64,
 }
 
 impl RequestIndex {
@@ -19,26 +42,39 @@ impl RequestIndex {
         request_id: RequestId,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
-    ) -> Result<(), WorkerWithDpRank> {
-        match self.request_to_worker.entry(request_id.clone()) {
-            Entry::Occupied(entry) => Err(*entry.get()),
+    ) -> Result<AttemptId, WorkerWithDpRank> {
+        match self.request_to_booking.entry(request_id.clone()) {
+            Entry::Occupied(entry) => Err(entry.get().booking.worker),
             Entry::Vacant(entry) => {
-                entry.insert(worker);
+                let attempt_id =
+                    AttemptId::new(self.next_attempt_id.fetch_add(1, Ordering::Relaxed) + 1);
+                entry.insert(BookingEntry {
+                    booking: RequestBooking { worker, attempt_id },
+                    has_lora: lora_name.is_some(),
+                });
                 if let Some(lora_name) = lora_name {
                     self.request_to_lora.insert(request_id, lora_name);
                 }
-                Ok(())
+                Ok(attempt_id)
             }
         }
     }
 
+    #[cfg(test)]
     pub(super) fn set_request(
         &self,
         request_id: RequestId,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
     ) {
-        self.request_to_worker.insert(request_id.clone(), worker);
+        let attempt_id = AttemptId::new(self.next_attempt_id.fetch_add(1, Ordering::Relaxed) + 1);
+        self.request_to_booking.insert(
+            request_id.clone(),
+            BookingEntry {
+                booking: RequestBooking { worker, attempt_id },
+                has_lora: lora_name.is_some(),
+            },
+        );
         if let Some(lora_name) = lora_name {
             self.request_to_lora.insert(request_id, lora_name);
         } else {
@@ -46,8 +82,14 @@ impl RequestIndex {
         }
     }
 
-    pub(super) fn worker_for(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
-        self.request_to_worker.get(request_id).map(|entry| *entry)
+    pub(super) fn worker_for(&self, request_id: &str) -> Option<WorkerWithDpRank> {
+        self.booking_for(request_id).map(|booking| booking.worker)
+    }
+
+    pub(super) fn booking_for(&self, request_id: &str) -> Option<RequestBooking> {
+        self.request_to_booking
+            .get(request_id)
+            .map(|entry| entry.booking)
     }
 
     pub(super) fn lora_for(&self, request_id: &RequestId) -> Option<String> {
@@ -57,12 +99,48 @@ impl RequestIndex {
     }
 
     pub(super) fn remove_request(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
-        let worker = self
-            .request_to_worker
+        let (_, entry) = self.request_to_booking.remove(request_id)?;
+        self.take_lora(request_id, entry);
+        Some(entry.booking.worker)
+    }
+
+    /// Drop the mapping for `request_id` only if it still points at `worker`.
+    pub(super) fn remove_request_if_worker(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+    ) -> Option<RemovedBooking> {
+        let (_, entry) = self
+            .request_to_booking
+            .remove_if(request_id, |_, entry| entry.booking.worker == worker)?;
+        Some(RemovedBooking {
+            lora_name: self.take_lora(request_id, entry),
+        })
+    }
+
+    /// Drop the mapping only when it still belongs to the captured attempt.
+    pub(super) fn remove_request_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+    ) -> Option<RemovedBooking> {
+        let expected = RequestBooking { worker, attempt_id };
+        let (_, entry) = self
+            .request_to_booking
+            .remove_if(request_id, |_, entry| entry.booking == expected)?;
+        Some(RemovedBooking {
+            lora_name: self.take_lora(request_id, entry),
+        })
+    }
+
+    fn take_lora(&self, request_id: &RequestId, removed: BookingEntry) -> Option<String> {
+        if !removed.has_lora {
+            return None;
+        }
+        self.request_to_lora
             .remove(request_id)
-            .map(|(_request_id, worker)| worker);
-        self.request_to_lora.remove(request_id);
-        worker
+            .map(|(_request_id, lora_name)| lora_name)
     }
 
     pub(super) fn remove_requests<'a>(&self, request_ids: impl IntoIterator<Item = &'a RequestId>) {
@@ -73,9 +151,9 @@ impl RequestIndex {
 
     pub(super) fn remove_worker_requests(&self, worker: WorkerWithDpRank) -> Vec<RequestId> {
         let request_ids: Vec<_> = self
-            .request_to_worker
+            .request_to_booking
             .iter()
-            .filter(|entry| *entry.value() == worker)
+            .filter(|entry| entry.value().booking.worker == worker)
             .map(|entry| entry.key().clone())
             .collect();
         self.remove_requests(request_ids.iter());
@@ -93,12 +171,12 @@ impl RequestIndex {
 
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn is_empty(&self) -> bool {
-        self.request_to_worker.is_empty() && self.request_to_lora.is_empty()
+        self.request_to_booking.is_empty() && self.request_to_lora.is_empty()
     }
 
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn worker_len(&self) -> usize {
-        self.request_to_worker.len()
+        self.request_to_booking.len()
     }
 }
 
@@ -118,7 +196,7 @@ mod tests {
             index.try_insert_request("req-1".to_string(), WorkerWithDpRank::new(2, 0), None),
             Err(worker)
         );
-        assert_eq!(index.worker_for(&"req-1".to_string()), Some(worker));
+        assert_eq!(index.worker_for("req-1"), Some(worker));
         assert_eq!(
             index.lora_for(&"req-1".to_string()),
             Some("adapter".to_string())
@@ -168,7 +246,7 @@ mod tests {
         let mut removed = index.remove_worker_requests(worker_a);
         removed.sort();
         assert_eq!(removed, vec!["req-a".to_string(), "req-c".to_string()]);
-        assert_eq!(index.worker_for(&"req-b".to_string()), Some(worker_b));
+        assert_eq!(index.worker_for("req-b"), Some(worker_b));
         assert_eq!(
             index.active_lora_counts(),
             HashMap::from([("adapter-b".to_string(), 1)])

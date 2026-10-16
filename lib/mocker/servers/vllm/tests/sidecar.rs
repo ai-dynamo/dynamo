@@ -1,0 +1,278 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
+use dynamo_backend_common::{
+    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
+    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+};
+use dynamo_mocker::common::protocols::MockerConfig;
+use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
+use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
+use dynamo_vllm_sidecar::VllmSidecarEngine;
+use dynamo_vllm_sidecar::proto::control_server::ControlServer;
+use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
+use futures::StreamExt;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio_stream::wrappers::TcpListenerStream;
+
+struct RunningServer {
+    endpoint: String,
+    shutdown: Option<oneshot::Sender<()>>,
+    _model_dir: Option<tempfile::TempDir>,
+}
+
+impl RunningServer {
+    async fn start(mode: ServerMode, engine_args: MockerConfig, supports_multimodal: bool) -> Self {
+        // Keep image-token discovery local; text fixtures keep their original model.
+        let model_dir = supports_multimodal.then(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.json"),
+                r#"{"model_type":"qwen2_5_vl","vision_token_id":151654,"image_token_id":151655}"#,
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("preprocessor_config.json"), "{}").unwrap();
+            dir
+        });
+        let mut config = MockerServerConfig {
+            mode,
+            supports_multimodal,
+            ..Default::default()
+        };
+        if let Some(dir) = &model_dir {
+            config.model = dir.path().to_string_lossy().into_owned();
+        }
+        let service = VllmMockerService::new(config, engine_args).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let inference_service = service.clone();
+        let control_service = service.clone();
+        let (health, health_service) = tonic_health::server::health_reporter();
+        health
+            .set_serving::<ControlServer<VllmMockerService>>()
+            .await;
+        health
+            .set_serving::<InferenceServer<VllmMockerService>>()
+            .await;
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    InferenceServer::new(inference_service)
+                        .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+                        .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
+                )
+                .add_service(ControlServer::new(control_service))
+                .add_service(health_service)
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        Self {
+            endpoint: format!("http://{address}"),
+            shutdown: Some(shutdown),
+            _model_dir: model_dir,
+        }
+    }
+}
+
+impl Drop for RunningServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "block_size": 4,
+            "num_gpu_blocks": 4096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
+}
+
+async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine {
+    let mut argv = vec![
+        "dynamo-vllm-sidecar".to_string(),
+        "--grpc-endpoint".to_string(),
+        endpoint.to_string(),
+        "--grpc-connections".to_string(),
+        "1".to_string(),
+        "--grpc-startup-deadline-secs".to_string(),
+        "5".to_string(),
+        "--grpc-connect-attempt-timeout-secs".to_string(),
+        "1".to_string(),
+    ];
+    if mode != DisaggregationMode::Aggregated {
+        argv.extend(["--disaggregation-mode".to_string(), mode.to_string()]);
+    }
+    tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+}
+
+fn request(max_tokens: u32) -> PreprocessedRequest {
+    PreprocessedRequest::builder()
+        .model("mocker-model".to_string())
+        .token_ids(vec![11, 22, 33, 44])
+        .stop_conditions(StopConditions {
+            max_tokens: Some(max_tokens),
+            ignore_eos: Some(true),
+            ..Default::default()
+        })
+        .sampling_options(SamplingOptions {
+            temperature: Some(0.0),
+            ..Default::default()
+        })
+        .output_options(OutputOptions {
+            logprobs: Some(2),
+            prompt_logprobs: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .unwrap()
+}
+
+async fn collect(
+    engine: &VllmSidecarEngine,
+    request: PreprocessedRequest,
+) -> Vec<dynamo_backend_common::LLMEngineOutput> {
+    let context = dynamo_backend_common::testing::mock_context();
+    engine
+        .generate(request, GenerateContext::new(context, None))
+        .await
+        .unwrap()
+        .map(|item| item.unwrap())
+        .collect()
+        .await
+}
+
+fn with_image(mut request: PreprocessedRequest, source: String) -> PreprocessedRequest {
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(source)],
+    )]));
+    request
+}
+
+#[tokio::test]
+async fn large_inline_image_streams_through_sidecar() {
+    let mut args = fast_engine_args();
+    args.enable_prefix_caching = false;
+    let server = RunningServer::start(ServerMode::Aggregated, args, true).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    // Exceeds Tonic's default 4 MiB limit. The mock must not decode the image.
+    let req = with_image(
+        request(3),
+        format!("data:image/png;base64,{}", "A".repeat(5 * 1024 * 1024)),
+    );
+    let outputs = collect(&engine, req).await;
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|output| output.token_ids.len())
+            .sum::<usize>(),
+        3
+    );
+    let terminal = outputs.last().unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
+    let usage = terminal.completion_usage.as_ref().unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (4, 3));
+    engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn prefill_handoff_round_trips_through_a_decode_server() {
+    for image in [false, true] {
+        let mut args = fast_engine_args();
+        if image {
+            args.enable_prefix_caching = false;
+        }
+        let prefill_server = RunningServer::start(ServerMode::Prefill, args.clone(), image).await;
+        let decode_server = RunningServer::start(ServerMode::Decode, args, image).await;
+        let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
+        let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode).await;
+        prefill.start(0).await.unwrap();
+        decode.start(1).await.unwrap();
+
+        let mut prefill_request = request(3);
+        if image {
+            prefill_request =
+                with_image(prefill_request, "https://example.invalid/image.png".into());
+        }
+        prefill_request.token_ids = vec![11, 22, 33, 44, 55].into();
+        let prefill_outputs = collect(&prefill, prefill_request.clone()).await;
+        assert_eq!(prefill_outputs.len(), 1);
+        assert!(prefill_outputs[0].token_ids.is_empty());
+        let handoff = prefill_outputs[0]
+            .disaggregated_params
+            .clone()
+            .expect("prefill response should carry an opaque KV handoff");
+        assert_eq!(handoff["do_remote_prefill"], true);
+        assert!(handoff["remote_engine_id"].is_string());
+        assert!(handoff["remote_request_id"].is_string());
+        let groups = handoff["remote_block_ids"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        let blocks = groups[0].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.iter().all(|block| block.as_u64().is_some()));
+        // The non-rendezvous sentinel proves the sidecar preserved opaque handoff
+        // fields rather than reconstructing only the keys it recognizes.
+        assert!(
+            handoff["mocker_request_id"].is_string(),
+            "sidecar must forward opaque KV-transfer fields verbatim"
+        );
+
+        let mut decode_request = prefill_request;
+        decode_request.prefill_result = Some(PrefillResult {
+            disaggregated_params: handoff,
+            prompt_tokens_details: None,
+        });
+        let decode_outputs = collect(&decode, decode_request).await;
+        assert_eq!(decode_outputs.len(), 3);
+        assert_eq!(
+            decode_outputs.last().unwrap().finish_reason,
+            Some(FinishReason::Length)
+        );
+        let usage = decode_outputs
+            .last()
+            .unwrap()
+            .completion_usage
+            .as_ref()
+            .unwrap();
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5, 3));
+        prefill.cleanup().await.unwrap();
+        decode.cleanup().await.unwrap();
+    }
+}
+
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    let mut args = fast_engine_args();
+    args.num_gpu_blocks = 8;
+    args.max_num_seqs = 1;
+    let block_size = u32::try_from(args.block_size).unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args, false).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    common::check_kv_events(&engine, block_size).await;
+}

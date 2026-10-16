@@ -173,7 +173,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 
 	assert.Equal(t, corev1.RestartPolicyNever, podSpec.RestartPolicy,
 		"inter-pod failover engines must be RestartPolicyNever so the "+
-			"FailoverCascadeReconciler is the sole recovery path")
+			"failover cascade controller is the sole recovery path")
 }
 
 // TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever pins the
@@ -370,10 +370,54 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 }
 
 func TestGmsRCTName(t *testing.T) {
-	assert.Equal(t, "my-svc-gpu-rank-0", gmsRCTName("my-svc", 0))
-	assert.Equal(t, "llama-gpu-rank-2", gmsRCTName("llama", 2))
-	assert.Equal(t, "vllmworker-gpu-rank-0", gmsRCTName("VllmWorker", 0))
-	assert.Empty(t, validation.IsDNS1123Subdomain(gmsRCTName("VllmWorker", 0)))
+	tests := []struct {
+		name        string
+		serviceName string
+		rank        int32
+		expected    string
+	}{
+		{
+			name:        "already normalized",
+			serviceName: "my-svc",
+			rank:        0,
+			expected:    "my-svc-gpu-rank-0",
+		},
+		{
+			name:        "lowercase",
+			serviceName: "llama",
+			rank:        2,
+			expected:    "llama-gpu-rank-2",
+		},
+		{
+			name:        "camel case",
+			serviceName: "worker",
+			rank:        0,
+			expected:    "worker-gpu-rank-0",
+		},
+		{
+			name:        "uppercase",
+			serviceName: "VLLMWorker",
+			rank:        2,
+			expected:    "vllmworker-gpu-rank-2",
+		},
+		{
+			name:        "dot",
+			serviceName: "Vllm.Worker",
+			rank:        1,
+			expected:    "vllm-worker-gpu-rank-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Generate the ResourceClaimTemplate name")
+			name := gmsRCTName(tt.serviceName, tt.rank)
+
+			t.Log("Verify the name is normalized and RFC 1123 compliant")
+			assert.Equal(t, tt.expected, name)
+			assert.Empty(t, validation.IsDNS1123Subdomain(name))
+		})
+	}
 }
 
 func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
@@ -384,11 +428,12 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs, err := gmsResourceClaimTemplateConfigs("VllmWorker", gmsSpec, resources, roles)
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplateWithResources(resources)}
+	configs, err := gmsResourceClaimTemplateConfigs("worker", gmsSpec, component, roles)
 	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
-	assert.Equal(t, "vllmworker-gpu-rank-0", configs[0].Name)
+	assert.Equal(t, "worker-gpu-rank-0", configs[0].Name)
 	assert.Empty(t, validation.IsDNS1123Subdomain(configs[0].Name))
 
 	req := configs[0].TemplateSpec.Spec.Devices.Requests[0]
@@ -398,6 +443,7 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 }
 
 func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
+	t.Log("Set up a two-rank inter-pod GMS service")
 	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
@@ -406,17 +452,55 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	configs, err := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	t.Log("Build ResourceClaimTemplate configs from a mixed-case service name")
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplateWithResources(resources)}
+	configs, err := gmsResourceClaimTemplateConfigs("decode", &v1beta1.GPUMemoryServiceSpec{}, component, roles)
 	require.NoError(t, err)
 
+	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, configs, 2)
-	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
-	assert.Equal(t, "svc-gpu-rank-1", configs[1].Name)
+	expectedNames := []string{
+		"decode-gpu-rank-0",
+		"decode-gpu-rank-1",
+	}
+	for i, config := range configs {
+		assert.Equal(t, expectedNames[i], config.Name)
+		assert.Empty(t, validation.IsDNS1123Subdomain(config.Name))
+	}
 
+	t.Log("Verify the GPU request configuration is preserved")
 	req := configs[1].TemplateSpec.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com", req.Exactly.DeviceClassName)
 	assert.Equal(t, int64(4), req.Exactly.Count)
+}
+
+func TestGmsResourceClaimTemplateConfigs_RoleSpecificGPUs(t *testing.T) {
+	leaderGPUs := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}
+	workerGPUs := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{Roles: []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: podTemplateWithResources(leaderGPUs)},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: podTemplateWithResources(workerGPUs)},
+	}}
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 1},
+		{Name: "svc-gms-1", Role: RoleGMS, Rank: 1, Replicas: 1},
+		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 1},
+	}
+
+	configs, err := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, component, roles)
+	require.NoError(t, err)
+	require.Len(t, configs, 2)
+	assert.Equal(t, int64(8), configs[0].TemplateSpec.Spec.Devices.Requests[0].Exactly.Count)
+	assert.Equal(t, int64(4), configs[1].TemplateSpec.Spec.Devices.Requests[0].Exactly.Count)
+}
+
+func podTemplateWithResources(resources corev1.ResourceRequirements) *corev1.PodTemplateSpec {
+	return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name:      commonconsts.MainContainerName,
+		Resources: resources,
+	}}}}
 }
 
 func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
@@ -425,10 +509,10 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	refs := gmsResourceSharingEntries("VllmWorker", roles)
+	refs := gmsResourceSharingEntries("worker", roles)
 
 	require.Len(t, refs, 1)
-	assert.Equal(t, "vllmworker-gpu-rank-0", refs[0].Name)
+	assert.Equal(t, "worker-gpu-rank-0", refs[0].Name)
 	assert.Empty(t, validation.IsDNS1123Subdomain(refs[0].Name))
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
@@ -436,6 +520,7 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 }
 
 func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
+	t.Log("Set up a two-rank inter-pod GMS service")
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
@@ -443,16 +528,26 @@ func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	refs := gmsResourceSharingEntries("svc", roles)
+	t.Log("Build resource-sharing entries from a mixed-case service name")
+	refs := gmsResourceSharingEntries("decode", roles)
 
+	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, refs, 2)
+	expectedNames := []string{
+		"decode-gpu-rank-0",
+		"decode-gpu-rank-1",
+	}
+	for i, ref := range refs {
+		assert.Equal(t, expectedNames[i], ref.Name)
+		assert.Empty(t, validation.IsDNS1123Subdomain(ref.Name))
+	}
 
-	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
+	t.Log("Verify rank zero targets the GMS server and leader cliques")
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
 	assert.Equal(t, []string{"svc-gms-0", "svc-ldr"}, refs[0].Filter.ChildCliqueNames)
 
-	assert.Equal(t, "svc-gpu-rank-1", refs[1].Name)
+	t.Log("Verify rank one targets the GMS server and worker cliques")
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[1].Scope)
 	require.NotNil(t, refs[1].Filter)
 	assert.Equal(t, []string{"svc-gms-1", "svc-wkr-1"}, refs[1].Filter.ChildCliqueNames)
@@ -493,6 +588,8 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 					{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
 					{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+					{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
+					{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
 					{Name: "TMPDIR", Value: gms.SharedMountPath},
 				},
 				Ports: []corev1.ContainerPort{
@@ -528,42 +625,90 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 	}
 }
 
-func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
+func TestBuildColdStartFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
+	t.Log("Keep an engine-prefixed sidecar separate from the two failover engines")
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	ps.Containers[1].Name = "engine-helper"
+	sidecar := ps.Containers[1].DeepCopy()
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
-	// 2 engines + 1 preserved sidecar
+	t.Log("Clone main and leave the sidecar untouched by legacy overrides")
 	assert.Len(t, ps.Containers, 3)
 	assert.Equal(t, "engine-0", ps.Containers[0].Name)
 	assert.Equal(t, "engine-1", ps.Containers[1].Name)
-	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
+	assert.Equal(t, sidecar, &ps.Containers[2])
 }
 
-func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
+func TestBuildColdStartFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildColdStartFailoverPod_RejectsSGLangColdStart(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkSGLang)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "currently supported only for vLLM")
 }
 
-func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
+func TestBuildSnapshotFailoverPod_RejectsMultinodeWithoutMutation(t *testing.T) {
+	t.Log("Give the snapshot renderer a setup with multiple nodes")
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	original := ps.DeepCopy()
+
+	t.Log("Reject multiple nodes before cloning engine containers")
+	err := buildSnapshotFailoverPod(&ps, 2, BackendFrameworkVLLM)
+	require.ErrorContains(t, err, "requires a single node setup")
+	assert.Equal(t, original, &ps)
+}
+
+func TestBuildSnapshotFailoverPod_Backends(t *testing.T) {
+	for _, backend := range []BackendFramework{BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM} {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Log("Render a snapshot engine pair with an inherited legacy shadow setting")
+			ps := intraPodFailoverPodSpec()
+			ps.Containers[0].Env = append(ps.Containers[0].Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+			ps.Containers[0].Args = []string{vllmMasterPortFlag, "29500"}
+			original := ps.DeepCopy()
+			err := buildSnapshotFailoverPod(&ps, 1, backend)
+
+			if backend == BackendFrameworkTRTLLM {
+				t.Log("Reject TRT-LLM before changing the pod")
+				require.ErrorContains(t, err, "supports only vLLM and SGLang")
+				assert.Equal(t, original, &ps)
+				return
+			}
+
+			t.Log("Use shared identity and preserve captured ports without cold shadow overrides")
+			require.NoError(t, err)
+			require.Len(t, ps.Containers, 3)
+			for i := range failoverEngineCount {
+				assert.Equal(t, original.Containers[0].Args, ps.Containers[i].Args)
+				assert.Equal(t, strconv.Itoa(i), envToMap(ps.Containers[i].Env)["ENGINE_ID"])
+				assert.NotContains(t, envToMap(ps.Containers[i].Env), "DYN_VLLM_GMS_SHADOW_MODE")
+				assert.NotContains(t, envToMap(ps.Containers[i].Env), "VLLM_NIXL_SIDE_CHANNEL_PORT")
+			}
+			assert.Equal(t, original.Containers[1], ps.Containers[2])
+		})
+	}
+}
+
+func TestBuildColdStartFailoverPod_EngineEnvVars(t *testing.T) {
+	t.Log("Build the active-passive engine containers from a container-discovery base")
+	ps := intraPodFailoverPodSpec()
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
+	t.Log("Verify each engine keeps container discovery and receives its own container identity")
 	for i := range 2 {
 		engine := ps.Containers[i]
 		env := envToMap(engine.Env)
 		assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"], "engine-%d ENGINE_ID", i)
 		assert.Equal(t, fmt.Sprintf("engine-%d", i), env["CONTAINER_NAME"], "engine-%d CONTAINER_NAME", i)
+		assert.Equal(t, "container", env["DYN_KUBE_DISCOVERY_MODE"], "engine-%d discovery mode", i)
 		assert.Equal(t, intraPodFailoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
 		assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d starting health", i)
 		assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"], "engine-%d system enabled", i)
@@ -576,9 +721,58 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 	}
 }
 
-func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
+func TestStaggerFlagValue(t *testing.T) {
+	const (
+		launch          = "exec python3 -m dynamo.vllm "
+		originalPortArg = "--master-port 29500"
+		shiftedPortArg  = "--master-port 29600"
+	)
+	tests := []struct {
+		name        string
+		args        []string
+		command     []string
+		wantArgs    []string
+		wantCommand []string
+	}{
+		{
+			name:     "separate args",
+			args:     []string{vllmMasterPortFlag, "29500"},
+			wantArgs: []string{vllmMasterPortFlag, "29600"},
+		},
+		{
+			name:     "shell args retain trailing flags",
+			args:     []string{launch + originalPortArg + " --model model"},
+			wantArgs: []string{launch + shiftedPortArg + " --model model"},
+		},
+		{
+			name:        "shell command",
+			command:     []string{"sh", "-c", launch + originalPortArg},
+			wantCommand: []string{"sh", "-c", launch + shiftedPortArg},
+		},
+		{
+			name:        "args take precedence over command",
+			args:        []string{launch + originalPortArg},
+			command:     []string{launch + "--master-port 30000"},
+			wantArgs:    []string{launch + shiftedPortArg},
+			wantCommand: []string{launch + "--master-port 30000"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Offset the cold engine's master port in its authored launch form")
+			container := &corev1.Container{Args: tt.args, Command: tt.command}
+			staggerFlagValue(container, vllmMasterPortFlag, vllmMasterPortStride)
+
+			t.Log("Preserve the launch form and update only the first selected port")
+			assert.Equal(t, tt.wantArgs, container.Args)
+			assert.Equal(t, tt.wantCommand, container.Command)
+		})
+	}
+}
+
+func TestBuildColdStartFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -591,9 +785,9 @@ func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 	}
 }
 
-func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
+func TestBuildColdStartFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -611,9 +805,9 @@ func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	}
 }
 
-func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
+func TestBuildColdStartFailoverPod_PreservesDRAClaim(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -623,9 +817,9 @@ func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 	}
 }
 
-func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
+func TestBuildColdStartFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -634,9 +828,9 @@ func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	}
 }
 
-func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
+func TestBuildColdStartFailoverPod_MultinodeNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 4, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -645,9 +839,9 @@ func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 	}
 }
 
-func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
+func TestBuildColdStartFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {

@@ -14,18 +14,56 @@
 //! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
 //! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use once_cell::sync::OnceCell;
+use std::ffi::OsStr;
 use std::sync::Arc;
+use thiserror::Error;
 use tmq::{
-    AsZmqSocket, Context, Multipart, SocketBuilder,
+    AsZmqSocket, Context, Message, Multipart, SocketBuilder,
     publish::{Publish, publish},
     subscribe::{Subscribe, subscribe},
 };
 use tokio::sync::{Mutex, broadcast};
+use tokio_util::task::AbortOnDropHandle;
+
+/// Returns the process-wide shared ZMQ context.
+///
+/// libzmq spawns background I/O threads per `Context`, so all PUB/SUB sockets
+/// share one. `zmq::Context` is reference-counted; clones drive the same context.
+fn shared_zmq_context() -> Result<Context> {
+    static CONTEXT: OnceCell<Context> = OnceCell::new();
+    CONTEXT
+        .get_or_try_init(|| {
+            let value = std::env::var_os("DYN_ZMQ_IO_THREADS");
+            configured_zmq_context(value.as_deref())
+        })
+        .cloned()
+}
+
+fn configured_zmq_context(value: Option<&OsStr>) -> Result<Context> {
+    let io_threads = value
+        .unwrap_or_else(|| OsStr::new("4"))
+        .to_str()
+        .context("DYN_ZMQ_IO_THREADS must be valid UTF-8")?
+        .parse::<i32>()
+        .context("DYN_ZMQ_IO_THREADS must be a positive integer")?;
+    anyhow::ensure!(
+        io_threads > 0,
+        "DYN_ZMQ_IO_THREADS must be a positive integer"
+    );
+    let context = Context::new();
+    // Configure the process-wide context before creating any PUB/SUB sockets.
+    context
+        .set_io_threads(io_threads)
+        .context("failed to apply DYN_ZMQ_IO_THREADS to the event-plane ZMQ context")?;
+    tracing::info!(io_threads, "Configured shared event-plane ZMQ context");
+    Ok(context)
+}
 
 /// High Water Mark (HWM) for ZMQ sockets.
 /// This controls the maximum number of messages that can be queued.
@@ -35,10 +73,76 @@ const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
-use super::codec::MsgpackCodec;
+const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached libzmq's ZMQ_MAX_SOCKETS limit or its file-descriptor limit. Reduce direct-ZMQ peers or raise the limit with `ulimit -n`. For routers with many direct-ZMQ KV publishers, increase `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` (default: 1) to group more publisher endpoints per subscriber socket";
+const PROCESS_FD_LIMIT_GUIDANCE: &str = "The process reached its file-descriptor limit. Reduce open file descriptors or raise the limit with `ulimit -n`";
+
+use super::codec::{Codec, MsgpackCodec};
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
+use crate::transports::zmq::ipv6_option_for;
+
+fn socket_limit_guidance(raw_errno: Option<i32>, guidance: &'static str) -> Option<&'static str> {
+    (raw_errno == Some(libc::EMFILE)).then_some(guidance)
+}
+
+fn error_with_guidance(
+    error: impl std::error::Error + Send + Sync + 'static,
+    guidance: &str,
+) -> anyhow::Error {
+    let message = format!("{error}. {guidance}");
+    anyhow::Error::new(error).context(message)
+}
+
+fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
+    let guidance = match &error {
+        tmq::TmqError::Zmq(error) => {
+            socket_limit_guidance(Some(error.to_raw()), ZMQ_SOCKET_LIMIT_GUIDANCE)
+        }
+        tmq::TmqError::Io(error) => {
+            socket_limit_guidance(error.raw_os_error(), PROCESS_FD_LIMIT_GUIDANCE)
+        }
+        tmq::TmqError::InterruptedSend => None,
+    };
+
+    match guidance {
+        Some(guidance) => error_with_guidance(error, guidance),
+        None => error.into(),
+    }
+}
+
+fn bind_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .bind(endpoint)
+        .map_err(map_socket_creation_error)
+}
+
+fn connect_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .connect(endpoint)
+        .map_err(map_socket_creation_error)
+}
+
+fn connect_zmq_socket(socket: &impl AsZmqSocket, endpoint: &str) -> Result<()> {
+    let ipv6 = ipv6_option_for(endpoint)?;
+    let socket = socket.get_socket();
+    // ZMQ snapshots this option per connection; keep hostname resolution on IPv4.
+    socket
+        .set_ipv6(ipv6)
+        .with_context(|| format!("Failed to set ZMQ_IPV6 for {endpoint}"))?;
+    socket
+        .connect(endpoint)
+        .with_context(|| format!("Failed to connect ZMQ socket to {endpoint}"))?;
+    Ok(())
+}
 
 fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
@@ -53,13 +157,29 @@ fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder
-        .set_rcvhwm(ZMQ_RCVHWM)
-        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    configure_subscribe_builder_with_hwm(builder, ZMQ_RCVHWM)
 }
 
-fn multipart_message(multipart: Multipart) -> Vec<Vec<u8>> {
-    multipart.into_iter().map(|frame| frame.to_vec()).collect()
+fn configure_subscribe_builder_with_hwm<T>(
+    builder: SocketBuilder<T>,
+    rcvhwm: i32,
+) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+}
+
+/// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
+///
+/// `Bytes::from_owner` obtains the message data pointer only after moving this
+/// owner into stable storage, so this also supports libzmq's inline messages.
+struct ZmqMessageOwner(Message);
+
+impl AsRef<[u8]> for ZmqMessageOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// ZMQ PUB transport for publishing events.
@@ -71,24 +191,24 @@ pub struct ZmqPubTransport {
 impl ZmqPubTransport {
     /// Create a new ZMQ publisher by binding to an endpoint.
     ///
-    /// If port is 0, finds an available port using TcpListener first,
-    /// then binds ZMQ to that port.
+    /// If the TCP port is 0, ZMQ allocates and reserves an ephemeral port
+    /// on the publisher socket itself.
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
-            let actual_addr = listener.local_addr()?;
-            let port = actual_addr.port();
-            drop(listener);
-
-            format!("tcp://0.0.0.0:{port}")
+        let bind_endpoint = if endpoint.starts_with("tcp://") && endpoint.ends_with(":0") {
+            format!("{}*", &endpoint[..endpoint.len() - 1])
         } else {
             endpoint.to_string()
         };
 
-        let ctx = Context::new();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
+        let ctx = shared_zmq_context()?;
+        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &bind_endpoint)?;
+        let actual_endpoint = socket
+            .get_socket()
+            .get_last_endpoint()
+            .context("Failed to read bound ZMQ publisher endpoint")?
+            .map_err(|_| anyhow!("Bound ZMQ publisher endpoint is not valid UTF-8"))?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -112,8 +232,8 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = Context::new();
-        let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
+        let ctx = shared_zmq_context()?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
 
         tracing::info!(
             endpoint = %xsub_endpoint,
@@ -135,11 +255,11 @@ impl ZmqPubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = Context::new();
-        let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
+        let ctx = shared_zmq_context()?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
-            socket.get_socket().connect(endpoint)?;
+            connect_zmq_socket(&socket, endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ PUB connected to broker XSUB");
         }
 
@@ -161,13 +281,13 @@ impl ZmqPubTransport {
 impl EventTransportTx for ZmqPubTransport {
     async fn publish(&self, _subject: &str, envelope_bytes: Bytes) -> Result<()> {
         let codec = MsgpackCodec;
-        let envelope = codec.decode_envelope(&envelope_bytes)?;
+        let (publisher_id, sequence) = codec.decode_envelope_identity(&envelope_bytes)?;
 
         let frame = Frame::new(envelope_bytes);
         let frames = vec![
             self.topic.as_bytes().to_vec(),
-            envelope.publisher_id.to_be_bytes().to_vec(),
-            envelope.sequence.to_be_bytes().to_vec(),
+            publisher_id.to_be_bytes().to_vec(),
+            sequence.to_be_bytes().to_vec(),
             frame.encode().to_vec(),
         ];
 
@@ -190,16 +310,186 @@ impl EventTransportTx for ZmqPubTransport {
 /// Uses a background async reader to fan out frames to multiple local subscribers.
 pub struct ZmqSubTransport {
     broadcast_tx: broadcast::Sender<Bytes>,
-    _socket_pump_handle: tokio::task::JoinHandle<()>,
+    socket_pump_handle: Arc<AbortOnDropHandle<()>>,
+}
+
+/// One validated multipart message from a direct ZMQ publisher.
+pub struct ZmqWireMessage {
+    pub publisher_id: u64,
+    pub sequence: u64,
+    pub payload: Bytes,
+}
+
+pub type ZmqWireStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<ZmqWireMessage>> + Send>>;
+
+/// One dynamically managed ZMQ SUB socket connected to several publishers.
+///
+/// The caller must keep this value in one task. ZMQ SUB sockets are not thread-safe.
+pub struct DynamicZmqSubSocket {
+    socket: Subscribe,
+    expected_topic: Vec<u8>,
+}
+
+impl DynamicZmqSubSocket {
+    /// Connect a new SUB socket with an explicit receive high-water mark.
+    pub fn connect_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Self> {
+        let socket = ZmqSubTransport::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
+        tracing::info!(endpoint, topic, rcvhwm, "Dynamic ZMQ SUB socket connected");
+        Ok(Self {
+            socket,
+            expected_topic: topic.as_bytes().to_vec(),
+        })
+    }
+
+    /// Connect this SUB socket to one more publisher endpoint.
+    pub fn add_endpoint(&mut self, endpoint: &str) -> Result<()> {
+        connect_zmq_socket(&self.socket, endpoint)?;
+        Ok(())
+    }
+
+    /// Stop receiving from one publisher endpoint.
+    pub fn remove_endpoint(&mut self, endpoint: &str) -> Result<()> {
+        self.socket.get_socket().disconnect(endpoint)?;
+        Ok(())
+    }
+
+    /// Receive and decode the next multipart message.
+    pub async fn next(&mut self) -> Option<Result<ZmqWireMessage>> {
+        loop {
+            let frames = match self.socket.next().await? {
+                Ok(frames) => frames,
+                Err(error) => return Some(Err(error.into())),
+            };
+            match decode_multipart(frames, &self.expected_topic) {
+                Ok(message) => return Some(Ok(message)),
+                Err(error) => {
+                    tracing::warn!(%error, "Dropping malformed dynamic ZMQ message");
+                }
+            }
+        }
+    }
+}
+
+/// One event envelope whose ZMQ frames and envelope attribution agree.
+#[derive(Debug)]
+pub struct ValidatedEnvelope {
+    pub publisher_id: u64,
+    pub sequence: u64,
+    pub published_at: u64,
+    pub payload: Bytes,
+}
+
+/// Failure returned while reading a [`ValidatedZmqSource`].
+#[derive(Debug, Error)]
+pub enum ValidatedZmqSourceError {
+    #[error("direct ZMQ receive failed: {0}")]
+    Receive(#[source] anyhow::Error),
+    #[error("direct ZMQ envelope decode failed: {0}")]
+    EnvelopeDecode(#[source] anyhow::Error),
+    #[error(
+        "direct ZMQ identity mismatch: expected publisher {expected_publisher_id} topic {expected_topic}, frame publisher {frame_publisher_id} sequence {frame_sequence}, envelope publisher {envelope_publisher_id} sequence {envelope_sequence} topic {envelope_topic}"
+    )]
+    IdentityMismatch {
+        expected_publisher_id: u64,
+        expected_topic: String,
+        frame_publisher_id: u64,
+        frame_sequence: u64,
+        envelope_publisher_id: u64,
+        envelope_sequence: u64,
+        envelope_topic: String,
+    },
+}
+
+/// A direct ZMQ source that validates frame and envelope attribution once.
+pub struct ValidatedZmqSource {
+    stream: ZmqWireStream,
+    expected_topic: String,
+    expected_publisher_id: u64,
+    codec: Codec,
+}
+
+impl ValidatedZmqSource {
+    pub async fn connect_default(
+        endpoint: &str,
+        topic: &str,
+        expected_publisher_id: u64,
+    ) -> Result<Self> {
+        Self::connect(endpoint, topic, expected_publisher_id, ZMQ_RCVHWM).await
+    }
+
+    pub async fn connect(
+        endpoint: &str,
+        topic: &str,
+        expected_publisher_id: u64,
+        rcvhwm: i32,
+    ) -> Result<Self> {
+        Ok(Self {
+            stream: ZmqSubTransport::connect_single_consumer_with_rcvhwm(endpoint, topic, rcvhwm)
+                .await?,
+            expected_topic: topic.to_string(),
+            expected_publisher_id,
+            codec: Codec::default(),
+        })
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<ValidatedEnvelope, ValidatedZmqSourceError>> {
+        let message = match self.stream.next().await? {
+            Ok(message) => message,
+            Err(error) => return Some(Err(ValidatedZmqSourceError::Receive(error))),
+        };
+        let envelope = match self.codec.decode_envelope(&message.payload) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                return Some(Err(ValidatedZmqSourceError::EnvelopeDecode(error)));
+            }
+        };
+
+        if envelope.publisher_id != self.expected_publisher_id
+            || envelope.publisher_id != message.publisher_id
+            || envelope.sequence != message.sequence
+            || envelope.topic != self.expected_topic
+        {
+            return Some(Err(ValidatedZmqSourceError::IdentityMismatch {
+                expected_publisher_id: self.expected_publisher_id,
+                expected_topic: self.expected_topic.clone(),
+                frame_publisher_id: message.publisher_id,
+                frame_sequence: message.sequence,
+                envelope_publisher_id: envelope.publisher_id,
+                envelope_sequence: envelope.sequence,
+                envelope_topic: envelope.topic,
+            }));
+        }
+
+        Some(Ok(ValidatedEnvelope {
+            publisher_id: envelope.publisher_id,
+            sequence: envelope.sequence,
+            published_at: envelope.published_at,
+            payload: envelope.payload,
+        }))
+    }
 }
 
 impl ZmqSubTransport {
+    fn connect_socket(endpoint: &str, topic: &str) -> Result<Subscribe> {
+        Self::connect_socket_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
+    }
+
+    fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
+        anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
+        let ctx = shared_zmq_context()?;
+        let socket = connect_tmq_socket(
+            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
+            endpoint,
+        )?;
+        Ok(socket.subscribe(topic.as_bytes())?)
+    }
+
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
     pub async fn connect(endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = Context::new();
-        let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(endpoint)?
-            .subscribe(topic.as_bytes())?;
+        let socket = Self::connect_socket(endpoint, topic)?;
 
         tracing::info!(
             endpoint = %endpoint,
@@ -213,8 +503,87 @@ impl ZmqSubTransport {
 
         Ok(Self {
             broadcast_tx,
-            _socket_pump_handle: pump_handle,
+            socket_pump_handle: Arc::new(AbortOnDropHandle::new(pump_handle)),
         })
+    }
+
+    /// Connect one consumer directly to one ZMQ publisher.
+    ///
+    /// Unlike [`Self::connect`], this stream owns and polls the socket directly. It
+    /// therefore has no background pump or lossy broadcast hop and naturally
+    /// applies backpressure at the configured ZMQ receive HWM.
+    pub async fn connect_single_consumer(endpoint: &str, topic: &str) -> Result<ZmqWireStream> {
+        Self::connect_single_consumer_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM).await
+    }
+
+    /// Connect one consumer directly to one ZMQ publisher with an explicit receive HWM.
+    pub async fn connect_single_consumer_with_rcvhwm(
+        endpoint: &str,
+        topic: &str,
+        rcvhwm: i32,
+    ) -> Result<ZmqWireStream> {
+        let socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
+        tracing::info!(
+            endpoint,
+            topic,
+            rcvhwm,
+            "ZMQ single-consumer stream connected"
+        );
+        Self::single_consumer_stream(socket, topic)
+    }
+
+    /// Connect one consumer directly to multiple ZMQ endpoints.
+    ///
+    /// The returned stream owns one SUB socket connected to every endpoint. It
+    /// avoids the lossy local broadcast hop used by [`Self::connect_multiple`].
+    pub async fn connect_single_consumer_multiple(
+        endpoints: &[String],
+        topic: &str,
+    ) -> Result<ZmqWireStream> {
+        let mut endpoint_iter = endpoints.iter();
+        let Some(first_endpoint) = endpoint_iter.next() else {
+            anyhow::bail!("Cannot connect to zero endpoints");
+        };
+
+        let endpoint_count = endpoints.len();
+        let socket = Self::connect_socket(first_endpoint, topic)?;
+        for endpoint in endpoint_iter {
+            connect_zmq_socket(&socket, endpoint)?;
+        }
+
+        tracing::info!(
+            endpoint_count,
+            topic,
+            rcvhwm = ZMQ_RCVHWM,
+            "ZMQ single-consumer stream connected to multiple endpoints"
+        );
+        tracing::debug!(?endpoints, topic, "ZMQ single-consumer stream endpoints");
+        Self::single_consumer_stream(socket, topic)
+    }
+
+    fn single_consumer_stream(mut socket: Subscribe, topic: &str) -> Result<ZmqWireStream> {
+        let expected_topic = topic.as_bytes().to_vec();
+
+        let stream = stream! {
+            while let Some(result) = socket.next().await {
+                let frames = match result {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        yield Err(error.into());
+                        break;
+                    }
+                };
+
+                match decode_multipart(frames, &expected_topic) {
+                    Ok(message) => yield Ok(message),
+                    Err(error) => {
+                        tracing::warn!(%error, "Dropping malformed ZMQ message");
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
     }
 
     /// Connect to broker's XPUB endpoint (broker mode)
@@ -234,13 +603,13 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = Context::new();
-        let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(first_endpoint)?
-            .subscribe(topic.as_bytes())?;
+        let ctx = shared_zmq_context()?;
+        let socket =
+            connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
+                .subscribe(topic.as_bytes())?;
 
         for endpoint in endpoints_iter {
-            socket.get_socket().connect(endpoint)?;
+            connect_zmq_socket(&socket, endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ SUB connected to endpoint");
         }
 
@@ -256,7 +625,7 @@ impl ZmqSubTransport {
 
         Ok(Self {
             broadcast_tx,
-            _socket_pump_handle: pump_handle,
+            socket_pump_handle: Arc::new(AbortOnDropHandle::new(pump_handle)),
         })
     }
 
@@ -272,52 +641,21 @@ impl ZmqSubTransport {
                 };
 
                 let frames = match result {
-                    Ok(frames) => multipart_message(frames),
+                    Ok(frames) => frames,
                     Err(error) => {
                         tracing::error!(error = %error, "ZMQ receive error in socket pump");
                         break;
                     }
                 };
 
-                if frames.len() != 4 {
-                    tracing::warn!(
-                        frame_count = frames.len(),
-                        "Unexpected multipart frame count in socket pump"
-                    );
-                    continue;
-                }
-
-                let publisher_id_bytes = &frames[1];
-                if publisher_id_bytes.len() != 8 {
-                    tracing::warn!(
-                        actual = publisher_id_bytes.len(),
-                        "Invalid publisher_id frame in socket pump"
-                    );
-                    continue;
-                }
-                let publisher_id =
-                    u64::from_be_bytes(publisher_id_bytes.as_slice().try_into().unwrap());
-
-                let sequence_bytes = &frames[2];
-                if sequence_bytes.len() != 8 {
-                    tracing::warn!(
-                        actual = sequence_bytes.len(),
-                        "Invalid sequence frame in socket pump"
-                    );
-                    continue;
-                }
-                let sequence = u64::from_be_bytes(sequence_bytes.as_slice().try_into().unwrap());
-
-                tracing::trace!(
-                    publisher_id = publisher_id,
-                    sequence = sequence,
-                    "Socket pump received ZMQ message"
-                );
-
-                let frame_bytes = Bytes::from(frames[3].clone());
-                match Frame::decode(frame_bytes) {
-                    Ok(frame) => {
-                        let _ = broadcast_tx.send(frame.payload);
+                match decode_multipart(frames, &[]) {
+                    Ok(message) => {
+                        tracing::trace!(
+                            publisher_id = message.publisher_id,
+                            sequence = message.sequence,
+                            "Socket pump received ZMQ message"
+                        );
+                        let _ = broadcast_tx.send(message.payload);
                     }
                     Err(error) => {
                         tracing::warn!(error = %error, "Failed to decode ZMQ frame in socket pump");
@@ -330,12 +668,57 @@ impl ZmqSubTransport {
     }
 }
 
+fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<ZmqWireMessage> {
+    if frames.len() != 4 {
+        anyhow::bail!("unexpected ZMQ multipart frame count: {}", frames.len());
+    }
+
+    if !expected_topic.is_empty() && &frames[0][..] != expected_topic {
+        anyhow::bail!("ZMQ message topic disagrees with the exact subscription topic");
+    }
+
+    let publisher_id_bytes = &frames[1];
+    if publisher_id_bytes.len() != 8 {
+        anyhow::bail!(
+            "invalid ZMQ publisher ID frame length: {}",
+            publisher_id_bytes.len()
+        );
+    }
+    let publisher_id = u64::from_be_bytes(publisher_id_bytes[..].try_into().unwrap());
+
+    let sequence_bytes = &frames[2];
+    if sequence_bytes.len() != 8 {
+        anyhow::bail!(
+            "invalid ZMQ sequence frame length: {}",
+            sequence_bytes.len()
+        );
+    }
+    let sequence = u64::from_be_bytes(sequence_bytes[..].try_into().unwrap());
+
+    let frame_message = frames
+        .pop_back()
+        .ok_or_else(|| anyhow!("ZMQ multipart message has no payload frame"))?;
+    let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
+    let frame = Frame::decode(frame_bytes)?;
+
+    Ok(ZmqWireMessage {
+        publisher_id,
+        sequence,
+        payload: frame.payload,
+    })
+}
+
 #[async_trait]
 impl EventTransportRx for ZmqSubTransport {
     async fn subscribe(&self, _subject: &str) -> Result<WireStream> {
         let mut receiver = self.broadcast_tx.subscribe();
+        let socket_pump_handle = Arc::clone(&self.socket_pump_handle);
 
         let stream = stream! {
+            // Keep the socket pump alive after the transport is dropped. The
+            // final transport or subscription stream aborts the pump, which
+            // drops its owned ZMQ socket instead of detaching the task.
+            let _socket_pump_handle = socket_pump_handle;
             loop {
                 match receiver.recv().await {
                     Ok(payload) => yield Ok(payload),
@@ -360,19 +743,186 @@ impl EventTransportRx for ZmqSubTransport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configures_zmq_io_threads() {
+        for (value, expected) in [(None, 4), (Some("1"), 1)] {
+            let context = super::configured_zmq_context(value.map(OsStr::new)).unwrap();
+            assert_eq!(context.get_io_threads().unwrap(), expected);
+        }
+        for value in ["0", "invalid", "2147483648"] {
+            assert!(super::configured_zmq_context(Some(OsStr::new(value))).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(super::configured_zmq_context(Some(OsStr::from_bytes(b"\xff"))).is_err());
+        }
+    }
+
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
+    use std::collections::HashSet;
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn emfile_errno_selects_source_specific_guidance() {
+        assert_eq!(
+            socket_limit_guidance(Some(libc::EMFILE), ZMQ_SOCKET_LIMIT_GUIDANCE),
+            Some(ZMQ_SOCKET_LIMIT_GUIDANCE)
+        );
+        assert_eq!(
+            socket_limit_guidance(Some(libc::EMFILE), PROCESS_FD_LIMIT_GUIDANCE),
+            Some(PROCESS_FD_LIMIT_GUIDANCE)
+        );
+        assert_eq!(
+            socket_limit_guidance(Some(libc::EINVAL), ZMQ_SOCKET_LIMIT_GUIDANCE),
+            None
+        );
+    }
+
+    #[test]
+    fn zmq_emfile_guides_routers_to_shared_subscribers() {
+        let guidance = socket_limit_guidance(Some(libc::EMFILE), ZMQ_SOCKET_LIMIT_GUIDANCE)
+            .expect("libzmq EMFILE should include socket-limit guidance");
+
+        assert!(guidance.contains("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB"));
+        assert!(guidance.contains("default: 1"));
+        assert!(guidance.contains("group more publisher endpoints per subscriber socket"));
+    }
+
+    #[test]
+    fn tmq_io_emfile_preserves_error_and_adds_fd_guidance() {
+        let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EMFILE));
+        let original = error.to_string();
+        let message = map_socket_creation_error(error).to_string();
+
+        assert!(message.starts_with(&original));
+        assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
+        assert!(!message.contains("ZMQ_MAX_SOCKETS"));
+        assert!(!message.contains("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB"));
+    }
+
+    #[test]
+    fn non_emfile_error_is_unchanged() {
+        let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EINVAL));
+        let original = error.to_string();
+
+        assert_eq!(map_socket_creation_error(error).to_string(), original);
+    }
+
+    #[tokio::test]
+    async fn unbracketed_ipv6_endpoints_fail_before_connecting() {
+        let error = ZmqSubTransport::connect_broker("tcp://::1:5555", "topic")
+            .await
+            .err()
+            .expect("unbracketed IPv6 endpoint should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("IPv6 addresses must be bracketed"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_additional_connection_names_endpoint() {
+        let endpoint = format!("inproc://dynamo-zmq-connect-context-{}", std::process::id());
+        let mut subscriber =
+            DynamicZmqSubSocket::connect_with_rcvhwm(&endpoint, "topic", ZMQ_RCVHWM).unwrap();
+        let error = subscriber.add_endpoint("tcp://missing-port").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("tcp://missing-port"),
+            "{error:#}"
+        );
+    }
+
+    async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
+        publisher
+            .socket
+            .lock()
+            .await
+            .send(Multipart::from(frames))
+            .await
+            .unwrap();
+    }
+
+    fn encoded_event(topic: &str, publisher_id: u64, sequence: u64) -> Bytes {
+        MsgpackCodec
+            .encode_envelope(&EventEnvelope {
+                publisher_id,
+                sequence,
+                published_at: sequence,
+                topic: topic.to_string(),
+                payload: Bytes::from_static(b"payload"),
+            })
+            .unwrap()
+    }
+
+    async fn receive_publishers(
+        subscriber: &mut DynamicZmqSubSocket,
+        topic: &str,
+        sequence: u64,
+        expected: usize,
+        publications: &[(&ZmqPubTransport, &Bytes)],
+    ) -> HashSet<u64> {
+        timeout(Duration::from_secs(2), async {
+            let mut seen = HashSet::new();
+            while seen.len() < expected {
+                for (publisher, payload) in publications {
+                    publisher.publish(topic, (*payload).clone()).await.unwrap();
+                }
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), subscriber.next()).await
+                    && message.sequence == sequence
+                {
+                    seen.insert(message.publisher_id);
+                }
+            }
+            seen
+        })
+        .await
+        .expect("dynamic subscriber should receive expected publishers")
+    }
+
+    #[test]
+    fn test_zmq_message_owner_survives_clones_slices_and_thread_transfer() {
+        let small = b"inline zmq message";
+        let small_bytes = Bytes::from_owner(ZmqMessageOwner(Message::from(&small[..])));
+        let small_clone = small_bytes.clone();
+        drop(small_bytes);
+
+        let small_slice = small_clone.slice(7..10);
+        drop(small_clone);
+        assert_eq!(small_slice, Bytes::from_static(b"zmq"));
+
+        let large = vec![0x5a; 64 * 1024];
+        let large_message = Message::from(large);
+        let large_ptr = large_message.as_ptr();
+        let large_bytes = Bytes::from_owner(ZmqMessageOwner(large_message));
+        assert_eq!(large_bytes.as_ptr(), large_ptr);
+
+        let large_clone = large_bytes.clone();
+        drop(large_bytes);
+        let returned = std::thread::spawn(move || {
+            assert_eq!(large_clone.len(), 64 * 1024);
+            assert!(large_clone.iter().all(|byte| *byte == 0x5a));
+            large_clone.slice(1024..2048)
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(returned.len(), 1024);
+        assert!(returned.iter().all(|byte| *byte == 0x5a));
+    }
 
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
-        let port = 25555;
-        let endpoint = format!("tcp://127.0.0.1:{port}");
         let topic = "test-topic";
 
-        let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
+        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
             .await
             .expect("Failed to create publisher");
+        assert!(endpoint.starts_with("tcp://127.0.0.1:"));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -384,6 +934,10 @@ mod tests {
             .subscribe(topic)
             .await
             .expect("Failed to create subscription");
+
+        // Broker-mode callers retain only the returned stream. It must keep the
+        // socket pump alive after the transport itself leaves scope.
+        drop(subscriber);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -408,6 +962,327 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn single_consumer_applies_explicit_receive_hwm() {
+        let endpoint = format!("inproc://dynamo-zmq-explicit-hwm-{}", std::process::id());
+        let topic = "explicit-hwm";
+        let (_publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+
+        let socket = ZmqSubTransport::connect_socket_with_rcvhwm(&endpoint, topic, 37).unwrap();
+        assert_eq!(socket.get_socket().get_rcvhwm().unwrap(), 37);
+
+        let default_socket = ZmqSubTransport::connect_socket(&endpoint, topic).unwrap();
+        assert_eq!(
+            default_socket.get_socket().get_rcvhwm().unwrap(),
+            ZMQ_RCVHWM
+        );
+        assert!(
+            ZmqSubTransport::connect_single_consumer_with_rcvhwm(&endpoint, topic, 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validated_source_rejects_bad_envelopes_and_continues_zero_copy() {
+        let codec = Codec::default();
+        let topic = "validated-source";
+        let publisher_id = 7;
+        let invalid = ZmqWireMessage {
+            publisher_id,
+            sequence: 0,
+            payload: Bytes::from_static(&[0xc1]),
+        };
+        let mismatched_payload = codec
+            .encode_envelope_parts(8, 1, 11, topic, b"mismatch")
+            .unwrap();
+        let mismatch = ZmqWireMessage {
+            publisher_id,
+            sequence: 1,
+            payload: mismatched_payload,
+        };
+        let encoded = codec
+            .encode_envelope_parts(publisher_id, 2, 12, topic, b"payload")
+            .unwrap();
+        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_end = encoded_start + encoded.len();
+        let valid = ZmqWireMessage {
+            publisher_id,
+            sequence: 2,
+            payload: encoded,
+        };
+        let mut source = ValidatedZmqSource {
+            stream: Box::pin(futures::stream::iter(vec![
+                Ok(invalid),
+                Ok(mismatch),
+                Ok(valid),
+            ])),
+            expected_topic: topic.to_string(),
+            expected_publisher_id: publisher_id,
+            codec,
+        };
+
+        assert!(matches!(
+            source.next().await.unwrap(),
+            Err(ValidatedZmqSourceError::EnvelopeDecode(_))
+        ));
+        assert!(matches!(
+            source.next().await.unwrap(),
+            Err(ValidatedZmqSourceError::IdentityMismatch { .. })
+        ));
+        let envelope = source.next().await.unwrap().unwrap();
+        assert_eq!(envelope.publisher_id, publisher_id);
+        assert_eq!(envelope.sequence, 2);
+        assert_eq!(envelope.published_at, 12);
+        assert_eq!(envelope.payload, Bytes::from_static(b"payload"));
+        let payload_ptr = envelope.payload.as_ptr() as usize;
+        assert!((encoded_start..encoded_end).contains(&payload_ptr));
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn single_consumer_preserves_wire_identity_and_exact_topic() {
+        let endpoint = format!("inproc://dynamo-zmq-single-consumer-{}", std::process::id());
+        let topic = "single-consumer";
+        let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let mut stream = ZmqSubTransport::connect_single_consumer(&endpoint, topic)
+            .await
+            .unwrap();
+        let codec = MsgpackCodec;
+        let anchor = EventEnvelope {
+            publisher_id: 41,
+            sequence: 1,
+            published_at: 1,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"anchor"),
+        };
+        let anchor_bytes = codec.encode_envelope(&anchor).unwrap();
+
+        let wire = timeout(Duration::from_secs(2), async {
+            loop {
+                publisher
+                    .publish(topic, anchor_bytes.clone())
+                    .await
+                    .unwrap();
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), stream.next()).await
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("single-consumer socket should become ready");
+        assert_eq!(wire.publisher_id, anchor.publisher_id);
+        assert_eq!(wire.sequence, anchor.sequence);
+        assert_eq!(
+            codec.decode_envelope(&wire.payload).unwrap().payload,
+            anchor.payload
+        );
+
+        let sentinel = EventEnvelope {
+            publisher_id: 41,
+            sequence: 2,
+            published_at: 2,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"sentinel"),
+        };
+        let sentinel_bytes = codec.encode_envelope(&sentinel).unwrap();
+        let framed = Frame::new(sentinel_bytes.clone()).encode().to_vec();
+        send_raw(
+            &publisher,
+            vec![
+                format!("{topic}-prefix-collision").into_bytes(),
+                sentinel.publisher_id.to_be_bytes().to_vec(),
+                sentinel.sequence.to_be_bytes().to_vec(),
+                framed,
+            ],
+        )
+        .await;
+        publisher.publish(topic, sentinel_bytes).await.unwrap();
+
+        let wire = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("valid event should follow an exact-topic rejection")
+            .expect("single-consumer stream should remain open")
+            .expect("valid event should decode");
+        assert_eq!(wire.publisher_id, sentinel.publisher_id);
+        assert_eq!(wire.sequence, sentinel.sequence);
+        assert_eq!(
+            codec.decode_envelope(&wire.payload).unwrap().payload,
+            sentinel.payload
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_hostname_connections_reach_ipv4_peers() {
+        let topic = "broker-hostname";
+        let ctx = shared_zmq_context().unwrap();
+        let mut broker_sub = subscribe(&ctx)
+            .set_ipv6(false)
+            .bind("tcp://127.0.0.1:*")
+            .unwrap()
+            .subscribe(topic.as_bytes())
+            .unwrap();
+        let xsub_endpoint = broker_sub
+            .get_socket()
+            .get_last_endpoint()
+            .unwrap()
+            .unwrap()
+            .replace("127.0.0.1", "localhost");
+        let publisher = ZmqPubTransport::connect(&xsub_endpoint, topic)
+            .await
+            .unwrap();
+        // Some hosts have no IPv6 localhost entry; still verify the DNS family.
+        assert!(
+            !publisher
+                .socket
+                .lock()
+                .await
+                .get_socket()
+                .is_ipv6()
+                .unwrap()
+        );
+        let (broker_pub, xpub_endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
+            .await
+            .unwrap();
+        let subscriber = ZmqSubTransport::connect_broker(
+            &xpub_endpoint.replace("127.0.0.1", "localhost"),
+            topic,
+        )
+        .await
+        .unwrap();
+        let mut stream = subscriber.subscribe(topic).await.unwrap();
+        let encoded = encoded_event(topic, 101, 1);
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                publisher.publish(topic, encoded.clone()).await.unwrap();
+                if let Ok(frames) = timeout(Duration::from_millis(25), broker_sub.next()).await {
+                    broker_pub
+                        .socket
+                        .lock()
+                        .await
+                        .send(frames.unwrap().unwrap())
+                        .await
+                        .unwrap();
+                }
+                if let Ok(event) = timeout(Duration::from_millis(25), stream.next()).await {
+                    assert_eq!(event.unwrap().unwrap(), encoded);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("hostname connections should deliver through IPv4-only peers");
+    }
+
+    #[rstest::rstest]
+    #[case("inproc", "inproc")]
+    #[case("tcp://127.0.0.1:0", "tcp://[::1]:0")]
+    #[case("tcp://[::1]:0", "tcp://127.0.0.1:0")]
+    #[tokio::test]
+    async fn dynamic_sub_socket_adds_and_removes_publishers(
+        #[case] endpoint_a: &str,
+        #[case] endpoint_b: &str,
+    ) {
+        if (ipv6_option_for(endpoint_a).unwrap() || ipv6_option_for(endpoint_b).unwrap())
+            && let Err(error) = std::net::TcpListener::bind("[::1]:0")
+        {
+            eprintln!("Skipping mixed IPv4/IPv6 subscriber test: {error}");
+            return;
+        }
+        let process = std::process::id();
+        let (endpoint_a, endpoint_b) = if endpoint_a == "inproc" {
+            (
+                format!("inproc://dynamo-zmq-dynamic-a-{process}"),
+                format!("inproc://dynamo-zmq-dynamic-b-{process}"),
+            )
+        } else {
+            (endpoint_a.to_string(), endpoint_b.to_string())
+        };
+        let topic = "dynamic-subscriber";
+        let (publisher_a, endpoint_a) = ZmqPubTransport::bind(&endpoint_a, topic).await.unwrap();
+        let (publisher_b, endpoint_b) = ZmqPubTransport::bind(&endpoint_b, topic).await.unwrap();
+        let endpoint_a = endpoint_a.replace("127.0.0.1", "localhost");
+        let endpoint_b = endpoint_b.replace("127.0.0.1", "localhost");
+        let mut subscriber =
+            DynamicZmqSubSocket::connect_with_rcvhwm(&endpoint_a, topic, ZMQ_RCVHWM).unwrap();
+        subscriber.add_endpoint(&endpoint_b).unwrap();
+
+        let encoded_a = encoded_event(topic, 101, 1);
+        let encoded_b = encoded_event(topic, 202, 1);
+        let seen = receive_publishers(
+            &mut subscriber,
+            topic,
+            1,
+            2,
+            &[(&publisher_a, &encoded_a), (&publisher_b, &encoded_b)],
+        )
+        .await;
+        assert_eq!(seen, HashSet::from([101, 202]));
+
+        subscriber.remove_endpoint(&endpoint_a).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let encoded_a_after_removal = encoded_event(topic, 101, 2);
+        let encoded_b_after_removal = encoded_event(topic, 202, 2);
+        let publications = [
+            (&publisher_a, &encoded_a_after_removal),
+            (&publisher_b, &encoded_b_after_removal),
+        ];
+        assert_eq!(
+            receive_publishers(&mut subscriber, topic, 2, 1, &publications).await,
+            HashSet::from([202])
+        );
+
+        let removed_delivery = timeout(Duration::from_millis(250), async {
+            loop {
+                publisher_a
+                    .publish(topic, encoded_a_after_removal.clone())
+                    .await
+                    .unwrap();
+                if let Some(Ok(message)) = subscriber.next().await
+                    && message.publisher_id == 101
+                    && message.sequence == 2
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            removed_delivery.is_err(),
+            "removed publisher delivered data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zmq_socket_pump_stops_with_last_owner() {
+        let endpoint = format!("inproc://dynamo-zmq-pump-lifetime-{}", std::process::id());
+        let topic = "pump-lifetime";
+
+        let (_publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let subscriber = ZmqSubTransport::connect(&endpoint, topic).await.unwrap();
+        let pump_handle = subscriber.socket_pump_handle.abort_handle();
+        let stream = subscriber.subscribe(topic).await.unwrap();
+
+        drop(subscriber);
+        tokio::task::yield_now().await;
+        assert!(
+            !pump_handle.is_finished(),
+            "subscription stream should keep the socket pump alive"
+        );
+
+        drop(stream);
+        timeout(Duration::from_secs(1), async {
+            while !pump_handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("socket pump should stop when its final owner is dropped");
     }
 
     #[tokio::test]
@@ -447,5 +1322,126 @@ mod tests {
             assert_eq!(decoded.sequence, i);
             assert_eq!(decoded.topic, topic);
         }
+    }
+
+    #[tokio::test]
+    async fn test_zmq_socket_pump_continues_after_malformed_messages() {
+        let endpoint = format!("inproc://dynamo-zmq-malformed-{}", std::process::id());
+        let topic = "malformed-test";
+
+        let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let subscriber = ZmqSubTransport::connect(&endpoint, topic).await.unwrap();
+        let mut stream = subscriber.subscribe(topic).await.unwrap();
+
+        let codec = MsgpackCodec;
+        let anchor = EventEnvelope {
+            publisher_id: 12345,
+            sequence: 0,
+            published_at: 1700000000000,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"anchor"),
+        };
+        let anchor_bytes = codec.encode_envelope(&anchor).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let received_anchor = loop {
+            publisher
+                .publish(topic, anchor_bytes.clone())
+                .await
+                .unwrap();
+            if let Ok(Some(Ok(bytes))) = timeout(Duration::from_millis(25), stream.next()).await {
+                break bytes;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timeout waiting for subscriber readiness anchor"
+            );
+        };
+        assert_eq!(
+            codec.decode_envelope(&received_anchor).unwrap().payload,
+            anchor.payload
+        );
+
+        let topic_frame = topic.as_bytes().to_vec();
+        let publisher_frame = 12345_u64.to_be_bytes().to_vec();
+        let sequence_frame = 1_u64.to_be_bytes().to_vec();
+        let empty_frame = Frame::new(Bytes::new()).encode().to_vec();
+
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                publisher_frame.clone(),
+                sequence_frame.clone(),
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                publisher_frame.clone(),
+                sequence_frame.clone(),
+                empty_frame.clone(),
+                b"extra".to_vec(),
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                vec![0; 7],
+                sequence_frame.clone(),
+                empty_frame.clone(),
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                publisher_frame.clone(),
+                vec![0; 7],
+                empty_frame,
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame,
+                publisher_frame,
+                sequence_frame,
+                vec![99, 0, 0, 0, 0],
+            ],
+        )
+        .await;
+
+        let sentinel = EventEnvelope {
+            publisher_id: 12345,
+            sequence: 2,
+            published_at: 1700000000000,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"sentinel"),
+        };
+        publisher
+            .publish(topic, codec.encode_envelope(&sentinel).unwrap())
+            .await
+            .unwrap();
+
+        let decoded = timeout(Duration::from_secs(2), async {
+            loop {
+                let received = stream.next().await.unwrap().unwrap();
+                let decoded = codec.decode_envelope(&received).unwrap();
+                if decoded.sequence == sentinel.sequence {
+                    break decoded;
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for valid message after malformed messages");
+        assert_eq!(decoded.publisher_id, sentinel.publisher_id);
+        assert_eq!(decoded.sequence, sentinel.sequence);
+        assert_eq!(decoded.payload, sentinel.payload);
     }
 }

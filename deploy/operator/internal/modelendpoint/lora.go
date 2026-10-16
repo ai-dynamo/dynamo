@@ -21,13 +21,58 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const maxLoRAErrorResponseBytes = 64 * 1024
+
+type loRAManagementUnavailableError struct {
+	operation  string
+	statusCode int
+	body       string
+}
+
+func (e *loRAManagementUnavailableError) Error() string {
+	return fmt.Sprintf("%s LoRA failed with status %d: %s", e.operation, e.statusCode, e.body)
+}
+
+func isLoRAManagementUnavailable(err error) bool {
+	var target *loRAManagementUnavailableError
+	return errors.As(err, &target)
+}
+
+func loRAManagementError(operation string, statusCode int, body []byte) error {
+	response := string(body)
+	normalized := strings.ToLower(response)
+	missingHandler := strings.Contains(normalized, "lora management not available") ||
+		strings.Contains(normalized, fmt.Sprintf("endpoint '%s_lora' not found in local registry", operation))
+	if statusCode == http.StatusInternalServerError && missingHandler {
+		return &loRAManagementUnavailableError{
+			operation:  operation,
+			statusCode: statusCode,
+			body:       response,
+		}
+	}
+	return fmt.Errorf("%s LoRA failed with status %d: %s", operation, statusCode, response)
+}
+
+func readLoRAErrorResponse(body io.Reader) ([]byte, error) {
+	payload, err := io.ReadAll(io.LimitReader(body, maxLoRAErrorResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxLoRAErrorResponseBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxLoRAErrorResponseBytes)
+	}
+	return payload, nil
+}
 
 // loadLoRA loads a LoRA model on a single endpoint
 func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI string) error {
@@ -70,9 +115,12 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := readLoRAErrorResponse(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("load LoRA failed with status %d and unreadable response: %w", resp.StatusCode, readErr)
+		}
 		logs.V(1).Info("Load LoRA failed", "address", address, "status", resp.StatusCode, "body", string(body))
-		return fmt.Errorf("load LoRA failed with status %d: %s", resp.StatusCode, string(body))
+		return loRAManagementError("load", resp.StatusCode, body)
 	}
 
 	logs.Info("Successfully loaded LoRA", "address", address, "modelName", modelName, "sourceURI", sourceURI)
@@ -109,12 +157,15 @@ func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) erro
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := readLoRAErrorResponse(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("unload LoRA failed with status %d and unreadable response: %w", resp.StatusCode, readErr)
+		}
 		logs.V(1).Info("Unload LoRA endpoint returned error status",
 			"address", address,
 			"status", resp.StatusCode,
 			"body", string(body))
-		return fmt.Errorf("unload LoRA failed with status %d: %s", resp.StatusCode, string(body))
+		return loRAManagementError("unload", resp.StatusCode, body)
 	}
 
 	logs.V(1).Info("Successfully unloaded LoRA", "address", address, "modelName", modelName)

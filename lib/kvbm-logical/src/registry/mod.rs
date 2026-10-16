@@ -199,7 +199,7 @@ impl BlockRegistry {
     /// Returns `Vec<(SequenceHash, bool)>` where `bool` is true if a block
     /// exists for at least one of the supplied tier `TypeId`s.
     ///
-    /// Same consistency caveats as [`check_presence`]: this is a
+    /// Same consistency caveats as `check_presence`: this is a
     /// refcounted shadow of authoritative store state, not a linearizable
     /// snapshot. May briefly disagree with the store mid-mutation.
     ///
@@ -229,8 +229,8 @@ impl BlockRegistry {
     // pattern should replace the direct EventsManager call here.
     #[inline]
     pub fn register_sequence_hash(&self, seq_hash: SequenceHash) -> BlockRegistrationHandle {
-        let map = self.prt.prefix(&seq_hash);
-        let mut weak = map.entry(seq_hash).or_default();
+        let mut map = self.prt.prefix(&seq_hash);
+        let weak = map.entry(seq_hash).or_default();
 
         if let Some(inner) = weak.upgrade() {
             return BlockRegistrationHandle::from_inner(inner);
@@ -334,13 +334,13 @@ impl BlockRegistry {
         let mut entries = entries.into_iter().peekable();
         while let Some(first) = entries.next() {
             let position = first.1.position();
-            let map = self.prt.prefix(&first.1);
+            let mut map = self.prt.prefix(&first.1);
             let mut current = first;
 
             loop {
                 let (key, seq_hash) = current;
                 debug_assert_eq!(seq_hash.position(), position);
-                let mut weak = map.entry(seq_hash).or_default();
+                let weak = map.entry(seq_hash).or_default();
                 let (inner, is_new) = match weak.upgrade() {
                     Some(inner) => (inner, false),
                     None => {
@@ -364,8 +364,8 @@ impl BlockRegistry {
     /// Used when copying blocks between pools where we don't want to count the transfer as a new access.
     #[allow(dead_code)]
     pub(crate) fn transfer_registration(&self, seq_hash: SequenceHash) -> BlockRegistrationHandle {
-        let map = self.prt.prefix(&seq_hash);
-        let mut weak = map.entry(seq_hash).or_default();
+        let mut map = self.prt.prefix(&seq_hash);
+        let weak = map.entry(seq_hash).or_default();
 
         match weak.upgrade() {
             Some(inner) => BlockRegistrationHandle::from_inner(inner),

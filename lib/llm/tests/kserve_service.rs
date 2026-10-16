@@ -540,6 +540,14 @@ pub mod kserve_test {
             model_name,
             "Expected response of the same model name",
         );
+        let mut output_names = response
+            .get_ref()
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         for output in &response.get_ref().outputs {
             match output.name.as_str() {
                 "text_output" => {
@@ -699,6 +707,13 @@ pub mod kserve_test {
                         "Expected response ID to match request ID"
                     );
                     let expected_output: Vec<Vec<u8>> = vec!["dummy".into(), "input".into()];
+                    let mut output_names = response
+                        .outputs
+                        .iter()
+                        .map(|output| output.name.as_str())
+                        .collect::<Vec<_>>();
+                    output_names.sort_unstable();
+                    assert_eq!(output_names, ["finish_reason", "text_output"]);
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -790,6 +805,13 @@ pub mod kserve_test {
                         format!("{response_idx}"),
                         "Expected response ID to match request ID"
                     );
+                    let mut output_names = response
+                        .outputs
+                        .iter()
+                        .map(|output| output.name.as_str())
+                        .collect::<Vec<_>>();
+                    output_names.sort_unstable();
+                    assert_eq!(output_names, ["finish_reason", "text_output"]);
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -873,30 +895,21 @@ pub mod kserve_test {
             .unwrap();
         let mut inbound = response.into_inner();
 
-        loop {
-            match inbound.message().await {
-                Ok(Some(_)) => {
-                    panic!("Expecting failure in the stream");
-                }
-                Err(err) => {
-                    assert_eq!(
-                        err.code(),
-                        tonic::Code::Internal,
-                        "Expected Internal error for streaming, get {}",
-                        err
-                    );
-                    assert!(
-                        err.message().contains("Failed to generate completions:"),
-                        "Expected error message to contain 'Failed to generate completions:', got: {}",
-                        err.message()
-                    );
-                }
-                Ok(None) => {
-                    // End of stream
-                    break;
-                }
-            }
-        }
+        let err = inbound
+            .message()
+            .await
+            .expect_err("the failing engine must terminate the stream with an error");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for streaming, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("Failed to generate completions:"),
+            "Expected error message to contain 'Failed to generate completions:', got: {}",
+            err.message()
+        );
     }
 
     #[rstest]
@@ -1019,6 +1032,22 @@ pub mod kserve_test {
             model_name,
             "Expected response of the same model name",
         );
+        let mut input_names = response
+            .get_ref()
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        assert_eq!(input_names, ["streaming", "text_input"]);
+        let mut output_names = response
+            .get_ref()
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         // input
         for io in &response.get_ref().inputs {
             match io.name.as_str() {
@@ -1091,6 +1120,20 @@ pub mod kserve_test {
             config.name, model_name,
             "Expected response of the same model name",
         );
+        let mut input_names = config
+            .input
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        assert_eq!(input_names, ["streaming", "text_input"]);
+        let mut output_names = config
+            .output
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         // input
         for io in &config.input {
             match io.name.as_str() {
@@ -1502,6 +1545,24 @@ pub mod kserve_test {
             response.get_ref().name,
             "tensor",
             "Expected response of the same model name",
+        );
+        assert_eq!(
+            response
+                .get_ref()
+                .inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            ["input"]
+        );
+        assert_eq!(
+            response
+                .get_ref()
+                .outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            ["output"]
         );
         // input
         for io in &response.get_ref().inputs {
@@ -1947,8 +2008,8 @@ pub mod kserve_test {
 
         // Verify metrics are present and have correct values
         assert!(
-            metrics_body.contains("dynamo_frontend_inflight_requests"),
-            "Metrics should contain inflight gauge"
+            metrics_body.contains("dynamo_frontend_active_requests"),
+            "Metrics should contain active requests gauge"
         );
         assert_metric_value(&metrics_body, "test_model", "completions", 1);
         assert_metric_value(&metrics_body, "test_tensor_model", "tensor", 1);

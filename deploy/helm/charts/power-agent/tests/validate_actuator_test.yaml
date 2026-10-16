@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template-time validation of agent.actuator selection. These tests
+# guard the validateActuator helper in templates/_helpers.tpl — that
+# typos like `agent.actuator=NVML` get caught at `helm install` time
+# (clear error) rather than at pod-start time (argparse CrashLoopBackOff).
+#
+# Assertion style: `contains` / `notContains` against the rendered
+# `command:` YAML list (not `matchRegex`, which helm-unittest 1.1.0
+# only supports on string paths — see the error
+# "expect '<path>' to be a string"). Each `contains` check pins the
+# exact rendered flag string, which is stricter than a substring
+# regex (catches accidental flag-value drift).
+
+suite: agent.actuator validation
+templates:
+  - templates/daemonset.yaml
+release:
+  name: power-agent
+  namespace: dynamo-system
+set:
+  # image.tag is required by validateImageTag; pin a sentinel so the
+  # actuator tests below can run without setting it per-test.
+  image.tag: v1.0.0
+
+tests:
+  # --- Happy paths: both valid values must render ---
+
+  - it: should render with the default actuator (nvml)
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --actuator=nvml
+
+  - it: should render with actuator=nvml explicit
+    set:
+      agent.actuator: nvml
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --actuator=nvml
+
+  - it: should render with actuator=dcgm and inject dcgm flags
+    set:
+      agent.actuator: dcgm
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --actuator=dcgm
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-host=nvidia-dcgm.gpu-operator.svc.cluster.local
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-port=5555
+
+  - it: should plumb custom dcgm.host / dcgm.port when overridden
+    set:
+      agent.actuator: dcgm
+      agent.dcgm.host: dcgm-custom.example.svc.cluster.local
+      agent.dcgm.port: 9999
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-host=dcgm-custom.example.svc.cluster.local
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-port=9999
+
+  - it: should NOT emit dcgm flags when actuator=nvml (no dead args)
+    set:
+      agent.actuator: nvml
+    asserts:
+      # notContains works on list paths the same way contains does
+      # — checks no element exactly matches. The default rendered
+      # --dcgm-host value is the only one the chart could emit
+      # since no override is set here.
+      - notContains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-host=nvidia-dcgm.gpu-operator.svc.cluster.local
+      - notContains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-port=5555
+
+  # --- Validation failures: typos must surface at template time ---
+
+  - it: should reject agent.actuator=NVML (uppercase typo)
+    set:
+      agent.actuator: NVML
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.actuator must be 'nvml' or 'dcgm'"
+
+  - it: should reject agent.actuator=DCGM (uppercase typo)
+    set:
+      agent.actuator: DCGM
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.actuator must be 'nvml' or 'dcgm'"
+
+  - it: should reject agent.actuator=auto (auto-detect was removed in v1.2)
+    set:
+      agent.actuator: auto
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.actuator must be 'nvml' or 'dcgm'"
+
+  - it: should reject unknown actuator values
+    set:
+      agent.actuator: typo
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.actuator must be 'nvml' or 'dcgm'"
+
+  - it: should reject empty actuator string
+    set:
+      agent.actuator: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.actuator must be 'nvml' or 'dcgm'"

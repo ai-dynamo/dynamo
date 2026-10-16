@@ -14,7 +14,7 @@ import pytest
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,  # needs sglang packages installed
+    pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]

@@ -4,27 +4,27 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
-    kv_router::indexer::try_build_cache_indexer,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
-    lora::LoraFilteredRouter,
+    kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
+    kv_router::{
+        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
+        metrics::RouterRequestMetrics,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::{
-        llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
-        preprocessor::MultimodalData,
-    },
+    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::SessionAffinityPushRouter,
+    session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -46,32 +46,6 @@ use dynamo_runtime::{
 };
 use std::sync::Arc;
 
-fn multimodal_cache_key_from_url(url: &str) -> String {
-    blake3::hash(url.as_bytes()).to_hex().to_string()
-}
-
-fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
-    let Some(items) = request
-        .multi_modal_data
-        .as_ref()
-        .and_then(|media| media.get("image_url"))
-    else {
-        return Vec::new();
-    };
-
-    let mut keys = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
-            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(_) => {}
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
-}
-
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
@@ -79,6 +53,7 @@ pub struct PreprocessedRouting {
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
+    encoder_router: Arc<EncoderRouter>,
 }
 
 pub struct PreparedEngine {
@@ -180,53 +155,45 @@ fn preprocessed_backend_engine(
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
-    session_affinity_ttl: Option<Duration>,
-) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
-{
+    endpoint_id: &dynamo_runtime::protocols::EndpointId,
+    affinity: Option<AffinityCoordinator>,
+    load_context: Arc<RoutingLoadContext>,
+) -> anyhow::Result<Arc<RoutingHost>> {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
     // arms below are only reached with LoRA serving disabled.
     validate_router_mode_for_lora(
         router_mode,
-        model_manager.lora_filter().is_some(),
-        session_affinity_ttl.is_some(),
+        model_manager.lora_enabled(),
+        affinity.is_some(),
     )?;
 
-    let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new(
-            router,
-            session_affinity_ttl,
-            true,
-        )?),
-        RouterMode::Random | RouterMode::RoundRobin => match model_manager.lora_filter() {
-            Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
-                router,
-                lora_filter,
-                model_manager.lora_load_estimator().clone(),
-                router_mode,
-            )),
-            None => Arc::new(SessionAffinityPushRouter::new(
-                router,
-                session_affinity_ttl,
-                false,
-            )?),
-        },
-        RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
-            router,
-            session_affinity_ttl,
-            router_mode.is_direct_routing(),
-        )?),
+    let routing_host = match router_mode {
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl)?)
+            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
+                router,
+                chooser,
+                load_context,
+                affinity,
+            ))
+        }
+        _ => {
+            let lora = model_manager
+                .lora_filter_for(endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+            Arc::new(RoutingHost::new_builtin_with_capabilities(
+                router,
+                load_context,
+                affinity,
+                lora,
+            )?)
         }
     };
 
-    Ok(engine)
+    Ok(routing_host)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -234,25 +201,64 @@ pub async fn build_preprocessed_routing(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
+    load_context: Arc<RoutingLoadContext>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_with_session_affinity_mode(
+        client,
+        model_manager,
+        router_mode,
+        load_context,
+        chooser,
+        prefill_chooser,
+        encoder_chooser,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+        SessionAffinityMode::Hard,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    load_context: Arc<RoutingLoadContext>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
     validate_router_mode_for_lora(
         router_mode,
-        model_manager.lora_filter().is_some(),
+        model_manager.lora_enabled(),
         session_affinity_ttl_secs.is_some(),
     )?;
-
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    let endpoint_id = router_client.endpoint.id();
+
+    let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
+    let affinity = match (ttl, chooser.as_ref()) {
+        (Some(ttl), Some(chooser)) => {
+            let affinity = chooser.affinity_coordinator(ttl, session_affinity_mode)?;
+            affinity.enable_replica_sync(router_client.clone()).await?;
+            Some(affinity)
+        }
+        _ => create_affinity_coordinator(ttl, session_affinity_mode, router_client.clone()).await?,
+    };
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)
@@ -266,42 +272,48 @@ pub async fn build_preprocessed_routing(
             as MultimodalCacheKeyExtractor<PreprocessedRequest>
     });
 
-    let monitor_arc =
-        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
-
     let router = LlmPushRouter::from_client_with_state(
         router_client,
         router_mode,
-        monitor_arc,
+        None,
         embedding_cache_indexer,
         cache_key_extractor,
     )
     .await?;
 
-    // Eagerly register router request metrics so they appear as zeros even in
-    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
-    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
+    // Eagerly register router request metrics so they appear as zeros before
+    // RoutingHost is constructed. The host repeats this idempotently so the
+    // standalone router path is covered as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
-        PrefillRouter::disabled(
+        PrefillRouter::disabled_with_session_affinity_mode(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
+            session_affinity_mode,
         )
     });
-
-    let backend_engine = preprocessed_backend_engine(
+    let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
+    let routing_host = preprocessed_backend_engine(
         router,
         router_mode,
         chooser,
         &model_manager,
-        session_affinity_ttl_secs.map(Duration::from_secs),
+        &endpoint_id,
+        affinity,
+        load_context,
     )?;
+    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+        prefill_router
+            .set_decode_routing_host(routing_host.clone())
+            .context("install conditional-disagg decode RoutingHost")?;
+    }
+    let backend_engine: ServiceEngine<_, _> = routing_host;
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,
+        encoder_router,
     })
 }
 
@@ -333,6 +345,9 @@ pub async fn prepare_engine(
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
             watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
+            watcher.set_tokenizer_fallback_enabled(
+                local_model.runtime_config().tokenizer_fallback_enabled,
+            );
             let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -449,7 +464,7 @@ where
         .link(engine)?
         .link(backend.backward_edge())?
         .link(preprocessor.backward_edge())?
-        .link(frontend)?)
+        .link_terminal(frontend)?)
 }
 
 impl PreprocessedRouting {
@@ -479,19 +494,22 @@ impl PreprocessedRouting {
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator_for::<BackendOutput>();
         let prefill_op = self.prefill_router.into_operator();
+        let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
             .link(preprocessor_op.forward_edge())?
             .link(migration.forward_edge())?
             .link(token_backend.forward_edge())?
+            .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(encoder_op.backward_edge())?
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }
@@ -514,15 +532,18 @@ impl PreprocessedRouting {
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
+        let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
             .link(migration.forward_edge())?
+            .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(encoder_op.backward_edge())?
             .link(migration.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }

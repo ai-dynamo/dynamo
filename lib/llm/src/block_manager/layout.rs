@@ -19,7 +19,7 @@
 //!   associated [`StorageType`].
 //! - [`BlockLayoutConfig`]: Provides metadata about the layout, such as the number of blocks, layers, page size,
 //!   and data type.
-//! - [`BlockLayoutLookup`]: Offers methods to retrieve the memory address and size of a specific memory region
+//! - `BlockLayoutLookup`: Offers methods to retrieve the memory address and size of a specific memory region
 //!   (page) within the layout.
 //!
 //! ### 2. Layout Configuration
@@ -29,7 +29,7 @@
 //! - `page_size`: Size of each page (often corresponds to a dimension like sequence length or number of tokens).
 //! - `inner_dim`: The inner dimension of the data (e.g., hidden size).
 //! - `alignment`: Required memory alignment for certain operations or hardware. Must be a power of 2.
-//! - `dtype`: The data type ([`DType`]) of the elements stored.
+//! - `dtype`: The data type (`DType`) of the elements stored.
 //!
 //! This configuration is validated to ensure consistency and correctness (e.g., alignment must be a power of 2).
 //!
@@ -41,7 +41,7 @@
 //!   necessary.
 //!
 //! ### 4. Strides and Alignment
-//! The layout calculations meticulously handle strides between layers and blocks. For instance, in [`FullyContiguousConfig`]:
+//! The layout calculations meticulously handle strides between layers and blocks. For instance, in `FullyContiguousConfig`:
 //! - `layer_stride_in_bytes`: The size of one memory region (page).
 //! - `natural_block_stride`: The size of one block if there were no additional alignment padding between blocks.
 //! - `block_stride_in_bytes`: The actual stride between the start of consecutive blocks, potentially larger than
@@ -53,7 +53,7 @@
 //!
 //! ### 5. Storage Interaction
 //! Layouts are tightly coupled with the [`Storage`] trait from the `super::storage` module.
-//! The [`BlockLayout::allocate`] method uses a [`StorageAllocator`] to obtain the necessary memory,
+//! The `BlockLayout::allocate` method uses a [`StorageAllocator`] to obtain the necessary memory,
 //! calculating the required size including any padding for alignment.
 //!
 //! ### 6. Error Handling

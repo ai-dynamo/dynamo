@@ -40,9 +40,6 @@ spec:
             - dynamo.frontend
             - --router-mode
             - kv
-            - --router-reset-states
-            - --request-plane
-            - nats
           env:
             - name: POD_UID
               valueFrom:
@@ -73,8 +70,6 @@ spec:
             - --disaggregation-mode
             - prefill
             - --publish-events-and-metrics
-            - --request-plane
-            - nats
             - --kv-block-size
             - "32"
             - --dyn-tool-call-parser
@@ -159,8 +154,6 @@ spec:
             - --disaggregation-mode
             - decode
             - --publish-events-and-metrics
-            - --request-plane
-            - nats
             - --kv-block-size
             - "32"
             - --dyn-tool-call-parser
@@ -251,6 +244,7 @@ data:
   prefill.yaml: |
     cache_transceiver_config:
       backend: UCX
+      transceiver_runtime: CPP
       max_tokens_in_buffer: 0
       kv_transfer_sender_future_timeout_ms: 30000
     allreduce_strategy: MNNVL
@@ -262,7 +256,6 @@ data:
     moe_expert_parallel_size: 4
     enable_attention_dp: true
     pipeline_parallel_size: 1
-    num_postprocess_workers: 4
     print_iter_log: true
     stream_interval: 100
     trust_remote_code: true
@@ -286,6 +279,7 @@ data:
     allreduce_strategy: MNNVL
     cache_transceiver_config:
       backend: UCX
+      transceiver_runtime: CPP
       max_tokens_in_buffer: 0
       kv_transfer_sender_future_timeout_ms: 30000
     max_num_tokens: 640
@@ -316,7 +310,6 @@ data:
         - cutlass
         - cublaslt
         - cuda_core
-    num_postprocess_workers: 8
     print_iter_log: true
     stream_interval: 10
     tensor_parallel_size: 4

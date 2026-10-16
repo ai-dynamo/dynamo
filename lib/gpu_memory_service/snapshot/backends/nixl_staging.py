@@ -14,7 +14,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
-from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
     FILE_MEM_TYPE,
@@ -293,7 +293,7 @@ class _NixlPosixStagingTransferSession:
             )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            cuda_utils.cuda_runtime_set_device(self._device)
+            get_vmm().runtime_set_device(self._device)
             agent = create_nixl_agent(
                 api,
                 agent_name=agent_name,
@@ -302,7 +302,7 @@ class _NixlPosixStagingTransferSession:
             )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            slots = make_pinned_copy_slots(_PINNED_COPY_BUFFERS_PER_WORKER)
+            slots = make_pinned_copy_slots(get_vmm(), _PINNED_COPY_BUFFERS_PER_WORKER)
             prep_elapsed_s = time.monotonic() - prep_t0
             logger.info(
                 "%s prepared %s=%s files=%d prep_elapsed=%.3fs "
@@ -335,7 +335,7 @@ class _NixlPosixStagingTransferSession:
         prepared: _PreparedNixlGroup,
         targets: Mapping[str, GMSTransferTarget],
     ) -> None:
-        cuda_utils.cuda_runtime_set_device(self._device)
+        get_vmm().runtime_set_device(self._device)
         group_t0 = time.monotonic()
         group_bytes = 0
         try:
@@ -394,7 +394,7 @@ def restore_file_groups_with_nixl_staging(
     next_slot = 0
     try:
         if owned_slots:
-            slots = make_pinned_copy_slots(buffers_per_worker)
+            slots = make_pinned_copy_slots(get_vmm(), buffers_per_worker)
         for file_path, sources in file_groups:
             fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
             try:

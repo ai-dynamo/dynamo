@@ -111,13 +111,13 @@ NAMESPACE="test-disagg"
 MODEL="Qwen/Qwen3-0.6B"
 
 # Terminal 1: Decode mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.backend.generate" \
     --disaggregation-mode decode --num-workers 2 \
     --speedup-ratio 10 --block-size 16
 
 # Terminal 2: Prefill mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.prefill.generate" \
     --disaggregation-mode prefill --num-workers 2 \
     --speedup-ratio 10 --block-size 16
@@ -157,16 +157,12 @@ This starts the router with:
 - KV cache routing mode
 - HTTP port 8000
 
-The default event path uses NATS Core/local-indexer mode. `--router-reset-states`
-only applies to deprecated durable JetStream mode (`--router-durable-kv-events`)
-and is not needed for these benchmark commands.
-
 To see all available router arguments, run:
 ```bash
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/components/router/router-guide.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/router-guide.md).
 
 > [!Note]
 > If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-router-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
@@ -185,7 +181,7 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 - Uses the same routing mode as the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
-No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/components/router/router-guide.md#disaggregated-serving) for more details.
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/router-guide.md#disaggregated-serving) for more details.
 
 > [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
@@ -287,14 +283,14 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 1. The trace is synthesized (same parameters as `real_data_benchmark.py`) and split into low / medium / high tiers according to `--priority-distribution`.
 2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every trace row carries an OpenAI-compatible extension field:
    ```json
-   {"nvext": {"agent_hints": {"priority": <value>}}}
+   {"extra": {"nvext": {"agent_hints": {"priority": <value>}}}}
    ```
    The `priority` value raises the request's router queue priority -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
 3. The baseline and priority runs use the same aiperf seed and split so prompt content matches. The priority run offsets `hash_ids` to keep its KV cache cold relative to the baseline and prevent mocker KV cache cross-contamination.
 
 #### Prerequisites: tune the priority queue
 
-The router queue is enabled by default, but the default threshold is conservative. To make priority effects visible under benchmark load, use a lower `--router-queue-threshold`. A threshold of `0.0` is the most sensitive setting and queues once all eligible workers have active prefill tokens.
+The router queue is disabled by default. To make priority effects visible under benchmark load, set `--router-queue-threshold`; `0.0` is the most sensitive value and queues once all eligible workers have active prefill tokens.
 
 ```bash
 # Launch the router with a sensitive priority queue threshold.
@@ -369,31 +365,34 @@ python agent_benchmark.py --input-dataset trace.jsonl --concurrency 10 --delay 1
 
 Both `real_data_benchmark.py` and `agent_benchmark.py` accept trace datasets in JSONL format (one JSON object per line). The format is compatible with [Mooncake trace format](https://github.com/kvcache-ai/Mooncake).
 
+For `agent_benchmark.py`, each row contains only the new input for that turn. AIPerf builds the request by appending the row to earlier turns and live assistant responses from the same `session_id`. Supplying a cumulative context on every row duplicates the earlier conversation and overstates the prompt work.
+
 #### Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `input_length` | int | Number of input tokens for this request |
+| `input_length` | int | Number of new input tokens in this turn. For `agent_benchmark.py`, exclude earlier turns and assistant responses. |
 | `output_length` | int | Number of output tokens to generate |
 | `session_id` | string | Groups turns into multi-turn conversations. Requests with the same `session_id` are processed sequentially. |
-| `hash_ids` | list[int] | List of hash IDs representing prefix blocks for KV cache routing. Shared hash IDs indicate shared prefixes. |
+| `hash_ids` | list[int] | Hash IDs representing blocks in this row's input. For later turns in `agent_benchmark.py`, do not repeat blocks already supplied by earlier turns. |
 | `delay` | int | Delay in milliseconds to wait before sending this turn (applied after the previous turn in the same session completes). Not applied to first turns. |
 
 #### Example Trace File
 
 ```jsonl
-{"session_id": "conv_0", "input_length": 9176, "output_length": 152, "hash_ids": [0, 1, 2, 3, 4, 5]}
-{"session_id": "conv_0", "input_length": 9368, "output_length": 104, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7], "delay": 500}
-{"session_id": "conv_0", "input_length": 9516, "output_length": 164, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "delay": 500}
-{"session_id": "conv_1", "input_length": 9445, "output_length": 143, "hash_ids": [0, 1, 2, 10, 11, 12, 13]}
-{"session_id": "conv_1", "input_length": 9628, "output_length": 123, "hash_ids": [0, 1, 2, 10, 11, 12, 13, 14, 15], "delay": 500}
+{"session_id": "conv_0", "input_length": 1024, "output_length": 152, "hash_ids": [0, 1]}
+{"session_id": "conv_0", "input_length": 192, "output_length": 104, "hash_ids": [2], "delay": 500}
+{"session_id": "conv_0", "input_length": 148, "output_length": 164, "hash_ids": [3], "delay": 500}
+{"session_id": "conv_1", "input_length": 1024, "output_length": 143, "hash_ids": [0, 1]}
+{"session_id": "conv_1", "input_length": 183, "output_length": 123, "hash_ids": [4], "delay": 500}
 ```
 
 In this example:
 - `conv_0` and `conv_1` are two separate conversations that can run concurrently
 - Within each conversation, turns are processed sequentially
 - Subsequent turns have a 500ms delay after the previous turn completes
-- `hash_ids` show prefix sharing: both conversations share prefix blocks `[0, 1, 2]`
+- The first turns share prefix blocks `[0, 1]`; later turns add only their new input blocks
+- AIPerf adds each live assistant response to its session before sending the next turn
 
 ## Benchmarking Results
 

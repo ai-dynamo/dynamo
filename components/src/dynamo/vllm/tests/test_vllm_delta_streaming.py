@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-from dynamo.common.constants import DisaggregationMode
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 pytestmark = [
@@ -59,11 +58,11 @@ def _output(
     )
 
 
-def _request_output(outputs, *, prompt_token_ids=None):
+def _request_output(outputs, *, prompt_token_ids=None, num_cached_tokens=0):
     return SimpleNamespace(
         outputs=outputs,
         prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [101],
-        num_cached_tokens=0,
+        num_cached_tokens=num_cached_tokens,
         kv_transfer_params=None,
     )
 
@@ -77,6 +76,11 @@ def _handler_with_responses(responses):
     handler.runtime = SimpleNamespace(shutdown=lambda: None)
     handler._extract_logprobs = BaseWorkerHandler._extract_logprobs
     handler._log_with_lora_context = _ignore_log
+    # These delta-streaming tests exercise base-model requests only. Model the
+    # no-LoRA branch without constructing the full legacy worker handler.
+    handler._generate_with_lora_admission_lock = (
+        lambda lora_request, create_generator: create_generator(lora_request)
+    )
     return handler
 
 
@@ -131,7 +135,7 @@ async def test_generate_tokens_passes_delta_chunks_without_cumulative_slicing():
         "prompt_tokens": 2,
         "completion_tokens": 4,
         "total_tokens": 6,
-        "prompt_tokens_details": None,
+        "prompt_tokens_details": {"cached_tokens": 0},
     }
 
 
@@ -239,46 +243,3 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
     assert [
         [entry[0]["token_id"] for entry in chunk["top_logprobs"]] for chunk in chunks
     ] == [[7], [8, 9]]
-
-
-@pytest.mark.asyncio
-async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
-    pytest.importorskip("vllm.usage.usage_lib")
-    from dynamo.vllm.llm_engine import VllmLLMEngine
-
-    responses = [
-        _request_output([_output([1])], prompt_token_ids=[10, 11]),
-        _request_output(
-            [_output([2, 3], finish_reason="length")], prompt_token_ids=[10, 11]
-        ),
-    ]
-    engine = VllmLLMEngine.__new__(VllmLLMEngine)
-    engine.engine_client = _FakeEngineClient(responses)
-    engine._default_sampling_params = {}
-    engine._model_max_len = None
-    engine.disaggregation_mode = DisaggregationMode.AGGREGATED
-    engine.enable_rl = False
-    engine._dp_range = None
-
-    chunks = [
-        chunk
-        async for chunk in VllmLLMEngine.generate(
-            engine,
-            {
-                "token_ids": [10, 11],
-                "sampling_options": {},
-                "stop_conditions": {},
-                "output_options": {},
-            },
-            _FakeContext(),
-        )
-    ]
-
-    sampling_params = engine.engine_client.calls[0][0][1]
-    assert sampling_params.output_kind == RequestOutputKind.DELTA
-    assert [chunk["token_ids"] for chunk in chunks] == [[1], [2, 3]]
-    assert chunks[-1]["completion_usage"] == {
-        "prompt_tokens": 2,
-        "completion_tokens": 3,
-        "total_tokens": 5,
-    }

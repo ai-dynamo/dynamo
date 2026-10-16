@@ -1,8 +1,13 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # vLLM Kubernetes Deployment Configurations
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying vLLM inference graphs using the **DynamoGraphDeployment** resource.
 
-The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+The `deploy/*.yaml` templates use the supported `nvidia.com/v1beta1` API.
 
 ## Available Deployment Patterns
 
@@ -11,22 +16,22 @@ Basic deployment pattern with frontend and a single decode worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
 Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 3. **Disaggregated Deployment** (`disagg.yaml`)
 High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -34,8 +39,8 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
 ### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
 Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
@@ -46,50 +51,73 @@ Hardware-specific templates for Intel XPU GPUs using Kubernetes DRA.
 
 See [`xpu/README.md`](./xpu/README.md) for available templates, prerequisites, and usage.
 
+### 7. **Aggregated + LMCache MP Deployment** (`v1beta1/agg_lmcache.yaml`)
+Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See the [Deploy LMCache MP guide](../../../../docs/fern/pages/kubernetes/kv-cache-offloading/lmcache.mdx) for the full recipe.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `worker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
+- `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
+
+### 8. **Aggregated KVCR Deployments** (`kvcr/`)
+
+Two-node aggregated deployments with a process-local KVCR tier or a resilient
+KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
+RDMA, and lifecycle requirements.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: <deployment-name>
 spec:
-  services:
-    <ServiceName>:
-      # Service configuration
+  components:
+  - name: <component-name>
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          # Container configuration
 ```
 
 ### Key Configuration Options
 
 **Resource Management:**
 ```yaml
-resources:
-  requests:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
-  limits:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+        limits:
+          nvidia.com/gpu: "1"
 ```
 
 **Container Configuration:**
 ```yaml
-extraPodSpec:
-  mainContainer:
-    image: my-registry/vllm-runtime:my-tag
-    workingDir: /workspace/examples/backends/vllm
-    args:
-      - "python3"
-      - "-m"
-      - "dynamo.vllm"
-      - "--model"
-      - "Qwen/Qwen3-0.6B"
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      image: my-registry/vllm-runtime:my-tag
+      workingDir: /workspace/examples/backends/vllm
+      command:
+      - python3
+      - -m
+      - dynamo.vllm
+      args:
+      - --model
+      - Qwen/Qwen3-0.6B
       # Optional: Enable prompt embeddings feature
-      # - "--enable-prompt-embeds"
+      # - --enable-prompt-embeds
       # Other model-specific arguments
 ```
 
@@ -97,16 +125,16 @@ extraPodSpec:
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
 - `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
-- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'` on prefill and `'{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'` on decode)
 
 ## Prerequisites
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
-4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
+4. **Hugging Face token secret** (referenced through `envFrom.secretRef`)
 
 ### Container Images
 
@@ -121,7 +149,7 @@ docker build -f container/rendered.Dockerfile .
 
 ### Planner Perf Model Bootstrap (SLA Planner Only)
 
-The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ## Usage
 
@@ -195,7 +223,7 @@ To use a custom dynamo frameworks image for vLLM, you can update the deployment 
 export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<vllm-image>
 
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' $DEPLOYMENT_FILE > $DEPLOYMENT_FILE.generated
 kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 ```
 
@@ -207,6 +235,32 @@ After deployment, forward the frontend service to access the API:
 kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8000:8000
 ```
 
+### 6. Update worker routing taints
+
+The operator enables the worker system server on port `9090`. Select one vLLM worker pod and forward that port:
+
+```bash
+export WORKER_POD=$(kubectl get pods -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-component=decode \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n "$NAMESPACE" pod/"$WORKER_POD" 9090:9090
+```
+
+In another terminal, replace the caller-managed routing taints for that worker:
+
+```bash
+curl --fail-with-body \
+  -X POST http://localhost:9090/engine/update/model_taints \
+  -H 'Content-Type: application/json' \
+  -d '{"taints":["capacity/fast"]}'
+```
+
+The `taints` array is a replacement, not a merge. Send an empty array to clear caller-managed taints. Dynamo preserves generated `dynamo.topology/` taints and rejects callers that use that reserved prefix. The request updates only the selected worker pod; repeat it for each target worker.
+
+Dynamic taint updates require every frontend/router consumer and the target worker to run a Dynamo version containing this API and the value-aware discovery watcher. Mixed-version operation is unsupported: an older frontend/router can retain stale taints even after the worker reports a successful update. For a safe rollout, upgrade all frontends/routers first, then upgrade workers, and only then enable taint updates.
+
+The system endpoint has no user-facing authentication layer. Keep port `9090` on a trusted control network or use `kubectl port-forward`; do not expose it publicly.
+
 ## Configuration Options
 
 ### Environment Variables
@@ -216,9 +270,15 @@ To change `DYN_LOG` level, edit the yaml file by adding:
 ```yaml
 ...
 spec:
-  envs:
-    - name: DYN_LOG
-      value: "debug" # or other log levels
+  components:
+  - name: <component-name>
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: DYN_LOG
+            value: debug # or another log level
   ...
 ```
 
@@ -264,7 +324,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fern/pages/kubernetes/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -274,13 +334,13 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
-- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
-- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
+- **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/pages/kubernetes/model-deployment/deploy-with-dgd.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
+- **Kubernetes Templates**: [vLLM Deployment Templates](../../../../docs/fern/pages/recipes/kubernetes-templates/dgd/vllm.mdx)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md), [KV-Aware Routing](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md)
 
 ## Troubleshooting
 
@@ -292,4 +352,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).

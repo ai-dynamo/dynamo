@@ -25,25 +25,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// ObservedValidator wraps any CustomValidator and automatically records metrics
+// ObservedValidator wraps any Validator and automatically records metrics
 // for webhook validation duration, results, and denials.
-type ObservedValidator struct {
-	admission.CustomValidator
+type ObservedValidator[T runtime.Object] struct {
+	validator    admission.Validator[T]
 	resourceType string
 }
 
 // NewObservedValidator creates a new ObservedValidator wrapper
-func NewObservedValidator(v admission.CustomValidator, resourceType string) *ObservedValidator {
-	return &ObservedValidator{
-		CustomValidator: v,
-		resourceType:    resourceType,
+func NewObservedValidator[T runtime.Object](v admission.Validator[T], resourceType string) *ObservedValidator[T] {
+	return &ObservedValidator[T]{
+		validator:    v,
+		resourceType: resourceType,
 	}
 }
 
 // ValidateCreate wraps the underlying validator's ValidateCreate method with metrics collection
-func (m *ObservedValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (m *ObservedValidator[T]) ValidateCreate(ctx context.Context, obj T) (admission.Warnings, error) {
 	startTime := time.Now()
-	warnings, err := m.CustomValidator.ValidateCreate(ctx, obj)
+	warnings, err := m.validator.ValidateCreate(ctx, obj)
 	duration := time.Since(startTime)
 
 	allowed := err == nil
@@ -57,9 +57,9 @@ func (m *ObservedValidator) ValidateCreate(ctx context.Context, obj runtime.Obje
 }
 
 // ValidateUpdate wraps the underlying validator's ValidateUpdate method with metrics collection
-func (m *ObservedValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (m *ObservedValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) (admission.Warnings, error) {
 	startTime := time.Now()
-	warnings, err := m.CustomValidator.ValidateUpdate(ctx, oldObj, newObj)
+	warnings, err := m.validator.ValidateUpdate(ctx, oldObj, newObj)
 	duration := time.Since(startTime)
 
 	allowed := err == nil
@@ -73,9 +73,9 @@ func (m *ObservedValidator) ValidateUpdate(ctx context.Context, oldObj, newObj r
 }
 
 // ValidateDelete wraps the underlying validator's ValidateDelete method with metrics collection
-func (m *ObservedValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (m *ObservedValidator[T]) ValidateDelete(ctx context.Context, obj T) (admission.Warnings, error) {
 	startTime := time.Now()
-	warnings, err := m.CustomValidator.ValidateDelete(ctx, obj)
+	warnings, err := m.validator.ValidateDelete(ctx, obj)
 	duration := time.Since(startTime)
 
 	allowed := err == nil

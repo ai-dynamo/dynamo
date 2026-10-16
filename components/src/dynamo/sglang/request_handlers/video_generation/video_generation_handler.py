@@ -7,11 +7,14 @@ import io
 import logging
 import random
 import time
+from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Optional
 
 import torch
 
 from dynamo._core import Context
+from dynamo.common.http.media_reference import local_media_reference
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -227,23 +230,30 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
-        # Add image_path for I2V if provided
-        if input_reference:
-            args["image_path"] = input_reference
+        # Add image_path for I2V if provided. A URL is fetched through the
+        # SSRF-safe client (revalidating each redirect hop) into a temp file, so
+        # the generator only ever opens a trusted local path.
+        async with AsyncExitStack() as stack:
+            if input_reference:
+                args["image_path"] = await stack.enter_async_context(
+                    local_media_reference(
+                        input_reference, UrlValidationPolicy.from_env()
+                    )
+                )
 
-        logger.info(
-            f"Generating video with {num_frames} frames at {width}x{height}, "
-            f"{num_inference_steps} steps, request_id={request_id}"
-        )
-
-        # Serialize access -- DiffGenerator has mutable state (CUDA graph
-        # caches, shared config objects) and is not thread-safe.
-        async with self._generate_lock:
-            # Run in thread pool to avoid blocking event loop
-            result = await asyncio.to_thread(
-                self.generator.generate,
-                sampling_params_kwargs=args,
+            logger.info(
+                f"Generating video with {num_frames} frames at {width}x{height}, "
+                f"{num_inference_steps} steps, request_id={request_id}"
             )
+
+            # Serialize access -- DiffGenerator has mutable state (CUDA graph
+            # caches, shared config objects) and is not thread-safe.
+            async with self._generate_lock:
+                # Run in thread pool to avoid blocking event loop
+                result = await asyncio.to_thread(
+                    self.generator.generate,
+                    sampling_params_kwargs=args,
+                )
 
         # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
@@ -259,7 +269,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         return video_bytes
 
     async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "h264_nvenc"
+        self, frames: list, fps: int, codec: str = "libvpx-vp9"
     ) -> bytes:
         """Convert list of frames to video bytes.
 
@@ -302,15 +312,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 output_buffer.seek(0)
                 return output_buffer.read()
 
-            try:
-                return encode_with_codec(codec)
-            except OSError:
-                if codec != "h264_nvenc":
-                    raise
-                logger.warning(
-                    "h264_nvenc failed; retrying video encoding with libx264"
-                )
-                return encode_with_codec("libx264")
+            # VP9 (libvpx-vp9) is a royalty-free CPU encoder in the in-tree LGPL
+            # ffmpeg; no HW/GPU fallback and no libx264 (GPL, H.264) fallback.
+            return encode_with_codec(codec)
 
         except ImportError as e:
             raise RuntimeError(

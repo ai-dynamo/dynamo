@@ -23,16 +23,11 @@ MODEL="Qwen/Qwen3-0.6B"
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# Strip --unified via the shared helper, then parse the remaining flags.
-# `--unified` routes workers through dynamo.sglang.unified_main (the Rust
-# backend-common Worker, which owns the prefill drain loop); default stays
-# on the legacy main. Done before the arg loop so it isn't rejected as an
-# unknown option.
-pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
-set -- "${REMAINING_ARGS[@]}"
+WORKER_MODULE="dynamo.sglang"
 
 # --model overrides the default (e.g. a VLM for the multimodal P/D test).
 # --single-gpu is a no-op kept for parity with the other launch scripts.
+EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
@@ -48,16 +43,14 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--model <name>] [--single-gpu] [--unified]"
+            echo "Usage: $0 [--model <name>] [--single-gpu] [EXTRA_SGLANG_ARGS...]"
             echo "  --model <name>  Model to serve (default: $MODEL)"
             echo "  --single-gpu    Accepted no-op; both workers already share GPU 0"
-            echo "  --unified       Use the unified_main entry point (Rust Worker)"
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
     esac
 done
@@ -124,7 +117,8 @@ python3 -m "$WORKER_MODULE" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
   $MEM_SAVER_ARGS \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
-  --enable-metrics &
+  --enable-metrics \
+  "${EXTRA_ARGS[@]}" &
 
 # Wait for prefill worker to initialize before starting decode worker.
 # Both workers share one GPU with --delete-ckpt-after-loading; without this
@@ -153,7 +147,8 @@ python3 -m "$WORKER_MODULE" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
   $MEM_SAVER_ARGS \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
-  --enable-metrics &
+  --enable-metrics \
+  "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

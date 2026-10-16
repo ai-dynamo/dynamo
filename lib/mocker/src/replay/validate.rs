@@ -3,13 +3,13 @@
 
 use anyhow::{Result, bail};
 
-use super::{OfflineDisaggReplayConfig, ReplayArgsMode, ReplayRouterMode};
-use crate::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+use super::{OfflineDisaggReplayConfig, ReplayArgsMode};
+use crate::common::protocols::{MockerConfig, WorkerType};
 
 pub fn validate_replay_args_mode(
-    aggregated_args: Option<&MockEngineArgs>,
-    prefill_args: Option<&MockEngineArgs>,
-    decode_args: Option<&MockEngineArgs>,
+    aggregated_args: Option<&MockerConfig>,
+    prefill_args: Option<&MockerConfig>,
+    decode_args: Option<&MockerConfig>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -42,95 +42,44 @@ pub fn validate_replay_args_mode(
     }
 }
 
-fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
-    if num_workers == 0 {
-        bail!("{mode} requires num_workers >= 1");
-    }
+fn validate_aggregated_worker(args: &MockerConfig, mode: &str) -> Result<()> {
     if args.worker_type != WorkerType::Aggregated {
         bail!(
             "{mode} only supports aggregated workers, got {:?}",
             args.worker_type,
         );
     }
-    if args.dp_size != 1 {
-        bail!(
-            "{mode} only supports data_parallel_size=1, got {}",
-            args.dp_size,
-        );
-    }
-
     Ok(())
 }
 
-fn validate_offline_router_mode(router_mode: ReplayRouterMode, num_workers: usize) -> Result<()> {
-    if router_mode != ReplayRouterMode::KvRouter {
-        return Ok(());
-    }
-    if num_workers > 1 {
-        return Ok(());
-    }
-
-    bail!("offline replay only supports router_mode=kv_router when num_workers > 1");
+// Engine and topology validation belong to AISimulate's ReplaySpec/engine factory.
+// Keep only the argument roles that Dynamo lowers into those contracts here.
+pub(super) fn validate_offline_replay_args(args: &MockerConfig) -> Result<()> {
+    validate_aggregated_worker(args, "offline replay")
 }
 
-pub(super) fn validate_offline_replay_args(
-    args: &MockEngineArgs,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<()> {
-    validate_offline_router_mode(router_mode, num_workers)?;
-    validate_replay_args(args, num_workers, "trace replay")
-}
-
-pub(super) fn validate_offline_concurrency_args(
-    args: &MockEngineArgs,
-    num_workers: usize,
-    max_in_flight: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<()> {
-    if max_in_flight == 0 {
-        bail!("concurrency replay requires max_in_flight >= 1");
+pub(super) fn validate_online_replay_args(args: &MockerConfig, num_workers: usize) -> Result<()> {
+    if num_workers == 0 {
+        bail!("online replay requires num_workers >= 1");
     }
-
-    validate_offline_router_mode(router_mode, num_workers)?;
-    validate_replay_args(args, num_workers, "concurrency replay")
-}
-
-pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
-    validate_replay_args(args, num_workers, "online replay")
+    validate_aggregated_worker(args, "online replay")
 }
 
 pub(super) fn validate_online_concurrency_args(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     num_workers: usize,
     max_in_flight: usize,
 ) -> Result<()> {
     if max_in_flight == 0 {
         bail!("online concurrency replay requires max_in_flight >= 1");
     }
-
-    validate_replay_args(args, num_workers, "online replay")
+    validate_online_replay_args(args, num_workers)
 }
 
-fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
-    if config.prefill_args.engine_type == EngineType::Trtllm
-        || config.decode_args.engine_type == EngineType::Trtllm
-    {
-        bail!("{mode} disaggregation does not support TRT-LLM");
-    }
-    if config.prefill_args.engine_type != config.decode_args.engine_type {
-        bail!(
-            "{mode} disaggregation requires matching prefill/decode engine_type, got {:?} and {:?}",
-            config.prefill_args.engine_type,
-            config.decode_args.engine_type,
-        );
-    }
-    if config.num_prefill_workers == 0 {
-        bail!("{mode} requires num_prefill_workers >= 1");
-    }
-    if config.num_decode_workers == 0 {
-        bail!("{mode} requires num_decode_workers >= 1");
-    }
+pub(super) fn validate_offline_disagg_replay_args(
+    config: &OfflineDisaggReplayConfig,
+) -> Result<()> {
+    let mode = "offline disaggregated replay";
     if config.prefill_args.worker_type != WorkerType::Prefill {
         bail!(
             "{mode} requires prefill_engine_args.worker_type=prefill, got {:?}",
@@ -143,18 +92,10 @@ fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Resul
             config.decode_args.worker_type,
         );
     }
-    if config.prefill_args.dp_size != 1 {
-        bail!(
-            "{mode} only supports prefill data_parallel_size=1, got {}",
-            config.prefill_args.dp_size,
-        );
-    }
-    if config.decode_args.dp_size != 1 {
-        bail!(
-            "{mode} only supports decode data_parallel_size=1, got {}",
-            config.decode_args.dp_size,
-        );
-    }
+    // TODO(aisimulate): validate per-role block geometry and reblock workload
+    // hashes/handoff metadata when prefill and decode use different sizes.
+    // The adapter creates one workload/hash stream at the prefill block size
+    // and shares it with the decode router. Unequal block sizes need reblocking.
     if config.prefill_args.block_size != config.decode_args.block_size {
         bail!(
             "{mode} requires matching prefill/decode block_size, got {} and {}",
@@ -166,70 +107,56 @@ fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Resul
     Ok(())
 }
 
-pub(super) fn validate_offline_disagg_replay_args(
-    config: &OfflineDisaggReplayConfig,
-    _router_mode: ReplayRouterMode,
-) -> Result<()> {
-    validate_disagg_args(config, "trace replay")
-}
-
-pub(super) fn validate_offline_disagg_concurrency_args(
-    config: &OfflineDisaggReplayConfig,
-    max_in_flight: usize,
-    _router_mode: ReplayRouterMode,
-) -> Result<()> {
-    if max_in_flight == 0 {
-        bail!("concurrency replay requires max_in_flight >= 1");
-    }
-    validate_disagg_args(config, "concurrency replay")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
-        MockEngineArgs {
-            engine_type,
-            worker_type,
-            block_size: 64,
-            ..MockEngineArgs::default()
-        }
-    }
-
-    fn config(
-        prefill_engine_type: EngineType,
-        decode_engine_type: EngineType,
-    ) -> OfflineDisaggReplayConfig {
+    fn config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
-            prefill_args: args(prefill_engine_type, WorkerType::Prefill),
-            decode_args: args(decode_engine_type, WorkerType::Decode),
+            prefill_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Prefill
+                }
+            }))
+            .unwrap(),
+            decode_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Decode
+                }
+            }))
+            .unwrap(),
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
     }
 
     #[test]
-    fn disagg_rejects_trtllm_on_either_side() {
-        for config in [
-            config(EngineType::Trtllm, EngineType::Vllm),
-            config(EngineType::Vllm, EngineType::Trtllm),
-        ] {
-            let error = validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin)
-                .unwrap_err();
-            assert!(error.to_string().contains("does not support TRT-LLM"));
-        }
+    fn offline_replay_rejects_inconsistent_worker_roles() {
+        let mut config = config();
+        assert!(validate_offline_replay_args(&config.prefill_args).is_err());
+        config.prefill_args.worker_type = WorkerType::Aggregated;
+        assert!(validate_offline_disagg_replay_args(&config).is_err());
+        config.prefill_args.worker_type = WorkerType::Prefill;
+        config.decode_args.worker_type = WorkerType::Aggregated;
+        assert!(validate_offline_disagg_replay_args(&config).is_err());
     }
 
     #[test]
-    fn disagg_rejects_mixed_supported_backends() {
-        for config in [
-            config(EngineType::Vllm, EngineType::Sglang),
-            config(EngineType::Sglang, EngineType::Vllm),
-        ] {
-            let error = validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin)
-                .unwrap_err();
-            assert!(error.to_string().contains("matching prefill/decode"));
-        }
+    fn disagg_requires_one_block_size_for_the_shared_workload() {
+        let mut config = config();
+        config.decode_args.block_size *= 2;
+        let error = validate_offline_disagg_replay_args(&config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("matching prefill/decode block_size")
+        );
+    }
+
+    #[test]
+    fn online_replay_accepts_attention_dp() {
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
+        validate_online_replay_args(&args, 1).unwrap();
+        validate_online_concurrency_args(&args, 1, 1).unwrap();
     }
 }

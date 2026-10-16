@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.utils.output_modalities import RequestType
+from dynamo.llm.exceptions import InvalidArgument
 
 try:
     from dynamo.vllm.omni import stage_router
@@ -19,7 +21,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -83,24 +85,31 @@ def test_router_loads_stage_configs_from_model_deploy_config():
         media_output_fs_url=None,
         media_output_http_url=None,
         default_video_fps=16,
+        image_png_compression_level=0,
     )
     stage_configs = [_make_stage_cfg(0)]
 
     with (
         patch(
-            "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
+            "dynamo.vllm.omni.stage_router.resolve_stage_configs",
             return_value=("/deploy/glm_image.yaml", stage_configs),
-        ) as load_and_resolve_stage_configs,
+        ) as resolve_stage_configs,
         patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
     ):
         router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
 
-    load_and_resolve_stage_configs.assert_called_once_with(
+    resolve_stage_configs.assert_called_once_with(
         config.model,
-        "/deploy/glm_image.yaml",
-        kwargs={},
+        trust_remote_code=False,
+        deploy_config_path="/deploy/glm_image.yaml",
     )
-    output_formatter.assert_called_once()
+    output_formatter.assert_called_once_with(
+        model_name=config.model,
+        media_fs=None,
+        media_http_url=None,
+        default_fps=16,
+        image_png_compression_level=0,
+    )
     assert router.stage_configs == stage_configs
 
 
@@ -252,11 +261,20 @@ async def test_generate_delegates_formatting_to_output_formatter():
         formatter=mock_formatter,
     )
 
-    request = {"prompt": "x", "response_format": "b64_json"}
+    request = {
+        "prompt": "x",
+        "response_format": "b64_json",
+        "output_format": "JPEG",
+    }
     with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
         with patch(
             "dynamo.vllm.omni.stage_router.parse_request_type",
-            return_value=(None, "image_generation"),
+            return_value=(
+                NvCreateImageRequest(
+                    prompt="x", response_format="b64_json", output_format="JPEG"
+                ),
+                RequestType.IMAGE_GENERATION,
+            ),
         ):
             with patch(
                 "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
@@ -267,9 +285,32 @@ async def test_generate_delegates_formatting_to_output_formatter():
     mock_formatter.format.assert_awaited_once_with(
         fake_result,
         "req-fmt",
-        request_type="image_generation",
+        request_type=RequestType.IMAGE_GENERATION,
         response_format="b64_json",
+        output_format="jpeg",
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_image_output_format_is_rejected_before_stage_call():
+    stage_called = False
+
+    async def stage0_handler(request):
+        nonlocal stage_called
+        stage_called = True
+        return {"shm_meta": {"x": 1}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        output_modalities=["image"],
+    )
+    request = {"prompt": "x", "output_format": "gif"}
+
+    with pytest.raises(InvalidArgument, match="Unsupported output_format"):
+        [chunk async for chunk in router.generate(request, context=None)]
+
+    assert not stage_called
 
 
 @pytest.mark.asyncio
@@ -486,3 +527,94 @@ class TestStageRouterContextNormalization:
         ctx = formatter_calls[0]
         assert "response_format" not in ctx
         assert "output_format" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_format_output_uses_connector_deserialized_object_directly():
+    """Connector path should pass deserialized object straight to formatter."""
+    formatted = {"finished": True}
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = formatted
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    final_obj = SimpleNamespace(final_output_type="text", outputs=[])
+    connector = MagicMock()
+    connector.get.return_value = (final_obj, 10)
+    router.connectors = {stage_router._connector_key(0, "router"): connector}
+
+    stage_output = SimpleNamespace(
+        stage_connector_refs={"0": {"rdma": "meta"}},
+        shm_meta=None,
+    )
+
+    chunks = [
+        c
+        async for c in router._format_output(
+            stage_output,
+            request_id="req-connector",
+            request_type=RequestType.CHAT_COMPLETION,
+            ctx={},
+            final_stage_id=0,
+        )
+    ]
+
+    assert chunks == [formatted]
+    connector.get.assert_called_once_with(
+        "0", "router", "req-connector", metadata={"rdma": "meta"}
+    )
+    mock_formatter.format.assert_awaited_once_with(
+        final_obj,
+        "req-connector",
+        request_type=RequestType.CHAT_COMPLETION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_format_output_restores_completion_attrs_from_engine_inputs_wrapper():
+    """Connector payload wrapper is restored before formatting."""
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    completion = SimpleNamespace(token_ids=[1, 2, 3])
+    wrapped = {
+        "engine_inputs": SimpleNamespace(
+            outputs=[completion], final_output_type="text"
+        ),
+        "_dynamo_completion_output_attrs": [
+            {
+                "cumulative_token_ids": [1, 2, 3],
+                "multimodal_output": {"hidden": True},
+            }
+        ],
+    }
+    connector = MagicMock()
+    connector.get.return_value = (wrapped, 32)
+    router.connectors = {stage_router._connector_key(0, "router"): connector}
+
+    stage_output = SimpleNamespace(
+        stage_connector_refs={"0": {"rdma": "meta"}},
+        shm_meta=None,
+    )
+    _ = [
+        c
+        async for c in router._format_output(
+            stage_output,
+            request_id="req-wrap",
+            request_type=RequestType.CHAT_COMPLETION,
+            ctx={},
+            final_stage_id=0,
+        )
+    ]
+
+    restored = wrapped["engine_inputs"].outputs[0]
+    assert restored.cumulative_token_ids == [1, 2, 3]
+    assert restored.multimodal_output == {"hidden": True}

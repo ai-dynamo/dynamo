@@ -1,0 +1,15 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Community
+subtitle: Community meetings, events, and project channels
+hide-toc: true
+hide-page-actions: true
+---
+
+import { LandingStyles } from "@/components/LandingStyles";
+import { CommunityLanding } from "@/components/CommunityLanding";
+
+<LandingStyles />
+
+<CommunityLanding />

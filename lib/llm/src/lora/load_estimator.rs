@@ -4,7 +4,7 @@
 //! LORA Load Estimator
 //!
 //! Tracks LORA adapter usage over time to estimate load for allocation decisions.
-//! Supports single-router (polling) and multi-router (event-based) modes.
+//! Event-based: routers report arrivals and completions as they happen.
 //!
 //! The primary load signal is **arrival count in a sliding window**, tracked by
 //! a lock-free [`BucketedRateCounter`] per LoRA. An optional [`LoadPredictor`]
@@ -17,12 +17,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::transports::event_plane::EventSubscriber;
 
-use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
-use crate::kv_router::scheduler::KvScheduler;
+use crate::kv_router::sequence::{RuntimeSequenceSubscriber, SequenceSubscriber};
 use crate::lora::config::PredictorType;
 use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 
@@ -232,7 +230,6 @@ impl std::fmt::Debug for LoraLoadData {
 
 #[derive(Debug, Clone)]
 pub struct LoadEstimatorConfig {
-    pub poll_interval: Duration,
     /// Sliding window size for request-rate calculation.
     pub rate_window: Duration,
     pub buckets_per_second: u64,
@@ -243,7 +240,6 @@ pub struct LoadEstimatorConfig {
 impl Default for LoadEstimatorConfig {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(5),
             rate_window: Duration::from_secs(30),
             buckets_per_second: 1,
             predictor_type: PredictorType::Ema,
@@ -367,6 +363,15 @@ impl LoadEstimator {
     /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
     /// against unloaded adapters and unknown/typo request names that never get allocated.
     pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
+        self.retain_known_at(known, Instant::now());
+    }
+
+    /// Prune tracking data using an explicitly supplied clock.
+    ///
+    /// This keeps deterministic simulation clocks out of the production hot path while allowing
+    /// callers that already own a clock to evaluate recent arrivals consistently.
+    #[doc(hidden)]
+    pub fn retain_known_at(&self, known: &std::collections::HashSet<&str>, now: Instant) {
         // Keep an entry if it is known, OR still has in-flight requests, OR has nonzero arrivals
         // within the current rate window. The in-flight check protects a LoRA whose arrival raced
         // this controller tick before its MDC reached the state tracker (dropping it would make
@@ -380,7 +385,6 @@ impl LoadEstimator {
         // zero and drop the very signal this protects. Once the window slides past with no further
         // arrivals and the name is still unknown, it is pruned, so memory stays bounded against
         // unknown/typo request names.
-        let now = Instant::now();
         self.data.retain(|name, data| {
             known.contains(name.as_str())
                 || data.active_count.load(Ordering::Relaxed) > 0
@@ -439,43 +443,26 @@ impl LoadEstimator {
             .remove(lora_name);
     }
 
-    pub fn start_polling(
-        self: Arc<Self>,
-        scheduler: Arc<KvScheduler>,
-        component: Component,
-    ) -> tokio::task::JoinHandle<()> {
-        let cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.config.read().poll_interval);
-            tracing::info!("Started LORA load polling");
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("LORA load polling task cancelled");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let lora_counts = scheduler.get_active_lora_counts();
-                        self.update_from_counts(lora_counts);
-                    }
-                }
-            }
-        })
+    pub(crate) fn reset(&self) {
+        self.data.clear();
+        self.predictors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 
     pub fn start_event_subscription(
         self: Arc<Self>,
-        component: Component,
+        endpoint: Endpoint,
     ) -> tokio::task::JoinHandle<()> {
-        let cancel_token = component.drt().child_token();
+        let cancel_token = endpoint.drt().child_token();
         tokio::spawn(async move {
             // Durable feed: reconnect on transient errors / stream end with capped backoff,
             // stopping only on cancellation. A failed subscribe must not silently disable KV
             // load tracking for the lifetime of the process.
             let mut backoff = Duration::from_secs(1);
             while !cancel_token.is_cancelled() {
-                match self.subscribe_to_events(&component, &cancel_token).await {
+                match self.subscribe_to_events(&endpoint, &cancel_token).await {
                     Ok(()) => break, // cancelled cleanly
                     Err(e) => {
                         tracing::warn!(
@@ -495,21 +482,19 @@ impl LoadEstimator {
 
     async fn subscribe_to_events(
         &self,
-        component: &Component,
+        endpoint: &Endpoint,
         cancel_token: &tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<()> {
-        let mut subscriber = EventSubscriber::for_component(component, ACTIVE_SEQUENCES_SUBJECT)
-            .await?
-            .typed::<ActiveSequenceEvent>();
+        let mut subscriber = RuntimeSequenceSubscriber::for_endpoint(endpoint).await?;
 
         tracing::info!("Started LORA load event subscription");
 
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => return Ok(()),
-                result = subscriber.next() => {
+                result = subscriber.next_event() => {
                     match result {
-                        Some(Ok((_envelope, event))) => {
+                        Some(Ok(event)) => {
                             self.handle_event(event);
                         }
                         Some(Err(e)) => {
@@ -538,8 +523,12 @@ impl LoadEstimator {
 
     /// Increment load count for a LORA and record arrival. Lock-free for existing LoRAs.
     pub fn increment_load(&self, lora_name: &str) {
-        let now = Instant::now();
+        self.increment_load_at(lora_name, Instant::now());
+    }
 
+    /// Increment load count and record an arrival at an explicitly supplied instant.
+    #[doc(hidden)]
+    pub fn increment_load_at(&self, lora_name: &str, now: Instant) {
         // Fast path: LoRA already exists
         if let Some(entry) = self.data.get(lora_name) {
             entry.value().active_count.fetch_add(1, Ordering::Relaxed);
@@ -575,6 +564,15 @@ impl LoadEstimator {
     /// or out-of-order `Free` event when `active_count == 0` is silently
     /// ignored rather than wrapping to `usize::MAX`.
     pub fn decrement_load(&self, lora_name: &str) {
+        self.decrement_load_at(lora_name, Instant::now());
+    }
+
+    /// Decrement the in-flight count at an explicitly supplied instant.
+    ///
+    /// The counter itself is not time-dependent, but accepting the timestamp keeps simulation
+    /// request start and completion paths symmetric.
+    #[doc(hidden)]
+    pub fn decrement_load_at(&self, lora_name: &str, _now: Instant) {
         if let Some(entry) = self.data.get(lora_name) {
             entry
                 .value()
@@ -587,7 +585,7 @@ impl LoadEstimator {
     }
 
     /// Remove all tracking data for a LoRA. After this call the LoRA will no
-    /// longer appear in [`get_current_load`] results. Useful when a LoRA is
+    /// longer appear in `get_current_load` results. Useful when a LoRA is
     /// permanently unloaded and its stale rate-counter / predictor entries
     /// should be purged.
     pub fn remove_lora(&self, lora_name: &str) {
@@ -597,57 +595,14 @@ impl LoadEstimator {
         }
     }
 
-    /// Update active counts from a polled snapshot.
-    ///
-    /// **Polling-mode caveat**: arrivals are approximated as the per-poll
-    /// delta `max(0, current - prev)`, since worker snapshots do not expose
-    /// request-start events. This is a *lower bound* on real arrivals:
-    /// in-interval churn (e.g., 10 requests finishing while 10 new ones start
-    /// — net delta 0) is invisible, and sub-interval oscillation is lost.
-    /// Event-based mode (`handle_event` / `increment_load`) gives accurate
-    /// arrival rates; prefer it when arrival precision matters.
-    fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
-        let now = Instant::now();
-        let cfg = self.config.read();
-        let num_buckets = cfg.num_buckets();
-        let bucket_duration = cfg.bucket_duration();
-        drop(cfg);
-
-        for (lora_name, count) in &lora_counts {
-            self.data
-                .entry(lora_name.clone())
-                .and_modify(|data| {
-                    let prev = data.active_count.load(Ordering::Relaxed);
-                    data.active_count.store(*count, Ordering::Relaxed);
-                    // Record only the delta (new arrivals since the last poll) to
-                    // avoid double-counting sustained requests.  A request active
-                    // for N ticks should contribute 1 arrival, not N.
-                    let arrivals = count.saturating_sub(prev) as u64;
-                    if arrivals > 0 {
-                        data.rate_counter.record_count(arrivals, now);
-                    }
-                })
-                .or_insert_with(|| {
-                    let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
-                    // First observation: the entire count represents new arrivals.
-                    counter.record_count(*count as u64, now);
-                    LoraLoadData {
-                        active_count: AtomicUsize::new(*count),
-                        rate_counter: counter,
-                    }
-                });
-        }
-
-        for entry in self.data.iter() {
-            if !lora_counts.contains_key(entry.key()) {
-                entry.value().active_count.store(0, Ordering::Relaxed);
-            }
-        }
-    }
-
     /// Get current load using arrival count in the sliding window.
     pub fn get_current_load(&self) -> HashMap<String, usize> {
-        let now = Instant::now();
+        self.get_current_load_at(Instant::now())
+    }
+
+    /// Get current load using an explicitly supplied instant.
+    #[doc(hidden)]
+    pub fn get_current_load_at(&self, now: Instant) -> HashMap<String, usize> {
         let cfg = self.config.read();
         let predictor_type = cfg.predictor_type;
         let ema_alpha = cfg.ema_alpha;
@@ -706,7 +661,12 @@ impl LoadEstimator {
 
     /// Get raw arrival counts from the sliding-window rate counters.
     pub fn get_raw_arrival_counts(&self) -> HashMap<String, u64> {
-        let now = Instant::now();
+        self.get_raw_arrival_counts_at(Instant::now())
+    }
+
+    /// Get raw arrival counts using an explicitly supplied instant.
+    #[doc(hidden)]
+    pub fn get_raw_arrival_counts_at(&self, now: Instant) -> HashMap<String, u64> {
         self.data
             .iter()
             .filter_map(|entry| {
@@ -745,6 +705,173 @@ impl Default for LoadEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::protocols::{ActiveSequenceEventBatch, WorkerWithDpRank};
+    use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::transports::event_plane::EventPublisher;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+
+    use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
+
+    impl LoadEstimator {
+        /// Update active counts from a snapshot; arrivals are approximated as the
+        /// positive delta since the previous snapshot.
+        fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
+            let now = Instant::now();
+            let cfg = self.config.read();
+            let num_buckets = cfg.num_buckets();
+            let bucket_duration = cfg.bucket_duration();
+            drop(cfg);
+
+            for (lora_name, count) in &lora_counts {
+                self.data
+                    .entry(lora_name.clone())
+                    .and_modify(|data| {
+                        let prev = data.active_count.load(Ordering::Relaxed);
+                        data.active_count.store(*count, Ordering::Relaxed);
+                        // Record only the delta (new arrivals since the last poll) to
+                        // avoid double-counting sustained requests.  A request active
+                        // for N ticks should contribute 1 arrival, not N.
+                        let arrivals = count.saturating_sub(prev) as u64;
+                        if arrivals > 0 {
+                            data.rate_counter.record_count(arrivals, now);
+                        }
+                    })
+                    .or_insert_with(|| {
+                        let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                        // First observation: the entire count represents new arrivals.
+                        counter.record_count(*count as u64, now);
+                        LoraLoadData {
+                            active_count: AtomicUsize::new(*count),
+                            rate_counter: counter,
+                        }
+                    });
+            }
+
+            for entry in self.data.iter() {
+                if !lora_counts.contains_key(entry.key()) {
+                    entry.value().active_count.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    fn lora_event(
+        request_id: &str,
+        lora_name: Option<&str>,
+        data: ActiveSequenceEventData,
+    ) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            request_id: request_id.to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data,
+            router_id: 7,
+            lora_name: lora_name.map(str::to_string),
+        }
+    }
+
+    fn add_request() -> ActiveSequenceEventData {
+        ActiveSequenceEventData::AddRequest {
+            token_sequence: None,
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_replica_batch_updates_lora_load_in_order() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+                    .await
+                    .expect("create distributed runtime");
+                let endpoint = drt
+                    .namespace(format!("lora-replica-batch-test-{}", uuid::Uuid::new_v4()))
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component")
+                    .endpoint("generate");
+                let publisher = EventPublisher::for_endpoint(&endpoint, ACTIVE_SEQUENCES_SUBJECT)
+                    .await
+                    .expect("create publisher");
+                let mut subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint)
+                    .await
+                    .expect("create sequence subscriber");
+                let batch = ActiveSequenceEventBatch {
+                    events: vec![
+                        lora_event("alpha", Some("lora-alpha"), add_request()),
+                        lora_event(
+                            "alpha",
+                            Some("lora-alpha"),
+                            ActiveSequenceEventData::MarkPrefillCompleted,
+                        ),
+                        lora_event("beta", Some("lora-beta"), add_request()),
+                        lora_event("alpha", Some("lora-alpha"), ActiveSequenceEventData::Free),
+                        lora_event("no-lora", None, add_request()),
+                    ],
+                };
+
+                let events = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        publisher
+                            .publish(&batch)
+                            .await
+                            .expect("publish active-sequence batch");
+                        let receive_batch = async {
+                            let mut events = Vec::with_capacity(batch.events.len());
+                            while events.len() < batch.events.len() {
+                                match subscriber.next_event().await {
+                                    Some(Ok(event)) => events.push(event),
+                                    Some(Err(error)) => {
+                                        panic!("receive active-sequence batch: {error}")
+                                    }
+                                    None => panic!("active-sequence event stream closed"),
+                                }
+                            }
+                            events
+                        };
+                        match tokio::time::timeout(Duration::from_millis(100), receive_batch).await
+                        {
+                            Ok(events) => break events,
+                            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        }
+                    }
+                })
+                .await
+                .expect("subscriber should receive an active-sequence batch");
+
+                assert_eq!(
+                    events
+                        .iter()
+                        .map(|event| event.request_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["alpha", "alpha", "beta", "alpha", "no-lora"]
+                );
+
+                let estimator = LoadEstimator::new();
+                for event in events {
+                    estimator.handle_event(event);
+                }
+
+                let inflight = estimator.get_inflight_counts();
+                assert!(!inflight.contains_key("lora-alpha"));
+                assert_eq!(inflight.get("lora-beta"), Some(&1));
+
+                let arrivals = estimator.get_raw_arrival_counts();
+                assert_eq!(arrivals.get("lora-alpha"), Some(&1));
+                assert_eq!(arrivals.get("lora-beta"), Some(&1));
+                assert_eq!(arrivals.len(), 2);
+                drt.shutdown();
+            },
+        )
+        .await;
+    }
 
     #[test]
     fn set_config_rebuilds_existing_counter_geometry() {

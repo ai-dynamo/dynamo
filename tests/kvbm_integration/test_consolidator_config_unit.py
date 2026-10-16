@@ -49,12 +49,13 @@ class TestShouldEnableConsolidatorDict:
             assert should_enable_consolidator(arg_map) is False
 
 
+# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
+# sequential GPU stage so TensorRT-LLM initialization is shared.
 @pytest.mark.unit
 @pytest.mark.pre_merge
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(0)
 class TestShouldEnableConsolidatorTyped:
     """Tests that need trtllm (requires GPU for import)."""
 

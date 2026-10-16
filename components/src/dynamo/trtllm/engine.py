@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
-from transformers import AutoConfig
+from transformers import PretrainedConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
@@ -27,7 +27,6 @@ class Backend(str, enum.Enum):
     """Supported TensorRT-LLM backend types."""
 
     PYTORCH = "pytorch"
-    AUTODEPLOY = "_autodeploy"
 
 
 class TensorRTLLMEngine:
@@ -44,16 +43,11 @@ class TensorRTLLMEngine:
             else DisaggregationMode.AGGREGATED
         )
         # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
-        # Copy it so that our internal `pop()` / pruning doesn't leak side effects.
+        # Copy it so that our internal `pop()` doesn't leak side effects.
         engine_args = dict(engine_args)
         backend = engine_args.pop("backend", Backend.PYTORCH)
         if backend == Backend.PYTORCH:
             self._llm_cls = LLM
-        elif backend == Backend.AUTODEPLOY:
-            from tensorrt_llm._torch.auto_deploy import LLM as AutoDeployLLM
-
-            self._llm_cls = AutoDeployLLM
-            self._prune_engine_args_for_autodeploy(engine_args)
         else:
             raise ValueError(
                 f"Unsupported {backend=}. Available backends: {[b.value for b in Backend]}."
@@ -73,24 +67,33 @@ class TensorRTLLMEngine:
                 # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
                 # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
                 # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
-                # We intentionally pass only the supported parameters to avoid unexpected kwargs.
+                # Keep an explicit allowlist so LLM-only arguments are not forwarded.
                 model = self.engine_args.get("model")
 
                 # Skip MultimodalEncoder for architectures that handle vision
                 # encoding inside the main model (e.g. Llama4).
-                if self._is_unsupported_encoder_arch(model):  # type: ignore
+                if self._is_unsupported_encoder_arch(model):  # type: ignore[arg-type]
                     return
 
                 max_batch_size = self.engine_args.get("max_batch_size", 1)
                 logging.info(
                     f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
                 )
+                encoder_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "max_batch_size": max_batch_size,
+                }
+                for arg_name in (
+                    "trust_remote_code",
+                    "tensor_parallel_size",
+                    "model_kwargs",
+                ):
+                    if arg_name in self.engine_args:
+                        encoder_kwargs[arg_name] = self.engine_args[arg_name]
+
                 # MultimodalEncoder and LLM both inherit from BaseLLM in TRT-LLM,
                 # so storing either in self._llm is valid.
-                self._llm = MultimodalEncoder(
-                    model=model,
-                    max_batch_size=max_batch_size,
-                )
+                self._llm = MultimodalEncoder(**encoder_kwargs)
             else:
                 # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
@@ -169,47 +172,21 @@ class TensorRTLLMEngine:
         tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
         return tensor_parallel_size if enable_attention_dp else 1
 
-    @staticmethod
-    def _prune_engine_args_for_autodeploy(engine_args) -> None:
-        """Remove entries from `self.engine_args` that the autodeploy backend does not support."""
-        # TODO(2ez4bz/lucaslie): consider handling this in AutoDeploy's `LlmArgs` itself.
-        unsupported_fields = [
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/v1.1.0rc5/tensorrt_llm/_torch/auto_deploy/
-            # llm_args.py#L313
-            "build_config",
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/b51258acdd968599b2c3756d5a5326e7d750e7bf/
-            # tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L384
-            "scheduler_config",
-            # The below all come from:
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/v1.1.0rc5/tensorrt_llm/_torch/auto_deploy/
-            # llm_args.py#L316
-            "tensor_parallel_size",
-            "pipeline_parallel_size",
-            "context_parallel_size",
-            "moe_cluster_parallel_size",
-            "moe_tensor_parallel_size",
-            "moe_expert_parallel_size",
-            "enable_attention_dp",  # AutoDeploy doesn't support attention DP (only pytorch backend does)
-            "cp_config",
-        ]
-        for field_name in unsupported_fields:
-            if engine_args.pop(field_name, None) is not None:
-                TensorRTLLMEngine._warn_about_unsupported_field(field_name)
-
-    @staticmethod
-    def _warn_about_unsupported_field(field_name: str) -> None:
-        logger.warning(
-            "`%s` cannot be used with the `_autodeploy` backend. Ignoring.",
-            field_name,
-        )
+    def get_kv_cache_capacity(self) -> dict[str, int]:
+        """Return the initialized engine's primary GPU KV-cache capacity."""
+        try:
+            get_capacity = self.llm.get_kv_cache_capacity
+        except AttributeError:
+            return {}
+        return get_capacity()
 
     @staticmethod
     def _is_unsupported_encoder_arch(model_path: str) -> bool:
         """Return True if *model_path*'s architecture is not supported by
         TRT-LLM's standalone MultimodalEncoder."""
         try:
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            archs = getattr(config, "architectures", None) or []
+            config, _ = PretrainedConfig.get_config_dict(model_path)
+            archs = config.get("architectures") or []
             return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
         except Exception:
             return False

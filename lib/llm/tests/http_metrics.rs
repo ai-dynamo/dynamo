@@ -13,6 +13,7 @@ use dynamo_llm::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
+        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
@@ -72,6 +73,7 @@ impl
                     tokenize_latency: None,
                     detokenize_total_latency: None,
                     detokenize_count: None,
+                    ..Default::default()
                 };
                 if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
                     annotated.event = ann.event;
@@ -79,6 +81,205 @@ impl
                 }
                 yield annotated;
             }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// Counts the media parts in the incoming request (same enum the preprocessor
+/// uses) so the test's asserted counts flow from the actual request inputs.
+fn count_request_media(request: &NvCreateChatCompletionRequest) -> (usize, usize, usize) {
+    use dynamo_protocols::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent as Content,
+        ChatCompletionRequestUserMessageContentPart as Part,
+    };
+    let (mut images, mut videos, mut audio) = (0, 0, 0);
+    for message in &request.inner.messages {
+        if let ChatCompletionRequestMessage::User(user) = message
+            && let Content::Array(parts) = &user.content
+        {
+            for part in parts {
+                match part {
+                    Part::ImageUrl(_) => images += 1,
+                    Part::VideoUrl(_) => videos += 1,
+                    Part::AudioUrl(_) => audio += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    (images, videos, audio)
+}
+
+/// Emits chunks whose `LLMMetricAnnotation` carries the media counts derived from
+/// the request, verifying the annotation -> observe -> exposition path end to end.
+struct MockMultimodalEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for MockMultimodalEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let (image_count, video_count, audio_count) = count_request_media(&request);
+        let mut generator = request.response_generator(ctx.id().to_string());
+
+        let stream = stream! {
+            for i in 0..3 {
+                let output = generator.create_choice(i, Some(format!("chunk {i}")), None, None);
+                let mut annotated = Annotated::from_data(output);
+                let metrics = LLMMetricAnnotation {
+                    input_tokens: 5,
+                    output_tokens: (i + 1) as usize,
+                    chunk_tokens: 1,
+                    image_count,
+                    video_count,
+                    audio_count,
+                    image_tokens: Some(1290),
+                    ..Default::default()
+                };
+                if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    annotated.event = ann.event;
+                    annotated.comment = ann.comment;
+                }
+                yield annotated;
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// Engine for pinning the non-streaming handler's observation order. It emits
+/// a data-less `llm_metrics` frame first, then holds the content chunk back
+/// until the test opens `gate`, so the test can read what the collector has
+/// observed while that frame sits in the backend-error preflight buffer.
+struct MockGatedMetricsEngine {
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for MockGatedMetricsEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let gate = Arc::clone(&self.gate);
+
+        let stream = stream! {
+            // Leading data-less metrics frame, as legacy engines emit and as the
+            // preflight buffers until the first data-bearing event.
+            let leading = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 1,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            yield leading
+                .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                .expect("metrics serialize");
+
+            // Hold the first data-bearing chunk until the test opens the gate.
+            gate.notified().await;
+
+            let output = generator.create_choice(
+                0,
+                Some("gated".to_string()),
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+            );
+            let mut annotated = Annotated::from_data(output);
+            let metrics = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 2,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            let ann = metrics
+                .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                .expect("metrics serialize");
+            annotated.event = ann.event;
+            annotated.comment = ann.comment;
+            yield annotated;
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// The completions-shaped twin of [`MockGatedMetricsEngine`]: same leading
+/// frame, same gate, so `/v1/completions` pins the same observation order.
+struct MockGatedCompletionsEngine {
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for MockGatedCompletionsEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let generator = request.response_generator(ctx.id().to_string());
+        let gate = Arc::clone(&self.gate);
+
+        let stream = stream! {
+            let leading = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 1,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            yield leading
+                .to_annotation::<NvCreateCompletionResponse>()
+                .expect("metrics serialize");
+
+            gate.notified().await;
+
+            let output = generator.create_choice(
+                0,
+                Some("gated".to_string()),
+                Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                None,
+            );
+            let mut annotated = Annotated::from_data(output);
+            let metrics = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 2,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            let ann = metrics
+                .to_annotation::<NvCreateCompletionResponse>()
+                .expect("metrics serialize");
+            annotated.event = ann.event;
+            annotated.comment = ann.comment;
+            yield annotated;
         };
 
         Ok(ResponseStream::new(Box::pin(stream), ctx))
@@ -116,7 +317,7 @@ async fn test_metrics_prefix_default() {
         // Assert metrics that are actually present in the default configuration
         assert!(body.contains("dynamo_frontend_requests_started_total"));
         assert!(body.contains("dynamo_frontend_requests_total"));
-        assert!(body.contains("dynamo_frontend_inflight_requests"));
+        assert!(body.contains("dynamo_frontend_active_requests"));
         assert!(body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(body.contains("dynamo_frontend_disconnected_clients"));
 
@@ -302,7 +503,7 @@ async fn test_metrics_with_mock_model() {
         // Assert that key metrics are present with the mockmodel
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains("model=\"mockmodel\""));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_active_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
         assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
@@ -313,6 +514,110 @@ async fn test_metrics_with_mock_model() {
         assert!(metrics_body.contains("status=\"success\""));
 
         // Clean up
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_multimodal_count_metrics_exposed() {
+    // End-to-end: POST a request whose engine emits multimodal counts, consume
+    // the stream, then GET /metrics and assert the per-request histograms are
+    // registered and exposed with the right sums/count. Covers annotation
+    // parsing -> observe -> registration -> Prometheus exposition as one path.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let card = ModelDeploymentCard::with_name_only("mmmodel");
+        let mock_engine = Arc::new(MockMultimodalEngine {});
+        manager
+            .add_chat_completions_model("mmmodel", card.mdcsum(), mock_engine)
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        // Real mixed-media request (2 images, 1 video); the mock derives the counts
+        // from these inputs, so the assertions below reflect the actual request.
+        let request = serde_json::json!({
+            "model": "mmmodel",
+            "stream": true,
+            "max_tokens": 50,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "compare"},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/a.png"}},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/b.png"}},
+                    {"type": "video_url", "video_url": {"url": "http://example.com/c.mp4"}}
+                ]
+            }]
+        });
+
+        let response = client
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let _ = response.bytes().await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let metrics_body = client
+            .get(format!("http://localhost:{}/metrics", port))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Observed once per request; sums == the request's media counts (2/1/0).
+        // Trailing newline so a value like `1` can't prefix-match `10`.
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_images_per_request_count{model=\"mmmodel\"} 1\n"),
+            "images_per_request_count should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_images_per_request_sum{model=\"mmmodel\"} 2\n"),
+            "images_per_request_sum should be 2; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_videos_per_request_sum{model=\"mmmodel\"} 1\n"),
+            "videos_per_request_sum should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_audio_per_request_sum{model=\"mmmodel\"} 0\n"),
+            "audio_per_request_sum should be 0; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_image_tokens_per_request_count{model=\"mmmodel\"} 1\n"),
+            "image_tokens_per_request_count should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_image_tokens_per_request_sum{model=\"mmmodel\"} 1290\n"),
+            "image_tokens_per_request_sum should be 1290; got:\n{metrics_body}"
+        );
+
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     })
@@ -429,6 +734,200 @@ async fn test_unknown_model_uses_sentinel_label() {
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     })
+    .await;
+}
+
+/// #11349: a non-streaming handler must observe metrics before the
+/// backend-error preflight. The preflight buffers leading data-less
+/// annotation frames until the first data-bearing event, so an observer
+/// placed after it would stamp TTFT with release time rather than arrival
+/// time. The engine holds its first data chunk behind a gate; TTFT must
+/// already be exposed on `/metrics` while the gate is closed. With the
+/// observer after the preflight the frame sits unobserved in the buffer and
+/// the case times out.
+///
+/// `path` selects the handler under test; `request` is the non-streaming
+/// request body for that endpoint. Chat and Responses route to the same
+/// chat engine; completions has its own twin with the same gate.
+async fn assert_non_streaming_observes_metrics_before_preflight(
+    path: &str,
+    request: serde_json::Value,
+) {
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .enable_cmpl_endpoints(true)
+            .enable_responses_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let card = ModelDeploymentCard::with_name_only("gatedmodel");
+        let engine = Arc::new(MockGatedMetricsEngine {
+            gate: Arc::clone(&gate),
+        });
+        manager
+            .add_chat_completions_model("gatedmodel", card.mdcsum(), engine)
+            .unwrap();
+        manager
+            .add_completions_model(
+                "gatedmodel",
+                card.mdcsum(),
+                Arc::new(MockGatedCompletionsEngine {
+                    gate: Arc::clone(&gate),
+                }),
+            )
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        let metrics_url = format!("http://localhost:{port}/metrics");
+        let request_task = {
+            let client = client.clone();
+            let url = format!("http://localhost:{port}{path}");
+            tokio::spawn(async move { client.post(url).json(&request).send().await })
+        };
+
+        // While the gate is closed, the only frame the handler has received is
+        // the leading metrics frame. Its TTFT must already be exposed.
+        let ttft_line =
+            "dynamo_frontend_time_to_first_token_seconds_count{model=\"gatedmodel\"} 1\n";
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut metrics_body = String::new();
+        while !metrics_body.contains(ttft_line) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{path}: TTFT was not observed while the leading metrics frame sat in the \
+                 backend-error preflight buffer; got:\n{metrics_body}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            metrics_body = client
+                .get(metrics_url.as_str())
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+        }
+
+        gate.notify_one();
+
+        let response = request_task.await.unwrap().unwrap();
+        assert!(
+            response.status().is_success(),
+            "{path}: request failed: {response:?}"
+        );
+        let body: serde_json::Value = response.json().await.unwrap();
+        // Exact content per endpoint shape: chat puts it on the message,
+        // completions on the choice text, the Responses API on an
+        // `output_text` item.
+        let content = if path == "/v1/chat/completions" {
+            body["choices"][0]["message"]["content"].as_str()
+        } else if path == "/v1/completions" {
+            body["choices"][0]["text"].as_str()
+        } else {
+            body["output"].as_array().and_then(|items| {
+                items.iter().find_map(|item| {
+                    item["content"]
+                        .as_array()
+                        .and_then(|parts| parts.iter().find_map(|part| part["text"].as_str()))
+                })
+            })
+        };
+        assert_eq!(
+            content,
+            Some("gated"),
+            "{path}: response must carry exactly the gated chunk's content; got:\n{body}"
+        );
+
+        // Give the handler time to drop the collector, which flushes OSL.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let metrics_body = client
+            .get(metrics_url.as_str())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Both frames were observed exactly once: 1 + 1 output tokens, OSL 2,
+        // ISL 5, and still a single TTFT sample.
+        for needle in [
+            ttft_line,
+            "dynamo_frontend_output_tokens_total{model=\"gatedmodel\"} 2\n",
+            "dynamo_frontend_output_sequence_tokens_sum{model=\"gatedmodel\"} 2\n",
+            "dynamo_frontend_input_sequence_tokens_sum{model=\"gatedmodel\"} 5\n",
+        ] {
+            assert!(
+                metrics_body.contains(needle),
+                "{path}: expected `{}` in metrics; got:\n{metrics_body}",
+                needle.trim_end()
+            );
+        }
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+/// Non-streaming `/v1/chat/completions`: observe → preflight → aggregate.
+#[tokio::test]
+async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+}
+
+/// Non-streaming `/v1/completions`: same order through its own engine type.
+#[tokio::test]
+async fn test_completions_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/completions",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_tokens": 8,
+            "prompt": "hi"
+        }),
+    )
+    .await;
+}
+
+/// Non-streaming `/v1/responses` reaches the same chat engine and must keep
+/// the same order; reverting only that handler fails
+/// this case while the chat case stays green.
+#[tokio::test]
+async fn test_responses_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/responses",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_output_tokens": 8,
+            "input": "hi"
+        }),
+    )
     .await;
 }
 
@@ -626,7 +1125,7 @@ mod integration_tests {
         assert!(metrics_body.contains("dynamo_frontend_requests_started_total"));
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_active_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
         assert!(metrics_body.contains("dynamo_frontend_queued_requests"));

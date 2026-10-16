@@ -47,28 +47,53 @@ independent metric rounding. Raw timing fields remain available in event args.
 ## Replay Dynamo Request Traces
 
 Traces captured with Dynamo request tracing include replay hashes whenever a
-request can be replayed by Dynamo mock workers. Pass the original JSONL or
-JSONL.GZ shards directly to the replay harness:
+request can be replayed by Dynamo mock workers. Save `/tmp/request-trace-prediction.yaml` with the
+original JSONL or JSONL.GZ shards:
+
+```yaml
+traffic:
+  source:
+    type: trace
+    format: dynamo
+    paths: [/tmp/dynamo-request-trace.0000.jsonl.gz]
+  load: {type: trace_timestamps, speedup: 1.0}
+engine:
+  mode: aggregated
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  hardware: h200_sxm
+  backend: vllm
+  context_length: max
+  workers:
+    aggregated:
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: default, memory_fraction: 0.9}}
+      timing: {type: default}
+router:
+  policy: kv_router
+  prefill_load_model: {type: none}
+planner: {policy: disabled}
+```
+
+Add every shard to `traffic.source.paths`, then run the offline prediction:
 
 ```bash
-python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
-  --trace-format dynamo \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 4 \
-  --report-json /tmp/dynamo-request-trace.replay-report.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/request-trace-prediction.yaml \
+  --output-dir /tmp/request-trace-prediction
 ```
 
 No format conversion or intermediate Mooncake file is required.
 
-Replay derives the trace block size from the request records and rejects mixed
-block sizes across shards. If you pass `--trace-block-size`, its value must
-match the embedded value. Context-free traces use standard replay. Traces in
+AISimulate derives the trace block size from the request records and rejects mixed
+block sizes across shards. Context-free traces use standard replay. Traces in
 which every request has `agent_context` use agentic replay. Mixed traces are
 rejected.
 
-`kv_router` requires more than one mock worker. For a single aggregated-worker
-sanity check, use `--router-mode round_robin --num-workers 1`.
+`router.policy: kv_router` requires more than one mock worker. For a single aggregated-worker
+sanity check, set `router.policy: round_robin` and
+`engine.workers.aggregated.parallelism.replicas: 1`.
 
 ## Validate Converter
 

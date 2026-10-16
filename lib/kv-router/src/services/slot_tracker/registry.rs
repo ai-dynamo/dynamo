@@ -6,48 +6,31 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
-use rustc_hash::FxHashSet;
 use serde::Serialize;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::RoutingPartitionId;
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
-use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
+use crate::sequences::topology::{
+    MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError,
+};
 use crate::sequences::{
-    ActiveSequencesMultiWorker, PrefillTokenDeltas, ReplicaWorkerPolicy, SequenceError,
+    ActiveSequencesMultiWorker, PrefillCompletion, ReplicaWorkerPolicy, SequenceError,
     SequenceRequest,
 };
 
 use crate::services::common::replica_sync::{
-    ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
+    ReplicaInbox, ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher,
+    setup_scoped_replica_sync,
 };
-
-fn default_tenant() -> String {
-    "default".to_string()
-}
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct TrackerKey {
-    pub model_name: String,
-    pub tenant_id: String,
-}
-
-impl TrackerKey {
-    pub fn new(model_name: String, tenant_id: Option<String>) -> Self {
-        Self {
-            model_name,
-            tenant_id: tenant_id.unwrap_or_else(default_tenant),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkerInfo {
     pub worker_id: WorkerId,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub block_size: u32,
     pub dp_start: u32,
     pub dp_size: u32,
@@ -56,7 +39,7 @@ pub struct WorkerInfo {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ActiveLoadInfo {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub worker_id: WorkerId,
     pub dp_rank: u32,
     pub active_prefill_tokens: usize,
@@ -71,58 +54,62 @@ pub enum RegistryError {
     #[error("dp_size must be greater than 0")]
     InvalidDpSize,
 
+    #[error("dp_size {dp_size} exceeds the maximum {MAX_DATA_PARALLEL_RANKS_PER_WORKER}")]
+    DpSizeTooLarge { dp_size: u32 },
+
     #[error("dp range overflows u32: start={dp_start} size={dp_size}")]
     InvalidDpRange { dp_start: u32, dp_size: u32 },
 
     #[error(
-        "block_size mismatch for model={model_name} tenant={tenant_id}: existing={existing}, requested={requested}"
+        "block_size mismatch for model={model_name} routing_group={routing_group}: existing={existing}, requested={requested}"
     )]
     BlockSizeMismatch {
         model_name: String,
-        tenant_id: String,
+        routing_group: String,
         existing: u32,
         requested: u32,
     },
 
-    #[error("worker {worker_id} already registered for model={model_name} tenant={tenant_id}")]
+    #[error(
+        "worker {worker_id} already registered for model={model_name} routing_group={routing_group}"
+    )]
     DuplicateWorker {
         worker_id: WorkerId,
         model_name: String,
-        tenant_id: String,
+        routing_group: String,
     },
 
-    #[error("worker {worker_id} not found for model={model_name} tenant={tenant_id}")]
+    #[error("worker {worker_id} not found for model={model_name} routing_group={routing_group}")]
     WorkerNotFound {
         worker_id: WorkerId,
         model_name: String,
-        tenant_id: String,
+        routing_group: String,
     },
 
-    #[error("no slot tracker for model={model_name} tenant={tenant_id}")]
+    #[error("no slot tracker for model={model_name} routing_group={routing_group}")]
     TrackerNotFound {
         model_name: String,
-        tenant_id: String,
+        routing_group: String,
     },
 }
 
 struct TrackerEntry {
     tracker: Arc<ActiveSequencesMultiWorker<ScopedSequencePublisher>>,
-    pub block_size: u32,
+    block_size: u32,
     lifecycle_lock: Mutex<()>,
-    replica_tx: Option<mpsc::Sender<crate::protocols::ActiveSequenceEvent>>,
+    replica_inbox: Option<ReplicaInbox>,
     cancel_token: CancellationToken,
 }
 
 impl TrackerEntry {
     fn new(
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         block_size: u32,
         root_cancel_token: &CancellationToken,
         replica_config: Option<&ReplicaSyncConfig>,
     ) -> Arc<Self> {
         let cancel_token = root_cancel_token.child_token();
-        let scoped_replica_sync =
-            setup_scoped_replica_sync(replica_config, &key.model_name, &key.tenant_id, block_size);
+        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size, None);
         let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             scoped_replica_sync.publisher,
             block_size as usize,
@@ -132,23 +119,23 @@ impl TrackerEntry {
             "standalone",
             ReplicaWorkerPolicy::RequireRegistered,
         ));
-        let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+        let replica_inbox = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
             tracker.start_replica_sync(subscriber, cancel_token.clone());
-            replica_tx
+            ReplicaInbox::new(replica_tx)
         });
         tracker.start_periodic_force_expiry_across_all_workers(cancel_token.clone());
         Arc::new(Self {
             tracker,
             block_size,
             lifecycle_lock: Mutex::new(()),
-            replica_tx,
+            replica_inbox,
             cancel_token,
         })
     }
 }
 
 pub struct SlotTrackerRegistry {
-    trackers: DashMap<TrackerKey, Arc<TrackerEntry>>,
+    trackers: DashMap<RoutingPartitionId, Arc<TrackerEntry>>,
     root_cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
 }
@@ -175,7 +162,7 @@ impl SlotTrackerRegistry {
 
     pub fn register(
         &self,
-        key: TrackerKey,
+        key: RoutingPartitionId,
         worker_id: WorkerId,
         block_size: u32,
         dp_start: u32,
@@ -207,7 +194,7 @@ impl SlotTrackerRegistry {
             if entry.block_size != block_size {
                 return Err(RegistryError::BlockSizeMismatch {
                     model_name: key.model_name,
-                    tenant_id: key.tenant_id,
+                    routing_group: key.routing_group,
                     existing: entry.block_size,
                     requested: block_size,
                 });
@@ -221,7 +208,11 @@ impl SlotTrackerRegistry {
         }
     }
 
-    pub fn unregister(&self, key: &TrackerKey, worker_id: WorkerId) -> Result<(), RegistryError> {
+    pub fn unregister(
+        &self,
+        key: &RoutingPartitionId,
+        worker_id: WorkerId,
+    ) -> Result<(), RegistryError> {
         loop {
             let Some(entry) = self
                 .trackers
@@ -231,7 +222,7 @@ impl SlotTrackerRegistry {
                 return Err(RegistryError::WorkerNotFound {
                     worker_id,
                     model_name: key.model_name.clone(),
-                    tenant_id: key.tenant_id.clone(),
+                    routing_group: key.routing_group.clone(),
                 });
             };
 
@@ -259,19 +250,19 @@ impl SlotTrackerRegistry {
     pub fn list_workers(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<WorkerInfo> {
         let mut workers = Vec::new();
         for entry in &self.trackers {
             let key = entry.key();
-            if !matches_filters(key, model_name, tenant_id) {
+            if !matches_filters(key, model_name, routing_group) {
                 continue;
             }
             for range in entry.value().tracker.worker_ranges() {
                 workers.push(WorkerInfo {
                     worker_id: range.worker_id,
                     model_name: key.model_name.clone(),
-                    tenant_id: key.tenant_id.clone(),
+                    routing_group: key.routing_group.clone(),
                     block_size: entry.value().block_size,
                     dp_start: range.dp_start,
                     dp_size: range.dp_size,
@@ -279,9 +270,9 @@ impl SlotTrackerRegistry {
             }
         }
         workers.sort_by(|a, b| {
-            (&a.model_name, &a.tenant_id, a.worker_id).cmp(&(
+            (&a.model_name, &a.routing_group, a.worker_id).cmp(&(
                 &b.model_name,
-                &b.tenant_id,
+                &b.routing_group,
                 b.worker_id,
             ))
         });
@@ -290,7 +281,7 @@ impl SlotTrackerRegistry {
 
     pub fn add_request(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         request_id: String,
         worker: WorkerWithDpRank,
         sequence_hashes: Vec<SequenceHash>,
@@ -318,17 +309,33 @@ impl SlotTrackerRegistry {
 
     pub fn mark_prefill_completed(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         request_id: &str,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
-        entry
-            .tracker
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
+        let not_found = || SequenceError::RequestNotFound {
+            request_id: request_id.to_string(),
+        };
+        let Some(booking) = entry.tracker.request_booking(request_id) else {
+            return Err(not_found().into());
+        };
+        let completion = entry.tracker.mark_prefill_completed_if_booking(
+            &booking.request_id,
+            booking.worker,
+            booking.attempt_id,
+            Instant::now(),
+        )?;
+        // Already marked: republish the completion while this attempt is still
+        // live so peers that missed the first event converge.
+        if completion == PrefillCompletion::Unchanged
+            && !entry.tracker.publish_prefill_completed_if_booking(&booking)
+        {
+            return Err(not_found().into());
+        }
         Ok(())
     }
 
-    pub fn free(&self, key: &TrackerKey, request_id: &str) -> Result<(), ServiceError> {
+    pub fn free(&self, key: &RoutingPartitionId, request_id: &str) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
         entry
             .tracker
@@ -339,35 +346,33 @@ impl SlotTrackerRegistry {
     pub fn list_loads(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<ActiveLoadInfo> {
         let mut loads = Vec::new();
         for entry in &self.trackers {
             let key = entry.key();
-            if !matches_filters(key, model_name, tenant_id) {
+            if !matches_filters(key, model_name, routing_group) {
                 continue;
             }
-            let (decode_blocks, prefill_tokens, _) = entry
+            let projections = entry
                 .value()
                 .tracker
-                .potential_blocks_and_tokens::<false>(None, &PrefillTokenDeltas::none());
-            let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
-            workers.extend(prefill_tokens.keys().copied());
-            for worker in workers {
+                .project_worker_loads(None, Instant::now());
+            for (worker, projection) in projections {
                 loads.push(ActiveLoadInfo {
                     model_name: key.model_name.clone(),
-                    tenant_id: key.tenant_id.clone(),
+                    routing_group: key.routing_group.clone(),
                     worker_id: worker.worker_id,
                     dp_rank: worker.dp_rank,
-                    active_prefill_tokens: prefill_tokens.get(&worker).copied().unwrap_or(0),
-                    active_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                    active_prefill_tokens: projection.active_prefill_tokens,
+                    active_decode_blocks: projection.active_decode_blocks,
                 });
             }
         }
         loads.sort_by(|a, b| {
-            (&a.model_name, &a.tenant_id, a.worker_id, a.dp_rank).cmp(&(
+            (&a.model_name, &a.routing_group, a.worker_id, a.dp_rank).cmp(&(
                 &b.model_name,
-                &b.tenant_id,
+                &b.routing_group,
                 b.worker_id,
                 b.dp_rank,
             ))
@@ -377,95 +382,61 @@ impl SlotTrackerRegistry {
 
     pub fn potential_loads(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         sequence_hashes: &[SequenceHash],
         new_isl_tokens: usize,
     ) -> Result<Vec<PotentialLoad>, RegistryError> {
         let entry = self.entry(key)?;
-        let (decode_blocks, prefill_tokens, active_requests) =
-            entry.tracker.potential_blocks_and_tokens::<true>(
-                Some(sequence_hashes),
-                &PrefillTokenDeltas::uniform(new_isl_tokens),
-            );
-        let active_requests = active_requests.expect("active request projection should be present");
-        Ok(decode_blocks
+        // One projection map carries every field; the request's ISL is a uniform prefill delta.
+        let projections = entry
+            .tracker
+            .project_worker_loads(Some(sequence_hashes), Instant::now());
+        Ok(projections
             .into_iter()
-            .map(|(worker, potential_decode_blocks)| PotentialLoad {
+            .map(|(worker, projection)| PotentialLoad {
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
-                potential_prefill_tokens: prefill_tokens.get(&worker).copied().unwrap_or(0),
-                potential_decode_blocks,
-                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
+                potential_prefill_tokens: projection.active_prefill_tokens + new_isl_tokens,
+                potential_decode_blocks: projection.potential_decode_blocks(),
+                active_requests: projection.active_requests,
             })
             .collect())
     }
 
     pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
+        let (key, block_size, event) = envelope.into_parts();
         if self
             .replica_config
             .as_ref()
-            .is_some_and(|config| config.is_self_event(&envelope.event))
+            .is_some_and(|config| config.is_self_event(&event))
         {
             return;
         }
 
-        let key = TrackerKey::new(envelope.model_name, Some(envelope.tenant_id));
         let Some(entry) = self
             .trackers
             .get(&key)
             .map(|entry| Arc::clone(entry.value()))
         else {
-            tracing::trace!(
-                model_name = %key.model_name,
-                tenant_id = %key.tenant_id,
-                "Dropping replica event for unknown slot tracker"
-            );
+            tracing::trace!(%key, "Dropping replica event for unknown slot tracker");
             return;
         };
-        if entry.block_size != envelope.block_size {
-            tracing::debug!(
-                model_name = %key.model_name,
-                tenant_id = %key.tenant_id,
-                expected_block_size = entry.block_size,
-                received_block_size = envelope.block_size,
-                "Dropping replica event with mismatched block size"
-            );
-            return;
-        }
-        let Some(replica_tx) = &entry.replica_tx else {
-            return;
-        };
-        match replica_tx.try_send(envelope.event) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    model_name = %key.model_name,
-                    tenant_id = %key.tenant_id,
-                    request_id = %event.request_id,
-                    "Replica subscriber channel full; dropping event"
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!(
-                    model_name = %key.model_name,
-                    tenant_id = %key.tenant_id,
-                    "Replica subscriber channel closed; dropping event"
-                );
-            }
+        if let Some(inbox) = &entry.replica_inbox {
+            inbox.deliver(&key, entry.block_size, block_size, event);
         }
     }
 
-    fn entry(&self, key: &TrackerKey) -> Result<Arc<TrackerEntry>, RegistryError> {
+    fn entry(&self, key: &RoutingPartitionId) -> Result<Arc<TrackerEntry>, RegistryError> {
         self.trackers
             .get(key)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| RegistryError::TrackerNotFound {
                 model_name: key.model_name.clone(),
-                tenant_id: key.tenant_id.clone(),
+                routing_group: key.routing_group.clone(),
             })
     }
 
-    fn is_attached(&self, key: &TrackerKey, entry: &Arc<TrackerEntry>) -> bool {
+    fn is_attached(&self, key: &RoutingPartitionId, entry: &Arc<TrackerEntry>) -> bool {
         self.trackers
             .get(key)
             .is_some_and(|current| Arc::ptr_eq(current.value(), entry))
@@ -488,32 +459,41 @@ fn validate_block_size(block_size: u32) -> Result<(), RegistryError> {
     Ok(())
 }
 
-fn topology_error(key: &TrackerKey, error: WorkerTopologyError) -> RegistryError {
+fn topology_error(key: &RoutingPartitionId, error: WorkerTopologyError) -> RegistryError {
     match error {
         WorkerTopologyError::InvalidDpSize { .. } => RegistryError::InvalidDpSize,
+        WorkerTopologyError::DpSizeTooLarge { dp_size, .. } => {
+            RegistryError::DpSizeTooLarge { dp_size }
+        }
         WorkerTopologyError::InvalidDpRange {
             dp_start, dp_size, ..
         } => RegistryError::InvalidDpRange { dp_start, dp_size },
         WorkerTopologyError::DuplicateWorker { worker_id } => RegistryError::DuplicateWorker {
             worker_id,
             model_name: key.model_name.clone(),
-            tenant_id: key.tenant_id.clone(),
+            routing_group: key.routing_group.clone(),
         },
         WorkerTopologyError::WorkerNotFound { worker_id } => RegistryError::WorkerNotFound {
             worker_id,
             model_name: key.model_name.clone(),
-            tenant_id: key.tenant_id.clone(),
+            routing_group: key.routing_group.clone(),
         },
     }
 }
 
-fn matches_filters(key: &TrackerKey, model_name: Option<&str>, tenant_id: Option<&str>) -> bool {
+fn matches_filters(
+    key: &RoutingPartitionId,
+    model_name: Option<&str>,
+    routing_group: Option<&str>,
+) -> bool {
     model_name.is_none_or(|model_name| key.model_name == model_name)
-        && tenant_id.is_none_or(|tenant_id| key.tenant_id == tenant_id)
+        && routing_group.is_none_or(|routing_group| key.routing_group == routing_group)
 }
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 
@@ -521,19 +501,19 @@ mod tests {
         SlotTrackerRegistry::new(CancellationToken::new())
     }
 
-    fn key(tenant_id: &str) -> TrackerKey {
-        TrackerKey::new("model".to_string(), Some(tenant_id.to_string()))
+    fn key(routing_group: &str) -> RoutingPartitionId {
+        RoutingPartitionId::new("model", routing_group)
     }
 
     fn replica_event(
-        tenant_id: &str,
+        routing_group: &str,
         block_size: u32,
         worker: WorkerWithDpRank,
         router_id: u64,
     ) -> ScopedReplicaEvent {
         ScopedReplicaEvent {
             model_name: "model".to_string(),
-            tenant_id: tenant_id.to_string(),
+            routing_group: routing_group.to_string(),
             block_size,
             event: ActiveSequenceEvent {
                 request_id: "replica-request".to_string(),
@@ -565,6 +545,16 @@ mod tests {
             registry.register(key("default"), 1, 16, u32::MAX, 1),
             Err(RegistryError::InvalidDpRange { .. })
         ));
+        assert!(matches!(
+            registry.register(
+                key("default"),
+                1,
+                16,
+                0,
+                MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1
+            ),
+            Err(RegistryError::DpSizeTooLarge { .. })
+        ));
     }
 
     #[tokio::test]
@@ -578,7 +568,7 @@ mod tests {
             vec![
                 ActiveLoadInfo {
                     model_name: "model".to_string(),
-                    tenant_id: "default".to_string(),
+                    routing_group: "default".to_string(),
                     worker_id: 1,
                     dp_rank: 2,
                     active_prefill_tokens: 0,
@@ -586,7 +576,7 @@ mod tests {
                 },
                 ActiveLoadInfo {
                     model_name: "model".to_string(),
-                    tenant_id: "default".to_string(),
+                    routing_group: "default".to_string(),
                     worker_id: 1,
                     dp_rank: 3,
                     active_prefill_tokens: 0,
@@ -627,7 +617,7 @@ mod tests {
             registry.list_loads(None, None),
             vec![ActiveLoadInfo {
                 model_name: "model".to_string(),
-                tenant_id: "default".to_string(),
+                routing_group: "default".to_string(),
                 worker_id: 1,
                 dp_rank: 0,
                 active_prefill_tokens: 0,
@@ -675,9 +665,10 @@ mod tests {
     #[tokio::test]
     async fn replica_dispatch_rejects_self_and_requires_matching_registered_worker() {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let cancel_token = CancellationToken::new();
         let registry = SlotTrackerRegistry::new_with_replica_sync(
-            CancellationToken::new(),
-            ReplicaSyncConfig::new(7, outbound_tx),
+            cancel_token.clone(),
+            ReplicaSyncConfig::new(7, outbound_tx, cancel_token),
         );
         let key = key("default");
         registry.register(key.clone(), 1, 16, 0, 1).unwrap();
@@ -700,6 +691,7 @@ mod tests {
             WorkerWithDpRank::new(1, 0),
             7,
         ));
+        registry.dispatch_replica_event(replica_event("other", 16, WorkerWithDpRank::new(1, 0), 8));
         tokio::task::yield_now().await;
         assert_eq!(registry.list_loads(None, None)[0].active_decode_blocks, 0);
 
@@ -722,11 +714,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_ids_are_scoped_by_model_and_tenant() {
+    async fn prefill_complete_publishes_only_for_the_live_booking() {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let registry = SlotTrackerRegistry::new_with_replica_sync(
+            cancel_token.clone(),
+            ReplicaSyncConfig::new(7, outbound_tx, cancel_token),
+        );
+        let key = key("default");
+        let worker = WorkerWithDpRank::new(1, 0);
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        registry
+            .add_request(&key, "req-1".to_string(), worker, vec![1, 2], 8)
+            .unwrap();
+        let mut next_event = || outbound_rx.try_recv().expect("published event").event;
+        assert!(matches!(
+            next_event().data,
+            ActiveSequenceEventData::AddRequest { .. }
+        ));
+
+        // A repeated completion republishes so peers that missed the first converge.
+        registry.mark_prefill_completed(&key, "req-1").unwrap();
+        registry.mark_prefill_completed(&key, "req-1").unwrap();
+        for _ in 0..2 {
+            let event = next_event();
+            assert!(matches!(
+                event.data,
+                ActiveSequenceEventData::MarkPrefillCompleted
+            ));
+            assert_eq!(event.worker, worker);
+        }
+
+        registry.free(&key, "req-1").unwrap();
+        assert!(matches!(next_event().data, ActiveSequenceEventData::Free));
+        assert!(matches!(
+            registry.mark_prefill_completed(&key, "req-1"),
+            Err(ServiceError::Sequence(
+                SequenceError::RequestNotFound { .. }
+            ))
+        ));
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "a freed request must not publish a completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_ids_are_scoped_by_model_and_routing_group() {
         let registry = registry();
         registry.register(key("a"), 1, 16, 0, 1).unwrap();
         registry.register(key("b"), 1, 16, 0, 1).unwrap();
         assert_eq!(registry.list_workers(None, None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_add_conflicts_across_workers() {
+        let registry = registry();
+        let key = key("default");
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        registry.register(key.clone(), 2, 16, 0, 1).unwrap();
+
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let add = |worker| registry.add_request(&key, "req-1".to_string(), worker, vec![1, 2], 8);
+
+        add(worker_a).unwrap();
+        assert!(
+            matches!(
+                add(worker_b),
+                Err(ServiceError::Sequence(
+                    SequenceError::DuplicateRequest { .. }
+                ))
+            ),
+            "a request ID already booked on another worker must conflict"
+        );
+
+        let blocks_on = |worker_id| {
+            registry
+                .list_loads(None, None)
+                .into_iter()
+                .find(|load| load.worker_id == worker_id)
+                .map(|load| load.active_decode_blocks)
+                .unwrap_or(0)
+        };
+        let booked = blocks_on(1);
+        assert!(booked > 0, "the first add must book worker 1");
+
+        assert_eq!(blocks_on(1), booked, "the original booking is unchanged");
+        assert_eq!(blocks_on(2), 0, "the duplicate creates no booking");
+
+        registry.free(&key, "req-1").unwrap();
+        assert_eq!(blocks_on(1), 0);
     }
 
     #[tokio::test]

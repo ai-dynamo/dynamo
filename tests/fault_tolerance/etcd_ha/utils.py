@@ -19,8 +19,8 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
-from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,7 @@ class EtcdCluster:
         # Reserve contiguous ports for the full cluster to avoid collisions with
         # other tests that may also run local etcd instances.
         reserved_ports = allocate_contiguous_ports(1, num_replicas * 2, base_port)
+        request.addfinalizer(lambda ports=reserved_ports: deallocate_ports(ports))
         self._reserved_ports = reserved_ports
         self.base_port = reserved_ports[0]
         self.replicas: List[Optional[EtcdReplicaServer]] = []

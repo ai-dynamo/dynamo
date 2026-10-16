@@ -38,6 +38,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "gpu", "memory", "dynamo"]
 gpu-memory-service = "gpu_memory_service.cli.runner:main"
 gms-storage-client = "gpu_memory_service.cli.storage_runner:main"
 
+[project.entry-points."sglang.srt.plugins"]
+gms-v1 = "gpu_memory_service.v1.integrations.sglang.plugin:register_gms_v1_plugin"
+
 [project.optional-dependencies]
 test = [
     "pytest>=8.3.4",

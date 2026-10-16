@@ -6,6 +6,8 @@
 #
 # Launches frontend + head (node-rank=0, GPU 0) + headless worker (node-rank=1, GPU 1)
 # on localhost to validate the headless code path without requiring multiple machines.
+# Each emulated node exposes only its local GPU. Disable custom all-reduce so vLLM
+# does not interpret the global TP rank as an index into that one-device view.
 
 set -e
 trap 'echo "Cleaning up..."; kill 0' EXIT
@@ -13,11 +15,8 @@ trap 'echo "Cleaning up..."; kill 0' EXIT
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 WORKER_MODULE="dynamo.vllm"
 
-# --unified switches both nodes to the unified backend entry point
-# (dynamo.vllm.unified_main), exercising the unified headless code path.
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --unified) WORKER_MODULE="dynamo.vllm.unified_main"; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -38,6 +37,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m "${WORKER_MODULE}" \
   --nnodes 2 \
   --node-rank 0 \
   --master-addr 127.0.0.1 \
+  --disable-custom-all-reduce \
   --enforce-eager \
   $GPU_MEM_ARGS &
 
@@ -48,6 +48,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m "${WORKER_MODULE}" \
   --nnodes 2 \
   --node-rank 1 \
   --master-addr 127.0.0.1 \
+  --disable-custom-all-reduce \
   --enforce-eager \
   $GPU_MEM_ARGS \
   --headless &

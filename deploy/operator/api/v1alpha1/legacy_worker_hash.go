@@ -59,6 +59,7 @@ func stripV1alpha1NonPodTemplateFields(spec *DynamoComponentDeploymentSharedSpec
 	stripped.ServiceName = ""
 	stripped.ComponentType = ""
 	stripped.SubComponentType = ""
+	stripped.RuntimeVersionOverride = ""
 	stripped.DynamoNamespace = nil
 	stripped.Replicas = nil
 	stripped.Autoscaling = nil //nolint:staticcheck // SA1019: intentionally matching the old v1alpha1 worker hash

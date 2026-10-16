@@ -4,7 +4,8 @@
 use crate::protocols::Annotated;
 use anyhow::Result;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, pin_mut};
+use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
@@ -31,6 +32,8 @@ pub enum DataType {
     Int16,
     Int32,
     Int64,
+    Float16,
+    BFloat16,
     Float32,
     Float64,
     Bytes,
@@ -48,6 +51,8 @@ impl DataType {
             DataType::Int16 => size_of::<i16>(),
             DataType::Int32 => size_of::<i32>(),
             DataType::Int64 => size_of::<i64>(),
+            DataType::Float16 => size_of::<f16>(),
+            DataType::BFloat16 => size_of::<bf16>(),
             DataType::Float32 => size_of::<f32>(),
             DataType::Float64 => size_of::<f64>(),
             DataType::Bytes => 0, // variable length, return 0 as indicator
@@ -60,7 +65,6 @@ impl DataType {
 #[serde(tag = "data_type", content = "values")]
 pub enum FlattenTensor {
     Bool(Vec<bool>),
-    // [gluo NOTE] f16, and bf16 is not stably supported
     Uint8(Vec<u8>),
     Uint16(Vec<u16>),
     Uint32(Vec<u32>),
@@ -69,6 +73,8 @@ pub enum FlattenTensor {
     Int16(Vec<i16>),
     Int32(Vec<i32>),
     Int64(Vec<i64>),
+    Float16(Vec<f16>),
+    BFloat16(Vec<bf16>),
     Float32(Vec<f32>),
     Float64(Vec<f64>),
     // Typically use to store string data, but really it can store
@@ -89,6 +95,8 @@ impl FlattenTensor {
             Self::Int16(v) => v.len(),
             Self::Int32(v) => v.len(),
             Self::Int64(v) => v.len(),
+            Self::Float16(v) => v.len(),
+            Self::BFloat16(v) => v.len(),
             Self::Float32(v) => v.len(),
             Self::Float64(v) => v.len(),
             Self::Bytes(v) => v.len(),
@@ -106,6 +114,8 @@ impl FlattenTensor {
             Self::Int16(_) => DataType::Int16,
             Self::Int32(_) => DataType::Int32,
             Self::Int64(_) => DataType::Int64,
+            Self::Float16(_) => DataType::Float16,
+            Self::BFloat16(_) => DataType::BFloat16,
             Self::Float32(_) => DataType::Float32,
             Self::Float64(_) => DataType::Float64,
             Self::Bytes(_) => DataType::Bytes,
@@ -142,6 +152,15 @@ pub struct TensorModelConfig {
 pub struct Tensor {
     pub metadata: TensorMetadata,
     pub data: FlattenTensor,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestedOutput {
+    pub name: String,
+
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
 }
 
 impl validator::Validate for Tensor {
@@ -196,6 +215,10 @@ pub struct NvCreateTensorRequest {
     /// Input tensors.
     #[validate(nested)]
     pub tensors: Vec<Tensor>,
+
+    /// Outputs the client asked for. An empty list asks for every model output.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub outputs: Vec<RequestedOutput>,
 
     /// Optional request-level parameters
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
@@ -264,55 +287,21 @@ impl AnnotationsProvider for NvCreateTensorRequest {
     }
 }
 
-pub struct DeltaAggregator {
-    response: Option<NvCreateTensorResponse>,
-    error: Option<String>,
-}
-
 impl NvCreateTensorResponse {
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateTensorResponse>>,
     ) -> Result<NvCreateTensorResponse> {
-        let aggregator = stream
-            .fold(
-                DeltaAggregator {
-                    response: None,
-                    error: None,
-                },
-                |mut aggregator, delta| async move {
-                    let delta = match delta.ok() {
-                        Ok(delta) => delta,
-                        Err(error) => {
-                            if aggregator.error.is_none() {
-                                aggregator.error = Some(error);
-                            }
-                            return aggregator;
-                        }
-                    };
-                    match delta.data {
-                        Some(resp) => {
-                            if aggregator.response.is_none() {
-                                aggregator.response = Some(resp);
-                            } else if aggregator.error.is_none() {
-                                aggregator.error =
-                                    Some("Multiple responses in non-streaming mode".to_string());
-                            }
-                        }
-                        None => {
-                            // Ignore metadata-only deltas in non-streaming mode.
-                        }
-                    }
-                    aggregator
-                },
-            )
-            .await;
-        if let Some(error) = aggregator.error {
-            Err(anyhow::anyhow!(error))
-        } else if let Some(response) = aggregator.response {
-            Ok(response)
-        } else {
-            Err(anyhow::anyhow!("No response received"))
+        pin_mut!(stream);
+        let mut response = None;
+        while let Some(delta) = stream.next().await {
+            let Some(next) = delta.into_data().map_err(anyhow::Error::new)? else {
+                continue;
+            };
+            if response.replace(next).is_some() {
+                anyhow::bail!("Multiple responses in non-streaming mode");
+            }
         }
+        response.ok_or_else(|| anyhow::anyhow!("No response received"))
     }
 }
 
@@ -327,3 +316,44 @@ pub enum ParameterValue {
 }
 
 pub type Parameters = HashMap<String, ParameterValue>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `half::f16` is `#[repr(transparent)] struct f16(u16)` with `#[derive(Serialize)]`,
+    // so it serializes as its underlying u16 bit pattern and the custom `Deserialize` is
+    // symmetric. Production request-plane codec is msgpack; JSON round-trip here is the
+    // cheapest local exercise of the derive without pulling in an extra dev-dep.
+    #[test]
+    fn fp16_flatten_tensor_json_roundtrip_bit_exact() {
+        let original = FlattenTensor::Float16(vec![
+            f16::from_f32(1.5),
+            f16::from_f32(-2.25),
+            f16::from_f32(3.125),
+            f16::from_f32(-4.0),
+            f16::from_f32(0.5),
+            f16::from_f32(100.0),
+        ]);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtrip: FlattenTensor = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn bf16_flatten_tensor_json_roundtrip_bit_exact() {
+        let original = FlattenTensor::BFloat16(vec![
+            bf16::from_f32(1.5),
+            bf16::from_f32(-2.25),
+            bf16::from_f32(3.125),
+            bf16::from_f32(-4.0),
+            bf16::from_f32(0.5),
+            bf16::from_f32(100.0),
+        ]);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtrip: FlattenTensor = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, original);
+    }
+}

@@ -18,11 +18,14 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::local_model::runtime_config::{
+    ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
+use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -31,15 +34,150 @@ use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
+
+fn append_runtime_contract_checksum(
+    bytes: &mut Vec<u8>,
+    runtime_config: &ModelRuntimeConfig,
+    key: &str,
+) {
+    let Some(value) = runtime_config.runtime_data.get(key) else {
+        return;
+    };
+    let mut value = value.clone();
+    canonicalize_json_object_keys(&mut value);
+    let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
+
+    // This contract controls model-visible media prompt expansion. Workers
+    // with different contracts must not share a cohort whose preprocessor is
+    // built from one representative card.
+    bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
+    bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(key.as_bytes());
+    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(&value);
+}
+
+fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(canonicalize_json_object_keys);
+        }
+        serde_json::Value::Object(map) => {
+            map.values_mut().for_each(canonicalize_json_object_keys);
+            map.sort_keys();
+        }
+        _ => {}
+    }
+}
+
+fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
+    bytes.extend_from_slice(b"dynamo/model-card/indexer-identity/v1");
+    append_identity_dimension(bytes, spec.semantics());
+    append_identity_dimension(bytes, spec.routing_scope());
+}
+
+fn append_identity_dimension(bytes: &mut Vec<u8>, dimension: Option<&ExplicitIdentityMap>) {
+    let Some(dimension) = dimension else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(dimension.entries().len() as u32).to_le_bytes());
+    for (key, value) in dimension.entries() {
+        append_framed_identity_value(bytes, key.as_bytes());
+        append_framed_identity_value(bytes, value.as_bytes());
+    }
+}
+
+fn append_framed_identity_value(bytes: &mut Vec<u8>, value: &[u8]) {
+    let len = u32::try_from(value.len()).expect("validated identity values fit u32");
+    bytes.extend_from_slice(&len.to_le_bytes());
+    bytes.extend_from_slice(value);
+}
 
 fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
 }
 
 fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                    value,
+                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
+                    %error,
+                    "Failed to parse tokenizer cache byte budget; using default"
+                );
+                DEFAULT_TOKENIZER_CACHE_BYTES
+            }
+        },
+        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+    }
+}
+
+fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
+    TOKENIZER_CACHE.get_or_init(|| {
+        let cache_bytes =
+            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
+        tracing::info!(cache_bytes, "initializing process-wide tokenizer cache");
+        crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
+    })
+}
+
+fn tokenizer_cache_namespace(checksum: &str, backend: &str) -> Vec<u8> {
+    let mut namespace = Vec::with_capacity(8 + checksum.len() + backend.len());
+    namespace.extend_from_slice(&(checksum.len() as u64).to_le_bytes());
+    namespace.extend_from_slice(checksum.as_bytes());
+    namespace.extend_from_slice(backend.as_bytes());
+    namespace
+}
+
+fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
+    let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+        .with_label_values(&[model]);
+    let uncached_tokens =
+        dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+            .with_label_values(&[model]);
+
+    Arc::new(move |usage| {
+        cached_tokens.inc_by(usage.cached_tokens as u64);
+        uncached_tokens.inc_by(usage.uncached_tokens as u64);
+    })
+}
+
+fn instrumented_tokenizer_cache(
+    raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
+    special_tokens: Vec<String>,
+    shared_cache: &crate::tokenizers::SharedTokenizerCache,
+    cache_extend: bool,
+    model: &str,
+    namespace: &[u8],
+) -> Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
+    let cached = crate::tokenizers::CachedTokenizer::new_with_cache(
+        raw,
+        special_tokens,
+        shared_cache.clone(),
+        namespace,
+    )
+    .context("failed to initialize tokenizer prefix cache")?;
+
+    Ok(Arc::new(
+        cached
+            .with_extend(cache_extend)
+            .with_observer(
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL.inc();
+                }),
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL.inc();
+                }),
+            )
+            .with_token_observer(tokenizer_cache_token_observer(model)),
+    ))
 }
 
 /// Identify model deployment cards in the key-value store
@@ -60,6 +198,56 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Exclusive bound for client token ids: the largest id plus one, added tokens
+/// included. Ids can have gaps, so the token count is not a bound.
+fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
+    hf.get_vocab(true)
+        .into_values()
+        .max()
+        .map(|id| id as usize + 1)
+}
+
+/// serde `deserialize_with` that maps an explicitly-present value -- *including
+/// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
+/// supplies `None` only when the key is absent), this distinguishes "field
+/// missing" from "field present but null/invalid". A plain `Option<Value>` would
+/// collapse an explicit `null` into `None`, letting a malformed present
+/// `max_position_embeddings` silently fall through to the next source instead of
+/// surfacing the documented deserialization error.
+fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// Minimal projection of `config.json`, holding only the fields consulted when
+/// deriving the architectural context length. Every other entry is skipped by
+/// serde. This matters because some HF configs (e.g. Nemotron-H) serialize
+/// fields such as `time_step_limit` with non-finite literals (`Infinity`,
+/// `NaN`) that are valid JSON5 but not strict JSON; deserializing the whole
+/// document into `serde_json::Value` would reject them, whereas projecting into
+/// this struct via the JSON5 parser never materializes those unread fields.
+///
+/// The two consulted fields are captured as raw `serde_json::Value` (rather than
+/// `u32`) so the original per-field error messages are preserved when a value is
+/// present but not a valid integer. `deserialize_present_json_value` keeps an
+/// explicit `null` distinguishable from an absent key (see its docs).
+#[derive(Deserialize)]
+struct ArchMaxContextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
+    text_config: Option<ArchMaxContextTextConfig>,
+}
+
+#[derive(Deserialize)]
+struct ArchMaxContextTextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
 }
 
 /// Resolve the static architectural context limit from local HF metadata.
@@ -93,20 +281,24 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
     let Some(config_json) = config_json else {
         return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
     };
-    let config: serde_json::Value = serde_json::from_str(&config_json)
+    // Parse with the JSON5 parser (a lenient superset of JSON) into a minimal
+    // projection, mirroring `HFConfig::from_json_file`. This tolerates non-finite
+    // literals (`Infinity`, `NaN`) that HF configs may emit in fields we don't
+    // read, which strict `serde_json` would reject.
+    let config: ArchMaxContextConfig = json_five::from_str(&config_json)
         .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
 
-    let context_length = match config.get("max_position_embeddings") {
+    let context_length = match config.max_position_embeddings {
         Some(value) => Some(
-            serde_json::from_value(value.clone())
+            serde_json::from_value(value)
                 .context("Failed to deserialize max_position_embeddings")?,
         ),
         None => match config
-            .get("text_config")
-            .and_then(|text_config| text_config.get("max_position_embeddings"))
+            .text_config
+            .and_then(|text_config| text_config.max_position_embeddings)
         {
             Some(value) => Some(
-                serde_json::from_value(value.clone())
+                serde_json::from_value(value)
                     .context("Failed to deserialize text_config.max_position_embeddings")?,
             ),
             None => tokenizer_context_length(),
@@ -616,12 +808,14 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+// Some(uri) selects a file location; None asks the caller to resolve the NGC
+// artifact. The file is still required, and its MDC checksum is unchanged.
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
     local_model_path: Option<&Path>,
     is_custom: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     use std::borrow::Cow;
 
     // Coerce path-only into a synthetic file:// URL up front so the
@@ -641,10 +835,10 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" | "hf" => Ok(Some(url.to_string())),
         "file" => {
-            // worker location → --model-path → hf://. Basename + checksum preserved.
-            // is_custom slots aren't published on HF, so rung 4 errors instead.
+            // Prefer the worker location, then the frontend's --model-path.
+            // Only model-provided files can fall back to the original HF/NGC source.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -653,12 +847,12 @@ fn checked_file_uri(
                 .and_then(|f| f.to_str())
                 .with_context(|| format!("no filename in file uri: {url}"))?;
             if path.exists() {
-                return Ok(url.to_string());
+                return Ok(Some(url.to_string()));
             }
             if let Some(prefix) = local_model_path {
                 let local = prefix.join(filename);
                 if local.exists() {
-                    return file_uri_for(&local);
+                    return file_uri_for(&local).map(Some);
                 }
             }
             if is_custom {
@@ -671,9 +865,12 @@ fn checked_file_uri(
                     path.display()
                 );
             }
-            Ok(format!("hf://{source}/{filename}"))
+            if source.starts_with("ngc://") {
+                return Ok(None);
+            }
+            Ok(Some(format!("hf://{source}/{filename}")))
         }
-        _ => Ok(url.to_string()),
+        _ => Ok(Some(url.to_string())),
     }
 }
 
@@ -716,7 +913,7 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
-    /// Original HuggingFace repository path for downloading model files.
+    /// Original Hugging Face repository, NGC URI, or local model path.
     /// When `display_name` is customized (e.g., via `--served-model-name`),
     /// this field preserves the original repository path needed for downloads.
     /// Falls back to `display_name` if not set.
@@ -749,6 +946,20 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub architectural_max_context_length: Option<u32>,
+
+    /// Deprecated v1.2 MDC wire field.
+    ///
+    /// This is only a deserialization fallback and serialization projection. Canonical state
+    /// remains in `runtime_config.context_length` and `architectural_max_context_length`.
+    ///
+    /// TODO(v1.5): Remove after the temporary v1.2-to-v1.4 upgrade exception expires.
+    #[serde(
+        default,
+        rename = "context_length",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[builder(default, setter(skip))]
+    legacy_context_length: Option<u32>,
 
     /// Size of a KV cache block.
     /// Passed to the engine, KV router, and trace replay hash path.
@@ -794,6 +1005,11 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraInfo>,
 
+    /// Additional names this model responds to (aliases).
+    /// Requests using any of these names will be routed to this worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -820,6 +1036,14 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 
+    /// Optional authoritative KV-indexer compatibility and isolation material.
+    ///
+    /// A present dimension replaces its component-derived default. Entry labels are deliberately
+    /// uninterpreted so engine-specific compatibility facts do not expand this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub indexer_identity: Option<IndexerIdentitySpec>,
+
     /// Sibling files (e.g. `preprocessor_config.json`) the worker
     /// advertises alongside the typed slots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -827,6 +1051,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+
+    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    #[serde(skip, default)]
+    tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
 /// LoRA adapter information for routing decisions
@@ -848,6 +1076,28 @@ impl ModelDeploymentCard {
 
     pub fn builder() -> ModelDeploymentCardBuilder {
         ModelDeploymentCardBuilder::default()
+    }
+
+    /// Return this card's explicit worker role, with compatibility for legacy cards.
+    ///
+    /// Before `worker_type` was added, prefill cards used `ModelType::Prefill`; every other
+    /// worker was a full-request worker.
+    pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
+        Self::resolve_worker_type(self.worker_type, self.model_type)
+    }
+
+    /// Resolve an explicit or legacy worker role without constructing a model card.
+    pub fn resolve_worker_type(
+        worker_type: Option<crate::worker_type::WorkerType>,
+        model_type: ModelType,
+    ) -> crate::worker_type::WorkerType {
+        worker_type.unwrap_or_else(|| {
+            if model_type.supports_prefill() {
+                crate::worker_type::WorkerType::Prefill
+            } else {
+                crate::worker_type::WorkerType::Aggregated
+            }
+        })
     }
 
     /// Create a ModelDeploymentCard where only the name is filled in.
@@ -902,12 +1152,20 @@ impl ModelDeploymentCard {
         self.runtime_config
             .context_length
             .or(self.architectural_max_context_length)
+            .or(self.legacy_context_length)
             .unwrap_or(0)
+    }
+
+    pub(crate) fn for_mdc_wire(&self) -> Self {
+        let mut card = self.clone();
+        card.legacy_context_length = Some(self.effective_context_length());
+        card.runtime_config.normalize_structural_tag_compatibility();
+        card
     }
 
     /// Serialize the model deployment card to a JSON string
     pub fn to_json(&self) -> Result<String, anyhow::Error> {
-        Ok(serde_json::to_string(self)?)
+        Ok(serde_json::to_string(&self.for_mdc_wire())?)
     }
 
     /// Per-MDC resolve directory. After `download_config` runs, every
@@ -1012,7 +1270,54 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
-                // TODO: Do we want any of user_data or runtime_config?
+                if let Some(identity) = self.indexer_identity.as_ref() {
+                    append_indexer_identity_checksum(&mut bytes_to_hash, identity);
+                }
+
+                // Aliases participate in the checksum. Every worker in a
+                // deployment carries the same static --served-model-name list,
+                // so their checksums still match and they share one WorkerSet;
+                // changing the alias list rolls a new WorkerSet (consistent per
+                // set) rather than mutating a live one in place. `aliases` holds
+                // only the alternate names (the primary is `display_name`, hashed
+                // above), so order within the list still matters — hash in order.
+                // Skipped entirely when empty so a card without aliases keeps the
+                // same checksum as before this field existed (no spurious
+                // WorkerSet split on upgrade); this is the last hashed field, so
+                // omission is unambiguous.
+                if !self.aliases.is_empty() {
+                    bytes_to_hash.extend((self.aliases.len() as u32).to_be_bytes());
+                    for alias in &self.aliases {
+                        bytes_to_hash.extend((alias.len() as u32).to_be_bytes());
+                        bytes_to_hash.extend(alias.as_bytes());
+                    }
+                }
+
+                // Tower/connector LoRA changes vLLM's multimodal cache identity.
+                // Isolate such workers from the default/missing=false WorkerSet
+                // without changing checksums for existing deployments.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
+                }
+
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
+                }
+
+                // The Qwen video contract is resolved per cohort, not per card.
+                // Nemotron contracts still partition WorkerSets by checksum.
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                );
+
+                // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -1029,26 +1334,53 @@ impl ModelDeploymentCard {
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
     /// Tokenizer backend controls:
-    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
-    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
+    /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_fallback_enabled` — control whether an alternate backend load
+    ///   failure falls back to HuggingFace
+    /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
+    ///   in this process (default 64 MiB), read once when the first eligible tokenizer
+    ///   creates the shared cache. Models compete for capacity without reserved shares.
+    ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = self
-            .runtime_config
-            .effective_tokenizer_backend()
-            .is_fastokens();
+        self.tokenizer_with_options(Default::default(), false)
+    }
+
+    /// `None` until this card loads its tokenizer, then `Some` of the
+    /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
+    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+        self.tokenizer_id_bound.get().copied()
+    }
+
+    pub(crate) fn embedding_tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        self.tokenizer_with_options(options, options.add_special_tokens)
+    }
+
+    fn tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+        force_hugging_face: bool,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let tokenizer_backend = if force_hugging_face {
+            TokenizerBackend::Default
+        } else {
+            self.runtime_config.effective_tokenizer_backend()
+        };
+        let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1062,9 +1394,9 @@ impl ModelDeploymentCard {
                 })?;
 
                 // Load HF first — needed both for fallback and (if cache is on) for
-                // extracting special-token strings. `FastTokenizer` does not re-expose
-                // `get_added_tokens_decoder`, so we must capture specials from the raw
-                // HF tokenizer before any swap.
+                // extracting special-token strings. Alternate backends do not re-expose
+                // `get_added_tokens_decoder`, so capture specials from the raw HF
+                // tokenizer before any swap.
                 let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -1085,6 +1417,35 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+                self.tokenizer_id_bound
+                    .get_or_init(|| hf_token_id_bound(&hf));
+
+                // Disable any truncation baked into `tokenizer.json`: the HF
+                // `tokenizers` crate honors it on `encode()`, silently clipping every
+                // prompt (e.g. `stepfun-ai/Step-3.7-Flash-*` caps at 2048), unlike
+                // Python `transformers`, which resets it on load. Match that: never
+                // truncate implicitly; over-length prompts are rejected elsewhere.
+                if hf.get_truncation().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a truncation config; disabling it so \
+                         prompts are not silently clipped"
+                    );
+                    // Hard-fail rather than warn: if we can't clear it, the prompt
+                    // would still be silently clipped, defeating the purpose.
+                    hf.with_truncation(None)
+                        .map_err(anyhow::Error::msg)
+                        .context("failed to disable tokenizer.json truncation")?;
+                }
+
+                // Padding belongs to the batching layer, not individual online requests.
+                if hf.get_padding().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a padding config; disabling it for online \
+                         tokenization"
+                    );
+                    hf.with_padding(None);
+                }
+
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
@@ -1092,59 +1453,113 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Merge already applied above; just wrap.
-                let wrap_hf =
-                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
-
-                // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                Arc::new(fast)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
-                                );
-                                Arc::new(wrap_hf(hf))
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                        Arc::new(wrap_hf(hf))
-                    }
-                } else {
-                    Arc::new(wrap_hf(hf))
+                // Merge already applied above; just wrap. Embedding
+                // tokenizers use the HF post-processor to apply BOS/EOS when
+                // requested; normal tokenizers keep their existing defaults.
+                let wrap_hf = |hf: HfTokenizer| {
+                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
                 };
 
-                if cache_enabled {
+                // Pick the inner backend.
+                let (raw, cache_backend): (
+                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    TokenizerBackend,
+                ) = match tokenizer_backend {
+                    TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
+                    TokenizerBackend::Fastokens => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                                Ok(fast) => {
+                                    tracing::info!("Using fastokens tokenizer backend");
+                                    (Arc::new(fast), TokenizerBackend::Fastokens)
+                                }
+                                Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load fastokens tokenizer backend and fallback is disabled",
+                                        );
+                                    }
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load fastokens, falling back to HuggingFace"
+                                    );
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                                }
+                            }
+                        } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load fastokens tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                            );
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                        }
+                    }
+                    TokenizerBackend::Basetenkenizer => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
+                                Ok(baseten) => {
+                                    tracing::info!("Using basetenkenizer tokenizer backend");
+                                    (Arc::new(baseten), TokenizerBackend::Basetenkenizer)
+                                }
+                                Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load basetenkenizer tokenizer backend and fallback is disabled",
+                                        );
+                                    }
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load basetenkenizer, falling back to HuggingFace"
+                                    );
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                                }
+                            }
+                        } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load basetenkenizer tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
+                            );
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                        }
+                    }
+                };
+
+                if cache_enabled && !options.add_special_tokens {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace =
+                        tokenizer_cache_namespace(self.mdcsum(), cache_backend.as_str());
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
-                    )
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        shared_cache,
+                        cache_extend,
+                        self.name(),
+                        &namespace,
+                    )?
                 } else {
+                    // The prefix cache encodes text in boundary-delimited
+                    // segments. Applying the HF post-processor to every segment
+                    // could add BOS/EOS more than once, so embedding special-token
+                    // mode bypasses that cache.
                     raw
                 }
             }
@@ -1159,29 +1574,28 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
+                // tiktoken does not expose its ids.
+                self.tokenizer_id_bound.get_or_init(|| None);
 
+                let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
-                    // Special-token extraction for tiktoken is out of scope for v1.
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace = tokenizer_cache_namespace(self.mdcsum(), "tiktoken");
                     tracing::info!(
-                        cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                        cache_bytes = shared_cache.max_memory_bytes(),
+                        cache_extend,
+                        boundaries = specials.len(),
+                        "wrapping tiktoken tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
-                    )
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        shared_cache,
+                        cache_extend,
+                        self.name(),
+                        &namespace,
+                    )?
                 } else {
                     raw
                 }
@@ -1214,6 +1628,11 @@ impl ModelDeploymentCard {
 
     pub fn source_path(&self) -> &str {
         self.source_path.as_ref().unwrap_or(&self.display_name)
+    }
+
+    /// Set additional names (aliases) this model responds to.
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        self.aliases = aliases;
     }
 
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
@@ -1300,16 +1719,27 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let local_dir = mdc_local_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_files()
-            .into_iter()
-            .map(|(cf, is_custom)| {
-                Ok((
-                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
-                    cf.clone(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut entries = Vec::new();
+        let mut ngc_snapshot = None;
+        for (cf, is_custom) in self.iter_metadata_files() {
+            let uri = match checked_file_uri(cf, &source, local_model_path, is_custom)? {
+                Some(uri) => uri,
+                None => {
+                    let snapshot = match &ngc_snapshot {
+                        Some(snapshot) => snapshot,
+                        None => ngc_snapshot.insert(
+                            crate::hub::from_hf(&source, /* ignore_weights = */ true).await?,
+                        ),
+                    };
+                    // The MDC supplies the filename and expected checksum. Retry
+                    // in the resolved directory; a still-missing file is an error.
+                    checked_file_uri(cf, &source, Some(snapshot), is_custom)?.with_context(
+                        || format!("NGC metadata file missing after fetching {source}: {cf}"),
+                    )?
+                }
+            };
+            entries.push((uri, cf.clone()));
+        }
 
         // Pre-resolve hf:// repos once per unique repo; otherwise the
         // resolve loop would call hub::from_hf N times for one model.
@@ -1553,6 +1983,7 @@ impl ModelDeploymentCard {
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             architectural_max_context_length,
+            legacy_context_length: None,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             model_type: Default::default(),  // set later
@@ -1560,14 +1991,17 @@ impl ModelDeploymentCard {
             worker_type: Default::default(), // set later
             needs: Default::default(),       // set later
             lora: None,
+            aliases: Vec::new(),
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             tensor_model_config: None,
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
+            indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
+            tokenizer_id_bound: OnceLock::new(),
         })
     }
 }
@@ -1578,7 +2012,8 @@ impl PartialEq for ModelDeploymentCard {
     }
 }
 
-/// A ModelDeploymentCard is published a single time per instance and never updated.
+/// Model-card registration is create-only. The discovery taint API owns the
+/// narrow exception for updating runtime_config.taints on an existing record.
 impl kv::Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
         0
@@ -2084,6 +2519,50 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn tokenizer_cache_token_observer_records_per_model_totals() {
+        let model_a = "token-observer-test-model-a";
+        let model_b = "token-observer-test-model-b";
+        let cached_a = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_a]);
+        let uncached_a =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_a]);
+        let cached_b = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_b]);
+        let uncached_b =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_b]);
+
+        let before_a = (cached_a.get(), uncached_a.get());
+        let before_b = (cached_b.get(), uncached_b.get());
+
+        super::tokenizer_cache_token_observer(model_a)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 7,
+            uncached_tokens: 5,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!((cached_b.get(), uncached_b.get()), before_b);
+
+        super::tokenizer_cache_token_observer(model_b)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 3,
+            uncached_tokens: 11,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!(
+            (cached_b.get(), uncached_b.get()),
+            (before_b.0 + 3, before_b.1 + 11)
+        );
+    }
+
+    #[test]
     fn tokenizer_cache_is_enabled_by_default_and_disabled_only_by_zero() {
         assert!(super::tokenizer_cache_enabled(None));
         assert!(super::tokenizer_cache_enabled(Some("1")));
@@ -2098,6 +2577,7 @@ mod tests {
             super::DEFAULT_TOKENIZER_CACHE_BYTES
         );
         assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert_eq!(super::tokenizer_cache_bytes(Some("0")), 0);
         assert_eq!(
             super::tokenizer_cache_bytes(Some("invalid")),
             super::DEFAULT_TOKENIZER_CACHE_BYTES
@@ -2409,6 +2889,70 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ngc_identity_survives_cache_relocation() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source = "ngc://example/team/model:1";
+        let worker_a = hf_cache_fixture(&workspace.path().join("worker-a"))?;
+        let worker_b = hf_cache_fixture(&workspace.path().join("worker-b"))?;
+        let cache_root = workspace.path().join("ngc-cache");
+        let snapshot = cache_root.join("ngc/example/team/models/model/1");
+        std::fs::create_dir_all(&snapshot)?;
+        for entry in std::fs::read_dir(&worker_a)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), snapshot.join(entry.file_name()))?;
+        }
+
+        let overlay = workspace.path().join("overlay");
+        std::fs::create_dir(&overlay)?;
+        std::fs::copy(worker_a.join("config.json"), overlay.join("config.json"))?;
+        // The explicit overlay must win even when another file needs the NGC cache.
+        std::fs::write(snapshot.join("config.json"), b"{}")?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path())),
+                ("MODEL_EXPRESS_CACHE_DIRECTORY", Some(cache_root.as_path())),
+            ],
+            async {
+                let mut cards = Vec::new();
+                for path in [&worker_a, &worker_b] {
+                    let model = crate::local_model::LocalModelBuilder::default()
+                        .model_path(path.clone())
+                        .source_path(source.into())
+                        .model_name(Some("public-model".to_string()))
+                        .build()
+                        .await?;
+                    cards.push(model.into_card());
+                }
+                assert_eq!(cards[0].source_path(), source);
+                assert_eq!(cards[0].mdcsum(), cards[1].mdcsum());
+                let expected_sum = cards[1].mdcsum().to_string();
+                std::fs::remove_dir_all(workspace.path().join("worker-a"))?;
+
+                cards[0].download_config(Some(&overlay)).await?;
+                // Deserialization clears the cached mdcsum so the next check recomputes it.
+                let resolved: ModelDeploymentCard = serde_json::from_str(&cards[0].to_json()?)?;
+                assert_eq!(resolved.source_path(), source);
+                assert_eq!(resolved.mdcsum(), expected_sum);
+                assert_eq!(
+                    std::fs::read(resolved.local_dir().join("config.json"))?,
+                    std::fs::read(overlay.join("config.json"))?
+                );
+                assert!(resolved.local_dir().join("tokenizer.json").exists());
+                assert!(
+                    resolved
+                        .local_dir()
+                        .join("special_tokens_map.json")
+                        .exists()
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
+    }
+
     /// Build a `CheckedFile` whose wire `path` field is `repr` — parses
     /// as a URL when `repr` has a scheme, otherwise as a `PathBuf`.
     fn cf_for(repr: &str) -> super::CheckedFile {
@@ -2460,7 +3004,7 @@ mod tests {
             let got =
                 super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
                     .unwrap();
-            assert_eq!(got, url);
+            assert_eq!(got.as_deref(), Some(url));
         }
     }
 
@@ -2474,7 +3018,7 @@ mod tests {
             super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
-            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+            Some(url::Url::from_file_path(&local_cfg).unwrap().to_string())
         );
     }
 
@@ -2499,7 +3043,7 @@ mod tests {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
 
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+        assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
 
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
             .expect_err("custom slot must error instead of falling back to HF");
@@ -2510,6 +3054,14 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+
+        let source = "ngc://example/team/model:1";
+        assert!(
+            super::checked_file_uri(&cf, source, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::checked_file_uri(&cf, source, None, true).is_err());
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
@@ -2630,6 +3182,9 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use crate::local_model::runtime_config::{
+        StructuralTagConfig, StructuralTagSchemaMode, StructuralTagScope,
+    };
 
     #[test]
     fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
@@ -2709,6 +3264,50 @@ mod ownership_tests {
             "{err:?}"
         );
 
+        // An explicit null is a present-but-malformed value: it must error, not
+        // silently fall through to text_config/tokenizer (regression guard for
+        // the Option<Value> projection collapsing null into None).
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": null}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": null}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_tolerates_non_finite_literals() -> anyhow::Result<()> {
+        // Some HF configs (e.g. Nemotron-H) serialize fields such as
+        // `time_step_limit` with the bare literal `Infinity`, which is valid
+        // JSON5 but not strict JSON. Deriving max_position_embeddings must not
+        // choke on such literals in fields we never read.
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 262144, "time_step_limit": [0.0, Infinity]}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(262144)
+        );
+
         Ok(())
     }
 
@@ -2725,6 +3324,88 @@ mod ownership_tests {
 
         card.runtime_config.context_length = Some(0);
         assert_eq!(card.effective_context_length(), 0);
+    }
+
+    #[test]
+    fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
+        use crate::entrypoint::RouterConfig;
+        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        for mode in [RouterMode::KV, RouterMode::RoundRobin] {
+            let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
+            let mut router = RouterConfig {
+                router_mode: mode,
+                ..Default::default()
+            };
+            router.kv_router_config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
+            card.router_config = Some(router);
+            let emitted: serde_json::Value =
+                serde_json::from_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(
+                emitted["router_config"]["kv_router_config"]["router_prefill_load_model"],
+                "aic"
+            );
+
+            for spelling in ["aic", "ais"] {
+                let mut input = emitted.clone();
+                input["router_config"]["kv_router_config"]["router_prefill_load_model"] =
+                    serde_json::json!(spelling);
+                let parsed = ModelDeploymentCard::load_from_json_str(&input.to_string()).unwrap();
+                assert_eq!(
+                    parsed
+                        .router_config
+                        .as_ref()
+                        .unwrap()
+                        .kv_router_config
+                        .router_prefill_load_model,
+                    RouterPrefillLoadModel::Ais
+                );
+                assert_eq!(parsed.mdcsum(), card.mdcsum());
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&parsed.to_json().unwrap()).unwrap(),
+                    emitted
+                );
+            }
+        }
+
+        let card = ModelDeploymentCard::with_name_only("wire-compat-default");
+        let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
+        assert!(parsed.router_config.is_none());
+        assert_eq!(parsed.mdcsum(), card.mdcsum());
+    }
+
+    #[test]
+    fn context_length_wire_compatibility() {
+        let card = ModelDeploymentCard::with_name_only("model");
+        let mut legacy_value = serde_json::to_value(&card).unwrap();
+        legacy_value["context_length"] = serde_json::json!(32_768);
+
+        let mut parsed: ModelDeploymentCard = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(parsed.effective_context_length(), 32_768);
+
+        parsed.runtime_config.context_length = Some(8_192);
+        let wire_value: serde_json::Value =
+            serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
+        assert_eq!(wire_value["context_length"], 8_192);
+    }
+
+    #[test]
+    fn structural_tag_wire_includes_fields_for_older_frontends() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Strict,
+            ..Default::default()
+        });
+
+        let wire: serde_json::Value = serde_json::from_str(&card.to_json().unwrap()).unwrap();
+        let runtime = &wire["runtime_config"];
+        assert_eq!(runtime["structural_tag_mode"], "on");
+        assert_eq!(runtime["structural_tag_scope"], "always");
+        assert_eq!(runtime["structural_tag_schema"], "strict");
+        assert_eq!(runtime["structural_tag"]["scope"], "always");
+        assert_eq!(runtime["structural_tag"]["schema"], "strict");
     }
 
     #[test]
@@ -2748,6 +3429,194 @@ mod ownership_tests {
             Some("tensor")
         );
     }
+
+    #[test]
+    fn runtime_taints_do_not_change_mdcsum() {
+        let mut fast = ModelDeploymentCard::with_name_only("model");
+        fast.runtime_config.taints = std::collections::HashSet::from(["fast".to_string()]);
+
+        let mut slow = ModelDeploymentCard::with_name_only("model");
+        slow.runtime_config.taints = std::collections::HashSet::from(["slow".to_string()]);
+
+        assert_eq!(fast.mdcsum(), slow.mdcsum());
+    }
+
+    #[test]
+    fn runtime_kv_event_capability_does_not_change_mdcsum() {
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.kv_event_publishing_enabled = Some(false);
+
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.kv_event_publishing_enabled = Some(true);
+
+        assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn vllm_generate_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn qwen_video_processor_contract_stays_out_of_the_checksum() {
+        use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
+        // `mdcsum()` caches via `OnceLock`, so each case uses a fresh card.
+
+        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+            card
+        }
+
+        fn legacy_ceil() -> serde_json::Value {
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+            })
+        }
+
+        let withheld = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(
+            withheld.mdcsum(),
+            card_with_contract(legacy_ceil()).mdcsum(),
+            "a worker that predates the contract must still join the WorkerSet of one that publishes it"
+        );
+
+        assert_eq!(
+            card_with_contract(legacy_ceil()).mdcsum(),
+            card_with_contract(serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+            }))
+            .mdcsum(),
+            "two workers publishing different contracts must still serve as one group"
+        );
+
+        // Negative control: a deployment that never carries this key is
+        // unaffected, so its cache directory and reported checksum do not move.
+        let bare = ModelDeploymentCard::with_name_only("model");
+        let mut unrelated = ModelDeploymentCard::with_name_only("model");
+        unrelated
+            .runtime_config
+            .runtime_data
+            .insert("some_unrelated_runtime_key".to_string(), true.into());
+        assert_eq!(bare.mdcsum(), unrelated.mdcsum());
+    }
+
+    #[test]
+    fn video_processor_runtime_contract_checksum_boundaries() {
+        use crate::local_model::runtime_config::{
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        };
+
+        fn card_with_contract(key: &str, value: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(key.to_string(), value);
+            card
+        }
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let qwen = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even"
+            }),
+        );
+        let same_qwen = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token"
+            }),
+        );
+        let different_qwen = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "vision_wrapped_video_token",
+                "resize_mode": "round_ties_even"
+            }),
+        );
+        let sglang_qwen = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+                "sglang_preprocess": {
+                    "image_factor": 28,
+                    "video_min_pixels": 100352,
+                    "video_max_pixels": 602112,
+                    "video_total_pixels": 90316800,
+                    "frame_factor": 2,
+                    "fps": 2.0,
+                    "min_frames": 4,
+                    "max_frames": 768
+                }
+            }),
+        );
+        let nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"video_pruning_rate": 0.5}),
+        );
+        let different_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"video_pruning_rate": 0.25}),
+        );
+        let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
+
+        assert_eq!(missing.mdcsum(), unrelated.mdcsum());
+        assert_eq!(missing.mdcsum(), qwen.mdcsum());
+        assert_eq!(missing.mdcsum(), sglang_qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), sglang_qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), same_qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), different_qwen.mdcsum());
+        assert_ne!(missing.mdcsum(), nemotron.mdcsum());
+        assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
+        assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+    }
 }
 
 #[cfg(test)]
@@ -2757,6 +3626,7 @@ mod worker_type_tests {
 
     use super::*;
     use crate::worker_type::WorkerType;
+    use std::collections::BTreeMap;
 
     #[test]
     fn default_card_has_no_worker_type_and_no_needs() {
@@ -2896,5 +3766,37 @@ mod worker_type_tests {
         let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
         assert_eq!(back.worker_type, None);
         assert!(back.needs.is_empty());
+    }
+
+    #[test]
+    fn indexer_identity_changes_mdcsum_and_missing_field_is_backward_compatible() {
+        fn spec(value: &str) -> IndexerIdentitySpec {
+            IndexerIdentitySpec::new(
+                Some(
+                    ExplicitIdentityMap::new(BTreeMap::from([(
+                        "weights".to_string(),
+                        value.to_string(),
+                    )]))
+                    .unwrap(),
+                ),
+                None,
+            )
+        }
+
+        let baseline = ModelDeploymentCard::with_name_only("model");
+        let mut explicit = ModelDeploymentCard::with_name_only("model");
+        explicit.indexer_identity = Some(spec("revision-a"));
+        assert_ne!(baseline.mdcsum(), explicit.mdcsum());
+
+        let mut serialized = serde_json::to_value(&explicit).unwrap();
+        assert!(
+            serialized
+                .as_object_mut()
+                .unwrap()
+                .remove("indexer_identity")
+                .is_some()
+        );
+        let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
+        assert!(restored.indexer_identity.is_none());
     }
 }

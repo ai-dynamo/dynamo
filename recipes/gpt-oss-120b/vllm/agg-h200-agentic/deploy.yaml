@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# gpt-oss-120b — AGGREGATED, H200, agentic (64k/400) — Dynamo 1.3.0 / vLLM 0.23.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: turbo-gptoss-120b-agg-h200-agentic-specdec-config
+  labels: {app.kubernetes.io/name: turbo-gptoss-120b-agg-h200-agentic, app.kubernetes.io/part-of: nim-turbo-dynamo}
+data:
+  compilation-config: |-
+    {"pass_config": {"fuse_allreduce_rms": true, "eliminate_noops": true}, "max_cudagraph_capture_size": 1024}
+  speculative-config: |-
+    {"method": "eagle3", "model": "nvidia/gpt-oss-120b-Eagle3-v3", "num_speculative_tokens": 3}
+  # CPU KV-offload tier (OPT-IN, off by default — see worker args). SimpleCPUOffloadConnector is native +
+  # SupportsHMA (keeps gpt-oss hybrid/sliding-window KV manager on) and is stable on gpt-oss, unlike
+  # LMCacheConnectorV1 (crashes on H200: request_finished → EngineDeadError; not SupportsHMA). cpu_bytes_to_use_per_rank
+  # is per-TP1-worker host RAM (100 GB × 8 workers = 800 GB/node); tune to fit the node.
+  kv-transfer-config: |-
+    {"kv_connector": "SimpleCPUOffloadConnector", "kv_role": "kv_both",
+     "kv_connector_extra_config": {"cpu_bytes_to_use_per_rank": 107374182400}}
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: turbo-gptoss-120b-agg-h200-agentic
+  labels: {app.kubernetes.io/name: turbo-gptoss-120b-agg-h200-agentic, app.kubernetes.io/part-of: nim-turbo-dynamo}
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              command: [python3]
+              args: [-m, dynamo.frontend, --router-mode, kv, --router-kv-events, --kv-cache-block-size, "64", --trust-remote-code]
+              # frontend = HTTP + tokenizer + KV router (CPU-bound); size CPU for the 8-worker fan-out
+              resources: {requests: {cpu: "8", memory: "16Gi"}}
+    - name: agg
+      type: worker
+      replicas: 8          # 8× TP1 replicas → one per GPU on an 8×H200 node; KV router load-balances
+      podTemplate:
+        spec:
+          hostIPC: true
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions: [{key: nvidia.com/gpu.product, operator: In, values: [NVIDIA-H200]}]
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model=openai/gpt-oss-120b
+                - --served-model-name=openai/gpt-oss-120b
+                - --trust-remote-code
+                - --quantization=mxfp4
+                - --moe-backend=flashinfer_cutlass
+                - --kv-cache-dtype=fp8
+                - --max-model-len=131072
+                - --gpu-memory-utilization=0.9
+                - --tensor-parallel-size=1          # TP1 replica (1 GPU); scale via replicas above
+                - --max-num-seqs=256
+                - --max-num-batched-tokens=32768
+                - --enable-chunked-prefill
+                - --enable-prefix-caching
+                - --async-scheduling
+                - --enable-flashinfer-autotune
+                - --compilation-config=$(COMPILATION_CONFIG)
+                - --speculative-config=$(SPECULATIVE_CONFIG)
+                # CPU KV offload is ON by default on H200: +9% tok/s/GPU at the 50-tps/user floor on the
+                # agentic trace (2026-07-09 perf A/B) — the host tier relieves GPU KV eviction pressure — and it
+                # is QUALITY-NEUTRAL (2026-07-13 controlled A/B, 541-prompt IFEval: offload-off 78.7 vs on 77.6
+                # p-strict, within noise; GPQA 73.7 either way; truncation 0.6%). SimpleCPUOffloadConnector is
+                # native + SupportsHMA (hybrid KV manager stays on; no --disable-hybrid-kv-cache-manager needed).
+                # Note: offload adds KV-reload tail latency — an lm_eval run through it undercounted IFEval
+                # (client timeouts under load), so measure quality with generous request timeouts. To disable
+                # offload, remove the next line. Do NOT swap in LMCache — it crashes on H200 (request_finished →
+                # EngineDeadError) and forces the HMA off.
+                - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
+                - --dyn-reasoning-parser
+                - gpt_oss
+                - --dyn-tool-call-parser        # harmony tool-call parser: required for tool_calls to populate
+                - harmony
+              env:
+                - {name: HF_HOME, value: /model-cache}
+                - {name: TORCH_CUDA_ARCH_LIST, value: "9.0"}
+                - {name: TRITON_CACHE_DIR, value: /tmp/.triton-cache}
+                - {name: VLLM_CACHE_ROOT, value: /tmp/vllm-cache}
+                - {name: HF_MODULES_CACHE, value: /tmp/hf_modules}
+                - {name: PYTHONHASHSEED, value: "42"}                 # consistent LMCache prefix hashes
+                - {name: COMPILATION_CONFIG, valueFrom: {configMapKeyRef: {name: turbo-gptoss-120b-agg-h200-agentic-specdec-config, key: compilation-config}}}
+                - {name: SPECULATIVE_CONFIG, valueFrom: {configMapKeyRef: {name: turbo-gptoss-120b-agg-h200-agentic-specdec-config, key: speculative-config}}}
+                - {name: KV_TRANSFER_CONFIG, valueFrom: {configMapKeyRef: {name: turbo-gptoss-120b-agg-h200-agentic-specdec-config, key: kv-transfer-config}}}
+              envFrom: [{secretRef: {name: hf-token-secret}}]
+              resources: {requests: {nvidia.com/gpu: "1", memory: "200Gi"}, limits: {nvidia.com/gpu: "1"}}
+              securityContext: {runAsUser: 0, capabilities: {add: ["SYS_PTRACE", "IPC_LOCK"]}}
+              startupProbe: {failureThreshold: 60, httpGet: {path: /live, port: 9090}, periodSeconds: 60, timeoutSeconds: 20}
+              volumeMounts:
+                - {mountPath: /model-cache, name: model-cache}
+                - {mountPath: /dev/shm, name: dshm}
+              workingDir: /workspace/
+          volumes:
+            - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
+            - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
+          tolerations:
+            - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}

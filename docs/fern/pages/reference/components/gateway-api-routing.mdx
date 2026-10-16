@@ -1,0 +1,331 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Gateway API Routing Reference
+subtitle: Dynamo Endpoint Picker Plugin fields, generated resources, runtime settings, and request contracts.
+---
+
+Use this reference for a `DynamoGraphDeployment` (DGD) that routes requests through the Gateway API
+Inference Extension (GAIE) and the Dynamo Endpoint Picker Plugin (EPP). For the procedure and
+topology, see [Using GAIE with Dynamo](../../kubernetes/kv-aware-routing/gateway-api.mdx).
+
+## EPP Modes
+
+The native Rust EPP runs in one of two modes, selected by the `DYN_EPP_MODE` environment variable.
+This reference covers Dynamo mode only. The deprecated Go EPP, kept by `eppConfig` with the image
+pinned to 1.4, does not read `DYN_EPP_MODE` and has no standalone mode.
+
+| Concern | Dynamo mode (`dynamo`, default) | Standalone mode (`standalone`) |
+|---|---|---|
+| Deployed by | Dynamo operator, from a DGD `epp` component | User-applied manifests |
+| Dynamo runtime | Required. It uses whichever discovery and event planes the platform is configured for; etcd and NATS are needed only when selected | Not used |
+| Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
+| EPP ServiceAccount and RBAC | Cluster-wide mode: the operator creates the ServiceAccount and binds it to the `dynamo-platform` chart's EPP ClusterRole. Namespace-restricted mode: the chart creates the ServiceAccount, Role, and RoleBinding | Supplied with the deployment manifests |
+| EPP replication | Available. With `DYN_ROUTER_REPLICA_SYNC=true`, replicas share active-sequence state over the Dynamo event plane (ZMQ by default, NATS if configured) | Available. Replicas share active-sequence state over ZMQ, discovering peers through the Service named by `DYN_EPP_PEER_SERVICE` |
+
+A standalone EPP is not managed by the Dynamo operator, so the operator generates no resources for
+it. It uses neither the EPP ServiceAccount nor the `dynamo-platform` chart's EPP RBAC. Standalone
+mode targets clusters without the Dynamo platform chart; do not install it for this path. A
+standalone EPP carries its own ServiceAccount and Role, which grant the permissions that mode needs.
+Do not bind a standalone EPP to the chart's EPP ClusterRole; its rules cover only the resources a
+Dynamo-mode EPP reads. For the standalone path, see
+[Using GAIE with vanilla vLLM](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx).
+
+## DGD EPP Fields
+
+The EPP is a DGD component with `type: epp`. The Dynamo operator creates the EPP workload, Service,
+and `InferencePool` from these fields. The Dynamo EPP runs the full Dynamo KV-aware router natively
+and is configured through `DYN_*` environment variables. It implements the GAIE
+[Lightweight Endpoint Picker (LW-EPP)](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/lwepp/README.md)
+`ext_proc` interface and does not use a plugin or scheduling-profile config.
+
+<ParamField path="spec.components[].type" type="string" required={true}>
+  Set to `epp` for the Endpoint Picker Plugin component. A DGD can contain at most one EPP component.
+
+  <span className="enum-values"><span className="enum-label">Value:</span> <Badge intent="note" minimal>epp</Badge></span>
+</ParamField>
+
+<ParamField path="spec.components[].eppConfig" type="object">
+  Deprecated Go-EPP configuration. When present, keep the EPP image pinned to 1.4; upgrading only
+  the Dynamo Operator does not require migration. To select the native Rust EPP, remove this field
+  and switch the image to 1.5 or later in the same update. Admission rejects mixed combinations. See
+  [Route Requests with Gateway API](../../kubernetes/kv-aware-routing/gateway-api.mdx).
+</ParamField>
+
+<ParamField path="spec.components[].replicas" type="integer" default="1">
+  Number of EPP pods. Increase it for endpoint-picker throughput or to survive the loss of a single
+  EPP pod. Above `1`, the routing accuracy of the fleet becomes approximate, and replicas do not share
+  active-load state unless `DYN_ROUTER_REPLICA_SYNC` is set. Read
+  [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy) before scaling it.
+
+  The deprecated Go EPP, selected by the presence of `eppConfig`, does not support replication. It
+  must have exactly `1` replica, and admission rejects any other value.
+</ParamField>
+
+<ParamField path="spec.components[].frontendSidecar" type="string" required={true}>
+  Name of the Frontend container in each routable worker pod. The named container must exist in
+  `podTemplate.spec.containers` and run with `--router-mode direct`.
+</ParamField>
+
+For the complete component schema, see the
+[DynamoComponentDeployment Reference](../kubernetes-api/dynamo-component-deployment.mdx).
+
+## EPP Runtime Environment
+
+Set these values on the EPP component's `main` container. Shared KV router settings use the same
+semantics as Frontend-hosted routing; this section identifies the settings most relevant to the
+Gateway topology.
+
+<ParamField path="DYN_MODEL_NAME" type="string">
+  Model identifier used to load tokenizer and model configuration. Set it when discovery does not
+  provide the model name. It must match the model served by the workers.
+</ParamField>
+
+<ParamField path="DYN_KV_CACHE_BLOCK_SIZE" type="integer">
+  Backend KV cache block size. Set it when discovery does not provide the value. It must match the
+  worker backend's block size; a mismatch changes prefix block hashes and produces incorrect overlap
+  scores.
+</ParamField>
+
+<ParamField path="DYN_USE_KV_EVENTS" type="boolean" default="true">
+  Enables worker-published KV event consumption in the EPP router. When `false`, the router relies on
+  predicted local state instead of precise worker cache events.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" type="number" default="1.0">
+  Credit applied to device-local prompt-prefix overlap. Higher values prefer workers that already hold
+  more of the prompt prefix. Set to `0` to remove device-local cache overlap from endpoint scoring.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY" type="number" default="0.0">
+  Reduces overlap credit as active prefill load rises above the least-loaded eligible worker. `0`
+  disables decay.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_PREFILL_LOAD_SCALE" type="number" default="1.0">
+  Scales prompt-side prefill load after cache-hit credits are applied.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT" type="number" default="0.0">
+  Adds block-equivalent routing cost for each active request on a candidate worker. Tune this value
+  only when decode step latency depends materially on active batch size.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_TEMPERATURE" type="number" default="0.0">
+  Controls worker exploration through normalized softmax sampling. `0` selects deterministically.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_REPLICA_SYNC" type="boolean" default="false">
+  Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
+  plane. Has no effect at one replica, and the deprecated Go EPP cannot be replicated. Set it to `true`
+  when running more than one EPP replica. See
+  [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy).
+</ParamField>
+
+<ParamField path="DYN_ROUTER_TRACK_ACTIVE_BLOCKS" type="boolean" default="true">
+  Includes blocks used by active generation in worker load accounting.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_TRACK_OUTPUT_BLOCKS" type="boolean" default="false">
+  Predicts output blocks during generation and decays them as requests make progress.
+</ParamField>
+
+<ParamField path="DYN_ROUTER_TRACK_PREFILL_TOKENS" type="boolean" default="true">
+  Includes active prompt-side prefill tokens in worker load accounting.
+</ParamField>
+
+For the full shared configuration surface and tuning guidance, see
+[Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
+
+## EPP Replication and Routing Accuracy
+
+Set `DYN_ROUTER_REPLICA_SYNC` to `true` when running more than one EPP replica.
+
+The EPP embeds the same KV router as the Frontend, so replicated EPPs behave like replicated
+Frontends:
+
+- Prefix-cache state is the same on every replica. Each replica consumes worker KV events directly,
+  so replication does not affect cache-overlap scoring.
+- Active-load state is where replicas differ. Without `DYN_ROUTER_REPLICA_SYNC`, each replica sees
+  only the requests it routed. With it, replicas share that state on a best-effort basis and can
+  briefly disagree, for example when two replicas pick the same worker at the same time.
+- Router queueing, when enabled, is per replica. A replica does not see requests queued on its
+  peers, and its queued requests are lost if it stops.
+
+For which active-load events are synchronized and which stay local, see
+[Active Block Replica Synchronization](../../developer-guide/knowledge-base/modular-components/router/router-operations.md#active-block-replica-synchronization).
+
+## Generated Resource Contract
+
+For a DGD named `<dgd-name>`, the operator generates an `InferencePool` named `<dgd-name>-pool` in
+the DGD namespace. Its `endpointPickerRef` points to the generated EPP Service on gRPC port `9002`,
+and its target port points to worker Frontend sidecars on port `8000`.
+
+```yaml
+spec:
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component-class: worker
+      nvidia.com/dynamo-namespace: <dynamo-namespace>
+  endpointPickerRef:
+    kind: Service
+    name: <epp-service-name>
+    port:
+      number: 9002
+  targetPorts:
+  - number: 8000
+```
+
+Treat the generated `InferencePool`, EPP Service, and Deployment as operator-owned resources. Make
+persistent changes in the DGD.
+
+### Endpoint Picker Failure Mode
+
+`InferencePool.spec.endpointPickerRef.failureMode` decides what the gateway does when the EPP does not
+answer, such as when its pod is restarting or has failed:
+
+- `FailClose` drops the request. The client gets an error, in practice HTTP 500.
+- `FailOpen` forwards the request to an endpoint the gateway picks. The request is served, but without
+  KV-aware routing.
+
+The operator does not set this field, so the Gateway API default of `FailClose` applies. Setting it by
+hand on the generated `InferencePool` does not hold: the operator restores its own rendering on the
+next reconcile, which leaves the field unset and lets the default apply again. No DGD field selects it.
+
+A standalone EPP is unaffected. Its `InferencePool` is user-applied, so the value you write is the
+value you keep. The on-ramp example leaves the field out, so it also gets `FailClose`.
+
+## HTTPRoute Contract
+
+<ParamField path="spec.parentRefs[]" type="ParentReference" required={true}>
+  Gateway that receives model traffic. The Gateway and route can be in different namespaces only when
+  the Gateway listener allows the route namespace.
+</ParamField>
+
+<ParamField path="spec.rules[].backendRefs[]" type="BackendRef" required={true}>
+  Reference to the operator-generated `InferencePool`.
+</ParamField>
+
+<Indent>
+  <ParamField path="group" type="string" required={true}>
+    Set to `inference.networking.k8s.io`.
+  </ParamField>
+  <ParamField path="kind" type="string" required={true}>
+    Set to `InferencePool`.
+  </ParamField>
+  <ParamField path="name" type="string" required={true}>
+    Generated pool name, normally `<dgd-name>-pool`.
+  </ParamField>
+  <ParamField path="port" type="integer" required={true}>
+    Worker Frontend target port. The operator-generated pool uses `8000`.
+  </ParamField>
+</Indent>
+
+## Request Mutation Contract
+
+The EPP returns the selected endpoint and routing metadata to the Gateway. The Gateway forwards the
+mutated request to the selected Frontend sidecar.
+
+<ParamField path="x-dynamo-worker-instance-id" type="HTTP header">
+  Aggregated or decode worker selected for the request.
+</ParamField>
+
+<ParamField path="x-dynamo-dp-rank" type="HTTP header">
+  Data-parallel rank selected for the aggregated or decode worker.
+</ParamField>
+
+<ParamField path="x-dynamo-routing-mode" type="HTTP header">
+  Routing topology selected for the request.
+
+  <span className="enum-values"><span className="enum-label">Values:</span> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>disaggregated</Badge></span>
+</ParamField>
+
+<ParamField path="x-dynamo-prefill-instance-id" type="HTTP header">
+  Prefill worker selected for a disaggregated request.
+</ParamField>
+
+<ParamField path="x-dynamo-prefill-dp-rank" type="HTTP header">
+  Data-parallel rank selected for the prefill worker.
+</ParamField>
+
+For supported body-bearing OpenAI requests, the EPP can inject precomputed token data into
+`nvext.token_data` so the Frontend sidecar does not repeat tokenization.
+
+## Service Mesh Configuration
+
+<ParamField path="dynamo.serviceMesh.enabled" type="boolean" default="false">
+  Generates service-mesh resources for EPP Services when the provider CRDs are installed.
+</ParamField>
+
+<ParamField path="dynamo.serviceMesh.provider" type="string" default="istio">
+  Service-mesh provider. Only Istio is supported.
+
+  <span className="enum-values"><span className="enum-label">Value:</span> <Badge intent="note" minimal>istio</Badge></span>
+</ParamField>
+
+<ParamField path="dynamo.serviceMesh.istio.tlsMode" type="string" default="SIMPLE">
+  TLS mode in generated Istio `DestinationRule` resources.
+</ParamField>
+
+<ParamField path="dynamo.serviceMesh.istio.insecureSkipVerify" type="boolean" default="true">
+  Skips server certificate verification for the EPP's self-signed serving certificate.
+</ParamField>
+
+<ParamField path="dynamo.serviceMesh.istio.clientCertificate" type="string">
+  Client certificate path for `MUTUAL` TLS mode.
+</ParamField>
+
+<ParamField path="dynamo.serviceMesh.istio.privateKey" type="string">
+  Client private-key path for `MUTUAL` TLS mode.
+</ParamField>
+
+<ParamField path="dynamo.serviceMesh.istio.caCertificates" type="string">
+  Certificate authority path for `MUTUAL` TLS mode.
+</ParamField>
+
+When service-mesh integration is enabled, the operator creates a `DestinationRule` for each EPP
+Service. If the operator does not manage the mesh integration, create an equivalent rule so the
+Gateway proxy can connect to EPP gRPC port `9002`.
+
+## agentgateway and Istio Injection
+
+When namespace-level Istio injection is enabled, an injected `istio-proxy` in an agentgateway data
+plane pod can intercept the EPP external-processing gRPC connection and cause HTTP 500 responses.
+Use an `AgentgatewayParameters` resource in the same namespace as the `Gateway`:
+
+```yaml
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: inference-gateway-params
+spec:
+  deployment:
+    spec:
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+```
+
+Reference it from the Gateway:
+
+```yaml
+spec:
+  gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: inference-gateway-params
+```
+
+`AgentgatewayParameters` is a local reference and must be in the Gateway namespace. Use a
+per-Gateway resource unless disabling injection is an intentional cluster-wide policy.
+
+## Developer References
+
+Image build commands belong with the component source, not in this user reference. Use this source
+location when developing or replacing the standard EPP image:
+
+- [Dynamo EPP source](https://github.com/ai-dynamo/dynamo/tree/main/deploy/inference-gateway/ext-proc)
+- [GAIE Lightweight Endpoint Picker (LW-EPP) reference](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/lwepp/README.md)

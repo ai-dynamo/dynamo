@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::discovery::DiscoveryInstance;
-use dynamo_runtime::discovery::DiscoverySpec;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoverySpec, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -20,6 +19,7 @@ use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -37,7 +37,8 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Default for `LocalModelBuilder::self_host_metadata`. Truthy values opt in.
+/// Default for `LocalModelBuilder::self_host_metadata`. On by default;
+/// set to an explicitly falsy value (`0`/`false`/`no`/`off`) to opt out.
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
@@ -46,18 +47,17 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    // Unset, empty, and unrecognized values keep the default-on behavior.
+    value
+        .and_then(dynamo_runtime::config::parse_bool_opt)
+        .unwrap_or(true)
 }
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
     model_name: Option<String>,
+    model_aliases: Vec<String>,
     endpoint_id: Option<EndpointId>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
@@ -65,10 +65,12 @@ pub struct LocalModelBuilder {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     is_mocker: bool,
@@ -90,13 +92,16 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
+            batch_gateway_url: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
+            tls_client_ca_cert_path: Default::default(),
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
+            model_aliases: Default::default(),
             endpoint_id: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
@@ -123,7 +128,7 @@ impl LocalModelBuilder {
         self
     }
 
-    /// The HF name of the model before we downloaded it, or a local path if
+    /// The HF name or NGC URI before we downloaded the model, or a local path if
     /// that was given on the cmd line. We need this because `model_path` is always
     /// a local path.
     pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
@@ -133,6 +138,11 @@ impl LocalModelBuilder {
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
         self.model_name = model_name;
+        self
+    }
+
+    pub fn model_aliases(&mut self, aliases: Vec<String>) -> &mut Self {
+        self.model_aliases = aliases;
         self
     }
 
@@ -159,6 +169,11 @@ impl LocalModelBuilder {
 
     pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
         self.http_metrics_port = port;
+        self
+    }
+
+    pub fn batch_gateway_url(&mut self, url: Option<String>) -> &mut Self {
+        self.batch_gateway_url = url;
         self
     }
 
@@ -205,8 +220,13 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in or out of self-hosting MDC artifacts. Default `false`.
-    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
+    pub fn reasoning_field(&mut self, reasoning_field: ReasoningField) -> &mut Self {
+        self.frontend_api_config
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
+    /// Opt in or out of self-hosting MDC artifacts. Default `true`.
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -219,6 +239,11 @@ impl LocalModelBuilder {
 
     pub fn tls_key_path(&mut self, p: Option<PathBuf>) -> &mut Self {
         self.tls_key_path = p;
+        self
+    }
+
+    pub fn tls_client_ca_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_client_ca_cert_path = p;
         self
     }
 
@@ -295,7 +320,7 @@ impl LocalModelBuilder {
     }
 
     /// Make an LLM ready for use:
-    /// - Download it from Hugging Face (and NGC in future) if necessary
+    /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
     /// - Load it's ModelDeploymentCard card
     /// - Name it correctly
@@ -338,6 +363,9 @@ impl LocalModelBuilder {
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
             card.router_config = self.router_config.clone();
+            if !self.model_aliases.is_empty() {
+                card.set_aliases(self.model_aliases.clone());
+            }
 
             return Ok(LocalModel {
                 card,
@@ -347,10 +375,12 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
+                batch_gateway_url: self.batch_gateway_url.take(),
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
+                tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
@@ -369,7 +399,8 @@ impl LocalModelBuilder {
                 model_path.display(),
             );
         }
-        let model_path = fs::canonicalize(model_path)?;
+        let original_model_path = model_path;
+        let model_path = fs::canonicalize(&original_model_path)?;
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
@@ -377,6 +408,11 @@ impl LocalModelBuilder {
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
+        } else if self.model_name.as_deref().is_some_and(|name| {
+            name != original_model_path.to_string_lossy() && name != card.display_name
+        }) {
+            // A served name must not replace the local metadata source during registration.
+            card.set_source_path(model_path.clone());
         }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
@@ -391,6 +427,9 @@ impl LocalModelBuilder {
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
         card.router_config = self.router_config.clone();
+        if !self.model_aliases.is_empty() {
+            card.set_aliases(self.model_aliases.clone());
+        }
 
         Ok(LocalModel {
             card,
@@ -400,10 +439,12 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
+            batch_gateway_url: self.batch_gateway_url.take(),
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
+            tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
@@ -424,10 +465,12 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
@@ -437,9 +480,68 @@ pub struct LocalModel {
     self_host_metadata: bool,
 }
 
+/// Register a Model Deployment Card via the discovery system.
+/// Derives the LoRA suffix from card.lora and constructs the DiscoverySpec.
+/// Derive LoRA suffix from an optional adapter name.
+/// Returns None if lora_name is None, otherwise returns a slugified version of the name.
+pub fn derive_lora_suffix(lora_name: Option<&str>) -> Option<String> {
+    lora_name.map(|name| Slug::slugify(name).to_string())
+}
+
+pub async fn register_model_card(
+    endpoint: &Endpoint,
+    card: &ModelDeploymentCard,
+) -> anyhow::Result<()> {
+    let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
+    let model_suffix = derive_lora_suffix(lora_name);
+
+    let discovery = endpoint.drt().discovery();
+    let wire_card = card.for_mdc_wire();
+    let spec = DiscoverySpec::from_model_with_suffix(
+        endpoint.component().namespace().name().to_string(),
+        endpoint.component().name().to_string(),
+        endpoint.name().to_string(),
+        &wire_card,
+        model_suffix,
+    )?;
+    let _instance = discovery.register(spec).await?;
+
+    // Size the process-global admission gate from this card, after registration
+    // succeeds. LoRA adapters carry no capacity of their own.
+    if lora_name.is_none() {
+        dynamo_runtime::admission_gate::record_engine_capacity(
+            card.runtime_config.max_num_seqs,
+            Some(card.runtime_config.data_parallel_size),
+        );
+    }
+    Ok(())
+}
+
+/// Replace the caller-managed taints on this worker's existing model card.
+pub async fn update_model_taints(
+    endpoint: &Endpoint,
+    taints: HashSet<String>,
+) -> anyhow::Result<()> {
+    let endpoint_id = endpoint.id();
+    let instance_id = endpoint.drt().connection_id();
+    let discovery = endpoint.drt().discovery();
+    discovery
+        .update_model_taints(
+            ModelCardInstanceId {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                instance_id,
+                model_suffix: None,
+            },
+            taints,
+        )
+        .await
+}
+
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
-    /// Downloads the model from Hugging Face if necessary.
+    /// Downloads the model from Hugging Face, or from NGC for `ngc://` names, if necessary.
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
@@ -482,6 +584,10 @@ impl LocalModel {
         self.http_metrics_port
     }
 
+    pub fn batch_gateway_url(&self) -> Option<&str> {
+        self.batch_gateway_url.as_deref()
+    }
+
     pub fn metrics_prefix(&self) -> Option<String> {
         self.metrics_config.prefix()
     }
@@ -514,12 +620,20 @@ impl LocalModel {
             .reasoning_dispatch()
     }
 
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
+    }
+
     pub fn tls_cert_path(&self) -> Option<&Path> {
         self.tls_cert_path.as_deref()
     }
 
     pub fn tls_key_path(&self) -> Option<&Path> {
         self.tls_key_path.as_deref()
+    }
+
+    pub fn tls_client_ca_cert_path(&self) -> Option<&Path> {
+        self.tls_client_ca_cert_path.as_deref()
     }
 
     pub fn router_config(&self) -> &RouterConfig {
@@ -581,10 +695,8 @@ impl LocalModel {
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
-        // Compute model_suffix from lora_name if present
-        let model_suffix = lora_info
-            .as_ref()
-            .map(|info| Slug::slugify(&info.name).to_string());
+        let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
+        let model_suffix = derive_lora_suffix(lora_name);
 
         let suffix_for_log = model_suffix
             .as_ref()
@@ -605,7 +717,9 @@ impl LocalModel {
         }
 
         let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
+        // NGC retains worker HTTP/file locations; the frontend can fall back to NGC
+        // when a worker's local metadata files are not accessible there.
+        if !source_path.exists() && !self.card.source_path().starts_with("ngc://") {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
             //
@@ -622,16 +736,7 @@ impl LocalModel {
         }
 
         // Register the Model Deployment Card via discovery interface
-        // The model_suffix (for LoRA) will be appended AFTER the instance_id
-        let discovery = endpoint.drt().discovery();
-        let spec = DiscoverySpec::from_model_with_suffix(
-            endpoint.component().namespace().name().to_string(),
-            endpoint.component().name().to_string(),
-            endpoint.name().to_string(),
-            &self.card,
-            model_suffix,
-        )?;
-        let _instance = discovery.register(spec).await?;
+        register_model_card(endpoint, &self.card).await?;
 
         Ok(())
     }
@@ -651,12 +756,15 @@ impl LocalModel {
         let component = endpoint.component().name().to_string();
         let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
-            tracing::warn!(
-                model_slug = %self.card.slug(),
-                "self_host_metadata enabled but system_status_server is not \
-                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
-                 set DYN_SYSTEM_PORT to enable",
-            );
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "self_host_metadata is ON but DYN_SYSTEM_PORT is unset; \
+                     falling back to shared-storage MDC. Set DYN_SYSTEM_PORT \
+                     (e.g. 9090) to enable self-hosting, or set \
+                     DYN_SELF_HOST_METADATA=0 to silence this warning.",
+                );
+            });
             return Ok(());
         };
         let model_slug = self.card.slug().to_string();
@@ -753,7 +861,7 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = derive_lora_suffix(lora_name);
         let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
@@ -802,15 +910,11 @@ pub(crate) fn self_host_base_url(
         return Ok(None);
     };
 
-    let configured = dynamo_runtime::RuntimeConfig::from_settings()
-        .unwrap_or_default()
-        .system_host;
-    let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
-        _ => configured,
-    };
+    Ok(Some(system_status_base_url(&info)))
+}
 
-    Ok(Some(format!("http://{host}:{}", info.port())))
+fn system_status_base_url(info: &dynamo_runtime::SystemStatusServerInfo) -> String {
+    format!("http://{}", info.advertised_socket_addr())
 }
 
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
@@ -852,24 +956,121 @@ fn harvest_extra_files(
 }
 
 #[cfg(test)]
-mod env_self_host_metadata_tests {
+mod local_source_tests {
     use super::*;
 
-    #[test]
-    fn env_default_parsing() {
-        assert!(!self_host_metadata_default(None), "unset → default OFF");
+    fn model_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
 
-        for v in [
-            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
+    #[tokio::test]
+    async fn renamed_local_model_publishes_local_metadata() {
+        let canonical = fs::canonicalize(model_dir()).unwrap();
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("local-source")
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let mut model = LocalModelBuilder::default()
+            .model_path(model_dir())
+            .model_name(Some("local-qwen".to_string()))
+            .self_host_metadata(false)
+            .build()
+            .await
+            .unwrap();
+
+        model
+            .attach(
+                &endpoint,
+                ModelType::Chat,
+                ModelInput::Tokens,
+                None,
+                Some(crate::worker_type::WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let instances = drt
+            .discovery()
+            .list(dynamo_runtime::discovery::DiscoveryQuery::AllModels)
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        let card: ModelDeploymentCard = instances[0].deserialize_model().unwrap();
+        assert_eq!(card.display_name, "local-qwen");
+        assert_eq!(card.source_path(), canonical.to_str().unwrap());
+        let files = card.iter_metadata_files();
+        assert!(!files.is_empty());
+        for (file, _) in files {
+            assert!(file.url().is_none(), "unexpected remote metadata: {file:?}");
+            assert!(file.path().unwrap().starts_with(&canonical));
+        }
+        drt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn default_names_keep_their_representation() {
+        let canonical = fs::canonicalize(model_dir()).unwrap();
+        let path_name = canonical.to_str().unwrap().to_string();
+        let relative = model_dir()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        let symlink = dir.path().join("model");
+        std::os::unix::fs::symlink(&canonical, &symlink).unwrap();
+        for (path, name) in [
+            (model_dir(), None),
+            (model_dir(), Some(path_name.clone())),
+            (relative.clone(), Some(relative.display().to_string())),
+            (symlink.clone(), Some(symlink.display().to_string())),
         ] {
-            assert!(
-                !self_host_metadata_default(Some(v)),
-                "expected OFF for {v:?}"
-            );
+            let mut builder = LocalModelBuilder::default();
+            builder.model_path(path).model_name(name.clone());
+            let model = builder.build().await.unwrap();
+            assert_eq!(model.display_name(), name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().source_path, None);
+            let mut original = LocalModelBuilder::default()
+                .model_path(model_dir())
+                .build()
+                .await
+                .unwrap()
+                .card()
+                .clone();
+            original.set_name(name.as_deref().unwrap_or(&path_name));
+            assert_eq!(model.card().mdcsum(), original.mdcsum());
         }
-        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
-        }
+    }
+}
+
+#[cfg(test)]
+mod self_host_metadata_default_tests {
+    use super::*;
+
+    // parse_bool_opt owns the falsy/truthy vocabulary (tested in the `truthy`
+    // crate); here we only lock the default-on inversion this flag introduced:
+    // anything that isn't an explicit falsy token stays ON.
+    #[test]
+    fn defaults_on_unless_explicitly_falsy() {
+        assert!(self_host_metadata_default(None)); // unset
+        assert!(self_host_metadata_default(Some(""))); // empty
+        assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
+        assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
+    }
+
+    #[test]
+    fn self_host_url_uses_the_bound_status_address() {
+        let info = dynamo_runtime::SystemStatusServerInfo::new("[::1]:8080".parse().unwrap(), None);
+
+        assert_eq!(system_status_base_url(&info), "http://[::1]:8080");
     }
 }
 

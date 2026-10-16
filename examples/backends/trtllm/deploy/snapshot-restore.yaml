@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Experimental Dynamo Snapshot restore example for Qwen3-0.6B with TensorRT-LLM.
+#
+# With checkpoint.enabled=true and no checkpointRef, Dynamo creates a
+# SnapshotJob for TRTLLMWorker. WaitForCheckpoint holds serving replicas at zero
+# until capture completes, then restores them from the generated PodSnapshot.
+# The default Immediate policy starts workers cold during capture; only later
+# Pods restore, and snapshot readiness does not restart existing workers.
+#
+# Use the same TensorRT-LLM runtime image for capture and restore, and a matching
+# frontend image. Replace the image names below with the revision being tested.
+# Omit the deprecated checkpoint.mode and checkpoint.identity fields.
+#
+# Requirements for the single-GPU TensorRT-LLM path:
+# - Install standalone Snapshot and enable checkpoint support in the Dynamo
+#   operator before applying this manifest.
+# - Create a PersistentVolumeClaim (PVC) named model-cache in the target
+#   namespace before applying this manifest.
+# - Run the normal TensorRT-LLM entrypoint. Do not wrap it in cuda-checkpoint
+#   --launch-job; the snapshot-agent drives CRIU/cuda-checkpoint externally.
+# - The engine config limits the batch size and KV cache allocation for Qwen3-0.6B.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-0-6b-trtllm-snapshot-restore
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: my-registry/tensorrtllm-runtime:my-tag
+              imagePullPolicy: IfNotPresent
+    - name: TRTLLMWorker
+      type: worker
+      replicas: 1
+      experimental:
+        checkpoint:
+          enabled: true
+          startupPolicy: WaitForCheckpoint
+      podTemplate:
+        spec:
+          runtimeClassName: nvidia
+          nodeSelector:
+            nvidia.com/gpu.present: "true"
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          volumes:
+            - name: hf-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: criu-work
+              emptyDir: {}
+            - name: dev-net-tun
+              hostPath:
+                path: /dev/net/tun
+                type: CharDevice
+          containers:
+            - name: main
+              image: my-registry/tensorrtllm-runtime:my-tag
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - python3
+                - -m
+                - dynamo.trtllm
+              args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --extra-engine-args
+                - ./examples/backends/trtllm/engine_configs/qwen3/snapshot.yaml
+              env:
+                - name: UCX_TLS
+                  # Avoid RDMA/IB transports whose kernel/device state is not
+                  # restored by CRIU.
+                  value: tcp,self
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
+                  ephemeral-storage: 10Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: hf-cache
+                  mountPath: /home/dynamo/.cache/huggingface
+                - name: criu-work
+                  mountPath: /var/criu-work
+                - name: dev-net-tun
+                  mountPath: /dev/net/tun

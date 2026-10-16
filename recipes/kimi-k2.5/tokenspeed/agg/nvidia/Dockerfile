@@ -24,9 +24,9 @@
 #     -t <your-registry>/dynamo-tokenspeed:runtime \
 #     .
 #
-# The default BASE_IMAGE pins lightseekorg/tokenspeed-runner at a CUDA-13
-# tag (matches B200's CUDA 13.x driver, ~4.66 GB). To target a different
-# TokenSpeed runtime build, override it:
+# The default BASE_IMAGE pins lightseekorg/tokenspeed-runner at an immutable
+# CUDA-13 digest (matches B200's CUDA 13.x driver, ~4.66 GB). To target a
+# different TokenSpeed runtime build, override it:
 #   --build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
 # or for arm64 base images:
 #   --build-arg ARCH=arm64
@@ -35,13 +35,14 @@
 # TokenSpeed engine itself from github.com/lightseekorg/tokenspeed, following
 # the upstream guide at lightseek.org/tokenspeed/guides/getting-started. Pin
 # the TokenSpeed source ref via --build-arg TOKENSPEED_GIT_REF=<ref>.
-ARG BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0
+ARG BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0@sha256:516a14ed701184d224e8e8700b41b8e116a687ac4c3481e13020ed5fd49e7061
 ARG ARCH=amd64
 ARG CARGO_BUILD_JOBS=16
 
 FROM ${BASE_IMAGE} AS tokenspeed_base
 ARG ARCH
-ARG TOKENSPEED_GIT_REF=main
+ARG TOKENSPEED_GIT_REF=886baafaa30f95d9a9e1b781c5906b0a89a64e98
+ARG FLASHINFER_WHEEL_INDEX=https://flashinfer.ai/whl/cu130
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -63,8 +64,11 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
     git clone https://github.com/lightseekorg/tokenspeed.git /opt/tokenspeed; \
     cd /opt/tokenspeed; \
-    git checkout "${TOKENSPEED_GIT_REF}"; \
+    git checkout --detach "${TOKENSPEED_GIT_REF}"; \
     pip install -e "./python" --no-build-isolation; \
+    FLASHINFER_VERSION="$(sed -n 's/^flashinfer-python==//p' tokenspeed-kernel/python/requirements/cuda.txt)"; \
+    test -n "${FLASHINFER_VERSION}"; \
+    pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" --index-url "${FLASHINFER_WHEEL_INDEX}"; \
     pip install -e tokenspeed-kernel/python/ --no-build-isolation; \
     pip install -e tokenspeed-scheduler/
 

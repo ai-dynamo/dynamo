@@ -8,6 +8,7 @@ Invoked from each container's `licenses` Dockerfile stage:
         --ecosystem rust,python,dpkg,go,native \\
         --venv /opt/dynamo/venv \\
         --output-dir /legal \\
+        --rust-sbom /tmp/sbom-rust-epp.cdx.json \\
         --go-sbom /tmp/sbom-go.cdx.json \\
         --native-yaml /opt/compliance/native_packages.yaml \\
         --native-image dynamo-runtime
@@ -94,9 +95,20 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help=(
             "Path to a cyclonedx-gomod output (required for go). Repeatable when "
-            "an image combines multiple Go binaries — e.g. frontend pulls in /epp "
-            "from the EPP image and consumes EPP's emitted SBOM alongside any "
-            "Go SBOM produced inside the frontend build itself."
+            "an image combines multiple Go binaries."
+        ),
+    )
+    parser.add_argument(
+        "--rust-sbom",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Path to a CycloneDX SBOM describing a Rust binary that ships in "
+            "this image without going through a wheel, so the rust generator's "
+            "site-packages scan cannot see it. Repeatable. Produced by "
+            "compliance.cargo_sbom; the frontend passes the ext-proc SBOM that "
+            "describes /epp."
         ),
     )
     parser.add_argument(
@@ -119,6 +131,17 @@ def main(argv: list[str] | None = None) -> int:
             "NOTICES attributes only what's installed above the baseline. "
             "Pass this from the runtime's licenses stage; omit it for "
             "from-image == baseline cases (no subtraction needed)."
+        ),
+    )
+    parser.add_argument(
+        "--dpkg-root",
+        type=Path,
+        default=Path("/"),
+        help=(
+            "Filesystem root whose dpkg database and /usr/share/doc tree should "
+            "be scanned for dpkg components. Defaults to the current container "
+            "root. Use this when the licenses stage installs helper packages "
+            "that are not shipped in the final image."
         ),
     )
     parser.add_argument(
@@ -195,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.output_dir,
                     subtract=subtract,
                     licenses_dir=args.rust_licenses_dir,
+                    extra_sboms=args.rust_sbom,
                 )
             elif eco == "python":
                 if not search_paths:
@@ -208,7 +232,9 @@ def main(argv: list[str] | None = None) -> int:
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 
-                comps = gen.generate(args.output_dir, subtract=subtract)
+                comps = gen.generate(
+                    args.output_dir, subtract=subtract, root=args.dpkg_root
+                )
             elif eco == "go":
                 if not args.go_sbom:
                     failures.append("go: at least one --go-sbom is required")

@@ -12,11 +12,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
 if TYPE_CHECKING:
     import torch
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from torch.cuda.memory import MemPool
+    from torch.cuda.memory import MemPool  # type alias; XPU MemPool has same API
 
 logger = logging.getLogger(__name__)
 
@@ -80,21 +81,46 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
 def _ensure_callbacks_initialized() -> None:
     global _callbacks_initialized, _pluggable_alloc
 
-    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
-    from torch.cuda import CUDAPluggableAllocator
+    from gpu_memory_service.client.torch.extensions import _allocator_ext as _alloc_ext
 
     if _callbacks_initialized:
         return
 
-    _pluggable_alloc = CUDAPluggableAllocator(cumem.__file__, "my_malloc", "my_free")
-    cumem.init_module(_gms_malloc, _gms_free)
+    device_type = get_vmm_device_type()
+    if device_type == VMMDeviceType.CUDA:
+        from torch.cuda import CUDAPluggableAllocator
+
+        _pluggable_alloc = CUDAPluggableAllocator(
+            _alloc_ext.__file__, "my_malloc", "my_free"
+        )
+    elif device_type == VMMDeviceType.XPU:
+        from torch.xpu import XPUPluggableAllocator
+
+        _pluggable_alloc = XPUPluggableAllocator(
+            _alloc_ext.__file__, "my_malloc", "my_free"
+        )
+    else:
+        raise NotImplementedError(
+            f"GMS torch mempool integration unsupported for device_type={device_type.value}"
+        )
+
+    _alloc_ext.init_module(_gms_malloc, _gms_free)
     _callbacks_initialized = True
 
 
 def _create_mem_pool() -> "MemPool":
-    from torch.cuda.memory import MemPool
-
     assert _pluggable_alloc is not None
+
+    device_type = get_vmm_device_type()
+    if device_type == VMMDeviceType.CUDA:
+        from torch.cuda.memory import MemPool
+    elif device_type == VMMDeviceType.XPU:
+        from torch.xpu.memory import MemPool
+    else:
+        raise NotImplementedError(
+            f"GMS torch mempool integration unsupported for device_type={device_type.value}"
+        )
+
     return MemPool(allocator=_pluggable_alloc.allocator())
 
 
@@ -284,9 +310,9 @@ def prune_allocations(
         return
 
     if synchronize:
-        import torch
+        from gpu_memory_service.integrations.common.utils import torch_device
 
-        torch.cuda.synchronize(manager.device)
+        torch_device().synchronize(manager.device)
 
     keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
 
@@ -330,7 +356,12 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
 
     token = _active_tag.set(tag)
     try:
-        with torch.cuda.use_mem_pool(state.mem_pool, device=device):
-            yield
+        device_type = get_vmm_device_type()
+        if device_type == VMMDeviceType.XPU:
+            with torch.xpu.use_mem_pool(state.mem_pool, device=device):
+                yield
+        else:
+            with torch.cuda.use_mem_pool(state.mem_pool, device=device):
+                yield
     finally:
         _active_tag.reset(token)

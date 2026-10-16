@@ -12,7 +12,8 @@ Rust-native exporters for privacy-preserving coding-agent traces.
 The Claude exporter lives in `dynamo-bench` and is invoked as:
 
 ```bash
-cargo run -p dynamo-bench --bin claude_trace_export -- \
+cargo run -p dynamo-bench --bin claude_trace_export \
+  --no-default-features --features claude-trace-export -- \
   --output-file /tmp/claude_trace.jsonl
 ```
 
@@ -39,7 +40,8 @@ If `--input-path` is omitted, the exporter:
 Use `--input-path` to restrict the export to a specific file or directory:
 
 ```bash
-cargo run -p dynamo-bench --bin claude_trace_export -- \
+cargo run -p dynamo-bench --bin claude_trace_export \
+  --no-default-features --features claude-trace-export -- \
   --input-path ~/.claude/projects/<encoded-path> \
   --output-file /tmp/claude_trace.jsonl
 ```
@@ -54,7 +56,8 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 ## Important Flags
 
 ```bash
-cargo run -p dynamo-bench --bin claude_trace_export -- \
+cargo run -p dynamo-bench --bin claude_trace_export \
+  --no-default-features --features claude-trace-export -- \
   --input-path ~/.claude/projects/<encoded-path> \
   --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --block-size 64 \
@@ -67,13 +70,16 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 - `--delta-overlap-words`: approximate tokenization by re-tokenizing only the final `N` words of the previous prompt plus the new delta; default is `50`
 - `--tokenizer-workers`: number of worker threads used for session-parallel tokenization
 
+The tokenizer only runs for turns without Claude usage and for compaction summaries, and is loaded only when one of them needs it. Usage-shaped turns, which are nearly all turns in recent sessions, skip transcript tokenization.
+
 ## Parsing Semantics
 
 The exporter:
 
-- uses top-level non-sidechain `user`, `assistant`, and `system` rows for the main transcript
+- uses top-level non-sidechain `user`, `assistant`, and `system` rows for the main transcript, skipping `<synthetic>` assistant rows that Claude Code writes for API errors and interruptions
 - reconstructs each `subagents/*.jsonl` file as a separate child session
-- groups assistant fragments by `requestId`, then `message.id`, across interleaved tool-result rows
+- groups assistant fragments by `requestId`, then `message.id`, across interleaved tool-result rows, ignored rows such as image companions, and other requests streaming concurrently in the same transcript
+- assigns each tool result to the request that issued its tool call
 - excludes `thinking` and `redacted_thinking`
 - pairs `compact_boundary` with its injected `isCompactSummary` row and emits the otherwise-hidden summarizer request
 - resets post-compaction transcript state to the summary while retaining Claude's observed stable cache prefix
@@ -88,26 +94,86 @@ The exporter:
 
 - Root turns use Claude `sessionId` as `agent_context.session_id`.
 - Child turns use Claude `agentId` as `session_id`; completed Agent results recover the immediate `parent_session_id`, with root `sessionId` as the fallback.
-- Request ingress is approximated by the most recent preceding user/tool-result timestamp. EOF does not imply `session_final`, because Claude sessions can resume.
+- Request ingress is approximated by the most recent preceding user/tool-result timestamp that an earlier request has not claimed. EOF does not imply `session_final`, because Claude sessions can resume.
 - Source Claude timestamps are parsed as UTC and normalized to millisecond replay timing; recorder-envelope timestamps are relative to the first request.
 - When Claude usage is present, input length and cached-prefix shape come from `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. The sequence hashes are deterministic synthetic hashes because local Claude JSONL omits the system prompt and complete tool schemas needed to reproduce wire-exact token IDs. The sidecar records this as `replay_hash_fidelity=synthetic_usage_shaped`.
+- A session's first request takes its cached prefix from a synthetic prefix shared by sessions with the same harness, model, and working directory. Claude's usage shows that this prefix was already cached but not which session wrote it, so the exporter attributes it to the context those sessions share, such as the system prompt and tool definitions. Later requests take their cached prefix from the session's previous request. The fidelity report counts the shared blocks as `pooled_prefix_blocks`.
 - The synthetic compaction request keeps Claude's `preTokens` input length, reuses every recoverable pre-compaction prefix block, and reserves a synthetic suffix for the unknown instruction. Its duration and context sizes come from `compactMetadata`; output length comes from tokenizing `isCompactSummary` because `postTokens` is post-compaction context size, not summary output. The exporter omits `cached_tokens` because Claude does not record cache usage for this hidden request.
 - The first post-compaction request reuses exactly Claude's observed `cache_read_input_tokens`, writes the new summary suffix once, and makes that suffix available to later turns. A full cache reset and a zero-write summary are both intentionally avoided.
-- Rows are written incrementally as turns are merged across sessions.
+- Rows are written incrementally as turns are merged across sessions. The exporter first indexes every file without keeping row content. It parses a session only when the merge can reach its earliest request, builds the session's turns, and releases its rows. A session with turns lacking usage keeps its rows and builds turns one at a time, because each such turn carries the transcript so far. Peak memory therefore follows the sessions active at the same time rather than the corpus size, and every input file is read twice.
 - Every export runs a source-to-output fidelity verifier. Request and compaction cardinality/timing, usage, tool classes/errors, child links, pre-compaction and post-compaction cached-prefix hashes, and forward causal references fail the export on mismatch.
 - The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.
 - `tool.claude` is exporter-only replay evidence, not a requirement for live request-trace or ZMQ tool-event producers. Direct replay consumes it while reconstructing the in-memory request graph and falls back to timestamps when it is absent.
 - `request.claude.compaction` is likewise exporter-only evidence. Direct replay ignores the metadata and replays the row as an ordinary model request.
+
+## Codex Exporter
+
+The Codex exporter converts Codex rollouts that record per-response token usage (Codex 0.154 and later) into the same request trace:
+
+```bash
+cargo run -p dynamo-bench --bin codex_trace_export \
+  --no-default-features --features codex-trace-export -- \
+  --output-file /tmp/codex_trace.jsonl
+```
+
+Without `--input-path`, it reads every `rollout-*.jsonl` under `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions`, with `$CODEX_HOME` defaulting to `~/.codex`. Codex moves rollouts into `archived_sessions` while it runs, so both are needed to keep agent trees complete. `--input-path` accepts a rollout file or a directory. It needs no tokenizer and writes no sidecar.
+
+### Codex Parsing Semantics
+
+The exporter:
+
+- reads only the payload fields it needs, so message and tool text is never materialized
+- treats each rollout as one thread and skips lines that a forked child copied from its parent, which are ordinals `1..subagent_history_start_ordinal`
+- emits one request per `token_usage_record`, with input length, cached prefix, and output length taken from its usage
+- approximates when a request was sent by the latest input line before the response's first output, or by the compaction start for compaction requests
+- recognizes a compaction as the usage record immediately followed by a `compacted` checkpoint with the same response ID
+- drops responses without a usage record and counts them by cause:
+  - responses cut off by a queued inter-agent message;
+  - responses ended by an interrupt or error;
+  - responses followed by input without a usage record, such as turns written before the rollout recorded usage.
+
+  A spawn, follow-up, or wait issued by a dropped response is attributed to the thread's latest earlier recorded request.
+- emits a `tool_end` row for each tool call whose output was recorded
+- skips rollouts without per-line ordinals or without usage records, and reports the counts
+
+### Codex Output Semantics
+
+- Each thread is a session. `agent_context.parent_session_id` names the spawning thread when its rollout is part of the export.
+- A forked child's first request takes its cached prefix from the request that spawned it. A first request of any other thread takes it from the shared prefix pool described for Claude, keyed by Codex, model, and working directory.
+- Cross-thread causality is written as `request.replay.dependencies` (see [Replay Dependencies](#replay-dependencies)):
+  - `spawn_agent` and `followup_task` start a turn in the recipient. The recipient's first request after the task was queued depends on the sending request, as a `spawn` from the parent or a `join` from any other thread.
+  - `send_message` only queues a message and starts nothing.
+  - A `wait_agent` call wakes on the first message queued for its thread after the waiting request started, including a child's final answer. The request that consumes the wait output joins the request that queued that message. A wait with no visible message either timed out or waited on a thread outside the export, and adds no edge.
+- The report prints dropped responses, unlinked waits, and agent references to threads without a rollout, such as children whose rollouts were deleted.
+
+## Replay Dependencies
+
+`request.replay.dependencies` is optional, exporter-only causality on a `request_end` row:
+
+```json
+"replay": {
+  "trace_block_size": 64,
+  "input_length": 1200,
+  "input_sequence_hashes": [1, 2],
+  "dependencies": [
+    {"request_id": "codex:parent:0", "relation": "spawn", "trigger": "completion"}
+  ]
+}
+```
+
+Live request traces never write it. Agentic lowering adds each listed edge to the per-session sequence edges it always derives. A dependency must name a request in the trace that started no later than the dependent request. A completion dependency that ends after the dependent request started gets zero delay. Coding agents run tools while a response streams, so a spawned or messaged request can start just before the sending response completes. A child session explicitly linked to its declared parent skips timestamp-based spawn and join inference with that parent. Links to other sessions leave that inference in place. Claude exports keep using `tool.claude` and do not write the field.
 
 ## Replay Metadata Flow
 
 ```mermaid
 flowchart LR
     A["Claude JSONL"] --> B["Claude exporter"]
+    G["Codex rollouts"] --> H["Codex exporter"]
     D["Live Dynamo requests<br/>and optional ZMQ tool events"] --> C["dynamo.request.trace.v1"]
     B --> C
+    H --> C
     C --> E["Dynamo replay loader<br/>--trace-format dynamo"]
     E --> F["In-memory standard or<br/>agentic replay model"]
 ```
 
-The Claude exporter adds `tool.claude` causality and `request.claude.compaction` evidence to the canonical request trace. The direct replay loader consumes tool causality while the compaction row follows the ordinary request path. Live traces can omit both Claude-only objects. Neither path writes an intermediate Mooncake file.
+The Claude exporter adds `tool.claude` causality and `request.claude.compaction` evidence to the canonical request trace, and the Codex exporter adds `request.replay.dependencies`. The direct replay loader consumes both kinds of causality while the compaction row follows the ordinary request path. Live traces omit all exporter-only objects. Neither path writes an intermediate Mooncake file.

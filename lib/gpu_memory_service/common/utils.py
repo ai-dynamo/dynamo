@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
 ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
 
+# Production GMS tags: the per-GPU server child and every engine integration
+# serve exactly these logical memory pools, one UDS socket per (device, tag).
+GMS_TAGS = ("weights", "kv_cache")
+
 _TRUTHY = ("true", "1", "yes")
 
 
@@ -46,13 +50,15 @@ def invalidate_uuid_cache() -> None:
 
 
 def get_socket_path(device: int, tag: str = "weights") -> str:
-    """Get GMS socket path for the given CUDA device and tag.
+    """Get GMS socket path for the given GPU device and tag.
 
     The socket path is based on GPU UUID, making it stable across different
-    CUDA_VISIBLE_DEVICES configurations. UUIDs are cached per device index.
+    device-visibility configurations. UUIDs are cached per device index.
+
+    The device type (CUDA vs XPU) is auto-detected via ``get_vmm_device_type()``.
 
     Args:
-        device: CUDA device index.
+        device: GPU device index.
 
     Returns:
         Socket path
@@ -60,14 +66,35 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
     """
     uuid = _uuid_cache.get(device)
     if uuid is None:
-        import pynvml  # deferred: not available in all environments
+        from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
-        pynvml.nvmlInit()
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-            uuid = pynvml.nvmlDeviceGetUUID(handle)
-        finally:
-            pynvml.nvmlShutdown()
+        if get_vmm_device_type() == VMMDeviceType.XPU:
+            from gpu_memory_service.common.vmm import _sycl_vmm
+
+            _sycl_vmm.ensure_initialized()
+            uuid = _sycl_vmm.device_uuid(device)
+        else:
+            import pynvml
+
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+            finally:
+                pynvml.nvmlShutdown()
         _uuid_cache[device] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+
+
+def align_to_granularity(size: int, granularity: int) -> int:
+    """Align size up to VMM granularity.
+
+    Args:
+        size: Size in bytes
+        granularity: Allocation granularity
+
+    Returns:
+        Aligned size
+    """
+    return ((size + granularity - 1) // granularity) * granularity

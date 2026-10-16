@@ -153,7 +153,7 @@ def validate_dgdr_dynamo_features(
         ):
             logger.warning(
                 "AIC does not support %s on %s and %s; planner will use the "
-                "Rust perf shim fallback regression when native AIC estimates "
+                "AIC core fallback regression when native AIC estimates "
                 "are unavailable.",
                 dgdr.model,
                 dgdr.hardware.gpuSku.lower(),

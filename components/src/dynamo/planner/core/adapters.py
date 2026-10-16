@@ -43,10 +43,11 @@ class PrefillPlanner(NativePlannerBase):
         # to accumulate samples.
         fpms = None
         try:
+            worker_info = self._required_worker_info(SubComponentType.PREFILL)
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.runtime_namespace,
-                worker_info=self.prefill_worker_info,
+                namespace=self._runtime_namespace(),
+                worker_info=worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.PREFILL,
                 aic_spec=self.config.aic_interpolation,
@@ -65,7 +66,9 @@ class PrefillPlanner(NativePlannerBase):
             [
                 TargetReplica(
                     sub_component_type=SubComponentType.PREFILL,
-                    component_name=self.prefill_worker_info.k8s_name,
+                    component_name=self._required_worker_info(
+                        SubComponentType.PREFILL
+                    ).k8s_name,
                     desired_replicas=desired,
                 )
             ]
@@ -84,10 +87,11 @@ class DecodePlanner(NativePlannerBase):
         # observations can still accumulate.
         fpms = None
         try:
+            worker_info = self._required_worker_info(SubComponentType.DECODE)
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.runtime_namespace,
-                worker_info=self.decode_worker_info,
+                namespace=self._runtime_namespace(),
+                worker_info=worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
@@ -106,7 +110,9 @@ class DecodePlanner(NativePlannerBase):
             [
                 TargetReplica(
                     sub_component_type=SubComponentType.DECODE,
-                    component_name=self.decode_worker_info.k8s_name,
+                    component_name=self._required_worker_info(
+                        SubComponentType.DECODE
+                    ).k8s_name,
                     desired_replicas=desired,
                 )
             ]
@@ -123,10 +129,11 @@ class AggPlanner(NativePlannerBase):
         # See PrefillPlanner._bootstrap_regression for rationale.
         fpms = None
         try:
+            worker_info = self._required_worker_info(SubComponentType.DECODE)
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.runtime_namespace,
-                worker_info=self.decode_worker_info,
+                namespace=self._runtime_namespace(),
+                worker_info=worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
@@ -145,7 +152,9 @@ class AggPlanner(NativePlannerBase):
             [
                 TargetReplica(
                     sub_component_type=SubComponentType.DECODE,
-                    component_name=self.decode_worker_info.k8s_name,
+                    component_name=self._required_worker_info(
+                        SubComponentType.DECODE
+                    ).k8s_name,
                     desired_replicas=desired,
                 )
             ]
@@ -167,14 +176,12 @@ class DisaggPlanner(NativePlannerBase):
         # component's missing benchmark doesn't tank the other.
         prefill_fpms = None
         decode_fpms = None
-        for component, worker_info in [
-            (SubComponentType.PREFILL, self.prefill_worker_info),
-            (SubComponentType.DECODE, self.decode_worker_info),
-        ]:
+        for component in [SubComponentType.PREFILL, SubComponentType.DECODE]:
             try:
+                worker_info = self._required_worker_info(component)
                 fpms = await fetch_pre_deployment_metrics(
                     runtime=self.runtime,
-                    namespace=self.runtime_namespace,
+                    namespace=self._runtime_namespace(),
                     worker_info=worker_info,
                     profile_results_dir=self.config.profile_results_dir,
                     component_type=component,
@@ -209,7 +216,9 @@ class DisaggPlanner(NativePlannerBase):
             targets.append(
                 TargetReplica(
                     sub_component_type=SubComponentType.PREFILL,
-                    component_name=self.prefill_worker_info.k8s_name,
+                    component_name=self._required_worker_info(
+                        SubComponentType.PREFILL
+                    ).k8s_name,
                     desired_replicas=decision.num_prefill,
                 )
             )
@@ -217,7 +226,9 @@ class DisaggPlanner(NativePlannerBase):
             targets.append(
                 TargetReplica(
                     sub_component_type=SubComponentType.DECODE,
-                    component_name=self.decode_worker_info.k8s_name,
+                    component_name=self._required_worker_info(
+                        SubComponentType.DECODE
+                    ).k8s_name,
                     desired_replicas=decision.num_decode,
                 )
             )
