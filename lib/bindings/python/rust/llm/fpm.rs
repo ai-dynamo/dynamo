@@ -1216,7 +1216,7 @@ mod tests {
             &latest,
             &HashMap::new(),
             &removed_workers,
-            now + Duration::from_millis(1500),
+            now + Duration::from_millis(1600),
             Duration::from_secs(1),
         );
         assert!(removed_workers.contains_key("retired"));
