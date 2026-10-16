@@ -37,14 +37,14 @@ pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
 };
-pub(crate) use record::{publish_tool_record, validate_tool_record};
+pub(crate) use record::{emit_router_selection, publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use sink::{ActiveInput, TraceShutdownReport, shutdown_workers};
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
     RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,
-    RequestTraceRecord, RequestTraceSchema, RequestTraceToolEvent, RequestTraceToolEventIngress,
-    RequestTraceToolStatus, RequestTraceWorkerInfo, ToolCallMetadata,
+    RequestTraceRecord, RequestTraceRouterSelection, RequestTraceSchema, RequestTraceToolEvent,
+    RequestTraceToolEventIngress, RequestTraceToolStatus, RequestTraceWorkerInfo, ToolCallMetadata,
 };
 
 static BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();
@@ -104,6 +104,19 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
 
 pub fn publish(record: RequestTraceRecord) {
     BUS.publish(record);
+}
+
+/// The router-selection capture spec for an embedded router: `Some` only when
+/// request tracing is initialized in this process with `router_selection`
+/// records enabled, so a process without a trace bus never pays for capture.
+/// Resolved once at router construction.
+pub fn router_selection_spec() -> Option<dynamo_kv_router::protocols::SelectionTraceSpec> {
+    let policy = policy();
+    (config::capture_enabled() && policy.emit_router_selection_records()).then_some(
+        dynamo_kv_router::protocols::SelectionTraceSpec {
+            top_k: policy.router_selection_top_k,
+        },
+    )
 }
 
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<RequestTraceRecord> {
