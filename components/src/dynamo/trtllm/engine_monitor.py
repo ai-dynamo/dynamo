@@ -23,9 +23,8 @@ logger = logging.getLogger(__name__)
 # error; the read is a cheap attribute lookup.
 _WATCHDOG_MAX_POLL_SECONDS = 0.5
 
-# Held by the first fatal-exit caller and never released: os._exit() ends the
-# process, so concurrent callers (monitor, watchdog, request handlers) return
-# at once instead of starting a second teardown.
+# Held by the first fatal-exit caller and never released, so later callers
+# return at once instead of starting a second teardown.
 _fatal_exit_lock = threading.Lock()
 
 
@@ -128,10 +127,8 @@ class TrtllmEngineMonitor:
             return
 
         self._monitor_task = asyncio.create_task(self._check_engine_health())
-        # The event loop can block for good in a TRT-LLM IPC send to a dead
-        # rank (for example LLM.generate_async() submitting a request), which
-        # also stops the asyncio monitor above. This thread only reads the
-        # executor's recorded fatal error, so it can always end the process.
+        # An IPC send to a dead rank can block the event loop and this monitor;
+        # the thread only reads the recorded fatal error, so it can still exit.
         threading.Thread(
             target=self._watch_fatal_error,
             name="trtllm-fatal-watchdog",
