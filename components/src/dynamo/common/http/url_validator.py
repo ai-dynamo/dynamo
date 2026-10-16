@@ -165,6 +165,11 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
 _URL_IN_TEXT: Final = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
 
 
+def mentions_url(text: str) -> bool:
+    """Whether ``text`` contains a URL that :func:`describe_error_detail` would bound."""
+    return isinstance(text, str) and _URL_IN_TEXT.search(text) is not None
+
+
 def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     """Bound a backend exception's text, keeping both ends.
 

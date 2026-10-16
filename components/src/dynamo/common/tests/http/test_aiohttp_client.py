@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
 from dynamo.common import http as mm_http
@@ -191,7 +192,9 @@ async def test_fetch_bytes_maps_connection_error() -> None:
 
 def _response_error(url: str) -> aiohttp.ClientResponseError:
     return aiohttp.ClientResponseError(
-        request_info=SimpleNamespace(real_url=URL(url)),
+        request_info=aiohttp.RequestInfo(
+            URL(url), "GET", CIMultiDictProxy(CIMultiDict())
+        ),
         history=(),
         status=403,
         message="Forbidden",
@@ -221,10 +224,13 @@ async def test_fetch_bytes_error_keeps_a_presigned_url_out(exc_factory, raised) 
     )
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
-    session.get = _cm_raising(lambda: exc_factory(url))
+    original = exc_factory(url)
+    session.get = _cm_raising(lambda: original)
     client = _make_client_with_session(session)
     with pytest.raises(raised) as exc:
         await client.fetch_bytes(url, 30.0)
+    # What aiohttp raised stays visible to callers, as a bounded copy.
+    assert type(exc.value.__cause__) is type(original)
     # The bounded error text keeps both of its ends, so check for any fragment
     # of the signature, not only the whole of it.
     for text in (str(exc.value), "".join(traceback.format_exception(exc.value))):
