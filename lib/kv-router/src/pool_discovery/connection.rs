@@ -18,7 +18,7 @@ use crate::global_view::PoolKey;
 
 /// Router side. Checks each caller with `verify`, then `admit`.
 #[async_trait]
-pub trait RelayListener: Send + Sync {
+pub trait StateReceiver: Send + Sync {
     async fn accept(
         &self,
         cancel_token: CancellationToken,
@@ -27,7 +27,7 @@ pub trait RelayListener: Send + Sync {
 
 /// Relay side. Dials every replica in its `ReplicaDirectory`.
 #[async_trait]
-pub trait RelayDialer: Send + Sync {
+pub trait StateBroadcaster: Send + Sync {
     async fn dial(
         &self,
         replica: &ReplicaEndpoint,
