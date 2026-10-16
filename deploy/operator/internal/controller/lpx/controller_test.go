@@ -48,6 +48,14 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+const (
+	releaseDownloadPending     = "download pending"
+	releaseDownloadFailure     = "download failure"
+	releaseSnapshotFailure     = "snapshot failure"
+	releaseConfigurationUpdate = "configuration update"
+	releaseStatusFailure       = "status failure"
+)
+
 func TestLPXControllerRemovesOnlyJournaledAgentPods(t *testing.T) {
 	t.Log("Publish a workload and journal one of its Agent Pods for release")
 	ctx := t.Context()
@@ -83,6 +91,186 @@ func TestLPXControllerRemovesOnlyJournaledAgentPods(t *testing.T) {
 	t.Log("Retry missing Pod observations until the LPX scheduler advances its release journal")
 	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 	require.ErrorContains(t, err, "not found")
+}
+
+func TestLPXAgentReleaseBeforeWorkloadResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantError string
+	}{
+		{name: releaseDownloadPending},
+		{name: releaseDownloadFailure, wantError: "download unavailable"},
+		{name: releaseSnapshotFailure, wantError: "snapshot unavailable"},
+		{name: "changed request"},
+		{name: "removed replica"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Publish two replicas and journal the second replica's Agent for release")
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			pod, request := journalLPXTestAgent(t, r, child, selected, objects, 1)
+
+			t.Log("Change desired intent or make its acquisition unavailable")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			switch tc.name {
+			case releaseDownloadPending, releaseDownloadFailure:
+				dgd.Spec.Components[0].LPX.BuildID = "gs://test-bucket/next-build"
+				downloads := newModelDownloadRegistry(t, nil, nil)
+				if tc.wantError != "" {
+					downloads.err = map[string]error{dgd.Spec.Components[0].LPX.BuildID: errors.New(tc.wantError)}
+				}
+				r.modelRegistry = downloads
+			case releaseSnapshotFailure:
+				r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: errors.New(tc.wantError)}
+			case "changed request":
+				request.Annotations[lpx.WorkloadDigestAnnotation] = "previous-build"
+				require.NoError(t, r.Update(ctx, request))
+			case "removed replica":
+				dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
+			}
+			require.NoError(t, r.Update(ctx, dgd))
+			child.Spec.InputRevision = mustLPXInputRevision(t, dgd)
+			require.NoError(t, r.Update(ctx, child))
+
+			t.Log("Remove the observed journaled Pod even when new intent cannot reach cleanup")
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+			if tc.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.wantError)
+			}
+			if tc.name == releaseDownloadPending {
+				require.Equal(t, modelDownloadRequeueAfter, result.RequeueAfter)
+			}
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+			require.Equal(t, request, getTestPipelineRequest(t, ctx, r, request.Namespace, request.Name), "release remains scheduler-owned, even for retiring requests")
+		})
+	}
+}
+
+func TestLPXAgentReleaseErrorsDoNotBlockReconciliation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline int64
+	}{
+		{name: releaseConfigurationUpdate},
+		{name: releaseDownloadPending},
+		{name: releaseSnapshotFailure},
+		{name: "long deadline", deadline: 60},
+		{name: "earlier deadline", deadline: 3},
+		{name: releaseStatusFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Observe a releasing replica beside a pending replica in a new child generation")
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			child.Generation, child.Status.ObservedGeneration = 2, 1
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+			if tc.deadline > 0 {
+				dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(tc.deadline)}
+			}
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			pod, request := journalLPXTestAgent(t, r, child, selected, objects, 0)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+
+			t.Log("Fail Agent deletion while allowing other reconciliation work to proceed")
+			cleanupErr, workloadErr, statusErr := errors.New("Agent deletion unavailable"), errors.New("build unavailable"), errors.New("status write unavailable")
+			failCleanup, failStatus := true, tc.name == releaseStatusFailure
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+					if _, ok := object.(*corev1.Pod); ok && failCleanup {
+						return cleanupErr
+					}
+					return delegated.Delete(ctx, object, opts...)
+				},
+				SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+					if subresource == "status" && failStatus { //nolint:goconst // Keep API subresource names inline in tests.
+						return statusErr
+					}
+					return delegated.SubResource(subresource).Update(ctx, object, opts...)
+				},
+			})
+			var downloads *fakeModelDownloadRegistry
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			switch tc.name {
+			case releaseConfigurationUpdate, releaseStatusFailure:
+				if dgd.Spec.Labels == nil {
+					dgd.Spec.Labels = make(map[string]string)
+				}
+				dgd.Spec.Labels["example.com/revision"] = "next"
+			case releaseDownloadPending:
+				dgd.Spec.Components[0].LPX.BuildID = "gs://test-bucket/next-build"
+				downloads = newModelDownloadRegistry(t, nil, nil)
+				r.modelRegistry = downloads
+			case releaseSnapshotFailure:
+				r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: workloadErr}
+			}
+			require.NoError(t, r.Update(ctx, dgd))
+			child.Spec.InputRevision = mustLPXInputRevision(t, dgd)
+			require.NoError(t, r.Update(ctx, child))
+			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			result, err := r.Reconcile(ctx, key)
+
+			t.Log("Retain cleanup failure, retries and generation accounting despite later progress")
+			if tc.deadline > 0 || tc.name == releaseDownloadPending {
+				require.NoError(t, err, "a persisted failure can use a bounded retry")
+				require.Positive(t, result.RequeueAfter)
+				require.LessOrEqual(t, result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
+				if tc.name == "earlier deadline" {
+					require.LessOrEqual(t, result.RequeueAfter, time.Duration(tc.deadline)*time.Second)
+				}
+			} else {
+				require.ErrorIs(t, err, cleanupErr)
+				require.Zero(t, result)
+			}
+			if tc.name == releaseSnapshotFailure {
+				require.ErrorIs(t, err, workloadErr)
+			}
+			if failStatus {
+				require.ErrorIs(t, err, statusErr)
+			}
+			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+			require.EqualValues(t, 1, child.Status.ObservedGeneration)
+			if !failStatus {
+				ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
+				require.NotNil(t, ready)
+				require.Equal(t, metav1.ConditionFalse, ready.Status)
+				require.Equal(t, v1alpha1.LPXReadyReasonFailed, ready.Reason)
+				require.Contains(t, ready.Message, cleanupErr.Error())
+				if tc.name == releaseSnapshotFailure {
+					require.Contains(t, ready.Message, workloadErr.Error())
+				}
+			}
+			require.Equal(t, request, getTestPipelineRequest(t, ctx, r, request.Namespace, request.Name))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+			if downloads != nil {
+				require.Equal(t, []string{dgd.Spec.Components[0].LPX.BuildID}, downloads.calls)
+			}
+			if tc.name == releaseConfigurationUpdate || tc.name == releaseStatusFailure {
+				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+				require.NotEmpty(t, pcs.Spec.Template.Cliques)
+				for _, clique := range pcs.Spec.Template.Cliques {
+					require.Equal(t, "next", clique.Labels["example.com/revision"])
+				}
+
+				t.Log("Recover cleanup without reverting the configuration update or replacing its request")
+				failCleanup, failStatus = false, false
+				_, err = r.Reconcile(ctx, key)
+				require.NoError(t, err)
+				require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+				require.Equal(t, request, getTestPipelineRequest(t, ctx, r, request.Namespace, request.Name))
+				require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+				require.Equal(t, child.Generation, child.Status.ObservedGeneration)
+			}
+		})
+	}
 }
 
 func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
@@ -4565,4 +4753,27 @@ func TestLPXRolloutBudgetEditsPreservePodCliqueSetAndRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func journalLPXTestAgent(t *testing.T, r *graphReconciler, child *v1alpha1.LPXGraphDeployment, selected *lpxTestWorkload, objects []client.Object, replica int32) (*corev1.Pod, *lpxv1alpha1.LPUPipelineRequest) {
+	t.Helper()
+	plan := selected.plan.ForReplica(replica)
+	clique := getResource[*grovev1alpha1.PodClique](t, objects, plan.Agents[0].CliqueName)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: child.Namespace, Name: fmt.Sprintf("released-%d", replica), UID: types.UID(fmt.Sprintf("released-%d-uid", replica)),
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
+	}}
+	require.NoError(t, r.Create(t.Context(), pod))
+	request := getTestPipelineRequest(t, t.Context(), r, child.Namespace, selected.requests[replica].Name)
+	request.Status = newLPXTestReleaseRequest(pod).Status
+	request.Status.ObservedGeneration = ptr.To(request.Generation)
+	require.NoError(t, r.Update(t.Context(), request))
+	return pod, request
+}
+
+func mustLPXInputRevision(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) string {
+	t.Helper()
+	revision, err := dynamo.LPXInputRevision(dgd, "")
+	require.NoError(t, err)
+	return revision
 }
