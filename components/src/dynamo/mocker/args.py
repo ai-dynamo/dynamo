@@ -603,6 +603,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Defaults to the serving endpoint.",
     )
     parser.add_argument(
+        "--kv-transfer-island-size",
+        type=int,
+        default=None,
+        help="Split this process's workers into KV-transfer islands of this many "
+        "workers: worker i's value for DYN_KV_TRANSFER_DOMAIN gets the suffix "
+        "-{i // N}, so one mocker process can stand for several islands. Requires "
+        "DYN_TOPOLOGY_ENABLED.",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -774,6 +783,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
+
+    if args.kv_transfer_island_size is not None and args.kv_transfer_island_size < 1:
+        raise ValueError("--kv-transfer-island-size must be positive")
 
     if args.kv_state_agent:
         if not args.zmq_kv_events_ports_list:

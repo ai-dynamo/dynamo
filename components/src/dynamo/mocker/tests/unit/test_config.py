@@ -521,3 +521,20 @@ def test_kv_state_agent_descriptors_cover_each_dp_rank():
             descriptor["indexer_domain_id"] + "/"
         )
         assert descriptor["router_hint_source"]["worker_type"] == "aggregated"
+
+
+def test_worker_topology_config_splits_the_transfer_domain_into_islands():
+    from dynamo.common.utils.topology import TopologyConfig
+
+    topology = TopologyConfig(
+        topology_domains={"rdma-island": "node-3", "zone": "us-east"},
+        kv_transfer_domain="rdma-island",
+        kv_transfer_enforcement="required",
+    )
+    for worker_id, island in ((0, "node-3-0"), (7, "node-3-0"), (8, "node-3-1")):
+        config = CONFIG.worker_topology_config(topology, worker_id, 8)
+        assert config.topology_domains == {"rdma-island": island, "zone": "us-east"}
+        assert config.kv_transfer_enforcement == "required"
+    assert CONFIG.worker_topology_config(topology, 9, None) is topology
+    disabled = TopologyConfig()
+    assert CONFIG.worker_topology_config(disabled, 9, 8) is disabled

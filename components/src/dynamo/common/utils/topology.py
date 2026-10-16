@@ -203,9 +203,15 @@ def read_topology_config(
     return config
 
 
-def apply_topology_config(runtime_config) -> TopologyConfig:
-    """Apply topology config to a ModelRuntimeConfig-like object."""
-    topology_config = read_topology_config()
+def apply_topology_config(
+    runtime_config, topology_config: TopologyConfig | None = None
+) -> TopologyConfig:
+    """Apply topology config to a ModelRuntimeConfig-like object.
+
+    Reads it from the environment unless ``topology_config`` is given.
+    """
+    if topology_config is None:
+        topology_config = read_topology_config()
     if not topology_config.enabled:
         return topology_config
 

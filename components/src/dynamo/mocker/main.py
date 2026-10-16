@@ -23,6 +23,7 @@ from dynamo.common.constants import (
 )
 from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.topology import read_topology_config
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
@@ -40,6 +41,7 @@ from .config import (
     build_runtime_config,
     kv_state_agent_cache_owner_ids,
     load_mocker_engine_args,
+    worker_topology_config,
 )
 from .utils.kv_cache import compute_kv_bytes_per_token
 
@@ -261,6 +263,11 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             args.router_advertisement.router_mode,
         )
 
+    # Read once: the environment is the same for every worker in this process.
+    topology_config = read_topology_config()
+    if args.kv_transfer_island_size and not topology_config.enabled:
+        raise ValueError("--kv-transfer-island-size requires DYN_TOPOLOGY_ENABLED")
+
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
@@ -315,7 +322,12 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         else:
             worker_engine_args = base_engine_args
 
-        kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
+        kv_cache_block_size, runtime_config = build_runtime_config(
+            worker_engine_args,
+            worker_topology_config(
+                topology_config, worker_id, args.kv_transfer_island_size
+            ),
+        )
         if args.sglang_generate:
             runtime_config.set_engine_specific("sglang_generate", "true")
         if worker_engine_args["dynamo"]["kv_state_agent"]:

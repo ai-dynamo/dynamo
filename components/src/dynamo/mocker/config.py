@@ -5,6 +5,7 @@
 
 import argparse
 import copy
+import dataclasses
 import json
 import os
 import socket
@@ -13,7 +14,7 @@ from typing import Any
 
 from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
 from dynamo.common.kv_state_agent import worker_raw_topic
-from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.topology import TopologyConfig, apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 
 # Fixed indexer domain and pool for mocker CacheOwners, in the canonical
@@ -228,6 +229,7 @@ def apply_worker_engine_args_overrides(
 
 def build_runtime_config(
     engine_args: Mapping[str, Any],
+    topology_config: TopologyConfig | None = None,
 ) -> tuple[int, ModelRuntimeConfig]:
     rank = engine_args["engine"]
     runtime = engine_args["dynamo"]
@@ -247,8 +249,25 @@ def build_runtime_config(
             socket.gethostname()
         )
         rc.set_disaggregated_endpoint(bootstrap_host=host, bootstrap_port=port)
-    apply_topology_config(rc)
+    apply_topology_config(rc, topology_config)
     return rank["block_size"], rc
+
+
+def worker_topology_config(
+    topology_config: TopologyConfig, worker_id: int, island_size: int | None
+) -> TopologyConfig:
+    """Topology of mocker worker ``worker_id`` in this process.
+
+    One mocker process stands for many workers. With ``island_size``, workers
+    are split into KV-transfer islands of that size: each worker's value for the
+    KV transfer domain gets the suffix ``-{worker_id // island_size}``.
+    """
+    if not island_size or not topology_config.enabled:
+        return topology_config
+    domain = topology_config.kv_transfer_domain
+    domains = dict(topology_config.topology_domains)
+    domains[domain] = f"{domains[domain]}-{worker_id // island_size}"
+    return dataclasses.replace(topology_config, topology_domains=domains)
 
 
 def kv_state_agent_cache_owner_ids(dp_size: int, first_slot: int) -> list[str]:
