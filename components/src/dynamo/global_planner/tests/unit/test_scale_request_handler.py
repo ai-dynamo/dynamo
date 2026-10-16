@@ -622,7 +622,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
     """Multi-partner packing: when same-DGD AND cross-DGD partners both fit
     within the budget band, BOTH are applied (the user's "larger groups of
     scaling decisions" property). Same-DGD partners are merged into the
-    request's DGD's atomic patch; cross-DGD partners get their own patch."""
+    request's DGD's connector call; cross-DGD partners get their own call."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -667,8 +667,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
         t.sub_component_type.value: t.desired_replicas
         for t in connector_b.set_component_replicas.call_args[0][0]
     }
-    # DGD-A patch combines the request's prefill change with the same-DGD
-    # decode partner (one atomic call).
+    # DGD-A call includes both targets, but patches each component separately.
     assert a_targets == {"prefill": 2, "decode": 4}
     # DGD-B's cross-DGD partner is a separate patch.
     assert b_targets == {"decode": 4}
