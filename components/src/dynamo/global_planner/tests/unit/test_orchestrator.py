@@ -17,7 +17,7 @@ import pytest
 from kubernetes import client
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
-from dynamo.global_planner.orchestrator import Orchestrator
+from dynamo.global_planner.orchestrator import Orchestrator, _ParticipantMutationBusy
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleStatus
@@ -278,6 +278,67 @@ async def test_submit_preserves_legacy_blocking_scale_contract():
 
     assert outcome.status == ScaleStatus.SUCCESS
     assert cm.blocking is True
+
+
+@pytest.mark.asyncio
+async def test_submit_preserves_duck_typed_capacity_manager_contract():
+    class DuckCapacityManager:
+        def __init__(self):
+            self.replicas = 1
+
+        def remember_roles(self, participant_id, targets):
+            return None
+
+        def participant_exists(self, participant_id):
+            return participant_id == "default/a"
+
+        async def scale(self, participant_id, targets, blocking):
+            self.replicas = targets[0].desired_replicas
+            return None
+
+        def current_replicas(self, participant_id):
+            return {"decode": self.replicas}
+
+    cm = DuckCapacityManager()
+    result = await _submit(_orch(cm), "default/a", _targets(decode=2))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert result.current_replicas == {"decode": 2}
+
+
+@pytest.mark.asyncio
+async def test_conflict_retry_does_not_restart_after_participant_lock_wait():
+    class ConflictError(Exception):
+        pass
+
+    class RetryingCapacityManager(FakeCapacityManager):
+        async def run_with_conflict_retry(self, operation):
+            try:
+                return await operation()
+            except ConflictError:
+                return await operation()
+
+    cm = RetryingCapacityManager()
+    orch = _orch(cm)
+    participant_lock = asyncio.Lock()
+    await participant_lock.acquire()
+    attempts = 0
+
+    async def operation(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConflictError()
+        raise _ParticipantMutationBusy(participant_lock)
+
+    orch._observe_decide_apply = operation
+    try:
+        with pytest.raises(RuntimeError, match="participant set changed"):
+            await _submit(orch, "default/a", _targets(decode=2))
+    finally:
+        participant_lock.release()
+
+    assert attempts == 2
 
 
 @pytest.mark.asyncio

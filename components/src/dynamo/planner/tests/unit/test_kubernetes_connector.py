@@ -1125,6 +1125,44 @@ async def test_delegated_conflict_retry_rejects_replacement_dgd(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("component_name", [None, "worker"])
+async def test_delegated_conflict_retry_rejects_retargeted_component(
+    kubernetes_connector, mock_kube_api, component_name
+):
+    initial = _deployment(_component("worker", "decode", replicas=1))
+    replacement = _deployment(_component("replacement", "decode", replicas=1))
+    mock_kube_api.get_graph_deployment.side_effect = [initial, replacement]
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.update_dgd_replicas_directly.side_effect = client.ApiException(
+        status=409
+    )
+    kubernetes_connector.retry_conflicts = False
+    retry_state = ReplicaUpdateRetryState()
+    targets = [
+        TargetReplica(
+            sub_component_type=SubComponentType.DECODE,
+            component_name=component_name,
+            desired_replicas=2,
+        )
+    ]
+
+    with pytest.raises(client.ApiException):
+        await kubernetes_connector.set_component_replicas_with_result(
+            targets,
+            blocking=False,
+            retry_state=retry_state,
+        )
+    with pytest.raises(RuntimeError, match="component identity"):
+        await kubernetes_connector.set_component_replicas_with_result(
+            targets,
+            blocking=False,
+            retry_state=retry_state,
+        )
+
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_delegated_conflict_retry_rejects_replacement_adapter(
     kubernetes_connector, mock_kube_api
 ):

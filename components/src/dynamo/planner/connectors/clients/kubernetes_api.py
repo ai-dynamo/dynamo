@@ -61,6 +61,8 @@ DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
 GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
+KUBERNETES_LIST_PAGE_SIZE = 500
+NONTERMINAL_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
 
 
 def _as_custom_object(value: object, resource: str) -> dict:
@@ -113,27 +115,50 @@ class KubernetesAPI:
 
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
-        result = _as_custom_object(
-            self.custom_api.list_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGD_PLURAL,
-            ),
-            "DynamoGraphDeployment list",
-        )
-        items = result.get("items")
-        if not isinstance(items, list):
-            raise TypeError(
-                "Kubernetes API returned a malformed DGD list: items is not a list"
+        deployments: list[dict] = []
+        continue_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            result = _as_custom_object(
+                self.custom_api.list_namespaced_custom_object(
+                    group=NVIDIA_API_GROUP,
+                    version=DYNAMO_API_VERSION,
+                    namespace=self.current_namespace,
+                    plural=DGD_PLURAL,
+                    limit=KUBERNETES_LIST_PAGE_SIZE,
+                    _continue=continue_token,
+                ),
+                "DynamoGraphDeployment list",
             )
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
+            items = result.get("items")
+            if not isinstance(items, list):
                 raise TypeError(
-                    "Kubernetes API returned a malformed DGD list: "
-                    f"items[{index}] is not an object"
+                    "Kubernetes API returned a malformed DGD list: items is not a list"
                 )
-        return items
+            for item in items:
+                if not isinstance(item, dict):
+                    raise TypeError(
+                        "Kubernetes API returned a malformed DGD list: "
+                        f"items[{len(deployments)}] is not an object"
+                    )
+                deployments.append(item)
+
+            metadata = result.get("metadata") or {}
+            if not isinstance(metadata, Mapping):
+                raise TypeError(
+                    "Kubernetes API returned a malformed DGD list: metadata is not an object"
+                )
+            raw_token = metadata.get("continue")
+            if raw_token in (None, ""):
+                return deployments
+            if not isinstance(raw_token, str):
+                raise TypeError(
+                    "Kubernetes API returned a malformed DGD list: continue is not a string"
+                )
+            if raw_token in seen_tokens:
+                raise RuntimeError("Kubernetes API repeated a DGD list continue token")
+            seen_tokens.add(raw_token)
+            continue_token = raw_token
 
     def list_worker_metadata(self) -> list[dict]:
         """List all DynamoWorkerMetadata resources in the current namespace."""
@@ -870,23 +895,38 @@ class KubernetesAPI:
 
     def list_pods_for_graph(self, dgd_name: str) -> list:
         """List all Pods for a DGD using its stable graph label."""
-        return (
-            self.core_api.list_namespaced_pod(
-                namespace=self.current_namespace,
-                label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
-            ).items
-            or []
-        )
+        return self._list_graph_pods(f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}")
 
     def list_graph_pods(self) -> list:
-        """List Pods carrying the stable DGD label in this namespace."""
-        return (
-            self.core_api.list_namespaced_pod(
-                namespace=self.current_namespace,
-                label_selector=DYNAMO_DGD_NAME_LABEL,
-            ).items
-            or []
+        """List nonterminal Pods carrying the stable DGD label."""
+        return self._list_graph_pods(
+            DYNAMO_DGD_NAME_LABEL,
+            field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
         )
+
+    def _list_graph_pods(
+        self, label_selector: str, field_selector: str | None = None
+    ) -> list:
+        pods: list = []
+        continue_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            page = self.core_api.list_namespaced_pod(
+                namespace=self.current_namespace,
+                label_selector=label_selector,
+                field_selector=field_selector,
+                limit=KUBERNETES_LIST_PAGE_SIZE,
+                _continue=continue_token,
+            )
+            pods.extend(page.items or [])
+            metadata = getattr(page, "metadata", None)
+            raw_token = getattr(metadata, "_continue", None)
+            if not isinstance(raw_token, str) or not raw_token:
+                return pods
+            if raw_token in seen_tokens:
+                raise RuntimeError("Kubernetes API repeated a Pod list continue token")
+            seen_tokens.add(raw_token)
+            continue_token = raw_token
 
     @staticmethod
     def partition_pods_by_component(pods: list) -> dict[str, list]:

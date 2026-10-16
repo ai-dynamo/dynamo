@@ -27,7 +27,7 @@ import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, Optional
+from typing import Awaitable, Callable, Iterator, Optional, TypeVar
 from weakref import WeakValueDictionary
 
 from dynamo.common.async_utils import run_async_to_completion, run_sync_in_thread
@@ -37,6 +37,7 @@ from dynamo.global_planner.capacity_manager import (
     PoolSpec,
 )
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleStatus
 from dynamo.planner.core import budget
 
@@ -45,6 +46,8 @@ from dynamo.planner.core import budget
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -259,6 +262,50 @@ class Orchestrator:
     # observe -> decide -> scale                                       #
     # ------------------------------------------------------------------ #
 
+    async def _run_with_conflict_retry(
+        self, operation: Callable[[], Awaitable[T]]
+    ) -> T:
+        retry = getattr(self.capacity_manager, "run_with_conflict_retry", None)
+        if retry is None:
+            return await operation()
+        return await retry(operation)
+
+    def _capture_current_replicas(
+        self, participant_id: str
+    ) -> Callable[[], dict[str, int]]:
+        capture = getattr(self.capacity_manager, "capture_current_replicas", None)
+        if capture is not None:
+            return capture(participant_id)
+        return lambda: self.capacity_manager.current_replicas(participant_id)
+
+    def _supports_split_readiness(self) -> bool:
+        supports = getattr(self.capacity_manager, "supports_split_readiness", None)
+        return bool(supports()) if supports is not None else False
+
+    async def _scale_with_result(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        blocking: bool,
+    ) -> ReplicaUpdateResult:
+        scale_with_result = getattr(self.capacity_manager, "scale_with_result", None)
+        if scale_with_result is not None:
+            result = await scale_with_result(participant_id, targets, blocking)
+        else:
+            result = await self.capacity_manager.scale(
+                participant_id, targets, blocking
+            )
+        if isinstance(result, ReplicaUpdateResult):
+            return result
+        if result is None:
+            return ReplicaUpdateResult(accepted=True, applied=True)
+        accepted = bool(result)
+        return ReplicaUpdateResult(accepted=accepted, applied=accepted)
+
+    def _is_conflict(self, error: Exception) -> bool:
+        is_conflict = getattr(self.capacity_manager, "is_conflict", None)
+        return bool(is_conflict(error)) if is_conflict is not None else False
+
     async def submit(
         self,
         participant_id: str,
@@ -280,11 +327,14 @@ class Orchestrator:
         admitted = asyncio.Event()
         committed_participants: list[str] = []
         held_participant_locks: dict[str, asyncio.Lock] = {}
+        transaction_attempts = 0
 
         def complete_after_cancel() -> bool:
             return admitted.is_set()
 
         async def operation() -> Optional[ScaleOutcome]:
+            nonlocal transaction_attempts
+            transaction_attempts += 1
             return await self._observe_decide_apply(
                 participant_id,
                 targets,
@@ -297,8 +347,10 @@ class Orchestrator:
             )
 
         async def transaction() -> Optional[ScaleOutcome]:
+            nonlocal transaction_attempts
+            transaction_attempts = 0
             try:
-                return await self.capacity_manager.run_with_conflict_retry(operation)
+                return await self._run_with_conflict_retry(operation)
             except Exception as error:
                 if committed_participants:
                     return self._partial_plan_error(
@@ -319,7 +371,7 @@ class Orchestrator:
 
             # Freeze backend identity under the transaction lock, but do not
             # hold the global lock across the potentially unbounded read GET.
-            return None, self.capacity_manager.capture_current_replicas(participant_id)
+            return None, self._capture_current_replicas(participant_id)
 
         try:
             while True:
@@ -331,6 +383,11 @@ class Orchestrator:
                         terminal, readback = await execute_transaction()
                     break
                 except _ParticipantMutationBusy as busy:
+                    if transaction_attempts > 1:
+                        raise RuntimeError(
+                            "participant set changed during conflict retry; "
+                            "refusing to restart without the retained identity fence"
+                        ) from busy
                     await busy.wait()
 
             if terminal is not None:
@@ -514,8 +571,8 @@ class Orchestrator:
                     pid, committed_participants, "participant is unknown"
                 )
             try:
-                split_readiness = self.capacity_manager.supports_split_readiness()
-                result = await self.capacity_manager.scale_with_result(
+                split_readiness = self._supports_split_readiness()
+                result = await self._scale_with_result(
                     pid,
                     tgts,
                     blocking=blocking and not split_readiness,
@@ -537,7 +594,7 @@ class Orchestrator:
                     f"participant is not ready: {patch_err}",
                 )
             except Exception as patch_err:
-                if self.capacity_manager.is_conflict(patch_err):
+                if self._is_conflict(patch_err):
                     raise
                 if not committed_participants:
                     # No write has completed, so preserve the original failure

@@ -150,7 +150,9 @@ class ReplicaUpdateRetryState:
     """Identity fences retained across complete-transaction conflict retries."""
 
     dgd_uid: str | None = None
-    authorities: dict[str, tuple[bool, str | None]] = field(default_factory=dict)
+    authorities: dict[tuple[str, str | None], tuple[str, bool, str | None]] = field(
+        default_factory=dict
+    )
 
 
 class KubernetesConnector(PlannerConnector):
@@ -1199,7 +1201,7 @@ class KubernetesConnector(PlannerConnector):
         target_replicas: list[TargetReplica],
         startup_reductions: _StartupReductionTracker,
         transaction: _ReplicaUpdateTracker,
-        retry_authorities: dict[str, tuple[bool, str | None]],
+        retry_authorities: dict[tuple[str, str | None], tuple[str, bool, str | None]],
     ) -> bool:
         """Validate and apply one conflict-free replica update attempt."""
         deployment_ready = self.kube_api.is_deployment_ready(deployment)
@@ -1226,13 +1228,17 @@ class KubernetesConnector(PlannerConnector):
                 return False
             raise
         current_authorities = {
-            plan.service.name: self._replica_authority_identity(
-                plan.service, plan.scaling_adapter
-            )[1:]
+            (
+                plan.target.sub_component_type.value,
+                plan.target.component_name,
+            ): self._replica_authority_identity(plan.service, plan.scaling_adapter)
             for plan in plans
         }
-        for name, authority in current_authorities.items():
-            if name in retry_authorities and retry_authorities[name] != authority:
+        for selector, authority in current_authorities.items():
+            if (
+                selector in retry_authorities
+                and retry_authorities[selector] != authority
+            ):
                 raise RuntimeError(
                     "component identity or replica authority changed during retry"
                 )

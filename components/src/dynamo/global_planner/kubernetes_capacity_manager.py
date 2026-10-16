@@ -17,8 +17,10 @@ a generic ``worker`` — the role hinted by its Planner's
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from dataclasses import replace
 from functools import partial
 from typing import Optional, TypeVar
 
@@ -49,6 +51,7 @@ from dynamo.planner.monitoring.dgd_services import (
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+INVENTORY_CACHE_TTL_SECONDS = 0.1
 
 
 class KubernetesCapacityManager(CapacityManager):
@@ -69,9 +72,11 @@ class KubernetesCapacityManager(CapacityManager):
         self._observe_all_deployments = False
         self._configured_deployment_names: set[str] | None = set()
         self._inventory_api: KubernetesAPI | None = None
+        self._inventory_cache: tuple[float, list[dict], dict[str, int]] | None = None
         # DGDs whose exact GET returned 404. Explicit-mode and cross-namespace
         # tombstones remain recreation probes and are checked for Pods each pass.
         self._missing_participants: set[str] = set()
+        self._last_observed_pools: dict[str, dict[str, PoolSpec]] = {}
         self._replica_retry_states: ContextVar[
             dict[str, ReplicaUpdateRetryState] | None
         ] = ContextVar("global_planner_replica_retry_states", default=None)
@@ -197,12 +202,38 @@ class KubernetesCapacityManager(CapacityManager):
             del self.connectors[participant_id]
             self._component_roles.pop(participant_id, None)
             self._missing_participants.discard(participant_id)
+            self._last_observed_pools.pop(participant_id, None)
             self._replica_uids.pop(participant_id, None)
 
     def _get_inventory_api(self) -> KubernetesAPI:
         if self._inventory_api is None:
             self._inventory_api = KubernetesAPI(self.namespace)
         return self._inventory_api
+
+    def _invalidate_inventory_cache(self) -> None:
+        self._inventory_cache = None
+
+    def _namespace_inventory(self) -> tuple[list[dict], dict[str, int]]:
+        now = time.monotonic()
+        cached = self._inventory_cache
+        if (
+            cached is not None
+            and not self._missing_participants
+            and now - cached[0] <= INVENTORY_CACHE_TTL_SECONDS
+        ):
+            return cached[1], cached[2]
+
+        inventory_api = self._get_inventory_api()
+        deployments = inventory_api.list_graph_deployments()
+        pod_counts = self._active_graph_pod_counts(inventory_api)
+        self._inventory_cache = (now, deployments, pod_counts)
+        return deployments, pod_counts
+
+    def _record_observed_pools(
+        self, participant_id: str, pools: dict[str, PoolSpec]
+    ) -> dict[str, PoolSpec]:
+        self._last_observed_pools[participant_id] = dict(pools)
+        return pools
 
     def _deployment_drain_error(
         self,
@@ -298,22 +329,21 @@ class KubernetesCapacityManager(CapacityManager):
                         ),
                         require_complete,
                     )
-                elif require_complete:
-                    self._record_observation_failure(
-                        all_pools,
-                        key,
-                        RuntimeError(
-                            f"DGD for {key} is missing; a Pod snapshot without "
-                            "nonterminal Pods does not prove that workload descendants "
-                            "have drained"
-                        ),
-                        require_complete,
-                    )
+                elif key in self._last_observed_pools:
+                    # Keep the last complete desired-state charge after drain.
+                    # Pod absence alone cannot prove all workload controllers
+                    # have disappeared, so releasing this capacity would make
+                    # the hard ceiling optimistic.
+                    all_pools[key] = dict(self._last_observed_pools[key])
                 elif retain:
-                    if self.connectors.get(key) is connector:
-                        self._missing_participants.add(key)
+                    # An allowlisted DGD may legitimately be created after the
+                    # planner. Keep probing it without charging unknown usage.
+                    all_pools[key] = {}
                 else:
                     self._discard_connector(key, connector)
+
+        if missing:
+            self._invalidate_inventory_cache()
 
     def ensure_participant(
         self,
@@ -367,8 +397,9 @@ class KubernetesCapacityManager(CapacityManager):
             missing: list[tuple[str, KubernetesConnector, bool]] = []
             for key, connector in connectors_snapshot:
                 try:
-                    all_pools[key] = self._read_pools(
-                        connector, self._component_roles.get(key)
+                    all_pools[key] = self._record_observed_pools(
+                        key,
+                        self._read_pools(connector, self._component_roles.get(key)),
                     )
                     if self.connectors.get(key) is connector:
                         self._missing_participants.discard(key)
@@ -386,8 +417,7 @@ class KubernetesCapacityManager(CapacityManager):
         # Implicit mode manages every DGD in the planner namespace, so one
         # namespace LIST is both the intended scope and cheaper than per-DGD GETs.
         try:
-            inventory_api = self._get_inventory_api()
-            deployments = inventory_api.list_graph_deployments()
+            deployments, local_pod_counts = self._namespace_inventory()
             deployments_by_key: dict[str, dict] = {}
             for index, deployment in enumerate(deployments):
                 metadata = deployment.get("metadata")
@@ -400,7 +430,6 @@ class KubernetesCapacityManager(CapacityManager):
                 if key in deployments_by_key:
                     raise ValueError(f"duplicate DGD {name!r} in list response")
                 deployments_by_key[key] = deployment
-            local_pod_counts = self._active_graph_pod_counts(inventory_api)
         except Exception as error:
             if require_complete:
                 raise RuntimeError(
@@ -444,8 +473,9 @@ class KubernetesCapacityManager(CapacityManager):
                 local_missing.append((key, connector, False))
                 continue
             try:
-                all_pools[key] = self._read_pools(
-                    connector, self._component_roles.get(key)
+                all_pools[key] = self._record_observed_pools(
+                    key,
+                    self._read_pools(connector, self._component_roles.get(key)),
                 )
                 if self.connectors.get(key) is connector:
                     self._missing_participants.discard(key)
@@ -467,10 +497,13 @@ class KubernetesCapacityManager(CapacityManager):
         for key, deployment in deployments_by_key.items():
             connector = self.connectors[key]
             try:
-                all_pools[key] = self._pools_from_deployment(
-                    connector,
-                    deployment,
-                    self._component_roles.get(key),
+                all_pools[key] = self._record_observed_pools(
+                    key,
+                    self._pools_from_deployment(
+                        connector,
+                        deployment,
+                        self._component_roles.get(key),
+                    ),
                 )
                 if self.connectors.get(key) is connector:
                     self._missing_participants.discard(key)
@@ -634,13 +667,40 @@ class KubernetesCapacityManager(CapacityManager):
             retry_state = retry_states.setdefault(
                 participant_id, ReplicaUpdateRetryState()
             )
-        result = await connector.set_component_replicas_with_result(
-            targets,
-            blocking=blocking,
-            retry_state=retry_state,
-        )
+        try:
+            result = await connector.set_component_replicas_with_result(
+                targets,
+                blocking=blocking,
+                retry_state=retry_state,
+            )
+        finally:
+            self._invalidate_inventory_cache()
         if retry_state.dgd_uid is not None:
             self._replica_uids[participant_id] = retry_state.dgd_uid
+        if result.accepted:
+            pools = self._last_observed_pools.get(participant_id)
+            if pools is not None:
+                for target in targets:
+                    selector = (
+                        target.sub_component_type.value,
+                        target.component_name,
+                    )
+                    authority = retry_state.authorities.get(selector)
+                    resolved_component = authority[0] if authority else None
+                    pool_key = next(
+                        (
+                            key
+                            for key, candidate in pools.items()
+                            if candidate.component_name == resolved_component
+                        ),
+                        target.sub_component_type.value,
+                    )
+                    pool = pools.get(pool_key)
+                    if pool is None:
+                        continue
+                    pools[pool_key] = replace(
+                        pool, current_replicas=target.desired_replicas
+                    )
         return result
 
     def supports_split_readiness(self) -> bool:
@@ -653,9 +713,18 @@ class KubernetesCapacityManager(CapacityManager):
 
     async def run_with_conflict_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Re-run the complete budget transaction after a Kubernetes conflict."""
+
+        async def observed_operation() -> T:
+            try:
+                return await operation()
+            except Exception as error:
+                if self.is_conflict(error):
+                    self._invalidate_inventory_cache()
+                raise
+
         token = self._replica_retry_states.set({})
         try:
-            return await retry_on_conflict(operation)
+            return await retry_on_conflict(observed_operation)
         finally:
             self._replica_retry_states.reset(token)
 

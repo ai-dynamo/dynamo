@@ -16,6 +16,7 @@
 import asyncio
 import threading
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch, sentinel
 
@@ -23,7 +24,11 @@ import pytest
 from kubernetes import client
 
 from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
-from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.clients.kubernetes_api import (
+    KUBERNETES_LIST_PAGE_SIZE,
+    NONTERMINAL_POD_FIELD_SELECTOR,
+    KubernetesAPI,
+)
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
@@ -157,6 +162,25 @@ def test_list_graph_deployments_rejects_non_object_item(k8s_api, mock_custom_api
 
     with pytest.raises(TypeError, match=r"items\[0\] is not an object"):
         k8s_api.list_graph_deployments()
+
+
+def test_list_graph_deployments_follows_continue_tokens(k8s_api, mock_custom_api):
+    first = {"metadata": {"name": "first"}}
+    second = {"metadata": {"name": "second"}}
+    mock_custom_api.list_namespaced_custom_object.side_effect = [
+        {"items": [first], "metadata": {"continue": "next-page"}},
+        {"items": [second], "metadata": {}},
+    ]
+
+    assert k8s_api.list_graph_deployments() == [first, second]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    ] == [None, "next-page"]
+    assert all(
+        call.kwargs["limit"] == KUBERNETES_LIST_PAGE_SIZE
+        for call in mock_custom_api.list_namespaced_custom_object.call_args_list
+    )
 
 
 def _dgd_json_patch_bodies(mock_custom_api):
@@ -1868,6 +1892,9 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
     mock_core_api.list_namespaced_pod.assert_called_once_with(
         namespace="default",
         label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
+        field_selector=None,
+        limit=KUBERNETES_LIST_PAGE_SIZE,
+        _continue=None,
     )
     assert by_component == {
         "prefill": [prefill],
@@ -1885,7 +1912,25 @@ def test_list_graph_pods_uses_label_existence_selector(k8s_api, mock_core_api):
     mock_core_api.list_namespaced_pod.assert_called_once_with(
         namespace="default",
         label_selector="nvidia.com/dynamo-graph-deployment-name",
+        field_selector=NONTERMINAL_POD_FIELD_SELECTOR,
+        limit=KUBERNETES_LIST_PAGE_SIZE,
+        _continue=None,
     )
+
+
+def test_list_graph_pods_follows_continue_tokens(k8s_api, mock_core_api):
+    first = _make_pod("prefill-0", component="prefill")
+    second = _make_pod("decode-0", component="decode")
+    mock_core_api.list_namespaced_pod.side_effect = [
+        SimpleNamespace(items=[first], metadata=SimpleNamespace(_continue="next-page")),
+        SimpleNamespace(items=[second], metadata=SimpleNamespace(_continue=None)),
+    ]
+
+    assert k8s_api.list_graph_pods() == [first, second]
+    assert [
+        call.kwargs["_continue"]
+        for call in mock_core_api.list_namespaced_pod.call_args_list
+    ] == [None, "next-page"]
 
 
 def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(
