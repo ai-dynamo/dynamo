@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Operator upgrade CPU contract
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-upgrade-cpu-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    name: Historical Grove state replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Initialize evidence directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/operator-upgrade-replay"
+          echo "DYNAMO_UPGRADE_REPLAY_OUTPUT_DIR=$RUNNER_TEMP/operator-upgrade-replay" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$RUNNER_TEMP/operator-upgrade-replay/candidate-sha.txt"
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache-dependency-path: deploy/operator/go.sum
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Fetch the catalog's immutable release commits
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          catalog = json.loads(Path('deploy/operator/internal/controller/testdata/upgrade/catalog.json').read_text())
+          for release in catalog['releases'].values():
+              subprocess.run(['git', 'fetch', '--no-tags', 'https://github.com/ai-dynamo/dynamo.git', release['revision']], check=True)
+          PY
+      - name: Verify fixtures against released source
+        shell: bash
+        run: python3 deploy/operator/hack/generate_upgrade_fixtures.py --check 2>&1 | tee "$DYNAMO_UPGRADE_REPLAY_OUTPUT_DIR/baseline.log"
+      - name: Replay historical state through the candidate
+        working-directory: deploy/operator
+        run: |
+          go test -p 2 ./internal/controller -run '^TestOperatorUpgradeReplay' -count=1 -json > "$DYNAMO_UPGRADE_REPLAY_OUTPUT_DIR/tests.jsonl"
+      - name: Retain CPU evidence, including failed contracts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: operator-upgrade-cpu-${{ github.sha }}
+          path: ${{ runner.temp }}/operator-upgrade-replay
+          if-no-files-found: error

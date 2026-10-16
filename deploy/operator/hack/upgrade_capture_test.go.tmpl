@@ -1,0 +1,57 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"testing"
+
+	config "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	// FEATURES_IMPORT
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
+)
+
+func TestCaptureUpgradeBaseline(t *testing.T) {
+	t.Log("Render the catalog input with the pinned released operator")
+	data, err := os.ReadFile(os.Getenv("UPGRADE_INPUT"))
+	require.NoError(t, err)
+	var dgd api.DynamoGraphDeployment
+	require.NoError(t, yaml.UnmarshalStrict(data, &dgd))
+	for i := range dgd.Spec.Components {
+		dgd.Spec.Components[i].PodTemplate.Spec.Containers[0].Image = os.Getenv("UPGRADE_IMAGE")
+	}
+	dgd.UID = "historical-dgd"
+	dgd.Generation = 1
+	hash, err := dynamo.ComputeDGDWorkersSpecHash(&dgd)
+	require.NoError(t, err)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: hash}
+	renderDGD := dgd.DeepCopy()
+	// WORKER_SUFFIX
+	cfg := &config.OperatorConfiguration{}
+	secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
+	pcs, err := dynamo.GenerateGrovePodCliqueSet(context.Background(), renderDGD, cfg, RUNTIME_CONFIG, nil, secrets, nil, nil, nil)
+	require.NoError(t, err)
+	pcs.APIVersion = "grove.io/v1alpha1"
+	pcs.Kind = "PodCliqueSet"
+	pcs.UID = "historical-pcs"
+	pcs.Generation = 1
+	pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(&dgd, api.GroupVersion.WithKind("DynamoGraphDeployment"))}
+	specHash, err := common.GetSpecHash(pcs)
+	require.NoError(t, err)
+	pcs.Annotations = map[string]string{common.NvidiaAnnotationHashKey: specHash, common.NvidiaAnnotationGenerationKey: "1"}
+
+	t.Log("Capture release-generated resources with deterministic API-server identity")
+	snapshot := map[string]any{"generated": "DO NOT EDIT: run hack/generate_upgrade_fixtures.py", "revision": os.Getenv("UPGRADE_REVISION"), "dgd": &dgd, "pcs": pcs}
+	output, err := json.MarshalIndent(snapshot, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(os.Getenv("UPGRADE_OUTPUT"), append(output, '\n'), 0644))
+}
