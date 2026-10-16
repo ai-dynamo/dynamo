@@ -454,6 +454,22 @@ impl MaybeError for LLMEngineOutput {
     }
 }
 
+/// What an engine output carries for the worker's backend admission gate, by
+/// the native backend contract: its `token_ids` are the tokens it generated,
+/// and a `finish_reason` marks the one terminal output that completes the
+/// request — a prefill or encode handoff's included, which may carry no token.
+/// A token-less output without one, such as a disaggregation bootstrap
+/// announcement, is interim. Usage is not a completion marker: an engine may
+/// report it early.
+impl crate::admission_gate::AdmissionResponse for LLMEngineOutput {
+    fn admission_output(&self) -> crate::admission_gate::ResponseOutput {
+        crate::admission_gate::ResponseOutput {
+            generated_token: !self.token_ids.is_empty(),
+            completion: self.finish_reason.is_some(),
+        }
+    }
+}
+
 /// Raw output from embedding engines containing base64-encoded float32 vectors.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EmbeddingsEngineOutput {
@@ -523,6 +539,60 @@ mod tests {
         assert!(
             !populated.to_string().contains("195"),
             "pending decoder IDs must not leak onto the wire"
+        );
+    }
+
+    /// A token, a terminal and a token-less handoff announcement each carry
+    /// what they say, independently; early usage completes nothing.
+    #[test]
+    fn engine_outputs_classify_their_tokens_and_completion_independently() {
+        use crate::admission_gate::{AdmissionResponse, ResponseOutput};
+        use dynamo_runtime::protocols::annotated::Annotated;
+
+        let output =
+            |token_ids: Vec<TokenIdType>, finish_reason: Option<FinishReason>| LLMEngineOutput {
+                token_ids,
+                finish_reason,
+                ..LLMEngineOutput::stop()
+            };
+        let classified = |generated_token, completion| ResponseOutput {
+            generated_token,
+            completion,
+        };
+
+        let bootstrap = LLMEngineOutput {
+            disaggregated_params: Some(serde_json::json!({"bootstrap_room": 7})),
+            ..output(vec![], None)
+        };
+        assert_eq!(bootstrap.admission_output(), ResponseOutput::INTERIM);
+        let early_usage = LLMEngineOutput {
+            completion_usage: Some(CompletionUsage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+            disaggregated_params: Some(serde_json::json!("dummy")),
+            ..output(vec![42], None)
+        };
+        assert_eq!(early_usage.admission_output(), classified(true, false));
+        assert_eq!(
+            output(vec![], Some(FinishReason::Length)).admission_output(),
+            classified(false, true),
+            "a token-less terminal handoff completes the request"
+        );
+        assert_eq!(
+            output(vec![42], Some(FinishReason::Stop)).admission_output(),
+            classified(true, true)
+        );
+        assert_eq!(
+            Annotated::from_data(output(vec![42], None)).admission_output(),
+            classified(true, false)
+        );
+        assert_eq!(
+            Annotated::<LLMEngineOutput>::from_error("engine failed").admission_output(),
+            ResponseOutput::INTERIM
         );
     }
 

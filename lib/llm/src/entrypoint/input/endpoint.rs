@@ -4,6 +4,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
+    admission_gate::{self, AdmissionEngine},
     backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
@@ -19,6 +20,7 @@ use crate::{
 };
 
 use dynamo_runtime::engine::AsyncEngineStream;
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, ResponseStream, SingleIn,
     async_trait, network::Ingress,
@@ -141,8 +143,11 @@ pub async fn run(
             };
 
             // The frontend owns tokenization and detokenization. Send raw engine
-            // output so distributed token workers exercise that same path.
-            let ingress = Ingress::for_engine(inner_engine)?;
+            // output so distributed token workers exercise that same path. The
+            // network path admits each request through the backend admission
+            // gate first, which this backend's metrics then expose.
+            admission_gate::register_metrics(endpoint.get_metrics_registry());
+            let ingress = Ingress::for_engine(AdmissionEngine::new(inner_engine))?;
 
             // The disaggregation role is carried by `worker_type`, not
             // `model_type`. Prefill workers register with an empty

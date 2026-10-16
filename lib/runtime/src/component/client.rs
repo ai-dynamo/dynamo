@@ -809,7 +809,11 @@ impl Client {
         }
 
         self.routing_instances.report_instance_down(instance_id);
-        tracing::debug!("inhibiting instance {instance_id}");
+        tracing::debug!(
+            instance_id,
+            routing_event = "worker_inhibited",
+            "inhibiting instance"
+        );
     }
 
     /// Replace the set of overloaded instances reported by the worker monitor.
@@ -834,6 +838,7 @@ impl Client {
             .mark_overloaded_immediate(instance_id);
         tracing::debug!(
             instance_id,
+            routing_event = "worker_overloaded",
             "marking instance overloaded with a bounded backpressure lease"
         );
     }
