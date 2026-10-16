@@ -22,6 +22,9 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: benchmark
           image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
