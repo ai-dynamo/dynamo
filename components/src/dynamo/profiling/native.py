@@ -12,13 +12,14 @@ import codecs
 import gzip
 import json
 import re
-import sqlite3
 from bisect import bisect_left
-from contextlib import ExitStack, closing
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
 
 import ijson
+
+from .nvtxt import read_only
 
 
 class Layout(ValueError):
@@ -125,39 +126,18 @@ def process_meta(pid, name: str, key: str, value) -> list[dict]:
     ]
 
 
-# Event table -> (category, SELECT columns start, end, name, lane, extra).
+# Event table -> (category, SELECT columns start, end, name, lane, extra, WHERE).
+NVTX = "start, end, COALESCE(text, textId), globalTid, domainId"
+HOST = "start, end, nameId, globalTid, NULL"
+DEVICE = "start, end, {}, deviceId, streamId"
 NSYS_TABLES = {
-    "NVTX_EVENTS": (
-        "nvtx",
-        "start, end, COALESCE(text, textId), globalTid, domainId",
-        " WHERE eventType IN (59, 60) AND end IS NOT NULL",
-    ),
-    "OSRT_API": ("osrt", "start, end, nameId, globalTid, NULL", ""),
-    "CUPTI_ACTIVITY_KIND_RUNTIME": (
-        "cuda_runtime",
-        "start, end, nameId, globalTid, NULL",
-        "",
-    ),
-    "CUPTI_ACTIVITY_KIND_DRIVER": (
-        "cuda_driver",
-        "start, end, nameId, globalTid, NULL",
-        "",
-    ),
-    "CUPTI_ACTIVITY_KIND_KERNEL": (
-        "kernel",
-        "start, end, demangledName, deviceId, streamId",
-        "",
-    ),
-    "CUPTI_ACTIVITY_KIND_MEMCPY": (
-        "gpu_memcpy",
-        "start, end, NULL, deviceId, streamId",
-        "",
-    ),
-    "CUPTI_ACTIVITY_KIND_MEMSET": (
-        "gpu_memset",
-        "start, end, NULL, deviceId, streamId",
-        "",
-    ),
+    "NVTX_EVENTS": ("nvtx", NVTX, " WHERE eventType IN (59, 60) AND end IS NOT NULL"),
+    "OSRT_API": ("osrt", HOST, ""),
+    "CUPTI_ACTIVITY_KIND_RUNTIME": ("cuda_runtime", HOST, ""),
+    "CUPTI_ACTIVITY_KIND_DRIVER": ("cuda_driver", HOST, ""),
+    "CUPTI_ACTIVITY_KIND_KERNEL": ("kernel", DEVICE.format("demangledName"), ""),
+    "CUPTI_ACTIVITY_KIND_MEMCPY": ("gpu_memcpy", DEVICE.format("NULL"), ""),
+    "CUPTI_ACTIVITY_KIND_MEMSET": ("gpu_memset", DEVICE.format("NULL"), ""),
 }
 GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
 NVTX_DOMAINS = {"PyTorch": "pytorch", "vLLM": "vllm"}
@@ -171,8 +151,7 @@ def nsys_events(path: Path):
     """
     if path.suffix != ".sqlite":
         return
-    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
+    with read_only(path) as (db, tables):
         # Event timestamps are relative to the session start anchored here.
         (epoch,) = db.execute(
             "SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"

@@ -11,15 +11,9 @@ post-processing bundle job, off the frontend and the capture's critical path.
 import asyncio
 import re
 from pathlib import Path
-from typing import Protocol
 
 from .models import Config
 from .nsys import validate_reports
-
-
-class ArtifactValidator(Protocol):
-    async def validate(self, evidence: dict, config: Config) -> dict:
-        ...
 
 
 def rank_files(location: str, prefix: str) -> list[tuple[str, Path]]:

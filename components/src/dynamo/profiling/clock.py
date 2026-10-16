@@ -4,17 +4,11 @@
 """Estimate alignment and uncertainty; never change a host's system clock."""
 
 import time
-from typing import Protocol
 
 import aiohttp
 
 from .collectors import CollectionError
 from .models import Config, Worker
-
-
-class ClockSampler(Protocol):
-    async def measure(self, worker: Worker, config: Config) -> dict:
-        ...
 
 
 def estimate_offset(

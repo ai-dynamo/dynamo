@@ -10,8 +10,9 @@ import time
 from pathlib import Path
 
 import aiohttp
+import msgspec
 
-from .models import Config, Worker
+from .models import Config, Plan, RuntimeSnapshot, Worker
 
 
 class CollectionError(RuntimeError):
@@ -26,6 +27,24 @@ def process_epoch(pid: int) -> str:
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
     # Start ticks alone can collide when independent replicas start together.
     return f"{boot}:{pid}:{fields[19]}"
+
+
+def selected_workers(
+    runtime: RuntimeSnapshot, plan: Plan, backend: str, **options
+) -> list[Worker | None]:
+    """Plan targets' workers (None for the frontend); `backend` gets `options`."""
+    workers = {
+        worker.target_id: msgspec.structs.replace(
+            worker, start_options={**worker.start_options, **options}
+        )
+        if worker.backend == backend
+        else worker
+        for worker in runtime.workers
+    }
+    return [
+        None if target.target_id == "frontend" else workers[target.target_id]
+        for target in plan.targets
+    ]
 
 
 class PerfCollector:
@@ -108,19 +127,17 @@ class PerfCollector:
                     self.process.send_signal(signal.SIGINT)
                 try:
                     code = await asyncio.wait_for(self.process.wait(), 30.0)
-                except asyncio.TimeoutError as exc:
-                    self.process.kill()
-                    await self.process.wait()
-                    raise CollectionError(
-                        "perf flush timed out; artifact is partial"
-                    ) from exc
-                except asyncio.CancelledError:
+                except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
                     # A coordinator deadline may be shorter than our flush
                     # timeout. Reap only our recorder before returning failure.
                     if self.process.returncode is None:
                         self.process.kill()
                     await self.process.wait()
-                    raise
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    raise CollectionError(
+                        "perf flush timed out; artifact is partial"
+                    ) from exc
                 self.evidence["stopped_at_ns"] = time.time_ns()
                 artifact = Path(self.evidence["artifact"])
                 if code not in (0, -signal.SIGINT) or not artifact.is_file():

@@ -8,33 +8,29 @@ import logging
 import os
 import time
 import uuid
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import aiohttp
 import msgspec
 
-from .adapters import Collector, CollectorRegistry, default_registry
-from .artifacts import ArtifactValidator, SharedFilesystemValidator
-from .clock import ClockSampler, WorkerClockSampler
+from .adapters import REGISTRY
+from .artifacts import SharedFilesystemValidator
+from .clock import WorkerClockSampler
 from .collectors import CollectionError
 from .errors import BadRequest, Conflict, NotFound, Unavailable, Unsupported
 from .models import Config, Plan, RuntimeSnapshot
 
 logger = logging.getLogger(__name__)
-COLLECTION_ERRORS = (
-    CollectionError,
-    OSError,
-    asyncio.TimeoutError,
-    aiohttp.ClientError,
-    ValueError,
-)
 
 
 async def errors_of(operations) -> list[str]:
-    """Run operations concurrently and keep only the errors they report."""
-    return [error for error in await asyncio.gather(*operations) if error]
+    """Run operations concurrently; keep reported errors and exception messages."""
+    results = await asyncio.gather(*operations, return_exceptions=True)
+    return [
+        error if isinstance(error, str) else str(error) or type(error).__name__
+        for error in results
+        if isinstance(error, (str, BaseException)) and error
+    ]
 
 
 @dataclass
@@ -42,14 +38,14 @@ class Session:
     session_id: str
     plan: Plan
     directory: Path
+    runtime: RuntimeSnapshot
     state: str = "accepted"
     accepted_at_ns: int = field(default_factory=time.time_ns)
-    collectors: list[Collector] = field(default_factory=list)
+    collectors: list = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
     deadline_monotonic: float = 0.0
-    runtime: RuntimeSnapshot | None = None
     clocks: dict = field(default_factory=dict)
     artifact_validation: list[dict] = field(default_factory=list)
 
@@ -62,42 +58,30 @@ class Coordinator:
         config: Config,
         runtime: RuntimeSnapshot,
         *,
-        registry: CollectorRegistry | None = None,
-        clock_sampler: ClockSampler | None = None,
-        artifact_validator: ArtifactValidator | None = None,
+        registry: dict | None = None,
+        clock_sampler=None,
+        artifact_validator=None,
     ):
-        # Frozen structs can still contain mutable inventory/options/context.
-        # The callable API owns snapshots rather than caller-owned containers.
-        config = deepcopy(config)
-        runtime = deepcopy(runtime)
-        if config.max_duration_ms <= 0 or config.max_sessions <= 0:
-            raise ValueError("Profiling limits must be positive")
-        if config.start_timeout_s <= 0 or config.finalize_timeout_s <= 0:
-            raise ValueError("Profiling timeouts must be positive")
-        if (
-            config.clock_probe_timeout_s <= 0
-            or not 1 <= config.clock_probe_samples <= 16
-        ):
-            raise ValueError(
-                "Clock sampling limits must be positive and at most 16 samples"
-            )
-        if config.artifact_validation_timeout_s <= 0 or config.max_trace_bytes <= 0:
-            raise ValueError("Artifact validation limits must be positive")
+        limits = (
+            config.max_duration_ms,
+            config.max_sessions,
+            config.start_timeout_s,
+            config.finalize_timeout_s,
+            config.clock_probe_timeout_s,
+            config.artifact_validation_timeout_s,
+            config.max_trace_bytes,
+        )
+        if min(limits) <= 0 or not 1 <= config.clock_probe_samples <= 16:
+            raise ValueError("Profiling limits must be positive; 1..16 clock samples")
         for worker in runtime.workers:
             if len(set(worker.expected_rank_ids)) != len(worker.expected_rank_ids):
                 raise ValueError("Expected rank IDs must be unique")
         self.config = config
         self.runtime = runtime
-        self.registry = registry if registry is not None else default_registry()
         self.builtin_collectors = registry is None
-        self.clock_sampler = (
-            clock_sampler if clock_sampler is not None else WorkerClockSampler()
-        )
-        self.artifact_validator = (
-            artifact_validator
-            if artifact_validator is not None
-            else SharedFilesystemValidator()
-        )
+        self.registry = dict(REGISTRY) if registry is None else registry
+        self.clock_sampler = clock_sampler or WorkerClockSampler()
+        self.artifact_validator = artifact_validator or SharedFilesystemValidator()
         self.workers = {worker.target_id: worker for worker in runtime.workers}
         if len(self.workers) != len(runtime.workers) or "frontend" in self.workers:
             raise ValueError("Worker target IDs must be unique and cannot be frontend")
@@ -138,15 +122,10 @@ class Coordinator:
             ],
         ]
 
-    def nsys_prefix(self, target_id: str) -> str | None:
-        if target_id == "frontend":
-            return self.config.nsys_frontend_output_prefix
-        return self.workers[target_id].nsys_output_prefix
-
     def validate(self, plan: Plan) -> None:
         if not plan.client_request_id or len(plan.client_request_id) > 128:
             raise BadRequest("client_request_id must contain 1..128 characters")
-        if not self.registry.supports(plan.mode):
+        if plan.mode not in self.registry:
             raise Unsupported("Collector mode is not installed")
         if not 0 < plan.duration_ms <= self.config.max_duration_ms:
             raise BadRequest("duration_ms exceeds configured capture budget")
@@ -155,10 +134,11 @@ class Coordinator:
             raise BadRequest("targets must be nonempty and unique")
         prefixes = []
         for target in plan.targets:
+            frontend = target.target_id == "frontend"
             worker = self.workers.get(target.target_id)
             epoch = (
                 self.runtime.frontend_epoch
-                if target.target_id == "frontend"
+                if frontend
                 else worker and worker.process_epoch
             )
             if epoch is None:
@@ -167,13 +147,13 @@ class Coordinator:
                 raise Conflict("Target process epoch does not match inventory")
             if not self.builtin_collectors:
                 continue
-            prefix = self.nsys_prefix(target.target_id)
+            prefix = (
+                self.config.nsys_frontend_output_prefix
+                if frontend
+                else worker.nsys_output_prefix
+            )
             if plan.mode == "torch_profile":
-                if (
-                    target.target_id != "frontend"
-                    and prefix
-                    and self.workers[target.target_id].backend == "vllm"
-                ):
+                if not frontend and prefix and worker.backend == "vllm":
                     raise Unsupported(
                         "This vLLM launch uses its CUDA profiler; Torch profiling requires a separate launch"
                     )
@@ -182,10 +162,7 @@ class Coordinator:
                 raise Unsupported("Nsight requires a prepared launch/output prefix")
             if not Path(prefix).is_absolute():
                 raise Unsupported("Nsight output prefixes must be absolute")
-            if (
-                target.target_id == "frontend"
-                and self.runtime.frontend_pid != os.getpid()
-            ):
+            if frontend and self.runtime.frontend_pid != os.getpid():
                 raise Unsupported("NVTX frontend capture requires an embedded host")
             prefixes.append(prefix)
         if len(set(prefixes)) != len(prefixes):
@@ -200,12 +177,8 @@ class Coordinator:
             raise Unsupported(
                 "Frontend profiling is disabled by operator configuration"
             )
-        # Frontend perf is implicit unless explicitly disabled by the operator.
 
     def submit(self, plan: Plan) -> Session:
-        # A caller of the Python API may retain mutable lists inside its plan.
-        # Copy and type-check the accepted value before using it as a retry key.
-        plan = msgspec.json.decode(msgspec.json.encode(plan), type=Plan)
         previous = self.requests.get(plan.client_request_id)
         if previous is not None:
             if previous.plan != plan:
@@ -227,10 +200,10 @@ class Coordinator:
         session_id = uuid.uuid4().hex
         directory = Path(self.config.output_dir) / session_id
         directory.mkdir(parents=True, mode=0o700)
-        session = Session(session_id, plan, directory)
-        session.runtime = deepcopy(
-            msgspec.structs.replace(self.runtime, workers=list(self.workers.values()))
+        runtime = msgspec.structs.replace(
+            self.runtime, workers=list(self.workers.values())
         )
+        session = Session(session_id, plan, directory, runtime)
         session.deadline_monotonic = (
             asyncio.get_running_loop().time() + plan.duration_ms / 1000
         )
@@ -240,10 +213,6 @@ class Coordinator:
         self.requests[plan.client_request_id] = session
         session.task = asyncio.create_task(self.capture(session))
         return session
-
-    def manifest(self, session: Session) -> dict:
-        # Callers receive a detached copy; persistence serializes in place.
-        return deepcopy(self.build_manifest(session))
 
     def build_manifest(self, session: Session) -> dict:
         statuses = {item["status"] for item in session.artifact_validation}
@@ -345,7 +314,6 @@ class Coordinator:
 
     async def capture(self, session: Session) -> None:
         session.state = "starting"
-        assert session.runtime is not None
         workers = {worker.target_id: worker for worker in session.runtime.workers}
         selected = [
             workers[target.target_id]
@@ -370,9 +338,10 @@ class Coordinator:
                 }
             if session.stop_requested.is_set():
                 raise CollectionError("Capture stopped before recording started")
+            budget = self.start_budget(session, "startup")
             # Register before starting: a timeout may have taken effect
             # remotely, so cleanup must also attempt stop on uncertain starts.
-            session.collectors = self.registry.create(
+            session.collectors = self.registry[session.plan.mode](
                 self.config, session.runtime, session.plan, session.directory
             )
             for collector in session.collectors:
@@ -384,9 +353,8 @@ class Coordinator:
                     collector.evidence[
                         "identity_verification"
                     ] = "control_process_epoch"
-            budget = self.start_budget(session, "startup")
             failures = await asyncio.wait_for(
-                errors_of(self.start_collector(c) for c in session.collectors), budget
+                errors_of(c.start() for c in session.collectors), budget
             )
             if failures:
                 raise CollectionError("; ".join(failures))
@@ -400,7 +368,7 @@ class Coordinator:
             except asyncio.TimeoutError:
                 pass  # The lease deadline is a normal stop trigger.
             capture_ok = True
-        except COLLECTION_ERRORS as exc:
+        except Exception as exc:
             logger.warning(
                 "Profiling startup failed for %s: %s", session.session_id, exc
             )
@@ -436,7 +404,11 @@ class Coordinator:
                 for collector, validation in zip(session.collectors, validations):
                     session.artifact_validation.append(validation)
                     if validation["status"] in ("partial", "invalid"):
-                        if collector.evidence.get("collector") == "nsys":
+                        evidence = collector.evidence
+                        if (
+                            evidence.get("collector") == "nsys"
+                            and "start_requested_at_ns" in evidence
+                        ):
                             # An unfinished export could be misassociated with the
                             # next window; require reconciliation before admitting it.
                             self.cleanup_uncertain = True
@@ -464,23 +436,28 @@ class Coordinator:
             measurements["offset_delta_ns"] = end["offset_ns"] - start["offset_ns"]
         return None
 
-    async def validate_artifacts(self, collector: Collector) -> dict:
-        try:
-            validation = await self.artifact_validator.validate(
-                collector.evidence, self.config
-            )
-        except Exception as exc:
-            validation = {"status": "invalid", "coverage": "partial", "error": str(exc)}
+    async def validate_artifacts(self, collector) -> dict:
+        if self.closed:
+            # Shutdown must not wait for exports; the bundle job verifies them.
+            validation = {
+                "status": "unverified",
+                "coverage": "unknown",
+                "reason": "host_shutdown",
+            }
+        else:
+            try:
+                validation = await self.artifact_validator.validate(
+                    collector.evidence, self.config
+                )
+            except Exception as exc:
+                validation = {
+                    "status": "invalid",
+                    "coverage": "partial",
+                    "error": str(exc),
+                }
         return {"target_id": collector.evidence.get("target_id"), **validation}
 
-    async def start_collector(self, collector: Collector) -> str | None:
-        try:
-            await collector.start()
-        except Exception as exc:
-            return str(exc) or type(exc).__name__
-        return None
-
-    async def stop_collector(self, collector: Collector) -> str | None:
+    async def stop_collector(self, collector) -> str | None:
         try:
             await asyncio.wait_for(collector.stop(), self.config.finalize_timeout_s)
         except Exception as exc:

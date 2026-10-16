@@ -134,28 +134,20 @@ class ParallelGzip(io.RawIOBase):
 def verify_native(manifest: dict) -> dict[str, dict]:
     """Inspect every native file in parallel; the capture only checked presence."""
     profiles = {p["target_id"]: p for p in manifest["profiles"]}
-    items = manifest["artifact_validation"]
-    kineto = {
-        i["target_id"]
-        for i in items
-        if profiles.get(i["target_id"], {}).get("collector") == "torch_profiler"
-        and i.get("artifacts")
-    }
-    ranks = [(i, a) for i in items if i["target_id"] in kineto for a in i["artifacts"]]
-    others = [i for i in items if i["target_id"] not in kineto]
+    kineto, others = [], []
+    for item in manifest["artifact_validation"]:
+        collector = profiles.get(item["target_id"], {}).get("collector")
+        ranked = collector == "torch_profiler" and item.get("artifacts")
+        (kineto if ranked else others).append(item)
+    ranks = [artifact for item in kineto for artifact in item["artifacts"]]
+    evidence = [profiles.get(item["target_id"], {}) for item in others]
     with pool(len(ranks) + len(others)) as executor:
-        rank_results = executor.map(inspect_rank, [a for _, a in ranks])
-        other_results = executor.map(
-            inspect_target, others, [profiles.get(i["target_id"], {}) for i in others]
-        )
-        results = {i["target_id"]: r for i, r in zip(others, other_results)}
-        per_target = defaultdict(list)
-        for (item, _), result in zip(ranks, rank_results):
-            per_target[item["target_id"]].append(result)
-    for item in items:
-        if item["target_id"] in kineto:
+        inspected = iter(executor.map(inspect_rank, ranks))
+        targets = executor.map(inspect_target, others, evidence)
+        results = {item["target_id"]: r for item, r in zip(others, targets)}
+        for item in kineto:
             results[item["target_id"]] = kineto_result(
-                item, per_target[item["target_id"]]
+                item, [next(inspected) for _ in item["artifacts"]]
             )
     return results
 
@@ -351,16 +343,17 @@ def write_lifecycle(paths: list[Path], selected: set[str], output: Path) -> None
 
 
 def request_lanes(spans: dict, workers: dict) -> dict:
-    """Process lane and flow group per span; router decisions run on the frontend."""
+    """Lane, flow group and router worker ID per span; routing is on the frontend."""
     lanes = {}
     for span in spans.values():
         worker_id, phase = router_decision(spans.get(span.get("parentSpanId")), spans)
         lanes[span["spanId"]] = (
-            ("frontend", 0)
+            ("frontend", 0, None)
             if worker_id is None
             else (
                 workers.get(worker_id) or f"{phase} worker {worker_id} (not captured)",
                 {"prefill": 1, "decode": 2}.get(phase, 3),
+                worker_id,
             )
         )
     return lanes
@@ -373,7 +366,7 @@ def draw_request(timeline, spans: dict, lanes: dict, offsets: dict, track: str) 
     for span in sorted(
         spans.values(), key=lambda s: (start_end(s)[0], -start_end(s)[1])
     ):
-        lane = lanes[span["spanId"]][0]
+        lane, _, worker_id = lanes[span["spanId"]]
         start, end = start_end(span)
         timeline.interval(
             span["name"],
@@ -386,9 +379,7 @@ def draw_request(timeline, spans: dict, lanes: dict, offsets: dict, track: str) 
                 "span_id": span["spanId"],
                 "process": lane,
                 "raw_start_unix_ns": start,
-                "router_worker_id": router_decision(
-                    spans.get(span.get("parentSpanId")), spans
-                )[0],
+                "router_worker_id": worker_id,
             }
             | (
                 {"session_id": session}
@@ -567,13 +558,6 @@ def nsight_reports(
             "marks": len(marks),
             "spans_outside_report": dropped,
         }
-        if writer is None and importer is None:
-            shutil.copy2(paths[".nsys-rep"], copy)
-            reports[target] = entry | {
-                "status": "nvtxt_only",
-                "reason": "neither nsys_writer nor ImportNvtxt found",
-            }
-            continue
         errors = []
         for method, tool in (("nsys_writer", writer), ("ImportNvtxt", importer)):
             if tool is None:
@@ -600,7 +584,13 @@ def nsight_reports(
             )
             break
         else:
-            reports[target] = entry | {"status": "failed", "reason": "; ".join(errors)}
+            if not errors:
+                shutil.copy2(paths[".nsys-rep"], copy)
+            reason = "; ".join(errors) or "neither nsys_writer nor ImportNvtxt found"
+            reports[target] = entry | {
+                "status": "failed" if errors else "nvtxt_only",
+                "reason": reason,
+            }
     return reports
 
 
@@ -627,6 +617,16 @@ def build(
                     artifact["location"] = str(packed)
     if manifest["state"] not in ("completed", "failed"):
         raise SystemExit(f"Session is still {manifest['state']}")
+    # Each build starts from an empty output, which must not hold its inputs.
+    inputs = [session, *otel_paths] + [
+        Path(artifact["location"])
+        for item in manifest["artifact_validation"]
+        for artifact in item.get("artifacts", [])
+    ]
+    if any(path.resolve().is_relative_to(output.resolve()) for path in inputs):
+        raise SystemExit(f"Output {output} contains the session or its inputs")
+    if output.exists():
+        shutil.rmtree(output)
     # Full verification happens here, off the capture path; its results give
     # the native recording bounds (Kineto bounds need a full trace parse).
     verification = verify_native(manifest)
@@ -709,7 +709,7 @@ def build(
     for entry in by_session(index) if draw else []:
         spans, request = traces[entry["trace_id"]], lanes[entry["trace_id"]]
         label = request_label(entry)
-        groups.update(dict(set(request.values())))
+        groups.update(lane[:2] for lane in request.values())
         draw_request(window, spans, request, offsets, label)
         if not per_request:
             continue
@@ -737,33 +737,30 @@ def build(
         collector = collectors.get(target)
         if not draw:
             native[target] = {"status": "nsight_report", "report": reports[target]}
-        elif target == "frontend":
-            # The detailed frontend host trace is captured and listed but not
-            # drawn until it carries CPU samples or per-request ranges.
-            native[target] = {
-                "status": "excluded",
-                "reason": "frontend host trace detail",
-            }
-        elif collector not in NATIVE_READERS:
-            native[target] = {
-                "status": "pending",
-                "reason": f"no timeline reader for {collector}",
-            }
-        elif item["status"] != "verified":
-            native[target] = {
-                "status": "omitted",
-                "reason": f"artifacts {item['status']}",
-            }
-        elif target not in intervals:
-            native[target] = {"status": "omitted", "reason": "recording bounds unknown"}
-        else:
-            native[target] = {
-                "status": "included",
-                "events_read": 0,
-                "events_written": 0,
-                "clock_offset_ns": offsets.get(target, 0),
-            }
-            files += [(target, collector, a["location"]) for a in item["artifacts"]]
+            continue
+        # The detailed frontend host trace is captured and listed but not
+        # drawn until it carries CPU samples or per-request ranges.
+        status, reason = (
+            ("excluded", "frontend host trace detail")
+            if target == "frontend"
+            else ("pending", f"no timeline reader for {collector}")
+            if collector not in NATIVE_READERS
+            else ("omitted", f"artifacts {item['status']}")
+            if item["status"] != "verified"
+            else ("omitted", "recording bounds unknown")
+            if target not in intervals
+            else ("included", None)
+        )
+        if reason:
+            native[target] = {"status": status, "reason": reason}
+            continue
+        native[target] = {
+            "status": status,
+            "events_read": 0,
+            "events_written": 0,
+            "clock_offset_ns": offsets.get(target, 0),
+        }
+        files += [(target, collector, a["location"]) for a in item["artifacts"]]
 
     # Per-request views go in batches so open timelines stay bounded; the
     # window view is drawn with the first batch.

@@ -12,15 +12,13 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-import msgspec
-
 # Optional profiling extra; ordinary Torch deployments do not require NVTX.
 try:
     import nvtx
 except ImportError:
     nvtx = None
 
-from .collectors import CollectionError, TorchCollector, process_epoch
+from .collectors import CollectionError, TorchCollector, process_epoch, selected_workers
 from .models import Config, Plan, RuntimeSnapshot
 
 
@@ -110,25 +108,13 @@ class NsysWorkerCollector(TorchCollector):
 def nsys_collectors(
     config: Config, runtime: RuntimeSnapshot, plan: Plan, directory: Path
 ) -> list:
-    collectors = []
-    workers = {worker.target_id: worker for worker in runtime.workers}
-    for target in plan.targets:
-        if target.target_id == "frontend":
-            collectors.append(
-                NsysFrontendCollector(runtime, config.nsys_frontend_output_prefix)
-            )
-        else:
-            worker = workers[target.target_id]
-            if worker.backend == "sglang":
-                worker = msgspec.structs.replace(
-                    worker,
-                    start_options={
-                        **worker.start_options,
-                        "activities": ["CUDA_PROFILER"],
-                    },
-                )
-            collectors.append(NsysWorkerCollector(worker, config))
-    return collectors
+    workers = selected_workers(runtime, plan, "sglang", activities=["CUDA_PROFILER"])
+    return [
+        NsysFrontendCollector(runtime, config.nsys_frontend_output_prefix)
+        if worker is None
+        else NsysWorkerCollector(worker, config)
+        for worker in workers
+    ]
 
 
 def report_bounds(conn, tables: set) -> dict:
@@ -158,18 +144,6 @@ def report_bounds(conn, tables: set) -> dict:
     return bounds
 
 
-def ready_report(prefix: Path, baseline: set[str], config: Config) -> dict | None:
-    """One poll (directory scan + export check); None until the report exists."""
-    reports = [path for path in report_paths(prefix) if str(path) not in baseline]
-    if len(reports) > 1:
-        return {
-            "status": "invalid",
-            "coverage": "partial",
-            "error": "Ambiguous Nsight reports for one window",
-        }
-    return check_report(reports[0], config) if reports else None
-
-
 async def validate_reports(evidence: dict, config: Config) -> dict:
     if "previous_reports" not in evidence:
         return {
@@ -184,7 +158,7 @@ async def validate_reports(evidence: dict, config: Config) -> dict:
     while time.monotonic() < deadline:
         # The prefix is on shared storage: keep scans off the serving loop.
         try:
-            result = await asyncio.to_thread(ready_report, prefix, baseline, config)
+            result = await asyncio.to_thread(check_report, prefix, baseline, config)
         except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
             error = str(exc)
         else:
@@ -225,13 +199,22 @@ def open_export(report: Path, config: Config):
     return paths, sizes, conn, tables
 
 
-def check_report(report: Path, config: Config) -> dict:
-    """Cheap readiness check on the capture path: this report's export finished.
+def check_report(prefix: Path, baseline: set[str], config: Config) -> dict | None:
+    """Cheap readiness check on the capture path; None until a new report exists.
 
     Full inspection (integrity scan, required activity, GPU process count and
     hashes) runs offline in the bundle job (dynamo.profiling.inspection).
     """
-    paths, sizes, conn, tables = open_export(report, config)
+    reports = [path for path in report_paths(prefix) if str(path) not in baseline]
+    if len(reports) > 1:
+        return {
+            "status": "invalid",
+            "coverage": "partial",
+            "error": "Ambiguous Nsight reports for one window",
+        }
+    if not reports:
+        return None
+    paths, sizes, conn, tables = open_export(reports[0], config)
     with closing(conn):
         bounds = report_bounds(conn, tables)
     return {

@@ -167,19 +167,18 @@ def inspect_trace(path: Path, config: Config, deadline: float) -> dict:
 
 
 def scan_trace(path: Path, config: Config, deadline: float, scan) -> dict:
-    before = path.stat()
+    before = file_state(path)
     with open_trace(path) as stream:
         reader = BoundedReader(stream, config.max_trace_bytes, deadline)
         has_events, events, kernels, base_time_ns, markers = scan(reader)
         # Consuming the whole stream also verifies the gzip trailer and CRC.
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        if file_state(path) != before:
             raise ValueError("Trace changed during validation")
         if not has_events or not events:
             raise ValueError("Trace has no traceEvents objects")
         return {
             "location": str(path),
-            "bytes": after.st_size,
+            "bytes": before[0],
             "uncompressed_bytes": reader.bytes,
             "sha256_uncompressed": reader.digest.hexdigest(),
             "events": events,
@@ -319,12 +318,9 @@ def inspect_rank(artifact: dict, config: Config = OFFLINE) -> dict:
 
 def kineto_result(item: dict, artifacts: list[dict]) -> dict:
     ok = artifacts and all(a["validation"] == "valid" for a in artifacts)
+    status = item.get("status") if ok else "invalid"
     return {
-        "status": "verified"
-        if ok and item.get("status") == "present"
-        else "invalid"
-        if not ok
-        else item.get("status"),
+        "status": "verified" if status == "present" else status,
         "artifacts": artifacts,
     }
 

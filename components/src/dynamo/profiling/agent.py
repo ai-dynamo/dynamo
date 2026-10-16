@@ -23,7 +23,7 @@ class ProfilingAgent:
         if self.epoch is None:
             self.epoch = process_epoch(self.pid)
         # This attests the control process, not every GPU rank in its group.
-        result = {
+        return {
             "status": "ok",
             "schema_version": 1,
             "backend": self.backend,
@@ -32,7 +32,6 @@ class ProfilingAgent:
             "process_epoch": self.epoch,
             "scope": "control_process",
             "received_at_ns": received_ns,
+            "sent_at_ns": time.time_ns(),
+            "elapsed_monotonic_ns": time.monotonic_ns() - received_monotonic_ns,
         }
-        result["sent_at_ns"] = time.time_ns()
-        result["elapsed_monotonic_ns"] = time.monotonic_ns() - received_monotonic_ns
-        return result

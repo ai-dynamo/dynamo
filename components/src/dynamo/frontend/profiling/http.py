@@ -30,30 +30,26 @@ def application(coordinator: Coordinator) -> web.Application:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     async def validate(request: web.Request) -> web.Response:
-        plan = await read_plan(request)
-        coordinator.validate(plan)
-        return web.json_response(
-            {
-                "valid": True,
-                "frontend_collector": "linux_perf"
-                if coordinator.config.frontend_perf_enabled
-                and plan.mode == "torch_profile"
-                else None,
-                "worker_collector": "torch_profiler"
-                if plan.mode == "torch_profile"
-                else plan.mode,
-            }
-        )
+        coordinator.validate(await read_plan(request))
+        return web.json_response({"valid": True})
 
     async def submit(request: web.Request) -> web.Response:
         session = coordinator.submit(await read_plan(request))
         return web.json_response(coordinator.build_manifest(session), status=202)
 
-    def lookup(request: web.Request):
-        return coordinator.lookup(request.match_info["session_id"])
-
     async def status(request: web.Request) -> web.Response:
-        return web.json_response(coordinator.build_manifest(lookup(request)))
+        session = coordinator.lookup(request.match_info["session_id"])
+        return web.json_response(coordinator.build_manifest(session))
+
+    async def artifacts(request: web.Request) -> web.Response:
+        """Artifact view for external retrieval: files per target and OTel refs."""
+        session = coordinator.lookup(request.match_info["session_id"])
+        manifest = coordinator.build_manifest(session)
+        keys = ("session_id", "state", "artifact_status", "artifact_validation")
+        return web.json_response(
+            {key: manifest[key] for key in keys}
+            | {"directory": str(session.directory), "otel": manifest["lifecycle_otel"]}
+        )
 
     async def stop(request: web.Request) -> web.Response:
         session = coordinator.stop(request.match_info["session_id"])
@@ -67,7 +63,7 @@ def application(coordinator: Coordinator) -> web.Application:
             web.post(prefix + "/sessions", submit),
             web.get(prefix + "/sessions/{session_id}", status),
             web.post(prefix + "/sessions/{session_id}/stop", stop),
-            web.get(prefix + "/sessions/{session_id}/artifacts", status),
+            web.get(prefix + "/sessions/{session_id}/artifacts", artifacts),
         ]
     )
     return app

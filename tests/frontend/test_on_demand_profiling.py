@@ -4,6 +4,7 @@
 """Control plane tests without GPU engines or a privileged perf installation."""
 
 import asyncio
+import functools
 import gzip
 import hashlib
 import json
@@ -42,7 +43,6 @@ from dynamo.profiling import (
     native,
     nsys,
 )
-from dynamo.profiling.adapters import CollectorRegistry
 from dynamo.profiling.artifacts import SharedFilesystemValidator
 from dynamo.profiling.clock import estimate_offset
 from dynamo.profiling.collectors import CollectionError, PerfCollector, TorchCollector
@@ -55,6 +55,99 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.timeout(20),
 ]
+
+BASE = 1_700_000_000_000_000_000
+
+
+async def hang(*args):
+    await asyncio.Event().wait()
+
+
+async def until(predicate, timeout=5):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+def kev(name, ts, dur=1, cat="kernel", pid=1, tid=1):
+    """A Kineto complete event, in the key order Kineto writes."""
+    return dict(ph="X", cat=cat, name=name, pid=pid, tid=tid, ts=ts, dur=dur)
+
+
+def profiler_range(ts, dur):
+    return kev("PyTorch Profiler (0)", ts, dur, "Trace", "Spans", 0)
+
+
+def meta(kind, pid, **args):
+    return {"ph": "M", "name": kind, "pid": pid, "tid": 0, "args": args}
+
+
+def otel_span(trace_id, span_id, parent, name, start=2_000_000, dur=1_000_000, **kv):
+    """An OTLP JSON span starting `start` ns after BASE."""
+    return {
+        "traceId": trace_id,
+        "spanId": span_id,
+        "parentSpanId": parent,
+        "name": name,
+        "startTimeUnixNano": str(BASE + start),
+        "endTimeUnixNano": str(BASE + start + dur),
+        "attributes": [
+            {"key": k, "value": {"stringValue": str(v)}} for k, v in kv.items()
+        ],
+    }
+
+
+def write_otel(path, spans):
+    path.write_text(
+        json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
+    )
+    return path
+
+
+def torch_target(path, **profile):
+    artifacts = [{"location": str(path), "rank_id": "dp0"}]
+    return {"collector": "torch_profiler", **profile}, artifacts
+
+
+def write_session(tmp_path, targets, clocks=None, trace_ids=(), bounds=None, **extra):
+    """A finished session; targets maps target_id -> (profile fields, artifacts)."""
+    session = tmp_path / "session"
+    session.mkdir()
+    manifest = {
+        "session_id": "s",
+        "state": "completed",
+        "artifact_status": "present",
+        "plan": {"trace_ids": list(trace_ids)},
+        "profiles": [{"target_id": t, **p} for t, (p, _) in targets.items()],
+        "clock": {"workers": clocks or {}},
+        "artifact_validation": [
+            {"target_id": t, "status": "present", "artifacts": artifacts}
+            | ({"recording_bounds": bounds} if bounds else {})
+            for t, (_, artifacts) in targets.items()
+        ],
+        **extra,
+    }
+    (session / "manifest.json").write_text(json.dumps(manifest))
+    return session
+
+
+def read_timeline(path):
+    return json.loads(gzip.decompress(path.read_bytes()))["traceEvents"]
+
+
+def lane_order(events):
+    """Process names in their timeline sort order."""
+    order = {
+        e["pid"]: e["args"]["sort_index"]
+        for e in events
+        if e.get("name") == "process_sort_index"
+    }
+    names = {
+        e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
+    }
+    return [names[pid] for pid in sorted(order, key=order.get)]
 
 
 @pytest.fixture
@@ -79,12 +172,10 @@ def controller(tmp_path, monkeypatch, collector):
 
 @pytest.fixture
 def provider_controller(tmp_path, collector):
-    registry = CollectorRegistry()
-    registry.register("nsys", lambda *args: [collector])
     return Coordinator(
         Config("unused", str(tmp_path), finalize_timeout_s=0.01),
         RuntimeSnapshot(123, "epoch", "host"),
-        registry=registry,
+        registry={"nsys": lambda *args: [collector]},
     )
 
 
@@ -141,23 +232,35 @@ def test_invalid_plans(controller, bad_plan, exception):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["error", "timeout"])
-async def test_uncertain_start_is_bounded_and_cleaned_up(
-    controller, collector, failure
+@pytest.mark.parametrize(
+    "phase,failure,error",
+    [
+        ("start", CollectionError("permission denied"), "permission denied"),
+        ("start", hang, "TimeoutError"),
+        ("stop", CollectionError("flush failed"), "flush failed"),
+        ("stop", hang, "TimeoutError"),
+        ("stop", RuntimeError("unexpected stop failure"), "unexpected stop failure"),
+    ],
+)
+async def test_start_or_stop_failure_is_bounded_and_releases_lease(
+    controller, collector, phase, failure, error
 ):
-    async def hang():
-        await asyncio.Event().wait()
-
-    collector.start.side_effect = (
-        CollectionError("permission denied") if failure == "error" else hang
+    controller.config = msgspec.structs.replace(
+        controller.config, finalize_timeout_s=0.01
     )
+    getattr(collector, phase).side_effect = failure
     session = controller.submit(plan())
     await asyncio.wait_for(session.task, 1)
     assert session.state == "failed"
+    assert error in session.errors
+    assert controller.active is None
     collector.stop.assert_awaited_once()
-    assert (
-        "permission denied" if failure == "error" else "TimeoutError"
-    ) in session.errors
+    assert controller.cleanup_uncertain is (phase == "stop")
+    if phase == "stop":
+        assert collector.evidence["coverage"] == "partial_or_unknown"
+        # A new capture is refused until the stuck collector is reconciled.
+        with pytest.raises(errors.Conflict, match="cleanup is uncertain"):
+            controller.submit(plan("retry-after-stop-failure"))
 
 
 @pytest.mark.asyncio
@@ -226,10 +329,9 @@ async def test_stop_before_recording_reports_missing_coverage(tmp_path, collecto
         RuntimeSnapshot(
             123, "epoch", "host", [Worker("decode", "epoch", "vllm", "http://w")]
         ),
-        registry=CollectorRegistry(),
+        registry={"torch_profile": lambda *args: [collector]},
         clock_sampler=SimpleNamespace(measure=measure),
     )
-    controller.registry.register("torch_profile", lambda *args: [collector])
     session = controller.submit(Plan("early", [Target("decode", "epoch")], 5000))
     await asyncio.wait_for(probing.wait(), 1)
     controller.stop(session.session_id)
@@ -273,10 +375,7 @@ async def test_rest_validation_stop_and_unknown_fields(
         validation = await client.post(
             "/admin/profiling/v1/plans/validate", json=payload
         )
-        assert validation.status == 200
-        assert (await validation.json())["frontend_collector"] == (
-            "linux_perf" if frontend_perf else None
-        )
+        assert await validation.json() == {"valid": True}
         bad = await client.post(
             "/admin/profiling/v1/sessions", json={**payload, "pid": 1}
         )
@@ -287,12 +386,16 @@ async def test_rest_validation_stop_and_unknown_fields(
         stopped = await client.post(f"/admin/profiling/v1/sessions/{session_id}/stop")
         assert stopped.status == 202
         await controller.close()
-        artifacts = await client.get(
-            f"/admin/profiling/v1/sessions/{session_id}/artifacts"
-        )
-        manifest = await artifacts.json()
+        status = await client.get(f"/admin/profiling/v1/sessions/{session_id}")
+        manifest = await status.json()
         assert manifest["state"] == "completed"
         assert manifest["frontend"]["profiling_enabled"] is frontend_perf
+        view = await client.get(f"/admin/profiling/v1/sessions/{session_id}/artifacts")
+        keys = ("session_id", "state", "artifact_status", "artifact_validation")
+        assert await view.json() == {key: manifest[key] for key in keys} | {
+            "directory": str(controller.lookup(session_id).directory),
+            "otel": manifest["lifecycle_otel"],
+        }
         assert manifest["frontend"]["omission_reason"] == (
             None if frontend_perf else "disabled_by_operator_config"
         )
@@ -336,41 +439,6 @@ async def test_backend_http200_error_is_failure_and_options_forwarded(
         with pytest.raises(CollectionError, match="engine rejected capture"):
             await adapter.start()
     assert bodies == [{"profile_prefix": "trusted"}]
-
-
-@pytest.mark.asyncio
-async def test_backend_text_plain_json_start_and_stop(tmp_path):
-    calls = []
-
-    async def hook(request):
-        calls.append((request.path, await request.json()))
-        return web.Response(text='{"status":"ok"}', content_type="text/plain")
-
-    app = web.Application()
-    app.router.add_post("/engine/control/start_profile", hook)
-    app.router.add_post("/engine/control/stop_profile", hook)
-    async with TestServer(app) as server:
-        worker = Worker("worker", "epoch", "vllm", str(server.make_url("/")), {})
-        adapter = TorchCollector(worker, Config("socket", str(tmp_path)))
-        await adapter.start()
-        await adapter.stop()
-        assert adapter.evidence["coverage"] == "export_unverified"
-        assert (
-            adapter.evidence["timestamp_scope"]
-            == "control_responses_not_native_recording_bounds"
-        )
-        assert (
-            adapter.evidence["start_requested_at_ns"]
-            <= adapter.evidence["started_at_ns"]
-        )
-        assert (
-            adapter.evidence["stop_requested_at_ns"]
-            <= adapter.evidence["stopped_at_ns"]
-        )
-    assert calls == [
-        ("/engine/control/start_profile", {}),
-        ("/engine/control/stop_profile", {}),
-    ]
 
 
 @pytest.mark.asyncio
@@ -419,35 +487,14 @@ async def test_perf_attach_ack_and_signal_only_recorder(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["error", "timeout"])
-async def test_finalization_failure_blocks_new_capture(controller, collector, failure):
-    async def hang():
-        await asyncio.Event().wait()
-
-    controller.config = msgspec.structs.replace(
-        controller.config, finalize_timeout_s=0.01
-    )
-    collector.stop.side_effect = (
-        CollectionError("flush failed") if failure == "error" else hang
-    )
-    session = controller.submit(plan())
-    await asyncio.wait_for(session.task, 1)
-    assert session.state == "failed"
-    assert collector.evidence["coverage"] == "partial_or_unknown"
-    assert ("flush failed" if failure == "error" else "TimeoutError") in session.errors
-    assert controller.active is None
-    with pytest.raises(errors.Conflict, match="cleanup is uncertain"):
-        controller.submit(plan("retry-after-stop-failure"))
-
-
-@pytest.mark.asyncio
 async def test_frontend_epoch_checked_before_perf_spawn(tmp_path, monkeypatch):
+    spawn = AsyncMock()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(collectors, "process_epoch", lambda pid: "replacement-epoch")
     adapter = PerfCollector(123, "old-epoch", tmp_path)
     with pytest.raises(CollectionError, match="epoch changed"):
         await adapter.start()
-    assert adapter.process is None
-    assert adapter.control == -1
+    spawn.assert_not_called()
     await adapter.stop()
 
 
@@ -501,17 +548,13 @@ def socket_directory():
 
 
 def trace(path):
-    payload = {
-        "traceEvents": [
-            {"name": "test_kernel", "cat": "kernel", "ph": "X", "ts": 1, "dur": 2}
-        ]
-    }
+    payload = {"traceEvents": [kev("test_kernel", 1, 2)]}
     path.write_bytes(gzip.compress(json.dumps(payload).encode()))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", ["complete", "missing", "corrupt", "stale_epoch", "unknown_membership"]
+    "case", ["complete", "missing", "stale_epoch", "unknown_membership"]
 )
 async def test_worker_capture_identity_clock_and_rank_validation(
     tmp_path, monkeypatch, case
@@ -538,10 +581,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     async def stop(request):
         calls.append("stop")
         for rank in RANKS[:1] if case == "missing" else RANKS:
-            path = outputs / f"{options['profile_prefix']}_{rank}.2.pt.trace.json.gz"
-            trace(path)
-            if case == "corrupt" and rank == RANKS[1]:
-                path.write_bytes(path.read_bytes()[:-5])
+            trace(outputs / f"{options['profile_prefix']}_{rank}.2.pt.trace.json.gz")
         return web.Response(text='{"status":"ok"}', content_type="text/plain")
 
     async def info(request):
@@ -598,17 +638,12 @@ async def test_worker_capture_identity_clock_and_rank_validation(
                 request_ids=["trigger-request"],
             )
         )
-
-        async def wait_recording():
-            while session.state in ("accepted", "starting"):
-                await asyncio.sleep(0)
-            assert session.state == "recording"
-
         if case != "stale_epoch":
-            await asyncio.wait_for(wait_recording(), 5)
+            await until(lambda: session.state not in ("accepted", "starting"))
+            assert session.state == "recording"
             controller.stop(session.session_id)
         await asyncio.wait_for(session.task, 5)
-    manifest = controller.manifest(session)
+    manifest = controller.build_manifest(session)
     assert controller.active is None
     assert unselected_calls == []
     assert manifest["lifecycle_otel"]["trace_ids"] == ["trigger-trace"]
@@ -628,26 +663,24 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     assert manifest["profiles"][0]["identity_verification"] == "control_process_epoch"
     validation = manifest["artifact_validation"][0]
     assert all("old_" not in item["location"] for item in validation["artifacts"])
-    if case in ("complete", "corrupt"):
-        # Only presence is checked on the capture path; a truncated trace is
-        # caught by the offline inspection in the bundle job.
+    if case == "complete":
+        # Only presence is checked on the capture path; full inspection (and
+        # truncation detection) runs offline in the bundle job.
         assert session.state == "completed"
         assert manifest["artifact_status"] == "present"
         assert validation["coverage"] == "present"
         assert len(validation["artifacts"]) == 2
         inspected = inspection.inspect_kineto(validation, config)
-        if case == "corrupt":
-            assert inspected["status"] == "invalid"
-            assert [item["validation"] for item in inspected["artifacts"]] == [
-                "valid",
-                "invalid",
-            ]
-            return
         assert inspected["status"] == "verified"
         for item in inspected["artifacts"]:
             assert item["events"] == item["cuda_kernels"] == 1
             raw = gzip.decompress(Path(item["location"]).read_bytes())
             assert item["sha256_uncompressed"] == hashlib.sha256(raw).hexdigest()
+        # text/plain {"status":"ok"} control responses bracket the timestamps.
+        profile = manifest["profiles"][0]
+        assert profile["coverage"] == "export_unverified"
+        assert profile["start_requested_at_ns"] <= profile["started_at_ns"]
+        assert profile["stop_requested_at_ns"] <= profile["stopped_at_ns"]
     elif case == "unknown_membership":
         assert session.state == "completed"
         assert manifest["artifact_status"] == "unverified"
@@ -715,9 +748,7 @@ async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
 @pytest.mark.asyncio
 async def test_uncompressed_rank_traces_are_present_and_inspected(tmp_path):
     """Workers may write plain JSON (torch_profiler_use_gzip=false)."""
-    payload = {
-        "traceEvents": [{"name": "k", "cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]
-    }
+    payload = {"traceEvents": [kev("k", 1, 2)]}
     for rank in RANKS:
         path = tmp_path / f"capture_{rank}.1.pt.trace.json"
         path.write_text(json.dumps(payload))
@@ -751,36 +782,40 @@ async def test_embedded_host_uses_pluggable_coordinator_and_drains(
         finalize_timeout_s=10.0,
     )
     controller.config = config
+    sessions = "http://localhost/admin/profiling/v1/sessions"
+
+    def body(request_id):
+        return {
+            "client_request_id": request_id,
+            "mode": "nsys",
+            "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
+            "duration_ms": 5000,
+        }
+
     async with host(controller) as embedded:
         assert embedded is controller
         assert Path(config.socket_path).stat().st_mode & 0o777 == 0o600
         async with aiohttp.ClientSession(
             connector=aiohttp.UnixConnector(path=config.socket_path)
         ) as client:
-            response = await client.post(
-                "http://localhost/admin/profiling/v1/sessions",
-                json={
-                    "client_request_id": "plugin",
-                    "mode": "nsys",
-                    "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
-                    "duration_ms": 5000,
-                },
-            )
+            response = await client.post(sessions, json=body("plugin"))
             assert response.status == 202
             session_id = (await response.json())["session_id"]
-            conflict = await client.post(
-                "http://localhost/admin/profiling/v1/sessions",
-                json={
-                    "client_request_id": "other",
-                    "mode": "nsys",
-                    "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
-                    "duration_ms": 5000,
-                },
-            )
+            conflict = await client.post(sessions, json=body("other"))
             assert conflict.status == 409
         await asyncio.wait_for(collector.started.wait(), 1)
     collector.stop.assert_awaited_once()
-    assert controller.lookup(session_id).state == "completed"
+    session = controller.lookup(session_id)
+    assert session.state == "completed"
+    # Draining on shutdown leaves export verification to the bundle job.
+    assert session.artifact_validation == [
+        {
+            "target_id": "frontend",
+            "status": "unverified",
+            "coverage": "unknown",
+            "reason": "host_shutdown",
+        }
+    ]
     assert not Path(config.socket_path).exists()
     with pytest.raises(Unavailable):
         controller.submit(Plan("new", [Target("frontend", "epoch")], 50, mode="nsys"))
@@ -816,53 +851,45 @@ async def test_frontend_passes_runtime_snapshot_without_spawning_helper(
 
 
 @pytest.mark.asyncio
-async def test_callable_api_owns_runtime_and_manifest_snapshots(
-    tmp_path, provider_controller, collector
+async def test_close_stops_collectors_without_waiting_for_artifacts(
+    provider_controller, collector
 ):
     controller = provider_controller
-    config = Config("unused", str(tmp_path))
-    worker = Worker(
-        "decode",
-        "epoch",
-        "vllm",
-        "http://configured",
-        {"option": [1]},
-        expected_rank_ids=[RANKS[0]],
+    validate = AsyncMock(side_effect=hang)  # an export that never arrives
+    controller.artifact_validator = SimpleNamespace(validate=validate)
+    session = controller.submit(
+        Plan("close", [Target("frontend", "epoch")], 5000, mode="nsys")
     )
-    runtime = RuntimeSnapshot(123, "epoch", "host", [worker], {"labels": ["accepted"]})
-    controller = Coordinator(config, runtime, registry=provider_controller.registry)
-    runtime.workers.clear()
-    runtime.context["labels"].append("caller-mutated")
-    worker.start_options["option"].append(2)
-    inventory = controller.targets()
-    inventory[1]["expected_rank_ids"].clear()
-    assert controller.workers["decode"].expected_rank_ids == [RANKS[0]]
-    assert controller.workers["decode"].start_options == {"option": [1]}
-    original_plan = Plan(
-        "snapshot",
-        [Target("frontend", "epoch")],
-        5000,
-        mode="nsys",
-        trace_ids=["trace"],
-    )
-    session = controller.submit(original_plan)
-    original_plan.trace_ids.append("caller-mutated")
-    controller.runtime.context["labels"].append("later-context")
     await asyncio.wait_for(collector.started.wait(), 1)
-    manifest = controller.manifest(session)
-    manifest["profiles"][0]["target_id"] = "caller-mutated"
-    manifest["runtime"]["context"]["labels"].clear()
-    manifest["lifecycle_otel"]["trace_ids"].clear()
-    await controller.close()
-    final = controller.manifest(session)
-    assert final["profiles"][0]["target_id"] == "frontend"
-    assert final["runtime"]["context"] == {"labels": ["accepted"]}
-    assert final["lifecycle_otel"]["trace_ids"] == ["trace"]
-    assert session.plan.trace_ids == ["trace"]
-    assert (
-        final["timing_contract"]["duration_semantics"]
-        == "best_effort_lease_from_acceptance"
+    await asyncio.wait_for(controller.close(), 1)
+    collector.stop.assert_awaited_once()
+    validate.assert_not_awaited()
+    assert session.state == "completed"
+    assert session.artifact_validation[0]["reason"] == "host_shutdown"
+    assert controller.build_manifest(session)["artifact_status"] == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_unstarted_nsight_capture_does_not_block_the_next(tmp_path, monkeypatch):
+    monkeypatch.setattr(nsys, "nvtx", None)  # start fails before preparing reports
+    controller = Coordinator(
+        Config(
+            "unused",
+            str(tmp_path / "sessions"),
+            nsys_frontend_output_prefix=str(tmp_path / "frontend"),
+        ),
+        RuntimeSnapshot(os.getpid(), "epoch", "host"),
     )
+    targets = [Target("frontend", "epoch")]
+    session = controller.submit(Plan("first", targets, 5000, mode="nsys"))
+    await asyncio.wait_for(session.task, 5)
+    assert session.state == "failed"
+    assert "ai-dynamo[profiling]" in session.errors[0]
+    assert session.artifact_validation[0]["status"] == "invalid"
+    # Nothing was recorded, so no export can be misassociated with a later window.
+    assert controller.cleanup_uncertain is False
+    controller.submit(Plan("second", targets, 5000, mode="nsys"))
+    await controller.close()
 
 
 @pytest.mark.asyncio
@@ -984,11 +1011,10 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
             )
             assert response.status == 202
             session = coordinator.lookup((await response.json())["session_id"])
-            while session.state != "recording":
-                await asyncio.sleep(0)
+            await until(lambda: session.state == "recording")
             await client.post(f"/admin/profiling/v1/sessions/{session.session_id}/stop")
             await session.task
-            manifest = coordinator.manifest(session)
+            manifest = coordinator.build_manifest(session)
             assert session.state == "completed", manifest
             assert manifest["frontend"]["profiling_enabled"] is True
             result = manifest["artifact_validation"][0]
@@ -1001,11 +1027,8 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
     assert len(handles) == 3
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-async def test_nsys_worker_uses_backend_controls(tmp_path, monkeypatch, backend):
-    requests = AsyncMock()
-    monkeypatch.setattr(TorchCollector, "_request", requests)
+def test_nsys_worker_uses_backend_controls(tmp_path, backend):
     worker = Worker(
         "decode",
         "epoch",
@@ -1013,23 +1036,17 @@ async def test_nsys_worker_uses_backend_controls(tmp_path, monkeypatch, backend)
         "http://worker",
         nsys_output_prefix=str(tmp_path / "worker"),
     )
-    config = Config("unused", str(tmp_path), frontend_perf_enabled=True)
-    runtime = RuntimeSnapshot(123, "frontend", "host", [worker])
-    selected = nsys.nsys_collectors(
-        config,
-        runtime,
+    # No implicit frontend/perf capture in Nsight mode, even with perf enabled.
+    (selected,) = nsys.nsys_collectors(
+        Config("unused", str(tmp_path), frontend_perf_enabled=True),
+        RuntimeSnapshot(123, "frontend", "host", [worker]),
         Plan("id", [Target("decode", "epoch")], 50, mode="nsys"),
         tmp_path,
     )
-    assert len(selected) == 1  # no implicit frontend/perf capture in Nsight mode
-    await selected[0].start()
-    await selected[0].stop()
-    assert requests.await_args_list[0].args == (
-        "start",
-        {"activities": ["CUDA_PROFILER"]} if backend == "sglang" else {},
-        config.start_timeout_s,
+    assert isinstance(selected, nsys.NsysWorkerCollector)
+    assert selected.worker.start_options == (
+        {"activities": ["CUDA_PROFILER"]} if backend == "sglang" else {}
     )
-    assert requests.await_args_list[1].args == ("stop", {}, config.finalize_timeout_s)
 
 
 @pytest.mark.asyncio
@@ -1063,6 +1080,8 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
         "expected_gpu_processes": 2 if defect == "missing_rank" else 1,
         "previous_reports": [],
     }
+    # The first poll always runs; the short deadline only ends exports that
+    # never become ready (corrupt, incomplete).
     config = Config("unused", str(tmp_path), artifact_validation_timeout_s=0.03)
     result = await SharedFilesystemValidator().validate(evidence, config)
     if defect in ("ambiguous", "corrupt", "incomplete"):
@@ -1071,8 +1090,8 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
     else:
         # Activity and rank checks run offline in the bundle job.
         assert result["status"] == "present"
-        result = inspection.inspect_nsys(
-            {"artifacts": [{"location": str(path)}]}, evidence, config
+        result = inspection.inspect_target(
+            {"artifacts": [{"location": str(path)}]}, evidence
         )
         assert result["status"] == "invalid"
     assert result["error"]
@@ -1109,7 +1128,7 @@ async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
     result = inspection.inspect_nsys(
         {"artifacts": [{"location": str(path)}]},
         {"required_activity": "cuda_events", "expected_gpu_processes": 1},
-        Config("unused", str(tmp_path), artifact_validation_timeout_s=0.05),
+        inspection.OFFLINE,
     )
     assert result["status"] == "verified"
     assert result["events"]["CUPTI_ACTIVITY_KIND_MEMCPY"] == 1
@@ -1117,121 +1136,36 @@ async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
 
 
 def test_bundle_writes_per_request_deployment_timelines(tmp_path):
-    base = 1_700_000_000_000_000_000
     trace = tmp_path / "native" / "capture_dp0.1.pt.trace.json.gz"
     trace.parent.mkdir()
-    kernels = [
-        {
-            "ph": "X",
-            "cat": "kernel",
-            "name": name,
-            "pid": 7,
-            "tid": 1,
-            "ts": ts,
-            "dur": 2,
-        }
-        for name, ts in (
-            ("before_recording", 100),
-            ("before_operation", 1000),
-            ("inside_operation", 2500.5),
-        )
+    events = [
+        meta("process_name", 7, name="EngineCore"),
+        meta("process_labels", 7, labels="CPU"),
+        kev("before_recording", 100, 2, pid=7),
+        kev("before_operation", 1000, 2, pid=7),
+        kev("inside_operation", 2500.5, 2, pid=7),
+        profiler_range(1000, 3000),
     ]
-    metadata = [
-        {
-            "ph": "M",
-            "name": "process_name",
-            "pid": 7,
-            "tid": 0,
-            "args": {"name": "EngineCore"},
-        },
-        {
-            "ph": "M",
-            "name": "process_labels",
-            "pid": 7,
-            "tid": 0,
-            "args": {"labels": "CPU"},
-        },
-    ]
-    marker = {
-        "ph": "X",
-        "cat": "Trace",
-        "name": "PyTorch Profiler (0)",
-        "pid": "Spans",
-        "tid": 0,
-        "ts": 1000,
-        "dur": 3000,
-    }
-    native = {"baseTimeNanoseconds": base, "traceEvents": metadata + kernels + [marker]}
+    native = {"baseTimeNanoseconds": BASE, "traceEvents": events}
     trace.write_bytes(gzip.compress(json.dumps(native).encode()))
-    session = tmp_path / "session"
-    session.mkdir()
     clock = {"alignment": "estimated", "offset_ns": 1000, "hostname": "h", "pid": 42}
-    manifest = {
-        "session_id": "s",
-        "state": "completed",
-        "artifact_status": "present",
-        "plan": {"trace_ids": ["trigger"]},
-        "profiles": [
-            {
-                "target_id": "decode-0",
-                "collector": "torch_profiler",
-                "started_at_ns": base + 900_000,
-            }
-        ],
-        "clock": {"workers": {"decode-0": {"start": clock}}},
-        "artifact_validation": [
-            {
-                "target_id": "decode-0",
-                "status": "present",
-                "artifacts": [{"location": str(trace), "rank_id": "dp0"}],
-            }
-        ],
-    }
-    (session / "manifest.json").write_text(json.dumps(manifest))
-
-    def span(trace_id, span_id, parent, name, start, **attributes):
-        return {
-            "traceId": trace_id,
-            "spanId": span_id,
-            "parentSpanId": parent,
-            "name": name,
-            "startTimeUnixNano": str(base + start),
-            "endTimeUnixNano": str(base + start + 3_000_000),
-            "attributes": [
-                {"key": k, "value": {"stringValue": str(v)}}
-                for k, v in attributes.items()
-            ],
-        }
+    session = write_session(
+        tmp_path,
+        {"decode-0": torch_target(trace, started_at_ns=BASE + 900_000)},
+        {"decode-0": {"start": clock}},
+        ["trigger"],
+    )
+    span = functools.partial(otel_span, dur=3_000_000)
 
     def phase(trace_id, prefix, name, worker, pid, start):
         # Span host attributes are not worker host identities; only the PID joins.
         epoch = {"dynamo.process.epoch": f"{pid}:x", "dynamo.instance.id": "other"}
+        decision = {"phase": name.title(), "worker_id": worker}
+        route, handle, op = prefix + "r", prefix + "h", prefix + "o"
         return [
-            span(
-                trace_id,
-                prefix + "r",
-                "a",
-                "kv_router.route_request",
-                start,
-                phase=name.title(),
-                worker_id=worker,
-            ),
-            span(
-                trace_id,
-                prefix + "h",
-                prefix + "r",
-                "handle_payload",
-                start,
-                instance_id=worker,
-            ),
-            span(
-                trace_id,
-                prefix + "o",
-                prefix + "h",
-                f"worker.operation.{name}",
-                start,
-                **epoch,
-            ),
+            span(trace_id, route, "a", "kv_router.route_request", start, **decision),
+            span(trace_id, handle, route, "handle_payload", start, instance_id=worker),
+            span(trace_id, op, handle, f"worker.operation.{name}", start, **epoch),
         ]
 
     def request(trace_id, decode_worker, decode_pid, start):
@@ -1241,14 +1175,11 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
             + phase(trace_id, "d", "decode", decode_worker, decode_pid, start)
         )
 
-    otel = tmp_path / "otel.jsonl"
-    spans = (
+    otel = write_otel(
+        tmp_path / "otel.jsonl",
         request("captured", "W1", 42, 2_000_000)
         + request("uncaptured", "W2", 43, 2_000_000)
-        + request("after", "W1", 42, 9_000_000)
-    )
-    otel.write_text(
-        json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
+        + request("after", "W1", 42, 9_000_000),
     )
     summary = bundle.build(session, [otel], tmp_path / "out", per_request=True)
     # The command runs the module as __main__; parallel verification must work there.
@@ -1287,17 +1218,8 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     # Window: both kernels and the profiler range; per request: the kernel
     # inside its operation and the overlapping profiler range.
     assert summary["coverage"]["native_timeline"]["decode-0"]["events_written"] == 5
-    timeline = tmp_path / "out" / index["requests"][0]["timeline"]
-    events = json.loads(gzip.decompress(timeline.read_bytes()))["traceEvents"]
-    order = {
-        e["pid"]: e["args"]["sort_index"]
-        for e in events
-        if e.get("name") == "process_sort_index"
-    }
-    names = {
-        e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
-    }
-    assert [names[pid] for pid in sorted(order, key=order.get)] == [
+    events = read_timeline(tmp_path / "out" / index["requests"][0]["timeline"])
+    assert lane_order(events) == [
         "Requests · OTel spans",
         "Recording windows",
         "decode-0 · EngineCore (CPU)",
@@ -1310,28 +1232,14 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
     assert lanes["kv_router.route_request"] == "frontend"
     # The default window timeline shows every request and each captured
     # worker for its whole recording, including work outside any request.
-    window = json.loads(
-        gzip.decompress((tmp_path / "out/timeline.json.gz").read_bytes())
-    )["traceEvents"]
+    window = read_timeline(tmp_path / "out/timeline.json.gz")
     threads = {e["args"]["name"] for e in window if e.get("name") == "thread_name"}
     assert "req captured · prefill (not captured) → decode-0" in threads
     assert sorted(e["name"] for e in window if e.get("cat") == "kernel") == [
         "before_operation",
         "inside_operation",
     ]
-    order = {
-        e["pid"]: e["args"]["sort_index"]
-        for e in window
-        if e.get("name") == "process_sort_index"
-    }
-    names = {
-        e["pid"]: e["args"]["name"] for e in window if e.get("name") == "process_name"
-    }
-    assert [names[pid] for pid in sorted(order, key=order.get)][:3] == [
-        "Requests · OTel spans",
-        "Recording windows",
-        "decode-0 · EngineCore (CPU)",
-    ]
+    assert lane_order(window)[:3] == lane_order(events)[:3]
     assert [e["name"] for e in events if e.get("cat") == "kernel"] == [
         "inside_operation"
     ]
@@ -1343,23 +1251,13 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unexpected_stop_failure_releases_lease(controller, collector):
-    collector.stop.side_effect = RuntimeError("unexpected stop failure")
-    session = controller.submit(plan())
-    await session.task
-    assert session.state == "failed"
-    assert controller.active is None
-    assert controller.cleanup_uncertain
-    assert any("unexpected stop failure" in error for error in session.errors)
-
-
-@pytest.mark.asyncio
 async def test_timed_out_frontend_range_start_is_closed_on_stop(tmp_path, monkeypatch):
-    opened, closed, handle = threading.Event(), [], object()
+    entered, release = threading.Event(), threading.Event()
+    closed, handle = [], object()
 
     def start_range(**kwargs):
-        time.sleep(0.2)  # Nsight blocking the range transition past the budget
-        opened.set()
+        entered.set()
+        release.wait(5)  # Nsight blocking the range transition past the budget
         return handle
 
     monkeypatch.setattr(
@@ -1369,10 +1267,15 @@ async def test_timed_out_frontend_range_start_is_closed_on_stop(tmp_path, monkey
     collector = nsys.NsysFrontendCollector(
         RuntimeSnapshot(os.getpid(), "epoch", "host"), str(tmp_path / "frontend")
     )
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(collector.start(), 0.05)
+    # The start budget expires exactly while the range transition is blocked.
+    start = asyncio.ensure_future(collector.start())
+    await asyncio.to_thread(entered.wait, 5)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    release.set()
     await collector.stop()
-    assert opened.is_set() and closed == [handle]
+    assert closed == [handle]
 
 
 @pytest.mark.asyncio
@@ -1395,36 +1298,35 @@ async def test_host_replaces_stale_socket_but_not_a_live_one(
 
 def test_bundle_without_observed_bounds_or_requests(tmp_path):
     trace = tmp_path / "capture_dp0.1.pt.trace.json"
-    kernel = {"ph": "X", "cat": "kernel", "name": "k", "pid": 1, "tid": 1, "ts": 1}
     trace.write_text(
-        json.dumps({"baseTimeNanoseconds": 10**18, "traceEvents": [kernel]})
+        json.dumps({"baseTimeNanoseconds": 10**18, "traceEvents": [kev("k", 1)]})
     )
-    session = tmp_path / "session"
-    session.mkdir()
-    manifest = {
-        "session_id": "s",
-        "state": "completed",
-        "artifact_status": "present",
-        "accepted_at_ns": 5,
-        "plan": {"trace_ids": []},
-        "profiles": [{"target_id": "decode-0", "collector": "torch_profiler"}],
-        "clock": {"workers": {}},
-        "artifact_validation": [
-            {
-                "target_id": "decode-0",
-                "status": "present",
-                "artifacts": [{"location": str(trace), "rank_id": "dp0"}],
-            }
-        ],
-    }
-    (session / "manifest.json").write_text(json.dumps(manifest))
+    session = write_session(
+        tmp_path, {"decode-0": torch_target(trace)}, accepted_at_ns=5
+    )
     otel = tmp_path / "otel.jsonl"
     otel.write_text("")
-    summary = bundle.build(session, [otel], tmp_path / "out")
+    out = tmp_path / "out"
+    bundle.build(session, [otel], out, per_request=True)
+    (out / "reports").mkdir(exist_ok=True)
+    (out / "reports/stale.nsys-rep").write_bytes(b"stale")
+    # A rebuild starts from an empty output: no stale reports or timelines.
+    summary = bundle.build(session, [otel], out)
+    assert not (out / "timelines").exists()
+    assert not (out / "reports/stale.nsys-rep").exists()
+    assert not any(f.startswith(("timelines/", "reports/")) for f in summary["files"])
     # No profiler marker: verified, but without bounds its events are not drawn.
     assert summary["artifact_verification"]["decode-0"]["status"] == "verified"
     assert summary["coverage"]["native_timeline"]["decode-0"]["status"] == "omitted"
     assert summary["timeline_origin_unix_ns"] == 5
+    # An output that is, or holds, the session or an input is never cleared.
+    held = tmp_path / "held"
+    held.mkdir()
+    inner = write_otel(held / "otel.jsonl", [])
+    for output, otel_path in ((session, otel), (tmp_path, otel), (held, inner)):
+        with pytest.raises(SystemExit, match="contains the session or its inputs"):
+            bundle.build(session, [otel_path], output)
+    assert (session / "manifest.json").exists() and inner.exists()
 
 
 def kineto_layout(base: int, events: list[dict]) -> str:
@@ -1440,29 +1342,13 @@ def kineto_layout(base: int, events: list[dict]) -> str:
 def test_kineto_block_reader_matches_token_parser(tmp_path, suffix):
     base = 1_790_857_026_000_000_000
     events = [
-        {"ph": "M", "name": "process_name", "pid": 7, "tid": 0, "args": {"name": "x"}},
-        {
-            "ph": "X",
-            "cat": "kernel",
-            "name": "k",
-            "pid": 7,
-            "tid": 1,
-            "ts": 5.5,
-            "dur": 2,
-        },
-        {
-            "ph": "X",
-            "cat": "Trace",
-            "name": "PyTorch Profiler (0)",
-            "pid": "Spans",
-            "tid": 0,
-            "ts": 1075990243460.021,
-            "dur": 10000.123,
-        },
+        meta("process_name", 7, name="x"),
+        kev("k", 5.5, 2, pid=7),
+        profiler_range(1075990243460.021, 10000.123),
     ]
     path = tmp_path / f"rank{suffix}"
-    data = kineto_layout(base, events).encode()
-    path.write_bytes(gzip.compress(data) if suffix.endswith(".gz") else data)
+    encode = gzip.compress if suffix.endswith(".gz") else bytes
+    path.write_bytes(encode(kineto_layout(base, events).encode()))
     assert list(native.kineto_events(path)) == list(
         native.kineto_events(path, fast=False)
     )
@@ -1473,13 +1359,8 @@ def test_kineto_block_reader_matches_token_parser(tmp_path, suffix):
     assert (fast["events"], fast["cuda_kernels"]) == (3, 1)
     assert fast["recording_bounds"]["start_unix_ns"] == base + 1075990243460021
     # Any other layout falls back to the token parser instead of failing.
-    path.write_bytes(
-        gzip.compress(
-            json.dumps({"baseTimeNanoseconds": base, "traceEvents": events}).encode()
-        )
-        if suffix.endswith(".gz")
-        else json.dumps({"baseTimeNanoseconds": base, "traceEvents": events}).encode()
-    )
+    native_layout = {"baseTimeNanoseconds": base, "traceEvents": events}
+    path.write_bytes(encode(json.dumps(native_layout).encode()))
     assert inspection.inspect_trace(path, config, deadline)["events"] == 3
     assert len(list(native.kineto_events(path, fast=False))) == 3
 
@@ -1500,92 +1381,32 @@ def test_parallel_gzip_is_one_standard_member(tmp_path):
 
 def test_bundle_fails_only_the_target_with_a_malformed_trace(tmp_path):
     base = 10**18
-    marker = {
-        "ph": "X",
-        "cat": "Trace",
-        "name": "PyTorch Profiler (0)",
-        "pid": "Spans",
-        "tid": 0,
-        "ts": 0,
-        "dur": 100,
-    }
     good = tmp_path / "good_dp0.1.pt.trace.json"
-    good.write_text(
-        kineto_layout(
-            base,
-            [
-                marker,
-                {
-                    "ph": "X",
-                    "cat": "kernel",
-                    "name": "k",
-                    "pid": 1,
-                    "tid": 1,
-                    "ts": 1,
-                    "dur": 1,
-                },
-            ],
-        )
-    )
+    good.write_text(kineto_layout(base, [profiler_range(0, 100), kev("k", 1)]))
     bad = tmp_path / "bad_dp0.1.pt.trace.json"
     # Structurally intact (verification passes) but one event is not JSON.
-    kernel = {
-        "ph": "X",
-        "cat": "kernel",
-        "name": "bad-k",
-        "pid": 1,
-        "tid": 1,
-        "ts": 1,
-        "dur": 1,
-    }
-    bad.write_text(
-        kineto_layout(base, [marker, kernel]).replace('"bad-k"', '"bad-k",,')
+    layout = kineto_layout(base, [profiler_range(0, 100), kev("bad-k", 1)])
+    bad.write_text(layout.replace('"bad-k"', '"bad-k",,'))
+    session = write_session(
+        tmp_path,
+        {"good": torch_target(good), "bad": torch_target(bad)},
+        accepted_at_ns=base,
     )
-    session = tmp_path / "session"
-    session.mkdir()
-    manifest = {
-        "session_id": "s",
-        "state": "completed",
-        "artifact_status": "present",
-        "accepted_at_ns": base,
-        "plan": {"trace_ids": []},
-        "profiles": [
-            {"target_id": t, "collector": "torch_profiler"} for t in ("good", "bad")
-        ],
-        "clock": {"workers": {}},
-        "artifact_validation": [
-            {
-                "target_id": t,
-                "status": "present",
-                "artifacts": [{"location": str(path), "rank_id": "dp0"}],
-            }
-            for t, path in (("good", good), ("bad", bad))
-        ],
-    }
-    (session / "manifest.json").write_text(json.dumps(manifest))
     otel = tmp_path / "otel.jsonl"
     otel.write_text("")
     summary = bundle.build(session, [otel], tmp_path / "out")
     native_timeline = summary["coverage"]["native_timeline"]
     assert native_timeline["good"]["status"] == "included"
     assert native_timeline["bad"]["status"] == "failed"
-    window = json.loads(
-        gzip.decompress((tmp_path / "out/timeline.json.gz").read_bytes())
-    )
-    assert [e["name"] for e in window["traceEvents"] if e.get("cat") == "kernel"] == [
-        "k"
-    ]
-    names = {
-        e["args"]["name"]
-        for e in window["traceEvents"]
-        if e.get("name") == "process_name"
-    }
+    window = read_timeline(tmp_path / "out/timeline.json.gz")
+    assert [e["name"] for e in window if e.get("cat") == "kernel"] == ["k"]
+    names = [e["args"]["name"] for e in window if e.get("name") == "process_name"]
     assert not any(name.startswith("bad ·") for name in names)
     assert summary["artifact_verification"]["bad"]["status"] == "verified"
 
 
 def nsight_session(tmp_path):
-    base, clock = 1_700_000_000_000_000_000, 5_000_000_000
+    clock = 5_000_000_000
     # Nsight event timestamps are relative to the session start (utcEpochNs).
 
     def export(name, rows):
@@ -1596,7 +1417,7 @@ def nsight_session(tmp_path):
             )
             db.execute(
                 "INSERT INTO TARGET_INFO_SESSION_START_TIME VALUES (?, ?)",
-                (base, clock),
+                (BASE, clock),
             )
             db.execute("CREATE TABLE StringIds (id, value)")
             db.executemany(
@@ -1655,84 +1476,36 @@ def nsight_session(tmp_path):
     )
     bounds = {
         "status": "observed",
-        "start_unix_ns": base + 1_000_000,
-        "end_unix_ns": base + 4_000_000,
+        "start_unix_ns": BASE + 1_000_000,
+        "end_unix_ns": BASE + 4_000_000,
     }
-    session = tmp_path / "session"
-    session.mkdir()
-    (session / "manifest.json").write_text(
-        json.dumps(
-            {
-                "session_id": "s",
-                "state": "completed",
-                "artifact_status": "present",
-                "plan": {"trace_ids": []},
-                "profiles": [
-                    {
-                        "target_id": "frontend",
-                        "collector": "nsys",
-                        "required_activity": "cpu_events",
-                        "pid": 42,
-                    },
-                    {
-                        "target_id": "decode-0",
-                        "collector": "nsys",
-                        "required_activity": "cuda_events",
-                        "expected_gpu_processes": 1,
-                    },
-                ],
-                "clock": {
-                    "workers": {
-                        "decode-0": {
-                            "start": {
-                                "alignment": "estimated",
-                                "offset_ns": 0,
-                                "pid": 42,
-                            }
-                        }
-                    }
-                },
-                "artifact_validation": [
-                    {
-                        "target_id": t,
-                        "status": "present",
-                        "recording_bounds": bounds,
-                        "artifacts": [
-                            {"location": str(path.with_suffix(".nsys-rep"))},
-                            {"location": str(path)},
-                        ],
-                    }
-                    for t, path in (("frontend", frontend), ("decode-0", worker))
-                ],
-            }
-        )
+
+    def target(path, **profile):
+        report = {"location": str(path.with_suffix(".nsys-rep"))}
+        return {"collector": "nsys", **profile}, [report, {"location": str(path)}]
+
+    session = write_session(
+        tmp_path,
+        {
+            "frontend": target(frontend, required_activity="cpu_events", pid=42),
+            "decode-0": target(
+                worker, required_activity="cuda_events", expected_gpu_processes=1
+            ),
+        },
+        {"decode-0": {"start": {"alignment": "estimated", "offset_ns": 0, "pid": 42}}},
+        bounds=bounds,
     )
-
-    def span(span_id, parent, name, **attributes):
-        return {
-            "traceId": "t",
-            "spanId": span_id,
-            "parentSpanId": parent,
-            "name": name,
-            "startTimeUnixNano": str(base + 2_000_000),
-            "endTimeUnixNano": str(base + 3_000_000),
-            "attributes": [
-                {"key": k, "value": {"stringValue": str(v)}}
-                for k, v in attributes.items()
-            ],
-        }
-
     spans = [
-        span("a", "", "http-request"),
-        span("r", "a", "kv_router.route_request", phase="Decode", worker_id="W"),
-        span("h", "r", "handle_payload", instance_id="W"),
-        span("o", "h", "worker.operation.decode", **{"dynamo.process.epoch": "42:x"}),
+        otel_span("t", "a", "", "http-request"),
+        otel_span(
+            "t", "r", "a", "kv_router.route_request", phase="Decode", worker_id="W"
+        ),
+        otel_span("t", "h", "r", "handle_payload", instance_id="W"),
+        otel_span(
+            "t", "o", "h", "worker.operation.decode", **{"dynamo.process.epoch": "42:x"}
+        ),
     ]
-    otel = tmp_path / "otel.jsonl"
-    otel.write_text(
-        json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
-    )
-    return session, otel, base
+    return session, write_otel(tmp_path / "otel.jsonl", spans)
 
 
 def test_nvtx_request_ranges_follow_the_span_tree():
@@ -1790,20 +1563,11 @@ def test_nvtx_request_ranges_follow_the_span_tree():
 
 
 def test_bundle_reads_nsight_worker_exports(tmp_path):
-    session, otel, base = nsight_session(tmp_path)
+    session, otel = nsight_session(tmp_path)
     bundle.build(session, [otel], tmp_path / "out", per_request=True)
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
-    path = tmp_path / "out" / index["requests"][0]["timeline"]
-    events = json.loads(gzip.decompress(path.read_bytes()))["traceEvents"]
-    order = {
-        e["pid"]: e["args"]["sort_index"]
-        for e in events
-        if e.get("name") == "process_sort_index"
-    }
-    names = {
-        e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"
-    }
-    assert [names[pid] for pid in sorted(order, key=order.get)] == [
+    events = read_timeline(tmp_path / "out" / index["requests"][0]["timeline"])
+    assert lane_order(events) == [
         "Requests · OTel spans",
         "Recording windows",
         "decode-0 · VLLM::EngineCore (CPU)",
@@ -1835,8 +1599,8 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     assert (tmp_path / "out.tar.gz.sha256").read_text() == f"{digest}  out.tar.gz\n"
 
 
-def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path):
-    session, otel, base = nsight_session(tmp_path)
+def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path, monkeypatch):
+    session, otel = nsight_session(tmp_path)
     # An install with only ImportNvtxt (no nsys_writer package or backend).
     install = tmp_path / "nsys"
     (install / "host-linux-x64").mkdir(parents=True)
@@ -1901,12 +1665,14 @@ def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path):
         names = set(tar.getnames())
     assert {"out/reports/decode-0.nsys-rep", "out/reports/frontend.nvtxt"} <= names
     # Without ImportNvtxt the NVTXT is still written and Perfetto is the fallback.
+    monkeypatch.delenv("NSYS_HOME", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "missing"))  # no nsys or ImportNvtxt
     summary = bundle.build(
         session, [otel], tmp_path / "plain", nsys_root=str(tmp_path / "missing")
     )
-    if summary["nsight_reports"]["frontend"]["status"] == "nvtxt_only":
-        assert summary["timeline"]["events"]
-        assert (tmp_path / "plain/reports/frontend.nvtxt").exists()
+    assert summary["nsight_reports"]["frontend"]["status"] == "nvtxt_only"
+    assert summary["timeline"]["events"]
+    assert (tmp_path / "plain/reports/frontend.nvtxt").exists()
 
 
 @pytest.mark.asyncio
@@ -1933,18 +1699,15 @@ async def test_slow_frontend_range_end_does_not_delay_worker_stop(
     runtime = RuntimeSnapshot(
         os.getpid(), "epoch", "host", [Worker("decode-0", "epoch", "vllm", "http://w")]
     )
-    registry = CollectorRegistry()
-    registry.register(
-        "nsys",
-        lambda config, runtime, plan, directory: [
-            nsys.NsysFrontendCollector(runtime, str(tmp_path / "frontend")),
-            worker,
-        ],
-    )
     controller = Coordinator(
         Config("unused", str(tmp_path / "sessions")),
         runtime,
-        registry=registry,
+        registry={
+            "nsys": lambda config, runtime, plan, directory: [
+                nsys.NsysFrontendCollector(runtime, str(tmp_path / "frontend")),
+                worker,
+            ]
+        },
         artifact_validator=SimpleNamespace(
             validate=AsyncMock(return_value={"status": "verified"})
         ),

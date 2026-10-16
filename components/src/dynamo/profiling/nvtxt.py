@@ -23,7 +23,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 # Synthetic "Dynamo requests" process. Nsight orders processes by PID across a
@@ -54,13 +54,19 @@ def quoted(text: str) -> str:
     return '"' + str(text).replace('"', "'").replace("\n", " ") + '"'
 
 
+@contextmanager
+def read_only(path: Path):
+    """A read-only connection to a SQLite export and its table names."""
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+        yield db, {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
+
+
 def report_clock(sqlite_path: Path) -> tuple[int, int, int | None]:
     """(Unix ns, report-clock ns) of the session start, and its report-clock end."""
-    with closing(sqlite3.connect(f"{sqlite_path.as_uri()}?mode=ro", uri=True)) as db:
+    with read_only(sqlite_path) as (db, tables):
         utc, clock = db.execute(
             "SELECT utcEpochNs, systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
         ).fetchone()
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
         stop = None
         if "ANALYSIS_DETAILS" in tables:
             clock, stop = db.execute(
@@ -264,19 +270,26 @@ def write(
         ),
     }
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "dynamo.profiling.nvtxt", str(spec)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        command = [sys.executable, "-m", "dynamo.profiling.nvtxt", str(spec)]
+        return run(command, output, r"wrote (\d+) events", env=env)
     finally:
         spec.unlink(missing_ok=True)
-    written = re.search(r"wrote (\d+) events", result.stdout)
-    if result.returncode or not written or not output.is_file():
-        raise RuntimeError((result.stderr or result.stdout).strip()[-500:])
-    return int(written.group(1))
+
+
+def run(command: list, output: Path, pattern: str, env=None, tool=None) -> int:
+    """Run a report tool to completion; returns the event count it printed."""
+    result = subprocess.run(
+        command, env=env, capture_output=True, text=True, timeout=600
+    )
+    count = re.search(pattern, result.stdout + result.stderr)
+    if result.returncode or not count or not output.is_file():
+        tail = result.stderr or result.stdout
+        raise RuntimeError(
+            f"{tool} failed ({result.returncode}): {tail[-500:]}"
+            if tool
+            else tail.strip()[-500:]
+        )
+    return int(count.group(1))
 
 
 def write_in_process(spec: dict) -> int:
@@ -316,28 +329,8 @@ def write_in_process(spec: dict) -> int:
 
 def merge(importer: str, report: Path, nvtxt: Path, output: Path) -> int:
     """Import NVTXT into a copy of the report; returns the imported event count."""
-    result = subprocess.run(
-        [
-            importer,
-            "--cmd",
-            "merge",
-            "-i",
-            str(report),
-            "-n",
-            str(nvtxt),
-            "-o",
-            str(output),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    imported = re.search(r"(\d+) events imported", result.stdout + result.stderr)
-    if result.returncode or not output.is_file() or not imported:
-        raise RuntimeError(
-            f"ImportNvtxt failed ({result.returncode}): {(result.stderr or result.stdout)[-500:]}"
-        )
-    return int(imported.group(1))
+    command = [importer, "--cmd", "merge", "-i", report, "-n", nvtxt, "-o", output]
+    return run(command, output, r"(\d+) events imported", tool="ImportNvtxt")
 
 
 if __name__ == "__main__":
