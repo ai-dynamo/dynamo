@@ -48,6 +48,43 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+func TestLPXControllerRemovesOnlyJournaledAgentPods(t *testing.T) {
+	t.Log("Publish a workload and journal one of its Agent Pods for release")
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	agentClique := getResource[*grovev1alpha1.PodClique](t, objects, selected.plan.Agents[0].CliqueName)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: child.Namespace, Name: "released", UID: "released-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(agentClique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
+	}}
+	sibling := pod.DeepCopy()
+	sibling.Name, sibling.UID = "sibling", "sibling-uid"
+	createLPXTestObjects(t, ctx, r.Client, pod, sibling)
+	request := getTestPipelineRequest(t, ctx, r, child.Namespace, selected.requests[0].Name)
+	request.Status = newLPXTestReleaseRequest(pod).Status
+	require.NoError(t, r.Update(ctx, request))
+	pcsg := getResource[*grovev1alpha1.PodCliqueScalingGroup](t, objects, selected.plan.LPXScalingGroup)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcsg), pcsg))
+
+	t.Log("Delete the journaled Pod while preserving its sibling, request and scaling group")
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
+	require.Equal(t, request, getTestPipelineRequest(t, ctx, r, child.Namespace, request.Name))
+	after := &grovev1alpha1.PodCliqueScalingGroup{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcsg), after))
+	require.Equal(t, pcsg, after)
+
+	t.Log("Retry missing Pod observations until the LPX scheduler advances its release journal")
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.ErrorContains(t, err, "not found")
+}
+
 func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 	t.Log("Materialize two hybrid workloads, each with two backbones")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
@@ -3555,6 +3592,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	require.Equal(t, plans, reorderedPlans)
 
 	t.Log("Observe two explicit replicas and three externally managed replicas in Grove")
+	require.NoError(t, r.stampClientIdentity(t.Context(), dgd, pcs))
 	firstPlan, secondPlan := plans["lpx"], plans["second-engine"]
 	secondPlan.Replicas = 3
 	objects := materializeLPXTestPCS(t, child, pcs, firstPlan, secondPlan)

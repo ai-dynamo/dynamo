@@ -48,6 +48,7 @@ from dynamo.sglang.gateway import (
     metrics_fanout_endpoint,
     owns_engine_metrics,
 )
+from dynamo.sglang.nixl_telemetry import scheduler_metrics_ipc_name
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -275,7 +276,7 @@ class DynamoSglangPublisher:
             self._ctx = zmq.asyncio.Context()
             self._sock, self._fanout = _open_metrics_sockets(
                 self._ctx,
-                self.engine.port_args.metrics_ipc_name,
+                scheduler_metrics_ipc_name(self.server_args, self.engine.port_args),
                 metrics_fanout_endpoint(),
                 self._publishes_engine_gauges,
             )

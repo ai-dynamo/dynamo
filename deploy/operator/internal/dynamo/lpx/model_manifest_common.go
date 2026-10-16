@@ -35,6 +35,12 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 			return "", fmt.Errorf("%s has duplicate LPU partition id %d", filename, partition.SourcePartitionID)
 		}
 		seen[partition.SourcePartitionID] = struct{}{}
+
+		// One Agent template serves the build; mixed node widths require Dynamo rendering support.
+		if partition.DevicesPerNode != partitions[0].DevicesPerNode {
+			return "", fmt.Errorf("%s LPU partition %d has devicesPerNode %d, want %d; all LPU partitions must use the same devicesPerNode",
+				filename, partition.SourcePartitionID, partition.DevicesPerNode, partitions[0].DevicesPerNode)
+		}
 	}
 	if family == BuildFamilyHX {
 		if partSelect {
@@ -132,17 +138,6 @@ func buildHXPartition[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](subject,
 	extent[0] = int64(devicesPerNode)
 	partition.HXExtent = extent
 	return partition, nil
-}
-
-func buildCompilationMode(filename, mode string) (BuildCompilationMode, error) {
-	switch mode {
-	case string(BuildCompilationModeLPUOnly):
-		return BuildCompilationModeLPUOnly, nil
-	case string(BuildCompilationModeHybrid):
-		return BuildCompilationModeHybrid, nil
-	default:
-		return BuildCompilationModeUnknown, fmt.Errorf("%s deployment.compilationMode %q is not supported", filename, mode)
-	}
 }
 
 // decodePropSyncChain normalizes one selected-chain list from the compiler manifest.
