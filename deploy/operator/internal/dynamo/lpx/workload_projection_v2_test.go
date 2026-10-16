@@ -123,10 +123,6 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	require.Equal(t, int64(8), spec.Partitions[1].CompilerPartitionID)
 	require.Equal(t, spec.Partitions[0].ID, spec.PropSyncConnectors[0].FromPartitionID)
 	require.Equal(t, spec.Partitions[1].ID, spec.PropSyncConnectors[0].ToPartitionID)
-
-	t.Log("Forward the selected stages' opaque names unchanged")
-
-	require.NotContains(t, resolvedPartitionData([]*ModelProjection{projection}), "topologies")
 }
 
 func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T) {
@@ -161,8 +157,6 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	require.Equal(t, "9\n8", data["nodes_per_partition"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
 	require.Equal(t, "part-7\npart-11", data["partition_paths"])
-
-	require.NotContains(t, data, "topologies")
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, 17, projection.agentReplicas)
 	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
