@@ -44,7 +44,8 @@ ARG NIXL_REF
 ARG TRTLLM_SOURCE_REPOSITORY
 ARG TRTLLM_SOURCE_COMMIT
 
-# Optional exact-source overlay for cross-repository CI.
+# Optional source overlay for cross-repository CI. Keep the base image's server
+# lifecycle entry points, which are coupled to that release's frontend runtime.
 RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
         test -n "${TRTLLM_SOURCE_REPOSITORY}" && \
         source_dir=$(mktemp -d) && \
@@ -55,8 +56,17 @@ RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
             --strip-components=1 && \
         package_dir=$(/usr/bin/python3 -c \
             'import importlib.util; print(next(iter(importlib.util.find_spec("tensorrt_llm").submodule_search_locations)))') && \
-        cp -a "${source_dir}/tensorrt_llm/grpc/openengine/." \
-            "${package_dir}/grpc/openengine/" && \
+        for entry in "${source_dir}/tensorrt_llm/grpc/openengine/"*; do \
+            case "$(basename "${entry}")" in \
+                __init__.py|server.py) continue ;; \
+            esac; \
+            cp -a "${entry}" "${package_dir}/grpc/openengine/"; \
+        done && \
+        sed -i \
+            's/from openengine\.v1 import openengine_pb2_grpc/from .bindings import openengine_pb2_grpc/' \
+            "${package_dir}/grpc/openengine/server.py" && \
+        grep -Fxq 'from .bindings import openengine_pb2_grpc' \
+            "${package_dir}/grpc/openengine/server.py" && \
         install -m 0644 "${source_dir}/tensorrt_llm/inputs/media_io.py" \
             "${package_dir}/inputs/media_io.py" && \
         rm -rf "${source_dir}"; \
@@ -403,9 +413,10 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # Hold DALI at a version that carries its own media-codec cleanup. Upstream
 # restricted DALI's vendored ffmpeg build to drop the software h264/hevc/aac
 # decoders (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1.
-# The supported base images carry either 2.2.0 or 2.3.0. Both were measured
-# without the restricted codecs; older versions are upgraded to 2.2.0 and any
-# other newer version stops the build for re-measurement.
+# The base image carried 2.1.0 through 1.3.0rc26, which predates it, and carries
+# 2.2.0 from 1.3.0rc27, which does not. So on this base the install below is a
+# no-op and what the block still buys is the two checks around it: the version
+# tripwire and the decoder enumeration.
 #
 # Pin rather than remove. The vendored libav*/libsw* set cannot be trimmed
 # on its own -- every one of them is DT_NEEDED by libdali.so and its siblings, so
@@ -415,17 +426,23 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # out of someone else's image.
 #
 # Measured on the shipped image: 2.1.0 registers 446 decoders including h264,
-# hevc, aac, aac_fixed and aac_latm; 2.1.1, 2.2.0, and 2.3.0 each register 440
-# with all five absent and vp8/vp9/mjpeg/av1 retained.
+# hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
+# five absent and vp8/vp9/mjpeg/av1 retained. 2.2.0 measured again on
+# tensorrt-llm/release:1.3.0rc27 itself, now that DALI arrives with the base.
 #
 # Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest, which is
 # a jump into a component this repo does not own, taken silently at build time.
 # The pin names the version that was measured, so moving it means measuring the
 # new one.
 #
-# A base below 2.2.0 is upgraded to the measured 2.2.0 wheel. The two measured
-# versions otherwise stay in place; any unmeasured newer version fails rather
-# than being downgraded or accepted silently.
+# The pin can go stale in the one direction that matters: if TensorRT-LLM later
+# ships a base image with a newer DALI, installing 2.2.0 over it is a downgrade.
+# The check below turns that into a build failure with instructions rather than a
+# silent regression. The pin now equals the base version, so the next base image
+# that moves DALI past 2.2.0 stops the build, which is the point: a human
+# re-measures and moves the pin, or deletes this RUN and lets the base version
+# stand. A base that moves DALI back below 2.2.0 passes that check and the
+# install below puts the measured version back, which is what it is there for.
 #
 # THIS BLOCK IS TRANSITIONAL, and on this base it is already down to its checks.
 # The guards after it and the bundled-libavcodec assertion in
@@ -450,23 +467,20 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI in base image: $before"; \
-    case "$before" in \
-        2.3.0) target=2.3.0 ;; \
-        *) \
-            newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
-            if [ "$newest" != "2.2.0" ]; then \
-                echo "ERROR: base image carries unmeasured DALI $before" >&2; \
-                exit 1; \
-            fi; \
-            target=2.2.0 ;; \
-    esac; \
-    if [ "$before" != "$target" ]; then \
-        /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-            --extra-index-url https://pypi.nvidia.com "nvidia-dali-cuda130==$target"; \
+    newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.2.0" ]; then \
+        echo "ERROR: base image already carries DALI $before, so pinning 2.2.0 would" >&2; \
+        echo "       downgrade it. Upstream has caught up -- delete this RUN and let" >&2; \
+        echo "       the base version stand. Keep the guards below and the bundled-" >&2; \
+        echo "       libavcodec assertion in tests/dependencies/, which are what stop" >&2; \
+        echo "       this from regressing." >&2; \
+        exit 1; \
     fi; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.2.0'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
-    [ "$v" = "$target" ] || { echo "ERROR: wanted DALI $target, got $v" >&2; exit 1; }; \
+    [ "$v" = "2.2.0" ] || { echo "ERROR: wanted DALI 2.2.0, got $v" >&2; exit 1; }; \
     libs=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); \
     if [ -z "$libs" ]; then \
         echo "ERROR: DALI $v ships no libavcodec under .libs, so the enumeration" >&2; \
