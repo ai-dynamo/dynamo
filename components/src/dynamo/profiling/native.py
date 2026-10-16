@@ -157,15 +157,8 @@ def nsys_events(path: Path):
             "SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"
         ).fetchone()
         strings = dict(db.execute("SELECT id, value FROM StringIds"))
-        domains = (
-            dict(
-                db.execute(
-                    "SELECT domainId, text FROM NVTX_EVENTS WHERE eventType = 75"
-                )
-            )
-            if "NVTX_EVENTS" in tables
-            else {}
-        )
+        query = "SELECT domainId, text FROM NVTX_EVENTS WHERE eventType = 75"
+        domains = dict(db.execute(query)) if "NVTX_EVENTS" in tables else {}
         for pid, name in db.execute("SELECT pid, name FROM PROCESSES"):
             yield from process_meta(pid, name, "labels", "CPU")
         if "ThreadNames" in tables:
@@ -283,9 +276,7 @@ def draw_views(task: dict, reader) -> dict:
                 start, end = max(start, low_bound), min(end, high_bound)
                 event["dur"] = max(0, end - start) / 1000
             # Views whose window overlaps [start, end); windows are sorted by low.
-            touch = max(end, start + 1)
-            hits = []
-            index = bisect_left(lows, touch)
+            hits, index = [], bisect_left(lows, max(end, start + 1))
             while index > 0:
                 index -= 1
                 low, high, view = views[index]
@@ -295,9 +286,7 @@ def draw_views(task: dict, reader) -> dict:
                     hits.append(view)
             if not hits:
                 continue
-            if key not in pids:
-                pids[key] = task["pid_base"] + len(pids)
-            pid = pids[key]
+            pid = pids.setdefault(key, task["pid_base"] + len(pids))
             event["pid"], event["ts"] = pid, (start - shift - origin) / 1000
             line = json.dumps(event)
             for view in hits:
@@ -316,8 +305,5 @@ def draw_views(task: dict, reader) -> dict:
                         write(view, json.dumps(item))
                 write(view, line)
             written += len(hits)
-    shards = {
-        view: (str(directory / f"{prefix}.{view}.json"), count)
-        for view, count in counts.items()
-    }
+    shards = {view: (str(files[view].name), count) for view, count in counts.items()}
     return {"read": read, "written": written, "shards": shards}

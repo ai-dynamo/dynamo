@@ -71,21 +71,14 @@ class PerfCollector:
         control_read, self.control = os.pipe()
         self.ack, ack_write = os.pipe()
         os.set_blocking(self.ack, False)
+        command = (
+            f"perf record --pid {self.pid} --event cpu-clock:u --freq 99"
+            f" --call-graph dwarf --delay=-1 --control=fd:{control_read},{ack_write}"
+        )
         try:
             with (self.directory / "frontend.perf.log").open("wb") as log:
                 self.process = await asyncio.create_subprocess_exec(
-                    "perf",
-                    "record",
-                    "--pid",
-                    str(self.pid),
-                    "--event",
-                    "cpu-clock:u",
-                    "--freq",
-                    "99",
-                    "--call-graph",
-                    "dwarf",
-                    "--delay=-1",
-                    f"--control=fd:{control_read},{ack_write}",
+                    *command.split(),
                     "--output",
                     self.evidence["artifact"],
                     pass_fds=(control_read, ack_write),
@@ -182,10 +175,8 @@ class TorchCollector:
             client.post(url, json=body) as response,
         ):
             response.raise_for_status()
-            # Dynamo's engine routes serialize JSON with a text/plain header.
-            # Validate the JSON body and engine status independently of MIME.
+            # Engine routes send JSON as text/plain and may return 200 with an error.
             result = await response.json(content_type=None)
-            # Engine callbacks can return HTTP 200 with status=error.
             if not isinstance(result, dict) or result.get("status") != "ok":
                 raise CollectionError(f"{self.worker.target_id}: {result}")
 

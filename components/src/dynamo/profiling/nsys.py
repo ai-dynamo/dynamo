@@ -62,9 +62,8 @@ class NsysFrontendCollector:
         ):
             raise CollectionError("NVTX frontend capture requires an embedded host")
         await asyncio.to_thread(prepare_reports, self.evidence)
-        # Nsight can block range transitions while it starts or ends a capture;
-        # keep that off the serving loop so worker controls are not delayed.
         self.evidence["start_requested_at_ns"] = time.time_ns()
+        # Nsight can block range transitions; keep them off the serving loop.
         # A start timeout cancels this await but not the thread, which may still
         # open the range; keep its future so stop() can close it.
         self.starting = asyncio.ensure_future(
@@ -119,29 +118,27 @@ def nsys_collectors(
 
 def report_bounds(conn, tables: set) -> dict:
     """Native recording bounds on the host UTC clock, if the export has them."""
-    bounds = {"status": "unknown"}
-    if {"ANALYSIS_DETAILS", "TARGET_INFO_SESSION_START_TIME"} <= tables:
-        capture = conn.execute(
-            "SELECT startTime, stopTime FROM ANALYSIS_DETAILS"
-        ).fetchall()
-        anchor = conn.execute(
-            "SELECT utcEpochNs, systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
-        ).fetchall()
-        if len(capture) == len(anchor) == 1:
-            start, end = capture[0]
-            utc, clock = anchor[0]
-            if (
-                all(type(value) is int for value in (start, end, utc, clock))
-                and end > start
-            ):
-                bounds = {
-                    "status": "observed",
-                    "clock": "nsight_host_unix_ns_unattested",
-                    "start_unix_ns": utc + start - clock,
-                    "end_unix_ns": utc + end - clock,
-                    "duration_ns": end - start,
-                }
-    return bounds
+    unknown = {"status": "unknown"}
+    if not {"ANALYSIS_DETAILS", "TARGET_INFO_SESSION_START_TIME"} <= tables:
+        return unknown
+    capture = conn.execute(
+        "SELECT startTime, stopTime FROM ANALYSIS_DETAILS"
+    ).fetchall()
+    anchor = conn.execute(
+        "SELECT utcEpochNs, systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
+    ).fetchall()
+    if len(capture) != 1 or len(anchor) != 1:
+        return unknown
+    (start, end), (utc, clock) = capture[0], anchor[0]
+    if not all(type(v) is int for v in (start, end, utc, clock)) or end <= start:
+        return unknown
+    return {
+        "status": "observed",
+        "clock": "nsight_host_unix_ns_unattested",
+        "start_unix_ns": utc + start - clock,
+        "end_unix_ns": utc + end - clock,
+        "duration_ns": end - start,
+    }
 
 
 async def validate_reports(evidence: dict, config: Config) -> dict:

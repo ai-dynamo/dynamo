@@ -96,8 +96,9 @@ def tree_threads(spans: dict) -> list[list]:
             span_id
         )
 
-    def adopt(ids: list) -> list:
-        # Nest siblings contained in an earlier sibling under it (recursively).
+    def settle(ids: list) -> list:
+        # Nest siblings contained in an earlier sibling under it, top-down so
+        # spans adopted into a node are settled with its children.
         kept: list = []
         for span_id in sorted(
             ids, key=lambda i: (spans[i][0], -spans[i][1], spans[i][2])
@@ -115,11 +116,6 @@ def tree_threads(spans: dict) -> list[list]:
                 kept.append(span_id)
             else:
                 children.setdefault(holder, []).append(span_id)
-        return kept
-
-    def settle(ids: list) -> list:
-        # Top-down, so spans adopted into a node are settled with its children.
-        kept = adopt(ids)
         for span_id in kept:
             if span_id in children:
                 children[span_id] = settle(children[span_id])
@@ -158,17 +154,13 @@ def tree_threads(spans: dict) -> list[list]:
         return len(threads) - 1
 
     def lay(items: list, thread: int, last: float) -> None:
-        for item in items:
-            if item[0] < last:  # overlaps an earlier sibling
-                place(item, spare(item[0], item[1]))
+        for start, end, message, argb, span_id in items:
+            if start < last:  # overlaps an earlier sibling
+                row = spare(start, end)
             else:
-                place(item, thread)
-                last = item[1]
-
-    def place(item, thread: int) -> None:
-        start, end, message, argb, span_id = item
-        threads[thread].append((start, end, message, argb))
-        lay(ordered(children.get(span_id, []), (start, end)), thread, start)
+                row, last = thread, end
+            threads[row].append((start, end, message, argb))
+            lay(ordered(children.get(span_id, []), (start, end)), row, start)
 
     lay(ordered(roots, None), 0, float("-inf"))
     return [thread for thread in threads if thread]

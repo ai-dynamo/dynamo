@@ -76,14 +76,8 @@ class WorkerClockSampler:
                 fields = ("received_at_ns", "sent_at_ns", "elapsed_monotonic_ns")
                 if any(type(result.get(key)) is not int for key in fields):
                     raise CollectionError("Invalid worker clock timestamps")
-                sample = estimate_offset(
-                    t1,
-                    result[fields[0]],
-                    result[fields[1]],
-                    t4,
-                    elapsed,
-                    result[fields[2]],
-                )
+                t2, t3, remote_elapsed = (result[key] for key in fields)
+                sample = estimate_offset(t1, t2, t3, t4, elapsed, remote_elapsed)
                 sample.update(
                     hostname=result.get("hostname"),
                     pid=result.get("pid"),

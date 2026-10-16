@@ -13,7 +13,7 @@ from pathlib import Path
 
 import msgspec
 
-from .adapters import REGISTRY
+from .adapters import REGISTRY, Collector, Factory
 from .artifacts import SharedFilesystemValidator
 from .clock import WorkerClockSampler
 from .collectors import CollectionError
@@ -41,7 +41,7 @@ class Session:
     runtime: RuntimeSnapshot
     state: str = "accepted"
     accepted_at_ns: int = field(default_factory=time.time_ns)
-    collectors: list = field(default_factory=list)
+    collectors: list[Collector] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
@@ -58,7 +58,7 @@ class Coordinator:
         config: Config,
         runtime: RuntimeSnapshot,
         *,
-        registry: dict | None = None,
+        registry: dict[str, Factory] | None = None,
         clock_sampler=None,
         artifact_validator=None,
     ):
@@ -344,15 +344,11 @@ class Coordinator:
             session.collectors = self.registry[session.plan.mode](
                 self.config, session.runtime, session.plan, session.directory
             )
+            verified = "control_process_epoch"
             for collector in session.collectors:
-                clock = session.clocks.get(collector.evidence.get("target_id"), {})
-                if (
-                    clock.get("start", {}).get("identity_verification")
-                    == "control_process_epoch"
-                ):
-                    collector.evidence[
-                        "identity_verification"
-                    ] = "control_process_epoch"
+                clock = session.clocks.get(collector.evidence.get("target_id"))
+                if clock and clock["start"].get("identity_verification") == verified:
+                    collector.evidence["identity_verification"] = verified
             failures = await asyncio.wait_for(
                 errors_of(c.start() for c in session.collectors), budget
             )
@@ -436,28 +432,24 @@ class Coordinator:
             measurements["offset_delta_ns"] = end["offset_ns"] - start["offset_ns"]
         return None
 
-    async def validate_artifacts(self, collector) -> dict:
+    async def validate_artifacts(self, collector: Collector) -> dict:
+        target = {"target_id": collector.evidence.get("target_id")}
         if self.closed:
             # Shutdown must not wait for exports; the bundle job verifies them.
-            validation = {
+            return target | {
                 "status": "unverified",
                 "coverage": "unknown",
                 "reason": "host_shutdown",
             }
-        else:
-            try:
-                validation = await self.artifact_validator.validate(
-                    collector.evidence, self.config
-                )
-            except Exception as exc:
-                validation = {
-                    "status": "invalid",
-                    "coverage": "partial",
-                    "error": str(exc),
-                }
-        return {"target_id": collector.evidence.get("target_id"), **validation}
+        try:
+            validation = await self.artifact_validator.validate(
+                collector.evidence, self.config
+            )
+        except Exception as exc:
+            validation = {"status": "invalid", "coverage": "partial", "error": str(exc)}
+        return target | validation
 
-    async def stop_collector(self, collector) -> str | None:
+    async def stop_collector(self, collector: Collector) -> str | None:
         try:
             await asyncio.wait_for(collector.stop(), self.config.finalize_timeout_s)
         except Exception as exc:

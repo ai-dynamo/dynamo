@@ -3,16 +3,34 @@
 
 """Trusted collector registration; requests never choose commands or imports."""
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from .collectors import PerfCollector, TorchCollector, selected_workers
 from .models import Config, Plan, RuntimeSnapshot
 from .nsys import nsys_collectors
 
 
+class Collector(Protocol):
+    """One target's capture: records `evidence`; start/stop raise on failure."""
+
+    evidence: dict
+
+    async def start(self) -> None:
+        ...
+
+    async def stop(self) -> None:
+        ...
+
+
+# Builds the collectors for one session of a mode.
+Factory = Callable[[Config, RuntimeSnapshot, Plan, Path], list[Collector]]
+
+
 def torch_collectors(
     config: Config, runtime: RuntimeSnapshot, plan: Plan, directory: Path
-) -> list:
+) -> list[Collector]:
     # vLLM incorporates this prefix in every engine-rank filename. An
     # immutable session-specific prefix prevents stale files from counting.
     workers = selected_workers(
@@ -25,5 +43,7 @@ def torch_collectors(
     ) + [TorchCollector(worker, config) for worker in workers if worker is not None]
 
 
-# Mode -> factory(config, runtime, plan, directory) returning collectors.
-REGISTRY = {"torch_profile": torch_collectors, "nsys": nsys_collectors}
+REGISTRY: dict[str, Factory] = {
+    "torch_profile": torch_collectors,
+    "nsys": nsys_collectors,
+}

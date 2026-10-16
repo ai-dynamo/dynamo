@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Artifact checks: a cheap presence check on the capture path, full inspection offline.
-
-The coordinator only confirms that each expected native file exists and is
-readable ("present"). Full parsing, hashing and recording bounds run in the
-post-processing bundle job, off the frontend and the capture's critical path.
-"""
+"""Cheap artifact presence checks on the capture path; the bundle job inspects."""
 
 import asyncio
 import re
@@ -39,8 +34,6 @@ def present(path: Path) -> tuple[int, str | None]:
 
 
 class SharedFilesystemValidator:
-    """Cheap checks only; full inspection is the bundle's job."""
-
     async def validate(self, evidence: dict, config: Config) -> dict:
         if evidence.get("collector") == "nsys":
             return await validate_reports(evidence, config)
@@ -95,11 +88,9 @@ class SharedFilesystemValidator:
         )
         return {
             "status": status,
-            "coverage": "present"
-            if status == "present"
-            else "partial"
-            if status in ("invalid", "partial")
-            else "unknown",
+            "coverage": {"present": "present", "unverified": "unknown"}.get(
+                status, "partial"
+            ),
             "artifacts": artifacts,
             "expected_rank_ids": expected,
             "observed_rank_ids": sorted(ranks),

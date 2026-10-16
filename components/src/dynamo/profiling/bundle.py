@@ -260,15 +260,12 @@ class Timeline:
             io.BufferedWriter(ParallelGzip(path), 1 << 20), encoding="utf-8"
         )
         self.stream.write('{"displayTimeUnit":"ms","traceEvents":[')
-        self.origin, self.first, self.count = origin_ns, True, 0
-        self.pids: dict = {}
-        self.tids: dict = {}
+        self.origin, self.count, self.pids, self.tids = origin_ns, 0, {}, {}
 
     def emit(self, event: dict) -> None:
-        self.stream.write(
-            ("" if self.first else ",\n") + json.dumps(event, default=float)
-        )
-        self.first, self.count = False, self.count + 1
+        separator = ",\n" if self.count else ""
+        self.stream.write(separator + json.dumps(event, default=float))
+        self.count += 1
 
     def pid(self, key, name: str, sort: int) -> int:
         if key not in self.pids:
@@ -279,16 +276,9 @@ class Timeline:
 
     def tid(self, pid: int, name: str) -> int:
         if (pid, name) not in self.tids:
-            self.tids[pid, name] = len(self.tids) + 1
-            self.emit(
-                {
-                    "ph": "M",
-                    "name": "thread_name",
-                    "pid": pid,
-                    "tid": self.tids[pid, name],
-                    "args": {"name": name},
-                }
-            )
+            tid = self.tids[pid, name] = len(self.tids) + 1
+            meta = {"ph": "M", "name": "thread_name", "pid": pid, "tid": tid}
+            self.emit(meta | {"args": {"name": name}})
         return self.tids[pid, name]
 
     def interval(self, name, cat, start, end, pid, tid, args=None) -> None:
@@ -308,10 +298,10 @@ class Timeline:
     def extend(self, shard: str, count: int) -> None:
         """Append a pool-drawn shard of comma-joined events."""
         if count:
-            self.stream.write("" if self.first else ",\n")
+            self.stream.write(",\n" if self.count else "")
             with open(shard) as source:
                 shutil.copyfileobj(source, self.stream, 1 << 20)
-            self.first, self.count = False, self.count + count
+            self.count += count
 
     def close(self) -> int:
         self.stream.write("]}\n")
@@ -439,16 +429,7 @@ def by_session(index: list[dict]) -> list[dict]:
 
 
 def nsight_reports(
-    output,
-    checked,
-    index,
-    traces,
-    lanes,
-    offsets,
-    intervals,
-    controls,
-    writer,
-    importer,
+    output, checked, index, traces, lanes, offsets, intervals, controls, tools
 ) -> dict:
     """Package the Nsight reports for the multi-report view, with the request
     flow imported as NVTX into one of them, as in the Perfetto view.
@@ -477,13 +458,11 @@ def nsight_reports(
             }
     hosts = ["frontend"] if "frontend" in usable else list(usable)
     for target, paths in usable.items():
-        copy = output / "reports" / f"{target}.nsys-rep"
+        report = f"reports/{target}.nsys-rep"
+        copy = output / report
         if target not in hosts:
             shutil.copy2(paths[".nsys-rep"], copy)
-            reports[target] = {
-                "status": "native",
-                "report": f"reports/{target}.nsys-rep",
-            }
+            reports[target] = {"status": "native", "report": report}
             continue
         utc, clock, stop = nvtxt.report_clock(paths[".sqlite"])
         low, high = clock, stop if stop is not None else 2**62
@@ -503,24 +482,17 @@ def nsight_reports(
                 message += f" (ended {(end - high) / 1e9:.1f} s after the report)"
             return max(start, low), min(end, high), message, color
 
-        threads = {nvtxt.CONTROL_THREAD: ("Capture control", [])}
-        marks, tid, dropped = [], nvtxt.CONTROL_THREAD + 1, 0
+        rows, dropped = [("Capture control", [])], 0  # numbered from CONTROL_THREAD
         for window, (begin, end) in sorted(intervals.items()):
             # Recording bounds are on each target's own clock.
             span = clipped(begin, end, window, f"{window} recording", nvtxt.RECORDING)
             if span:
-                threads[tid] = (f"Recording · {window}", [span])
-                tid += 1
-        for event in controls:
-            time = local(event["unix_ns"])
-            if low <= time <= high:
-                marks.append(
-                    (
-                        time,
-                        nvtxt.CONTROL_THREAD,
-                        f"{event['target_id']} {event['event']}",
-                    )
-                )
+                rows.append((f"Recording · {window}", [span]))
+        marks = [
+            (time, nvtxt.CONTROL_THREAD, f"{event['target_id']} {event['event']}")
+            for event in controls
+            if low <= (time := local(event["unix_ns"])) <= high
+        ]
         for entry in by_session(index):
             if target != "frontend" and target not in {
                 p["target_id"] for p in entry["phases"]
@@ -543,23 +515,21 @@ def nsight_reports(
                 if kept:
                     spans[span["spanId"]] = (*kept, span.get("parentSpanId"))
             label = request_label(entry)
-            for number, nested in enumerate(nvtxt.tree_threads(spans)):
-                threads[tid] = (
-                    label if not number else f"{label} (overlap {number})",
-                    nested,
-                )
-                tid += 1
+            rows += [
+                (f"{label} (overlap {number})" if number else label, nested)
+                for number, nested in enumerate(nvtxt.tree_threads(spans))
+            ]
+        threads = dict(enumerate(rows, nvtxt.CONTROL_THREAD))
         text = output / "reports" / f"{target}.nvtxt"
         text.write_text(nvtxt.render(threads, marks))
-        ranges = sum(len(spans) for _, spans in threads.values())
         entry = {
             "nvtxt": f"reports/{target}.nvtxt",
-            "ranges": ranges,
+            "ranges": sum(len(spans) for _, spans in rows),
             "marks": len(marks),
             "spans_outside_report": dropped,
         }
         errors = []
-        for method, tool in (("nsys_writer", writer), ("ImportNvtxt", importer)):
+        for method, tool in zip(("nsys_writer", "ImportNvtxt"), tools):
             if tool is None:
                 continue
             try:
@@ -576,7 +546,7 @@ def nsight_reports(
                 | {
                     "status": "merged",
                     "method": method,
-                    "report": f"reports/{target}.nsys-rep",
+                    "report": report,
                     "events_imported": imported,
                     "clock_offset_ns": shift,
                 }
@@ -584,8 +554,8 @@ def nsight_reports(
             )
             break
         else:
-            if not errors:
-                shutil.copy2(paths[".nsys-rep"], copy)
+            # Without request rows the native report still opens with the rest.
+            shutil.copy2(paths[".nsys-rep"], copy)
             reason = "; ".join(errors) or "neither nsys_writer nor ImportNvtxt found"
             reports[target] = entry | {
                 "status": "failed" if errors else "nvtxt_only",
@@ -606,13 +576,9 @@ def build(
     if (session / "profiles").is_dir():
         # An extracted bundle: read its packed raw traces, not the original paths.
         for item in manifest["artifact_validation"]:
+            folder = session / "profiles" / item["target_id"]
             for artifact in item.get("artifacts", []):
-                packed = (
-                    session
-                    / "profiles"
-                    / item["target_id"]
-                    / Path(artifact["location"]).name
-                )
+                packed = folder / Path(artifact["location"]).name
                 if packed.exists():
                     artifact["location"] = str(packed)
     if manifest["state"] not in ("completed", "failed"):
@@ -634,9 +600,8 @@ def build(
     for item in manifest["artifact_validation"]:
         result = verification[item["target_id"]]
         merged = {**item, **result, "target_id": item["target_id"]}
-        if (result.get("recording_bounds") or {}).get(
-            "status"
-        ) != "observed" and item.get("recording_bounds"):
+        bounds = result.get("recording_bounds") or {}
+        if bounds.get("status") != "observed" and item.get("recording_bounds"):
             merged["recording_bounds"] = item["recording_bounds"]
         checked.append(merged)
     traces = load_traces(otel_paths)
@@ -648,17 +613,13 @@ def build(
     }
     workers = router_targets(manifest, traces)
     index = index_requests(manifest, traces, workers, intervals)
+    stages = ("start_requested", "started", "stop_requested", "stopped")
     controls = sorted(
         (
-            {"target_id": p["target_id"], "event": key[:-6], "unix_ns": p[key]}
+            {"target_id": p["target_id"], "event": e, "unix_ns": p[f"{e}_at_ns"]}
             for p in manifest["profiles"]
-            for key in (
-                "start_requested_at_ns",
-                "started_at_ns",
-                "stop_requested_at_ns",
-                "stopped_at_ns",
-            )
-            if key in p
+            for e in stages
+            if f"{e}_at_ns" in p
         ),
         key=lambda event: event["unix_ns"],
     )
@@ -666,11 +627,8 @@ def build(
     for folder in ("lifecycle", "control") + (("timelines",) if per_request else ()):
         (output / folder).mkdir(parents=True, exist_ok=True)
     shutil.copy2(session / "manifest.json", output / "manifest.json")
-    write_lifecycle(
-        otel_paths,
-        {e["trace_id"] for e in index},
-        output / "lifecycle/traces.otlp.jsonl",
-    )
+    selected = {e["trace_id"] for e in index}
+    write_lifecycle(otel_paths, selected, output / "lifecycle/traces.otlp.jsonl")
     (output / "control/events.jsonl").write_text(
         "".join(json.dumps(e) + "\n" for e in controls)
     )
@@ -698,7 +656,7 @@ def build(
         root = nvtxt.nsys_root(nsys_root)
         tools = (nvtxt.find_writer(root), nvtxt.find_importer(root))
         reports = nsight_reports(
-            output, checked, index, traces, lanes, offsets, intervals, controls, *tools
+            output, checked, index, traces, lanes, offsets, intervals, controls, tools
         )
     draw = not nsight or perfetto or per_request or tools == (None, None)
     # The window timeline shows every request and every captured worker for
@@ -829,19 +787,13 @@ def build(
             for view, (entry, *_) in batch:
                 entry["timeline_events"] = timelines[view].close()
     window_events = window.close() if draw else None
+    trace_index = {"router_targets": workers, "recording_intervals": intervals}
     (output / "lifecycle/trace-index.json").write_text(
-        json.dumps(
-            {
-                "router_targets": workers,
-                "recording_intervals": intervals,
-                "requests": index,
-            },
-            indent=2,
-        )
-        + "\n"
+        json.dumps(trace_index | {"requests": index}, indent=2) + "\n"
     )
 
     triggers = set(manifest["plan"]["trace_ids"])
+    fields = ("location", "rank_id", "sha256", "sha256_uncompressed", "bytes")
     summary = {
         "schema_version": 1,
         "session_id": manifest["session_id"],
@@ -861,18 +813,7 @@ def build(
             if p.is_file() and p.name != "bundle.json"
         },
         "native_profiles": [
-            {
-                k: a[k]
-                for k in (
-                    "location",
-                    "rank_id",
-                    "sha256",
-                    "sha256_uncompressed",
-                    "bytes",
-                )
-                if k in a
-            }
-            | {"target_id": item["target_id"]}
+            {k: a[k] for k in fields if k in a} | {"target_id": item["target_id"]}
             for item in checked
             for a in item.get("artifacts", [])
         ],
@@ -920,31 +861,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
-        "session", type=Path, help="session directory containing manifest.json"
-    )
-    parser.add_argument(
+    add = parser.add_argument
+    add("session", type=Path, help="session directory containing manifest.json")
+    add(
         "--otel-jsonl",
         type=Path,
         action="append",
         help="collector OTLP export-batch JSONL; repeat for multiple files "
         "(default for an extracted bundle: lifecycle/traces.otlp.jsonl)",
     )
-    parser.add_argument(
-        "--output", type=Path, help="bundle directory (default: <session>/bundle)"
-    )
-    parser.add_argument(
+    add("--output", type=Path, help="bundle directory (default: <session>/bundle)")
+    add(
         "--per-request",
         action="store_true",
         help="also write one timeline per request under timelines/",
     )
-    parser.add_argument(
+    add(
         "--perfetto",
         action="store_true",
         help="Nsight sessions: also convert native events to the Perfetto timeline "
         "(the default for Nsight is reports with request spans imported as NVTX)",
     )
-    parser.add_argument(
+    add(
         "--nsys-root",
         help="Nsight Systems install root providing nsys_writer and ImportNvtxt "
         "(default: $NSYS_HOME, or the install of nsys on PATH)",

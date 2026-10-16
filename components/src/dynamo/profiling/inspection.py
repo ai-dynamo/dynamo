@@ -12,6 +12,7 @@ import hashlib
 import json
 import sqlite3
 import time
+import zlib
 from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
@@ -47,10 +48,7 @@ def file_state(path: Path) -> tuple[int, int]:
 
 class BoundedReader:
     def __init__(self, stream, limit: int, deadline: float):
-        self.stream = stream
-        self.limit = limit
-        self.deadline = deadline
-        self.bytes = 0
+        self.stream, self.limit, self.deadline, self.bytes = stream, limit, deadline, 0
         self.digest = hashlib.sha256()
 
     def read(self, size: int = -1) -> bytes:
@@ -71,12 +69,11 @@ def recording_bounds(base_time_ns: int | None, markers: list[dict]) -> dict:
             "status": "unknown",
             "reason": "missing_or_ambiguous_native_profiler_bounds",
         }
-    marker = markers[0]
-    values = (marker.get("ts"), marker.get("dur"))
-    if any(type(value) not in (int, Decimal) for value in values):
-        return {"status": "unknown", "reason": "invalid_native_profiler_bounds"}
-    timestamp, duration = (Decimal(value) for value in values)
-    if not timestamp.is_finite() or not duration.is_finite() or duration < 0:
+    timestamp, duration = values = markers[0].get("ts"), markers[0].get("dur")
+    if (
+        any(type(v) not in (int, Decimal) or not Decimal(v).is_finite() for v in values)
+        or duration < 0
+    ):
         return {"status": "unknown", "reason": "invalid_native_profiler_bounds"}
     start = base_time_ns + round(timestamp * 1000)
     duration_ns = round(duration * 1000)
@@ -126,13 +123,13 @@ def scan_blocks(reader) -> tuple:
     return True, events, kernels, base if type(base) is int else None, markers
 
 
+FIELDS = {f"traceEvents.item.{key}" for key in ("name", "cat", "ph", "ts", "dur")}
+
+
 def scan_tokens(reader) -> tuple:
     """Count events with the ijson token parser (any valid trace layout)."""
     events = kernels = 0
-    has_events = False
-    base_time_ns = None
-    markers = []
-    current = {}
+    has_events, base_time_ns, markers, current = False, None, [], {}
     for prefix, event, value in ijson.parse(reader):
         if (prefix, event) == ("traceEvents", "start_array"):
             has_events = True
@@ -142,13 +139,7 @@ def scan_tokens(reader) -> tuple:
         elif prefix == "traceEvents.item" and event == "end_map":
             if is_marker(current) and len(markers) < 2:
                 markers.append(current)
-        elif prefix in (
-            "traceEvents.item.name",
-            "traceEvents.item.cat",
-            "traceEvents.item.ph",
-            "traceEvents.item.ts",
-            "traceEvents.item.dur",
-        ) and event in ("string", "number"):
+        elif prefix in FIELDS and event in ("string", "number"):
             current[prefix.rsplit(".", 1)[1]] = value
             if prefix == "traceEvents.item.cat" and value == "kernel":
                 kernels += 1
@@ -238,16 +229,10 @@ def inspect_report(
                     "Worker CUDA process count differs from configured rank count"
                 )
         bounds = report_bounds(conn, tables)
-        diagnostics = (
-            [
-                row[0][:512]
-                for row in conn.execute(
-                    "SELECT text FROM DIAGNOSTIC_EVENT WHERE severity >= 2 LIMIT 16"
-                )
-            ]
-            if "DIAGNOSTIC_EVENT" in tables
-            else []
-        )
+        diagnostics = []
+        if "DIAGNOSTIC_EVENT" in tables:
+            query = "SELECT text FROM DIAGNOSTIC_EVENT WHERE severity >= 2 LIMIT 16"
+            diagnostics = [row[0][:512] for row in conn.execute(query)]
     artifacts = [
         {
             "location": str(path),
@@ -291,12 +276,8 @@ def inspect_nsys(item: dict, evidence: dict, config: Config) -> dict:
     if report is None:
         return {"status": "invalid", "error": "no Nsight report"}
     try:
-        return inspect_report(
-            report,
-            evidence,
-            config,
-            time.monotonic() + config.artifact_validation_timeout_s,
-        )
+        deadline = time.monotonic() + config.artifact_validation_timeout_s
+        return inspect_report(report, evidence, config, deadline)
     except (OSError, sqlite3.Error, ValueError, TimeoutError) as exc:
         return {"status": "invalid", "error": str(exc)}
 
@@ -311,7 +292,14 @@ def inspect_rank(artifact: dict, config: Config = OFFLINE) -> dict:
         result = inspect_trace(
             path, config, time.monotonic() + config.artifact_validation_timeout_s
         )
-    except (OSError, EOFError, ijson.JSONError, ValueError, TimeoutError) as exc:
+    except (
+        OSError,
+        EOFError,
+        zlib.error,
+        ijson.JSONError,
+        ValueError,
+        TimeoutError,
+    ) as exc:
         result = {"location": str(path), "validation": "invalid", "error": str(exc)}
     return {**result, "rank_id": artifact.get("rank_id")}
 

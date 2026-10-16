@@ -769,6 +769,10 @@ async def test_uncompressed_rank_traces_are_present_and_inspected(tmp_path):
     assert [a["validation"] for a in inspected["artifacts"]] == ["valid", "invalid"]
     path.write_text(json.dumps(payload))
     assert inspection.inspect_target(result, evidence)["status"] == "verified"
+    # Corrupt deflate data (zlib.error) fails the rank, not the bundle.
+    path = tmp_path / "corrupt.pt.trace.json.gz"
+    path.write_bytes(gzip.compress(b"")[:10] + b"\xff" * 16)
+    assert inspection.inspect_rank({"location": str(path)})["validation"] == "invalid"
 
 
 @pytest.mark.asyncio
