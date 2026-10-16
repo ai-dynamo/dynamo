@@ -41,8 +41,8 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError
-from dynamo.vllm.errors import vllm_client_error_to_http_error
+from dynamo.llm.exceptions import DynamoException, HttpError
+from dynamo.vllm.errors import engine_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .structural_tag_policy import (
@@ -928,10 +928,7 @@ class VllmProcessor:
                 async for item in self._generator_inner(request, context=context):
                     yield item
         except VLLMClientError as exc:
-            # vLLM 0.27 replaced many request-side ValueError/TypeError raises
-            # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
-            # Dynamo's HTTP boundary.
-            raise vllm_client_error_to_http_error(exc) from exc
+            raise engine_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -1449,10 +1446,7 @@ class VllmProcessor:
 
                 yield envelope
             _nvtx.end_range(rng_stream)
-        except VLLMClientError:
-            # Preserve request-side 400/404/422 errors for generator(), which
-            # translates them at Dynamo's HTTP boundary. The generic handler
-            # below is reserved for genuine internal failures.
+        except (DynamoException, VLLMClientError):
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

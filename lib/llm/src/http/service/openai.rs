@@ -247,11 +247,17 @@ pub(crate) struct ErrorMessage {
     details: Option<Box<serde_json::Value>>,
     #[serde(skip)]
     metric_error_type: Option<ErrorType>,
+    #[serde(skip)]
+    semantic_class: Option<ErrorClass>,
 }
 
 impl ErrorMessage {
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(super) fn semantic_class(&self) -> Option<ErrorClass> {
+        self.semantic_class
     }
 
     pub(crate) fn is_overload(&self) -> bool {
@@ -278,14 +284,16 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
     }
 }
 
-fn semantic_error_type(class: ErrorClass, status: StatusCode) -> String {
+fn semantic_error_type(class: ErrorClass) -> String {
     if class.normalized() == ErrorClass::CapacityExhausted {
-        "Overloaded".to_string()
-    } else {
-        status
+        return "Overloaded".to_string();
+    }
+    match super::error::default_http_action_for_class(class) {
+        ClientErrorAction::Respond { status, .. } => status
             .canonical_reason()
             .unwrap_or("UnknownError")
-            .to_string()
+            .to_string(),
+        ClientErrorAction::NoDelivery => "Client Closed Request".to_string(),
     }
 }
 
@@ -489,6 +497,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: "Model not found".to_string(),
                 error_type,
                 code: code.as_u16(),
@@ -529,6 +538,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: "Service is not ready".to_string(),
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
@@ -550,6 +560,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message,
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
@@ -572,6 +583,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: reason.clone(),
                 error_type: reason,
                 code: code.as_u16(),
@@ -596,6 +608,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: msg.to_string(),
                 error_type: internal_error_type(),
                 code: code.as_u16(),
@@ -623,6 +636,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: public_msg.to_string(),
                 error_type: internal_error_type(),
                 code: code.as_u16(),
@@ -671,6 +685,7 @@ impl ErrorMessage {
         (
             status,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: err.to_string(),
                 error_type,
                 code: status.as_u16(),
@@ -711,6 +726,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
@@ -733,6 +749,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
@@ -749,6 +766,7 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
@@ -801,8 +819,9 @@ impl ErrorMessage {
         Some((
             status,
             Json(ErrorMessage {
+                semantic_class: Some(error.class()),
                 message: error.public_message().unwrap_or(public_message).to_string(),
-                error_type: semantic_error_type(error.class(), status),
+                error_type: semantic_error_type(error.class()),
                 code: status.as_u16(),
                 details: error
                     .public_details()
@@ -830,11 +849,12 @@ impl ErrorMessage {
             return (
                 code,
                 Json(ErrorMessage {
+                    semantic_class: Some(ErrorClass::CapacityExhausted),
                     message: rejection.to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
-                    metric_error_type: None,
+                    metric_error_type: Some(ErrorType::Overload),
                 }),
             );
         }
@@ -845,6 +865,7 @@ impl ErrorMessage {
             return (
                 code,
                 Json(ErrorMessage {
+                    semantic_class: None,
                     message: super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
@@ -925,6 +946,7 @@ impl ErrorMessage {
             BackendStatusAction::ForwardClientError => (
                 status,
                 Json(ErrorMessage {
+                    semantic_class: None,
                     message: err.message,
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
@@ -979,6 +1001,7 @@ fn backend_http_error_class(status: StatusCode) -> ErrorClass {
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
         ErrorMessage {
+            semantic_class: None,
             message: err.message,
             error_type: map_error_code_to_error_type(
                 StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -992,29 +1015,31 @@ impl From<HttpError> for ErrorMessage {
 
 fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
     match serde_json::from_slice::<ErrorMessage>(body) {
-        Ok(error) => (error.message, true),
-        Err(_) => (String::from_utf8_lossy(body).into_owned(), false),
+        Ok(error) if error.code == StatusCode::UNPROCESSABLE_ENTITY.as_u16() => {
+            (error.message, true)
+        }
+        _ => (String::from_utf8_lossy(body).into_owned(), false),
     }
 }
 
-// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
-// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+/// Normalize Axum JSON validation failures while preserving rendered protocol errors.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
-        if !already_recorded {
-            record_local_failure(ErrorClass::InvalidRequest);
+        if already_recorded {
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
+        record_local_failure(ErrorClass::InvalidRequest);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: error_message,
                 error_type: bad_request_error_type(),
                 code: StatusCode::BAD_REQUEST.as_u16(),
@@ -2947,7 +2972,19 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             .as_ref()
             .map(|error| error.message())
             .unwrap_or(&error_str);
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
+        let legacy_http_error = event.error.as_ref().is_none_or(|error| {
+            matches!(
+                error.error_type(),
+                ErrorClass::Unknown
+                    | ErrorClass::Backend(
+                        dynamo_runtime::error::BackendError::Unknown
+                            | dynamo_runtime::error::BackendError::InvalidArgument
+                    )
+            )
+        });
+        if legacy_http_error
+            && let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message)
+        {
             // Preserve explicit HTTP-like statuses (for example 415); Python
             // 4xx exceptions share the Backend(InvalidArgument) category.
             let code = if overloaded {
@@ -3228,6 +3265,13 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
         metric_error_type,
     } = backend_error;
     if let Some(variant) = sanitized {
+        if let Some(error) = &semantic
+            && error.class() == sanitized_error_class(variant)
+            && let Some(response) =
+                ErrorMessage::from_semantic_error_with_recording(error, record_failure)
+        {
+            return response;
+        }
         let mut render_record_failure = record_failure;
         if record_failure
             && let Some(error) = &semantic
@@ -3248,7 +3292,9 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             error.reason().as_str(),
             "backend.unknown" | "runtime.unclassified"
         );
-        if is_classified
+        // An unclassified failure without a legacy status still has the
+        // canonical Internal class and must use its configured HTTP policy.
+        if (is_classified || status == StatusCode::INTERNAL_SERVER_ERROR)
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
         {
@@ -3283,6 +3329,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             (
                 status,
                 Json(ErrorMessage {
+                    semantic_class: None,
                     message,
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
@@ -4663,6 +4710,7 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorRespo
     (
         code,
         Json(ErrorMessage {
+            semantic_class: None,
             message: format!("Route not found: {} {}", method, uri.path()),
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
@@ -6780,6 +6828,7 @@ mod tests {
     #[test]
     fn semantic_422_body_is_not_reclassified() {
         let body = serde_json::to_vec(&ErrorMessage {
+            semantic_class: None,
             message: "safe semantic message".to_string(),
             error_type: "Unprocessable Entity".to_string(),
             code: 422,
@@ -6833,6 +6882,199 @@ mod tests {
                 "client response must not include the backend-supplied HttpError message"
             );
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn semantic_status_overrides_preserve_middleware_response() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route(
+                "/semantic",
+                axum::routing::get(|| async {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        [("x-semantic-error", "preserved")],
+                        Json(ErrorMessage {
+                            semantic_class: None,
+                            message: "safe validation".to_owned(),
+                            error_type: "Bad Request".to_owned(),
+                            code: 422,
+                            details: Some(Box::new(serde_json::json!({"limit": 7}))),
+                            metric_error_type: Some(ErrorType::Validation),
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/raw",
+                axum::routing::get(|| async {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "raw JSON validation error",
+                    )
+                }),
+            )
+            .layer(middleware::from_fn(smart_json_error_middleware));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/semantic")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.headers()["x-semantic-error"], "preserved");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], 422);
+        assert_eq!(body["type"], "Bad Request");
+        assert_eq!(body["details"]["limit"], 7);
+        let response = app
+            .oneshot(Request::builder().uri("/raw").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn semantic_status_overrides_reach_precommit_without_changing_identity() {
+        const CHILD: &str = "DYNAMO_PRECOMMIT_OVERRIDE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http::service::openai::tests::semantic_status_overrides_reach_precommit_without_changing_identity", "--nocapture"])
+                .env(CHILD, "1")
+                .env("DYN_HTTP_ERROR_STATUS_OVERRIDES", "Internal=502,UnsupportedMedia=422,CapacityExhausted=429,InvalidRequest=499")
+                .status().unwrap();
+            assert!(
+                result.success(),
+                "isolated precommit override regression failed"
+            );
+            return;
+        }
+        use dynamo_runtime::error::{DynamoError, ErrorReason};
+        for (class, reason, expected_status, expected_type) in [
+            (
+                ErrorClass::Internal,
+                "runtime.unclassified",
+                502,
+                "Internal Server Error",
+            ),
+            (
+                ErrorClass::Internal,
+                "backend.unknown",
+                502,
+                "Internal Server Error",
+            ),
+            (
+                ErrorClass::UnsupportedMedia,
+                "request.unsupported_media",
+                422,
+                "Unsupported Media Type",
+            ),
+            (
+                ErrorClass::InvalidRequest,
+                "request.invalid",
+                499,
+                "Bad Request",
+            ),
+            (
+                ErrorClass::CapacityExhausted,
+                "capacity.exhausted",
+                429,
+                "Overloaded",
+            ),
+            (
+                ErrorClass::InvalidRequest,
+                "request.invalid_argument",
+                499,
+                "Bad Request",
+            ),
+            (
+                ErrorClass::InvalidRequest,
+                "backend.invalid_argument",
+                499,
+                "Bad Request",
+            ),
+        ] {
+            let builder = DynamoError::builder()
+                .class(class)
+                .reason(ErrorReason::new(reason).unwrap())
+                .diagnostic(r#"{"code":415,"message":"PRIVATE_OVERRIDE_DIAGNOSTIC"}"#);
+            let error = if class == ErrorClass::InvalidRequest {
+                builder.public_message("safe validation details").build()
+            } else if class == ErrorClass::CapacityExhausted {
+                builder
+                    .public_details(dynamo_runtime::error::PublicDetails::SizeLimit {
+                        limit: 8,
+                        actual: Some(9),
+                    })
+                    .build()
+            } else {
+                builder.build()
+            };
+            let counter = crate::http::service::metrics::DYNAM_FAILURES_TOTAL
+                .with_label_values(&[class.as_str(), reason]);
+            let semantic_before = counter.get();
+            let unary = ErrorMessage::from_anyhow(error.clone().into(), BACKUP_ERROR_MESSAGE);
+            let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_owned()),
+                comment: None,
+                error: Some(serde_json::from_value(serde_json::to_value(&error).unwrap()).unwrap()),
+            };
+            let precommit = check_for_backend_error(
+                futures::stream::iter([event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await
+            .err()
+            .expect("typed failure must reject before headers");
+            assert_eq!(
+                precommit.0.as_u16(),
+                expected_status,
+                "precommit {class}/{reason}"
+            );
+            for response in [unary, precommit] {
+                assert_eq!(response.0.as_u16(), expected_status, "{class}/{reason}");
+                assert_eq!(
+                    response.1.error_type, expected_type,
+                    "protocol type for {class}"
+                );
+                assert_eq!(
+                    response.1.metric_error_type,
+                    Some(metric_error_type_for_class(class))
+                );
+                if class == ErrorClass::InvalidRequest {
+                    assert_eq!(response.1.message, "safe validation details");
+                }
+                if class == ErrorClass::CapacityExhausted {
+                    assert_eq!(
+                        response.1.details.as_deref(),
+                        Some(&serde_json::json!({"type":"size_limit","limit":8,"actual":9}))
+                    );
+                }
+                assert!(
+                    !serde_json::to_string(&response.1.0)
+                        .unwrap()
+                        .contains("PRIVATE_OVERRIDE_DIAGNOSTIC")
+                );
+            }
+            assert_eq!(error.class(), class);
+            assert_eq!(error.reason().as_str(), reason);
+            assert_eq!(
+                counter.get() - semantic_before,
+                2,
+                "one count per delivered response"
+            );
+        }
+        legacy_python_worker_503_envelope_is_supported();
     }
 
     #[test]
@@ -7348,6 +7590,7 @@ mod tests {
         let mut response = (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorMessage {
+                semantic_class: None,
                 message: "request rejected because the service is overloaded".to_string(),
                 error_type: "service_unavailable".to_string(),
                 code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),

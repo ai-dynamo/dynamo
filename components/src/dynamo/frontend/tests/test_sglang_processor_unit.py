@@ -5960,3 +5960,35 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+@pytest.mark.parametrize("after_output", [False, True])
+def test_processor_preserves_typed_backend_failure(after_output):
+    from dynamo.llm.exceptions import WorkerOverloaded
+
+    failure = WorkerOverloaded("private engine admission diagnostic")
+
+    class FailingEngine:
+        async def generate(self, *_args, **_kwargs):
+            async def stream():
+                if after_output:
+                    yield FakeRoutedItem({"token_ids": list(b"A"), "index": 0})
+                raise failure
+
+            return stream()
+
+    tokenizer = TestIncrementalDetokenization.ByteTokenizer()
+    processor = SglangProcessor(tokenizer, FailingEngine(), None, None, None)
+    post = SglangStreamingPostProcessor(
+        tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+    )
+
+    async def collect():
+        async for _ in processor._generate_and_stream(
+            "typed-error", {"model": "test"}, {}, [], post
+        ):
+            pass
+
+    with pytest.raises(WorkerOverloaded) as raised:
+        asyncio.run(collect())
+    assert raised.value is failure

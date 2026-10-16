@@ -49,7 +49,12 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import (
+    DynamoException,
+    EngineShutdown,
+    InvalidArgument,
+    WorkerOverloaded,
+)
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -61,6 +66,7 @@ from dynamo.trtllm.conversation_affinity import (
     engine_conversation_affinity_enabled,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.errors import engine_error, protocol_error
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -1002,13 +1008,7 @@ class HandlerBase(BaseGenerativeHandler):
             self.first_token_source.bind(context, routing.get("dp_rank"))
         started = await self._mark_request_started()
         if not started:
-            yield {
-                "finish_reason": {
-                    "error": "Worker is temporarily rejecting new requests"
-                },
-                "token_ids": [],
-            }
-            return
+            raise WorkerOverloaded("Worker is temporarily rejecting new requests")
         try:
             async for chunk in self._generate_locally_impl(
                 request, context, embeddings, ep_disaggregated_params
@@ -1333,11 +1333,7 @@ class HandlerBase(BaseGenerativeHandler):
                     type(e).__name__,
                     error_msg,
                 )
-                yield {
-                    "finish_reason": {"error": error_msg},
-                    "token_ids": [],
-                }
-                return
+                raise engine_error(e, validation=True) from e
 
             # Log the Dynamo-to-engine request-ID mapping exactly once per
             # request, immediately after submission. This is the only place the
@@ -1390,8 +1386,9 @@ class HandlerBase(BaseGenerativeHandler):
 
                     # If we are not done generating, but there are no outputs, return an error
                     if not res.outputs and not res.finished:
-                        yield {"finish_reason": "error", "token_ids": []}
-                        break
+                        raise protocol_error(
+                            "TensorRT-LLM returned no outputs before completion"
+                        )
 
                     for output in res.outputs:
                         output_idx = getattr(output, "index", 0) or 0
@@ -1582,13 +1579,10 @@ class HandlerBase(BaseGenerativeHandler):
         except RequestError as e:
             error_msg = str(e)
             logging.warning(f"Request {request_id} error: {error_msg}")
-            yield {
-                "finish_reason": {"error": error_msg},
-                "token_ids": [],
-            }
+            raise engine_error(e) from e
 
         # 3. EngineShutdown - let it propagate to the Rust bridge
-        except EngineShutdown:
+        except DynamoException:
             raise
 
         # 4. ALL OTHER ERRORS - graceful shutdown
@@ -1600,15 +1594,8 @@ class HandlerBase(BaseGenerativeHandler):
                 exc_info=True,
             )
 
-            # Try to send error to client before shutdown
-            try:
-                yield {
-                    "finish_reason": {"error": error_msg},
-                    "token_ids": [],
-                }
-            except Exception:
-                pass  # Best effort
-
+            # Fatal engine failures retain the existing cleanup/exit policy.
+            # Transport loss reports unavailability; never emit an untyped success chunk.
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
 

@@ -3160,6 +3160,24 @@ class DynamoException(Exception):
 
     ...
 
+class ClassifiedError(DynamoException):
+    """Canonical semantic error; construct with classified_error()."""
+
+    error_class: str
+    reason: str
+    diagnostic: str | None
+    public_details: dict[str, Any] | None
+
+def classified_error(
+    error_class: str,
+    *,
+    reason: str | None = None,
+    diagnostic: str | None = None,
+    public_details: dict[str, Any] | None = None,
+) -> ClassifiedError | InvalidArgument:
+    """Validate a canonical class/reason; public details must be explicitly safe."""
+    ...
+
 class RouterQueueLimitExceeded(DynamoException):
     """A policy-class queue cap rejected the request."""
 
@@ -3167,6 +3185,10 @@ class RouterQueueLimitExceeded(DynamoException):
     limit_kind: str
     current: int
     limit: int
+    error_class: str
+    reason: str
+    diagnostic: str | None
+    public_details: dict[str, Any] | None
 
 class Unknown(DynamoException):
     """Uncategorized or unknown error."""

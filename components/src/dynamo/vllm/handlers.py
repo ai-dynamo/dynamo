@@ -88,7 +88,13 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
+from dynamo.llm.exceptions import (
+    DynamoException,
+    EngineShutdown,
+    HttpError,
+    InvalidArgument,
+    WorkerOverloaded,
+)
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -1190,17 +1196,14 @@ ResponseT = TypeVar("ResponseT")
 
 async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
+    *,
+    engine_boundary: bool = False,
 ) -> AsyncIterator[ResponseT]:
-    """Keep request-side vLLM errors client-visible on worker endpoints."""
-    from vllm.exceptions import VLLMClientError
+    """Preserve semantic errors from submission and iteration on worker endpoints."""
+    from .errors import classified_stream
 
-    from .errors import vllm_client_error_to_http_error
-
-    try:
-        async for chunk in generator:
-            yield chunk
-    except VLLMClientError as exc:
-        raise vllm_client_error_to_http_error(exc) from exc
+    async for chunk in classified_stream(generator, classify_unknown=engine_boundary):
+        yield chunk
 
 
 def _as_exact_int(value: object) -> Optional[int]:
@@ -3544,14 +3547,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         request_id,
                         lora_request,
                     )
-                    # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                    # Rust will parse this into FinishReason::Error(message)
-                    yield {
-                        "finish_reason": "error: No outputs from vLLM engine",
-                        "index": 0,
-                        "token_ids": [],
-                    }
-                    break
+                    from .errors import protocol_error
+
+                    raise protocol_error("No outputs from vLLM engine")
 
                 prepared_outputs = []
                 for output in res.outputs:
@@ -3715,6 +3713,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
+        except (DynamoException, HttpError):
+            raise
+        except Exception as error:
+            from .errors import engine_error
+
+            raise engine_error(error) from error
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -3771,15 +3775,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
             if self.use_vllm_tokenizer and request.get("encoder_result") is not None:
-                yield {
-                    "finish_reason": (
-                        "error: external encoder results require token-in/token-out "
-                        "mode"
-                    ),
-                    "index": 0,
-                    "token_ids": [],
-                }
-                return
+                raise InvalidArgument(
+                    "external encoder results require token-in/token-out mode"
+                )
             if self.use_vllm_tokenizer:
                 # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
                 generator = self._generate_text_mode(request, context, request_id)
@@ -4023,12 +4021,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
             except (MissingMultimodalHandoffError, MultimodalTransferError) as exc:
                 logger.error("Request %s: %s", request_id, exc)
-                yield {
-                    "finish_reason": f"error: {exc}",
-                    "index": 0,
-                    "token_ids": [],
-                }
-                return
+                from .errors import engine_error
+
+                raise engine_error(exc) from exc
 
             request = prepared_input.request
             multi_modal_data = prepared_input.multi_modal_data
@@ -4362,22 +4357,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                 )
 
-                async for res in gen:
+                async for res in _translate_vllm_client_errors(
+                    gen, engine_boundary=True
+                ):
                     if not res.outputs:
-                        yield {
-                            "id": openai_request_id,
-                            "created": int(time.time()),
-                            "object": "chat.completion.chunk",
-                            "model": "unknown",
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": ""},
-                                    "finish_reason": "error",
-                                }
-                            ],
-                        }
-                        break
+                        from .errors import protocol_error
+
+                        raise protocol_error("No outputs from vLLM engine")
 
                     for output in res.outputs:
                         if abort_guard is not None:
@@ -4615,7 +4601,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            async for res in gen:
+            async for res in _translate_vllm_client_errors(gen, engine_boundary=True):
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
@@ -4925,7 +4911,9 @@ class EmbeddingWorkerHandler:
                 if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for out in self.engine_client.encode(**encode_kwargs):
+                async for out in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs), engine_boundary=True
+                ):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(

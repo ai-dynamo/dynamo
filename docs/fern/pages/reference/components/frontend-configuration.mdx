@@ -90,6 +90,18 @@ The Rust HTTP server also reads these environment variables, which are not expos
   first use.
 </ParamField>
 
+<ParamField path="DYN_HTTP_ERROR_STATUS_OVERRIDES" type="string">
+  Override the Frontend's semantic error-class-to-HTTP-status table with comma-separated `Class=status` entries. For example, `DYN_HTTP_ERROR_STATUS_OVERRIDES="CapacityExhausted=429,UnsupportedMedia=422"`. Set this on the Frontend; backends continue to classify errors without selecting response statuses. The value is read and cached on first use.
+
+  Supported canonical classes are `InvalidRequest`, `Unauthenticated`, `PermissionDenied`, `NotFound`, `Conflict`, `PayloadTooLarge`, `UnsupportedMedia`, `RateLimited`, `CapacityExhausted`, `Unavailable`, `BackendProtocol`, `DeadlineExceeded`, `NotImplemented`, and `Internal`. Status values must be integers from 400 through 599. Classes without an override keep their defaults; `CapacityExhausted` defaults to 529. Cancellation keeps its no-delivery behavior and cannot be overridden.
+
+  Legacy class names normalize before lookup: `InvalidArgument` maps to `InvalidRequest`, and `ResourceExhausted` and `WorkerOverloaded` both map to `CapacityExhausted`. They cannot have independent statuses. Other accepted legacy aliases are `Unknown` for `Internal`; `CannotConnect`, `Disconnected`, and `WorkerUnavailable` for `Unavailable`; and `ConnectionTimeout` and `ResponseTimeout` for `DeadlineExceeded`. Repeating the same canonical class with the same status is accepted, including `ResourceExhausted=429,WorkerOverloaded=429`. Conflicting aliases, unknown classes, malformed entries, or invalid statuses cause the entire setting to be ignored with a warning. An unset or blank value adds no overrides.
+
+  Python HTTP-like exceptions are normalized to semantic classes before this table is applied. Their original status number does not override the class policy: for example, native status 422 maps to `InvalidRequest`, whose default response is 400. Legacy status envelopes from older workers retain their rolling-upgrade compatibility path.
+
+  A `CapacityExhausted` override takes precedence over `DYN_HTTP_OVERLOAD_STATUS_CODE`; otherwise the legacy overload setting still applies. Overrides change response status selection, not error classes, reasons, metrics, internal retry policy, or worker health. Errors received before streaming headers are committed can select an HTTP status. Errors received afterward use the existing terminal stream error representation; they cannot change the committed HTTP status.
+</ParamField>
+
 <ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
   Interval in milliseconds between SSE comment frames while a streaming response has no data.
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.

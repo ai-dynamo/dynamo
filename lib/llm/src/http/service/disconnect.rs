@@ -390,24 +390,20 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
         ),
     };
     let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
-        "service_unavailable"
-    } else {
-        match status {
-            StatusCode::BAD_REQUEST
-            | StatusCode::CONFLICT
-            | StatusCode::PAYLOAD_TOO_LARGE
-            | StatusCode::UNSUPPORTED_MEDIA_TYPE => "invalid_request_error",
-            StatusCode::UNAUTHORIZED => "authentication_error",
-            StatusCode::FORBIDDEN => "permission_error",
-            StatusCode::NOT_FOUND => "not_found_error",
-            StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
-            StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
-            StatusCode::GATEWAY_TIMEOUT => "timeout_error",
-            StatusCode::NOT_IMPLEMENTED => "not_implemented_error",
-            _ if status.as_u16() == 499 => "request_cancelled",
-            _ => "internal_server_error",
-        }
+    let error_type = match error.class().normalized() {
+        ErrorClass::InvalidRequest
+        | ErrorClass::Conflict
+        | ErrorClass::PayloadTooLarge
+        | ErrorClass::UnsupportedMedia => "invalid_request_error",
+        ErrorClass::Unauthenticated => "authentication_error",
+        ErrorClass::PermissionDenied => "permission_error",
+        ErrorClass::NotFound => "not_found_error",
+        ErrorClass::RateLimited => "rate_limit_error",
+        ErrorClass::CapacityExhausted | ErrorClass::Unavailable => "service_unavailable",
+        ErrorClass::DeadlineExceeded => "timeout_error",
+        ErrorClass::NotImplemented => "not_implemented_error",
+        ErrorClass::Cancelled => "request_cancelled",
+        _ => "internal_server_error",
     };
     let body = serde_json::json!({
         "error": {
@@ -1156,6 +1152,115 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn semantic_status_overrides_preserve_terminal_types_and_metrics() {
+        const CHILD: &str = "DYNAMO_TERMINAL_OVERRIDE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http::service::disconnect::tests::semantic_status_overrides_preserve_terminal_types_and_metrics", "--nocapture"])
+                .env(CHILD, "1")
+                .env("DYN_HTTP_ERROR_STATUS_OVERRIDES", "Internal=502,UnsupportedMedia=422,CapacityExhausted=429,InvalidRequest=499")
+                .status().unwrap();
+            assert!(
+                result.success(),
+                "isolated terminal override regression failed"
+            );
+            return;
+        }
+        use dynamo_runtime::error::ErrorClass;
+        for (class, code, slug, metric) in [
+            (
+                ErrorClass::UnsupportedMedia,
+                422,
+                "invalid_request_error",
+                ErrorType::Validation,
+            ),
+            (
+                ErrorClass::RateLimited,
+                429,
+                "rate_limit_error",
+                ErrorType::Overload,
+            ),
+            (
+                ErrorClass::InvalidRequest,
+                499,
+                "invalid_request_error",
+                ErrorType::Validation,
+            ),
+            (
+                ErrorClass::Internal,
+                502,
+                "internal_server_error",
+                ErrorType::Internal,
+            ),
+        ] {
+            let model = format!("override-terminal-{class}");
+            let metrics = Arc::new(Metrics::new());
+            let guard = metrics.clone().create_inflight_guard(
+                &model,
+                Endpoint::ChatCompletions,
+                true,
+                "override-request",
+            );
+            let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::with_kill_tracking());
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let error_signal = StreamErrorSignal::default();
+            let producer_signal = error_signal.clone();
+            let expected_metric = metric.clone();
+            let error = DynamoError::builder()
+                .class(class)
+                .diagnostic("PRIVATE_TERMINAL_OVERRIDE")
+                .build();
+            let counter = crate::http::service::metrics::DYNAM_FAILURES_TOTAL
+                .with_label_values(&[error.class().as_str(), error.reason().as_str()]);
+            let semantic_before = counter.get();
+            let error_stream = futures::stream::once(async move {
+                producer_signal.set_semantic(expected_metric, &error);
+                Err::<Event, _>(axum::Error::new("private transport failure"))
+            });
+            let stream = futures::stream::once(async { Ok(Event::default().data("first chunk")) })
+                .chain(error_stream);
+            let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+                stream,
+                context,
+                guard,
+                ConnectionHandle::create_disabled(tx),
+                None,
+                openai_stream_error,
+                StreamMonitorOptions {
+                    error_signal: Some(error_signal),
+                    ..Default::default()
+                },
+            );
+            let body = collect_sse_body(monitored).await;
+            assert!(body.contains("first chunk"));
+            assert!(body.contains(&format!("\"code\":{code}")), "{body}");
+            assert!(body.contains(slug), "{class}: {body}");
+            assert_eq!(
+                body.matches("\"error\"").count(),
+                1,
+                "one terminal error frame"
+            );
+            assert!(!body.contains("PRIVATE_TERMINAL_OVERRIDE"));
+            assert!(!body.contains("private transport failure"));
+            assert_eq!(
+                counter.get() - semantic_before,
+                1,
+                "one semantic failure per terminal error"
+            );
+            assert_eq!(
+                metrics.get_request_counter(
+                    &model,
+                    &Endpoint::ChatCompletions,
+                    &RequestType::Stream,
+                    &Status::Error,
+                    &metric
+                ),
+                1
+            );
+        }
     }
 
     #[test]

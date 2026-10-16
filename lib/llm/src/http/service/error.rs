@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorType as DynamoErrorType};
 use thiserror::Error;
 
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
@@ -20,12 +20,75 @@ fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
 /// Overload / admission-control rejection status. Reads
 /// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
 /// environment is fixed at runtime and this is on the rejection path.
-pub(crate) fn overload_status_code() -> StatusCode {
+fn legacy_overload_status_code() -> StatusCode {
     static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
         let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
         parse_overload_status_code(value.as_deref())
     });
     *CODE
+}
+
+fn parse_error_status_overrides(
+    value: &str,
+) -> Result<Vec<(ErrorClass, StatusCode)>, &'static str> {
+    let mut overrides = Vec::new();
+    if value.trim().is_empty() {
+        return Ok(overrides);
+    }
+    for entry in value.split(',') {
+        let (name, code) = entry
+            .split_once('=')
+            .ok_or("expected Class=status entries")?;
+        let name = name.trim();
+        let class: ErrorClass = serde_json::from_value(serde_json::Value::String(name.to_owned()))
+            .map_err(|_| "invalid error class")?;
+        if class.as_str() != name || class.normalized() == ErrorClass::Cancelled {
+            return Err("unknown or non-deliverable error class");
+        }
+        let class = class.normalized();
+        let code = code
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| "invalid HTTP status")?;
+        if !(400..=599).contains(&code) {
+            return Err("HTTP error status must be between 400 and 599");
+        }
+        let status = StatusCode::from_u16(code).map_err(|_| "invalid HTTP status")?;
+        if let Some((_, existing)) = overrides.iter().find(|(key, _)| *key == class) {
+            if *existing != status {
+                return Err("conflicting overrides for the same canonical class");
+            }
+        } else {
+            overrides.push((class, status));
+        }
+    }
+    Ok(overrides)
+}
+
+fn error_status_override(class: ErrorClass) -> Option<StatusCode> {
+    static OVERRIDES: LazyLock<Vec<(ErrorClass, StatusCode)>> = LazyLock::new(|| {
+        let Some(value) = std::env::var(env_llm::DYN_HTTP_ERROR_STATUS_OVERRIDES).ok() else {
+            return Vec::new();
+        };
+        match parse_error_status_overrides(&value) {
+            Ok(overrides) => overrides,
+            Err(error) => {
+                tracing::warn!(
+                    error,
+                    "Ignoring invalid DYN_HTTP_ERROR_STATUS_OVERRIDES; using default HTTP policy"
+                );
+                Vec::new()
+            }
+        }
+    });
+    OVERRIDES
+        .iter()
+        .find_map(|(key, status)| (*key == class.normalized()).then_some(*status))
+}
+
+/// Resolved overload status, including the canonical class override.
+pub(crate) fn overload_status_code() -> StatusCode {
+    error_status_override(ErrorClass::CapacityExhausted).unwrap_or_else(legacy_overload_status_code)
 }
 
 /// Implementation of the Completion Engines served by the HTTP service should
@@ -49,9 +112,20 @@ pub(crate) enum ClientErrorAction {
 }
 
 /// Total class-to-HTTP policy. Backends never select these status codes.
-pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) -> ClientErrorAction {
-    use dynamo_runtime::error::ErrorClass;
+pub(crate) fn http_action_for_class(class: ErrorClass) -> ClientErrorAction {
+    let action = default_http_action_for_class(class);
+    match (action, error_status_override(class)) {
+        (ClientErrorAction::Respond { public_message, .. }, Some(status)) => {
+            ClientErrorAction::Respond {
+                status,
+                public_message,
+            }
+        }
+        _ => action,
+    }
+}
 
+pub(super) fn default_http_action_for_class(class: ErrorClass) -> ClientErrorAction {
     let response = |status, public_message| ClientErrorAction::Respond {
         status,
         public_message,
@@ -72,9 +146,10 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
             response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Unsupported media type")
         }
         ErrorClass::RateLimited => response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
-        ErrorClass::CapacityExhausted => {
-            response(overload_status_code(), "Service temporarily overloaded")
-        }
+        ErrorClass::CapacityExhausted => response(
+            legacy_overload_status_code(),
+            "Service temporarily overloaded",
+        ),
         ErrorClass::Unavailable => response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service temporarily unavailable",
@@ -313,6 +388,118 @@ impl std::fmt::Display for SanitizedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_error_status_overrides_with_canonical_aliases() {
+        assert!(parse_error_status_overrides("  ").unwrap().is_empty());
+        assert_eq!(
+            parse_error_status_overrides(
+                " ResourceExhausted = 429, WorkerOverloaded=429, InvalidArgument=422 "
+            )
+            .unwrap(),
+            vec![
+                (ErrorClass::CapacityExhausted, StatusCode::TOO_MANY_REQUESTS),
+                (ErrorClass::InvalidRequest, StatusCode::UNPROCESSABLE_ENTITY),
+            ]
+        );
+        for name in [
+            "InvalidRequest",
+            "Unauthenticated",
+            "PermissionDenied",
+            "NotFound",
+            "Conflict",
+            "PayloadTooLarge",
+            "UnsupportedMedia",
+            "RateLimited",
+            "CapacityExhausted",
+            "Unavailable",
+            "BackendProtocol",
+            "DeadlineExceeded",
+            "NotImplemented",
+            "Internal",
+            "Unknown",
+            "CannotConnect",
+            "Disconnected",
+            "WorkerUnavailable",
+            "ConnectionTimeout",
+            "ResponseTimeout",
+        ] {
+            let parsed = parse_error_status_overrides(&format!("{name}=502")).unwrap();
+            assert_eq!(parsed.len(), 1, "{name}");
+            assert_eq!(parsed[0].1, StatusCode::BAD_GATEWAY, "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_conflicting_error_status_overrides() {
+        for invalid in [
+            "InvalidRequest",
+            "=400",
+            "InvalidRequest=",
+            "Internal=invalid",
+            "MisspelledClass=500",
+            "Cancelled=499",
+            "InvalidRequest=200",
+            "InvalidRequest=399",
+            "Internal=600",
+            "Internal=999",
+            "Internal=1000",
+            "Internal=500=502",
+            "Internal=500,",
+            ",Internal=500",
+            "ResourceExhausted=429,CapacityExhausted=503",
+            "CapacityExhausted=503,WorkerOverloaded=429",
+            "InvalidArgument=422,InvalidRequest=400",
+        ] {
+            assert!(parse_error_status_overrides(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn configured_error_status_overrides_reach_http_policy() {
+        use dynamo_runtime::error::ErrorClass;
+
+        const CHILD: &str = "DYNAMO_ERROR_POLICY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "http::service::error::tests::configured_error_status_overrides_reach_http_policy",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_HTTP_OVERLOAD_STATUS_CODE", "503")
+                .env(
+                    "DYN_HTTP_ERROR_STATUS_OVERRIDES",
+                    "ResourceExhausted=429,WorkerOverloaded=429,UnsupportedMedia=422",
+                )
+                .status()
+                .unwrap();
+            assert!(result.success(), "isolated HTTP override policy failed");
+            return;
+        }
+
+        for (class, expected) in [
+            (ErrorClass::CapacityExhausted, 429),
+            (ErrorClass::WorkerOverloaded, 429),
+            (ErrorClass::UnsupportedMedia, 422),
+            (ErrorClass::InvalidRequest, 400),
+        ] {
+            assert!(
+                matches!(
+                    http_action_for_class(class),
+                    ClientErrorAction::Respond { status, .. } if status.as_u16() == expected
+                ),
+                "{class} must use configured status {expected}"
+            );
+        }
+        assert_eq!(overload_status_code().as_u16(), 429);
+        assert_eq!(SanitizedError::Overloaded.status().as_u16(), 429);
+        assert_eq!(
+            http_action_for_class(ErrorClass::Cancelled),
+            ClientErrorAction::NoDelivery
+        );
+    }
 
     #[test]
     fn parses_configured_overload_status_code() {

@@ -12,6 +12,7 @@ import torch
 
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as mod
+from dynamo.llm.exceptions import DynamoException
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -415,13 +416,15 @@ class TestPoolingBatchExecution:
                 raise
 
         handler.engine_client.encode = fake_encode
-        with pytest.raises(RuntimeError, match="boom"):
+        with pytest.raises(DynamoException) as raised:
             async for _ in handler.generate(
                 {"input": ["a", "b", "c", "d"], "model": "test-model"},
                 _make_context(),
             ):
                 pass
 
+        assert raised.value.error_class == "Internal"
+        assert raised.value.diagnostic == "boom"
         assert all(event.is_set() for event in started.values())
         assert cancelled == {0, 2, 3}
 

@@ -13,6 +13,7 @@ from dynamo._core import Context
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang._compat import resolved_server_args
 from dynamo.sglang.capacity import sglang_dp_layout
+from dynamo.sglang.errors import classified_stream
 
 _CANCELLATION_POLL_MAX_DELAY_S = 0.05
 _CANCELLATION_ABORT_RETRY_LIMIT = 8
@@ -109,7 +110,7 @@ class CancellationMixin:
         cancellation_task: asyncio.Task[Any],
     ) -> AsyncGenerator[Any, None]:
         """Drain briefly after abort, then stop a stream that did not terminate."""
-        iterator = aiter(stream_source)
+        iterator = aiter(classified_stream(stream_source))
         drain_deadline: float | None = None
         while True:
             next_item = asyncio.create_task(_next_stream_item(iterator))

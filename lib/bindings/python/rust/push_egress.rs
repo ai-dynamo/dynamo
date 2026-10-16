@@ -713,29 +713,8 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonP
 mod tests {
     //! Unit tests for the pure-Rust parts of push_egress.rs.
     //!
-    //! # Python linkage constraint
-    //!
-    //! This crate builds with `pyo3/extension-module`.  The linker does NOT
-    //! include libpython in the test binary; Python symbols are supplied at
-    //! runtime by the Python interpreter loading the `.so`.  Any test that
-    //! compiles code which references Python C-API symbols — even unreachable
-    //! branches — fails with "undefined symbol: Py_InitializeEx" etc.
-    //!
-    //! Confirmed: a trivial `prepare_freethreaded_python()` test produced
-    //! "undefined symbol: Py_InitializeEx" from rust-lld.
-    //!
-    //! **Root cause for push_egress.rs**: `ResponseSink::send` takes
-    //! `Python<'_>` / `Bound<'_, PyAny>`, and `ResponseSender` is a
-    //! `#[pyclass]`.  A test that instantiates either — `response_channel`
-    //! creates both — pulls pyo3 and the Python C API into the test binary's
-    //! object graph.
-    //!
-    //! **What compiles**: [`PushFrame`] and everything downstream of it. The
-    //! frame is a `Bytes` plus two scalars, and both the terminal-frame
-    //! constructor and the ingress hand-off are pure serde, so the encoding
-    //! contract — the part this module actually owns — is testable here.
-    //! `send`/`close` and `handler_supports_push` are not; they are covered by
-    //! pytest against the built `.so`.  Gaps are documented at the bottom.
+    //! Python-facing integration tests run against the built extension.
+    //! Embedding tests disable the default extension-module Cargo feature.
 
     use super::{EncodeBuffer, PushFrame};
     use crate::engine::RESPONSE_CHANNEL_DEPTH;
@@ -1095,10 +1074,5 @@ mod tests {
         );
     }
 
-    // The rest of this module's surface -- ResponseSink send/close semantics,
-    // send_terminal's spawn-vs-blocking_send branches, PushFrame::encode, and
-    // handler_supports_push -- cannot be unit-tested here: pyo3's
-    // `extension-module` is hardcoded in Cargo.toml, so any test whose object
-    // graph reaches the Python C API fails to link against libpython. Covering
-    // it needs pytest against a maturin-built extension. See #12845.
+    // Python-facing integration tests run against the built extension.
 }

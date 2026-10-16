@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import DynamoException, EngineShutdown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
@@ -367,8 +367,10 @@ async def test_decode_cancellation_preserves_stream_lifetime(
     )
     try:
         if outcome == "registration_error":
-            with pytest.raises(ValueError, match="registration failed"):
+            with pytest.raises(DynamoException) as raised:
                 await asyncio.wait_for(consumer, timeout=1)
+            assert raised.value.error_class == "Internal"
+            assert raised.value.diagnostic == "registration failed"
         else:
             if case.first_response:
                 await asyncio.wait_for(case.first_response_consumed.wait(), timeout=1)
@@ -814,8 +816,10 @@ async def test_decode_stream_exit_retains_pending_abort_wait(
         await asyncio.wait_for(sleeping.wait(), timeout=1)
         case.allow_dispatch.set()
         if outcome == "error":
-            with pytest.raises(ValueError, match="dispatch failed"):
+            with pytest.raises(DynamoException) as raised:
                 await asyncio.wait_for(consumer, timeout=1)
+            assert raised.value.error_class == "Internal"
+            assert raised.value.diagnostic == "dispatch failed"
         else:
             assert await asyncio.wait_for(consumer, timeout=1) == []
         assert not case.abort_calls

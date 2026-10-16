@@ -454,17 +454,18 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.19.0
         cargo-deny -L error --all-features check licenses bans --config ${{ github.workspace }}/deny.toml
+    # PyO3 extension mode cannot link embedding test executables; retain custom policies.
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run
+      run: cargo test --locked ${{ matrix.dir == 'lib/bindings/python' && '--no-default-features --features custom-policy' || '' }} --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo doc --no-deps && cargo test --locked --doc
+      run: cargo doc --no-deps ${{ matrix.dir == 'lib/bindings/python' && '--no-default-features --features custom-policy' || '' }} && cargo test --locked ${{ matrix.dir == 'lib/bindings/python' && '--no-default-features --features custom-policy' || '' }} --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      run: cargo test --locked ${{ matrix.dir == 'lib/bindings/python' && '--no-default-features --features custom-policy' || '' }} --all-targets
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -489,7 +490,7 @@ jobs:
     - name: Run Python bindings AIS feature tests
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --features ais-forward-pass -- --nocapture
+      run: cargo test --locked --no-default-features --features custom-policy,ais-forward-pass -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

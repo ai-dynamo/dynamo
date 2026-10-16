@@ -64,9 +64,11 @@ except ImportError:
 from ._unary import LLMUnaryClient as LLMUnaryClient
 from ._unary import UnaryChatModel as UnaryChatModel
 from ._unary import with_engine_data as with_engine_data
+from .exceptions import ClassifiedError as ClassifiedError
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 from .exceptions import WorkerOverloaded as WorkerOverloaded
+from .exceptions import classified_error as classified_error
 
 
 class RoutedEngine(Protocol):

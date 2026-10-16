@@ -1665,6 +1665,9 @@ where
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
     Python::with_gil(|py| {
+        if let Some(error) = crate::errors::py_exception_to_dynamo_error(py, &err) {
+            return error;
+        }
         if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
             let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend))
@@ -1710,4 +1713,29 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             .message(err.to_string())
             .build()
     })
+}
+
+#[cfg(test)]
+mod semantic_error_tests {
+    use super::*;
+    use dynamo_runtime::error::{ErrorClass, ErrorReason, PublicDetails};
+
+    #[test]
+    fn unified_backend_preserves_semantic_python_errors() {
+        pyo3::prepare_freethreaded_python();
+        let original = DynamoError::builder()
+            .class(ErrorClass::CapacityExhausted)
+            .reason(ErrorReason::new("capacity.worker_overloaded").unwrap())
+            .diagnostic("private unified engine detail")
+            .public_details(PublicDetails::SizeLimit {
+                limit: 4,
+                actual: Some(5),
+            })
+            .build();
+        let restored = py_err_to_dynamo(crate::errors::dynamo_error_to_pyerr(original.clone()));
+        assert_eq!(restored.class(), original.class());
+        assert_eq!(restored.reason(), original.reason());
+        assert_eq!(restored.public_details(), original.public_details());
+        assert_eq!(restored.diagnostic(), original.diagnostic());
+    }
 }

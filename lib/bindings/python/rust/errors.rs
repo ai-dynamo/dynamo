@@ -11,16 +11,145 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorReason, PublicDetails};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyModule};
 
 // Base exception for all Dynamo errors.
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
+pyo3::create_exception!(dynamo._core, ClassifiedError, DynamoException);
+
+/// Construct a semantic engine error without choosing a transport status.
+/// Public details must be fixed or explicitly allowlisted by the producer.
+#[pyfunction]
+#[pyo3(signature = (error_class, *, reason=None, diagnostic=None, public_details=None))]
+pub fn classified_error(
+    py: Python<'_>,
+    error_class: &str,
+    reason: Option<&str>,
+    diagnostic: Option<String>,
+    public_details: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let class: ErrorClass = serde_json::from_value(serde_json::json!(error_class))
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("Invalid error class"))?;
+    if class.as_str() != error_class || class != class.normalized() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Expected a canonical error class",
+        ));
+    }
+    let mut builder = DynamoError::builder().class(class);
+    if let Some(reason) = reason {
+        builder = builder.reason(ErrorReason::new(reason).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err("Unknown or malformed error reason")
+        })?);
+    }
+    if let Some(diagnostic) = diagnostic {
+        builder = builder.diagnostic(diagnostic);
+    }
+    if let Some(public_details) = public_details {
+        let details: PublicDetails = pythonize::depythonize(public_details)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("Invalid public error details"))?;
+        builder = match details {
+            PublicDetails::Message { message } => builder.public_message(message),
+            details => builder.public_details(details),
+        };
+    }
+    let error = builder.build();
+    if error.class() != class || reason.is_some_and(|reason| error.reason().as_str() != reason) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Error reason does not match its class",
+        ));
+    }
+    Ok(dynamo_error_to_pyerr(error).into_value(py).into())
+}
+
+/// Preserve the canonical identity even when an anyhow context wraps the source.
+pub(crate) fn pipeline_error_to_pyerr(error: anyhow::Error) -> PyErr {
+    if let Some(semantic) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<DynamoError>())
+    {
+        return dynamo_error_to_pyerr(semantic.clone());
+    }
+    if let Some(rejection) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>())
+    {
+        return queue_rejection_to_pyerr(rejection.clone());
+    }
+    dynamo_error_to_pyerr(DynamoError::from(error.as_ref()))
+}
+
+pub(crate) fn dynamo_error_to_pyerr(error: DynamoError) -> PyErr {
+    let python_error = match public_invalid_request_message(&error) {
+        Some(message) => InvalidArgument::new_err(message.to_owned()),
+        None => ClassifiedError::new_err(format!(
+            "{} ({})",
+            error.class().as_str(),
+            error.reason().as_str()
+        )),
+    };
+    attach_dynamo_error(python_error, error)
+}
+
+fn attach_dynamo_error(python_error: PyErr, error: DynamoError) -> PyErr {
+    Python::with_gil(|py| -> PyResult<()> {
+        let value = python_error.value(py);
+        value.setattr(
+            "_dynamo_error",
+            serde_json::to_string(&error).map_err(crate::to_pyerr)?,
+        )?;
+        value.setattr("error_class", error.class().as_str())?;
+        value.setattr("reason", error.reason().as_str())?;
+        value.setattr(
+            "diagnostic",
+            error.diagnostic().map(|detail| detail.as_str()),
+        )?;
+        value.setattr(
+            "public_details",
+            pythonize::pythonize(py, &error.public_details())?,
+        )?;
+        Ok(())
+    })
+    .err()
+    .unwrap_or(python_error)
+}
+
+pub(crate) fn py_exception_to_dynamo_error(py: Python<'_>, error: &PyErr) -> Option<DynamoError> {
+    if !error.is_instance_of::<ClassifiedError>(py)
+        && !error.is_instance_of::<InvalidArgument>(py)
+        && !error.is_instance_of::<RouterQueueLimitExceeded>(py)
+    {
+        return None;
+    }
+    let payload = match error.value(py).getattr("_dynamo_error") {
+        Ok(payload) => payload,
+        Err(_) => return None,
+    };
+    Some(
+        payload
+            .extract::<String>()
+            .ok()
+            .and_then(|payload| serde_json::from_str(&payload).ok())
+            .unwrap_or_else(|| {
+                DynamoError::builder()
+                    .class(ErrorClass::Internal)
+                    .reason(
+                        ErrorReason::new("runtime.invalid_error").expect("registered error reason"),
+                    )
+                    .diagnostic("Invalid classified Python error payload")
+                    .build()
+            }),
+    )
+}
 
 pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
+    let semantic = DynamoError::builder()
+        .class(ErrorClass::CapacityExhausted)
+        .diagnostic(rejection.to_string())
+        .build();
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
     let attributes = Python::with_gil(|py| -> PyResult<()> {
         let value = error.value(py);
@@ -33,7 +162,7 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
     if let Err(error) = attributes {
         return error;
     }
-    error
+    attach_dynamo_error(error, semantic)
 }
 
 // Raised by the in-process `SelectionService` bindings for selector failures
@@ -97,6 +226,8 @@ macro_rules! define_dynamo_exceptions {
         /// Register all Dynamo exception classes on the `_core` module.
         pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("DynamoException", m.py().get_type::<DynamoException>())?;
+            m.add("ClassifiedError", m.py().get_type::<ClassifiedError>())?;
+            m.add_function(wrap_pyfunction!(classified_error, m)?)?;
             m.add(
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),
@@ -136,22 +267,21 @@ define_dynamo_exceptions!(
     (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
 
-/// Preserve explicitly public validation errors across Rust-to-Python streams.
-/// Other errors retain the iterator's existing `ValueError` behavior; diagnostic
-/// text must never be promoted into a public `InvalidArgument` message.
+/// Preserve the canonical error and explicitly approved public details.
 pub(crate) fn check_response_error<R>(response: Annotated<R>) -> PyResult<Annotated<R>> {
-    if response.is_error()
-        && let Some(message) = response
-            .error
-            .as_ref()
-            .and_then(public_invalid_request_message)
-    {
-        return Err(InvalidArgument::new_err(message.to_owned()));
+    if response.is_error() {
+        let error = response.error.clone().unwrap_or_else(|| {
+            DynamoError::msg(
+                response
+                    .comment
+                    .as_ref()
+                    .map(|comments| comments.join(", "))
+                    .unwrap_or_else(|| "unknown error".to_owned()),
+            )
+        });
+        return Err(dynamo_error_to_pyerr(error));
     }
-
-    response
-        .ok()
-        .map_err(pyo3::exceptions::PyValueError::new_err)
+    Ok(response)
 }
 
 fn public_invalid_request_message(error: &DynamoError) -> Option<&str> {
@@ -304,5 +434,171 @@ mod tests {
             assert_eq!(legacy_http.code, code);
             assert_eq!(legacy_http.message, "private backend detail");
         }
+    }
+}
+
+#[cfg(test)]
+mod semantic_roundtrip_tests {
+    use super::*;
+    use dynamo_runtime::error::{ErrorReason, PublicDetails};
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+    fn queue_rejection() -> dynamo_kv_router::scheduling::QueueRejection {
+        dynamo_kv_router::scheduling::QueueRejection {
+            policy_class: "latency".into(),
+            limit_kind: dynamo_kv_router::scheduling::QueueLimitKind::Requests,
+            current: 2,
+            limit: 1,
+        }
+    }
+
+    #[test]
+    fn initial_queue_rejection_retains_capacity_identity() {
+        pyo3::prepare_freethreaded_python();
+        let error = anyhow::Error::new(queue_rejection()).context("prefill selection failed");
+        let python_error = pipeline_error_to_pyerr(error);
+        let restored = crate::engine::map_python_exception(python_error);
+        assert_eq!(restored.class(), ErrorClass::CapacityExhausted);
+        assert_eq!(restored.reason().as_str(), "capacity.exhausted");
+        assert_eq!(restored.public_details(), None);
+    }
+
+    #[test]
+    fn direct_queue_exception_keeps_attributes_and_semantics() {
+        pyo3::prepare_freethreaded_python();
+        let python_error = queue_rejection_to_pyerr(queue_rejection());
+        Python::with_gil(|py| {
+            assert!(python_error.is_instance_of::<RouterQueueLimitExceeded>(py));
+            assert_eq!(
+                python_error
+                    .value(py)
+                    .getattr("policy_class")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "latency"
+            );
+            assert_eq!(
+                python_error
+                    .value(py)
+                    .getattr("limit_kind")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "requests"
+            );
+            assert_eq!(
+                python_error
+                    .value(py)
+                    .getattr("current")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                python_error
+                    .value(py)
+                    .getattr("limit")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+        });
+        let restored = crate::engine::map_python_exception(python_error);
+        assert_eq!(restored.class(), ErrorClass::CapacityExhausted);
+        assert_eq!(restored.reason().as_str(), "capacity.exhausted");
+        assert_eq!(restored.public_details(), None);
+    }
+
+    #[test]
+    fn annotated_error_preserves_canonical_identity_and_public_details() {
+        pyo3::prepare_freethreaded_python();
+        let original = DynamoError::builder()
+            .class(ErrorClass::CapacityExhausted)
+            .reason(ErrorReason::new("capacity.worker_overloaded").unwrap())
+            .diagnostic("private engine detail")
+            .public_details(PublicDetails::SizeLimit {
+                limit: 4,
+                actual: Some(5),
+            })
+            .build();
+        let response = Annotated::<String>::from_err(original.clone());
+        let python_error = check_response_error(response).unwrap_err();
+        let restored = crate::engine::map_python_exception(python_error);
+        assert_eq!(restored.class(), original.class());
+        assert_eq!(restored.reason(), original.reason());
+        assert_eq!(restored.public_details(), original.public_details());
+        assert_eq!(restored.diagnostic(), original.diagnostic());
+    }
+
+    #[test]
+    fn all_canonical_classes_survive_the_stream_bridge() {
+        pyo3::prepare_freethreaded_python();
+        for class in [
+            ErrorClass::InvalidRequest,
+            ErrorClass::Unauthenticated,
+            ErrorClass::PermissionDenied,
+            ErrorClass::NotFound,
+            ErrorClass::Conflict,
+            ErrorClass::PayloadTooLarge,
+            ErrorClass::UnsupportedMedia,
+            ErrorClass::RateLimited,
+            ErrorClass::CapacityExhausted,
+            ErrorClass::Unavailable,
+            ErrorClass::BackendProtocol,
+            ErrorClass::DeadlineExceeded,
+            ErrorClass::NotImplemented,
+            ErrorClass::Internal,
+            ErrorClass::Cancelled,
+        ] {
+            let original = DynamoError::builder()
+                .class(class)
+                .diagnostic("private secret https://internal.invalid")
+                .build();
+            let python_error =
+                check_response_error(Annotated::<String>::from_err(original.clone())).unwrap_err();
+            assert!(!python_error.to_string().contains("secret"));
+            let restored = crate::engine::map_python_exception(python_error);
+            assert_eq!(restored.class(), class);
+            assert_eq!(restored.reason(), original.reason());
+            assert_eq!(restored.public_details(), None);
+            assert_eq!(restored.diagnostic(), original.diagnostic());
+        }
+    }
+
+    #[test]
+    fn explicitly_public_validation_retains_legacy_type_and_full_identity() {
+        pyo3::prepare_freethreaded_python();
+        let original = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.invalid_argument").unwrap())
+            .public_message("The message role is invalid")
+            .diagnostic("private request body")
+            .build();
+        let python_error = dynamo_error_to_pyerr(original.clone());
+        Python::with_gil(|py| assert!(python_error.is_instance_of::<InvalidArgument>(py)));
+        let restored = crate::engine::map_python_exception(python_error);
+        assert_eq!(restored.reason(), original.reason());
+        assert_eq!(restored.public_details(), original.public_details());
+        assert_eq!(restored.diagnostic(), original.diagnostic());
+    }
+
+    #[test]
+    fn malformed_payload_fails_closed_without_public_details() {
+        pyo3::prepare_freethreaded_python();
+        let python_error = ClassifiedError::new_err("private forged diagnostic");
+        Python::with_gil(|py| {
+            python_error
+                .value(py)
+                .setattr("_dynamo_error", "invalid json")
+                .unwrap()
+        });
+        let restored = crate::engine::map_python_exception(python_error);
+        assert_eq!(restored.class(), ErrorClass::Internal);
+        assert_eq!(restored.reason().as_str(), "runtime.invalid_error");
+        assert_eq!(restored.public_details(), None);
+        assert!(!restored.diagnostic().unwrap().as_str().contains("forged"));
     }
 }
