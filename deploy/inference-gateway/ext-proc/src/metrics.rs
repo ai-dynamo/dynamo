@@ -108,7 +108,9 @@ pub fn register_router_queue_metrics() {
     if REGISTERED.load(Ordering::Acquire) {
         return;
     }
-    let _guard = INIT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = INIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if REGISTERED.load(Ordering::Acquire) {
         return;
     }
