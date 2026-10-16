@@ -6,6 +6,8 @@
 package lpx
 
 import (
+	"strings"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -42,4 +44,35 @@ func configureAgentScheduling(
 		container.Resources.Limits = make(corev1.ResourceList)
 	}
 	container.Resources.Requests[name], container.Resources.Limits[name] = amount, amount
+}
+
+// stripLPUResources removes authored LPU requests and limits from a non-agent PodSpec,
+// so only agents hold trays.
+func stripLPUResources(spec *corev1.PodSpec) {
+	for index := range spec.InitContainers {
+		stripLPUResourceRequirements(&spec.InitContainers[index].Resources)
+	}
+	for index := range spec.Containers {
+		stripLPUResourceRequirements(&spec.Containers[index].Resources)
+	}
+	for index := range spec.EphemeralContainers {
+		stripLPUResourceRequirements(&spec.EphemeralContainers[index].Resources)
+	}
+	if spec.Resources != nil {
+		stripLPUResourceList(spec.Resources.Limits)
+		stripLPUResourceList(spec.Resources.Requests)
+	}
+}
+
+func stripLPUResourceRequirements(resources *corev1.ResourceRequirements) {
+	stripLPUResourceList(resources.Limits)
+	stripLPUResourceList(resources.Requests)
+}
+
+func stripLPUResourceList(resources corev1.ResourceList) {
+	for name := range resources {
+		if strings.HasPrefix(string(name), "lpu.nvidia.com/") || name == v3LPUResourceName {
+			delete(resources, name)
+		}
+	}
 }
