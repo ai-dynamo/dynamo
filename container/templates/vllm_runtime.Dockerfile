@@ -182,7 +182,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
 {# vLLM <0.31 rejects the extra output fields added by Omni. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
-{% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{% set vllm_rs_plugins = "modelexpress,dynamo_nixl_telemetry" if context.vllm.enable_modelexpress == "true" else "dynamo_nixl_telemetry" %}
 {% endif %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
