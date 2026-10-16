@@ -11,19 +11,10 @@ import (
 	"strings"
 )
 
-// BuildCompilationMode records the compiler-authored execution mode in a normalized build.
-type BuildCompilationMode string
-
 // BuildFamily identifies the physical LPU target family of a normalized build.
 type BuildFamily string
 
 const (
-	// BuildCompilationModeUnknown represents a build whose compilation mode is not known.
-	BuildCompilationModeUnknown BuildCompilationMode = ""
-	// BuildCompilationModeLPUOnly represents a build executed entirely on LPUs.
-	BuildCompilationModeLPUOnly BuildCompilationMode = "lpuOnly"
-	// BuildCompilationModeHybrid retains the model manifest's historical "lpx" value.
-	BuildCompilationModeHybrid BuildCompilationMode = "lpx"
 	// BuildFamilyXT identifies the XT8888 LPU target family.
 	BuildFamilyXT BuildFamily = "xt8888"
 	// BuildFamilyHX identifies the HX16x8x2x3 LPU target family.
@@ -39,8 +30,8 @@ type Build struct {
 	Path string
 	// Family is the physical LPU target family.
 	Family BuildFamily
-	// CompilationMode selects the compiler-authored LPU-only or hybrid artifact mode.
-	CompilationMode BuildCompilationMode
+	// HasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
+	HasCUDAPartitions bool
 	// Partitions contains the normalized physical compiler partitions.
 	Partitions []BuildPartition
 	// SelectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.

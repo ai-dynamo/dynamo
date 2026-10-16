@@ -622,6 +622,37 @@ def _assert_inline_reference_elided(caplog, encoded: str) -> None:
     assert all(len(record.getMessage()) < 512 for record in caplog.records)
 
 
+async def test_multi_picture_jpeg_loads_primary_frame(loader: ImageLoader) -> None:
+    primary = Image.new("RGB", (4, 3), color="red")
+    buf = BytesIO()
+    primary.save(
+        buf,
+        format="MPO",
+        save_all=True,
+        append_images=[Image.new("RGB", (2, 2), color="blue")],
+    )
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    image = await loader.load_image(f"data:image/jpeg;base64,{encoded}")
+
+    assert image.mode == "RGB"
+    assert image.size == (4, 3)
+    assert image.getpixel((0, 0))[0] > 200
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "BMP", "TIFF"])
+async def test_pillow_format_outside_allowlist_raises_415(
+    loader: ImageLoader, fmt: str
+) -> None:
+    buf = BytesIO()
+    Image.new("RGB", (4, 3), color="red").save(buf, format=fmt)
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(f"data:image/{fmt.lower()};base64,{encoded}")
+    assert exc_info.value.status == 415
+
+
 async def test_unsupported_format_url_raises_415(loader: ImageLoader) -> None:
     """Fetching a URL that returns an unsupported image format (e.g. SVG) should raise
     HttpStatusError with status 415, not 500."""

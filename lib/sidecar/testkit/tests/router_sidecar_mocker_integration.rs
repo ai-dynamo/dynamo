@@ -124,6 +124,25 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
         ),
         "{error}"
     );
+    assert_eq!(
+        error.class(),
+        dynamo_backend_common::ErrorType::InvalidRequest,
+        "{error}"
+    );
+    assert!(
+        !dynamo_runtime::error::match_error_chain(
+            &error,
+            &[dynamo_backend_common::ErrorType::CannotConnect],
+            &[],
+        ),
+        "{error}"
+    );
+    assert!(
+        router
+            .selectable_worker_ids()
+            .is_ok_and(|ids| !ids.is_empty()),
+        "a request-validation refusal must not quarantine the worker"
+    );
     assert!(!rejected.reached(Event::Received));
     healthy::<F>(&env, &router, &control, "after-unsupported").await;
 
@@ -238,13 +257,15 @@ async fn vllm_failed_and_interrupted_startup_leave_no_registration() {
 
 async fn failed_and_interrupted_startup_leave_no_registration<F: ProcessFixture>() {
     let env = Environment::new().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // Reserve the unavailable endpoint so another parallel mock cannot acquire it.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = format!("http://{}", socket.local_addr().unwrap());
     let mut child = env.spawn::<F>(&endpoint, DisaggregationMode::Aggregated, 1);
     assert!(!child.exit().await.success(), "{}", child.logs());
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
+    drop(socket);
     for is_interrupted in [false, true] {
         let env = Environment::new().await;
         let mut gate = Gate::new("http://127.0.0.1:1").await;
