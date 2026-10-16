@@ -3,7 +3,6 @@
 
 """SGLang-managed launcher for Dynamo's native sidecar."""
 
-import os
 import sys
 
 from dynamo._core import backend as _backend
@@ -12,8 +11,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 def main(argv: list[str] | None = None) -> None:
     """Run the Dynamo sidecar against SGLang's injected gRPC endpoint."""
-    if endpoint := os.environ.get("SGLANG_GRPC_ENDPOINT"):
-        os.environ.setdefault("DYN_SIDECAR_GRPC_ENDPOINT", endpoint)
     configure_dynamo_logging(service_name="dynamo.sglang.sidecar")
     _backend._run_sglang_sidecar(sys.argv[1:] if argv is None else argv)
 
