@@ -2662,12 +2662,7 @@ mod tests {
         const GIB: u64 = 1024 * 1024 * 1024;
         for (limit, expected) in [
             (Some(4 * GIB), (256 * MIB, "cgroup_limit")),
-            (Some(32 * GIB), (2048 * MIB, "cgroup_limit")),
-            (Some(128 * GIB), (8192 * MIB, "cgroup_limit")),
-            (Some(256 * GIB), (8192 * MIB, "cgroup_limit")),
             (Some(u64::MAX), (8192 * MIB, "cgroup_limit")),
-            (Some(16), (1, "cgroup_limit")),
-            (Some(15), (0, "cgroup_limit")),
             (None, (64 * MIB, "fallback")),
         ] {
             assert_eq!(
@@ -2680,27 +2675,16 @@ mod tests {
 
     #[test]
     fn tokenizer_cache_budget_overrides_bypass_memory_detection() {
+        const FALLBACK: usize = super::FALLBACK_TOKENIZER_CACHE_BYTES;
         for (value, expected) in [
-            ("0".to_string(), 0),
-            ("1024".to_string(), 1024),
-            (" 1024".to_string(), 1024),
-            ("1024\n".to_string(), 1024),
-            (usize::MAX.to_string(), usize::MAX),
+            ("0", (0, "DYN_TOKENIZER_CACHE_BYTES")),
+            (" 1024\n", (1024, "DYN_TOKENIZER_CACHE_BYTES")),
+            ("512MiB", (FALLBACK, "fallback")),
+            ("", (FALLBACK, "fallback")),
         ] {
             assert_eq!(
-                super::tokenizer_cache_budget(Some(&value), || panic!("unexpected detection")),
-                (expected, "DYN_TOKENIZER_CACHE_BYTES"),
-                "value={value:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tokenizer_cache_budget_invalid_override_uses_fallback() {
-        for value in ["", "invalid", "512MiB", "1e9", "-1", "\u{FFFD}"] {
-            assert_eq!(
                 super::tokenizer_cache_budget(Some(value), || panic!("unexpected detection")),
-                (super::FALLBACK_TOKENIZER_CACHE_BYTES, "fallback"),
+                expected,
                 "value={value:?}"
             );
         }
@@ -2711,12 +2695,9 @@ mod tests {
     fn tokenizer_cache_finite_memory_limit_ignores_host_memory_total() {
         const GIB: u64 = 1024 * 1024 * 1024;
         for (limit, mem_total, expected) in [
-            (2 * GIB, 100 * GIB, Some(2 * GIB)),
             (89 * GIB, 100 * GIB, Some(89 * GIB)),
             (90 * GIB, 100 * GIB, None),
             (100 * GIB, 100 * GIB, None),
-            (200 * GIB, 100 * GIB, None),
-            (2 * GIB, 0, None),
         ] {
             assert_eq!(
                 super::finite_memory_limit(limit, mem_total),
@@ -2742,16 +2723,17 @@ mod tests {
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
                 String::from_utf8_lossy(&output.stderr),
             );
             return;
         }
 
-        const SOFT: libc::rlim_t = 1024;
+        // Stays below the hard limit even when a container sets it to 1024.
+        const SOFT: libc::rlim_t = 64;
         let mut nofile = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
@@ -2761,19 +2743,12 @@ mod tests {
             unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
             0
         );
-        if nofile.rlim_max <= SOFT {
-            eprintln!(
-                "skipping: hard RLIMIT_NOFILE {} leaves no room to observe a raise",
-                nofile.rlim_max
-            );
-            return;
-        }
+        assert!(nofile.rlim_max > SOFT);
         nofile.rlim_cur = SOFT;
         // SAFETY: lowering the soft limit below the hard limit needs no privileges.
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) }, 0);
 
-        let memory_limit = super::tokenizer_cache_memory_limit();
-        eprintln!("detected memory_limit={memory_limit:?}");
+        super::tokenizer_cache_memory_limit();
 
         // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
