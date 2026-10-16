@@ -37,8 +37,14 @@ pub(crate) struct ModelMetadata {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
-    /// True when both portable and engine-specific capabilities advertise images.
-    pub(crate) supports_image: bool,
+    /// Whether both portable and engine-specific capabilities advertise images.
+    /// `None` means startup discovery failed transiently and may be retried.
+    pub(crate) supports_image: Option<bool>,
+}
+
+pub(crate) enum ModelInfoResponse {
+    Available(ModelMetadata),
+    Unsupported(tonic::Status),
 }
 
 pub(crate) struct TrtllmClient {
@@ -125,22 +131,24 @@ impl TrtllmClient {
         Ok(ModelMetadata {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
-            supports_image,
+            supports_image: Some(supports_image),
         })
     }
 
     /// One `GetModelInfo` call, for when `--context-length` already supplies the
     /// window and the engine is consulted only to cross-check it and to learn
     /// its output cap.
-    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelMetadata, DynamoError> {
-        tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model))
-            .await
-            .map_err(|_| {
-                connection_timeout(format!(
-                    "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
-                ))
-            })?
-            .map_err(|status| status_to_dynamo("GetModelInfo", status))
+    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelInfoResponse, DynamoError> {
+        match tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model)).await {
+            Ok(Ok(metadata)) => Ok(ModelInfoResponse::Available(metadata)),
+            Ok(Err(status)) if is_request_itself_wrong(&status) => {
+                Ok(ModelInfoResponse::Unsupported(status))
+            }
+            Ok(Err(status)) => Err(status_to_dynamo("GetModelInfo", status)),
+            Err(_) => Err(connection_timeout(format!(
+                "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
+            ))),
+        }
     }
 
     /// Polls `GetModelInfo` until the engine reports a usable context length or

@@ -197,6 +197,11 @@ const testCases = [
     desc: 'trtllm sidecar source triggers Rust checks and trtllm E2E'
   },
   {
+    file: 'tests/serve/test_sidecar.py',
+    expect: { sidecar: true, trtllm: true },
+    desc: 'shared sidecar test changes trigger the TensorRT-LLM sidecar E2E'
+  },
+  {
     file: 'lib/sidecar/vllm/deploy/agg.yaml',
     expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar deployment config avoids Rust and E2E checks'

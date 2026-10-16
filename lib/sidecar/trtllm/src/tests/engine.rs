@@ -441,6 +441,64 @@ async fn a_configured_context_length_survives_a_server_without_control() {
         config.llm.expect("llm registration").context_length,
         Some(8192)
     );
+
+    let mut image_request = request();
+    add_images(&mut image_request, ["https://example.com/image.png"]);
+    let error = match engine
+        .generate(
+            image_request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+    {
+        Ok(_) => panic!("a server without capability discovery must reject images"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise image support")
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        1,
+        "a definitive UNIMPLEMENTED response must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn image_request_retries_transient_capability_discovery() {
+    let service = FakeTrtllm::default();
+    service.unavailable_model_info.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
+    engine.start(0).await.expect("start with configured window");
+
+    server
+        .service
+        .unavailable_model_info
+        .store(false, Ordering::SeqCst);
+    server
+        .service
+        .supports_multimodal
+        .store(true, Ordering::SeqCst);
+    server
+        .service
+        .advertises_image
+        .store(true, Ordering::SeqCst);
+    let mut image_request = request();
+    add_images(&mut image_request, ["https://example.com/image.png"]);
+
+    let output = collect(&engine, image_request).await;
+    assert_eq!(
+        output.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        2,
+        "the image request must retry the transient startup failure once"
+    );
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a

@@ -211,10 +211,6 @@ sidecar_configs = {
             pytest.mark.requested_trtllm_kv_tokens(32768),
             pytest.mark.timeout(960),
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                not _trtllm_serves_openengine(),
-                reason=TRTLLM_OPENENGINE_SKIP_REASON,
-            ),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         timeout=900,
@@ -339,6 +335,10 @@ sidecar_configs = {
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
+    if config.name == "trtllm_aggregated_image" and not _trtllm_serves_openengine():
+        if os.environ.get("DYNAMO_TEST_SIDECAR_BACKEND") == "trtllm":
+            pytest.fail(TRTLLM_OPENENGINE_SKIP_REASON)
+        pytest.skip(TRTLLM_OPENENGINE_SKIP_REASON)
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")

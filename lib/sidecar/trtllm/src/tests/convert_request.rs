@@ -8,8 +8,8 @@ use super::*;
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
     let request = request();
-    let proto = build_generate_request(&request, "req-1", "served-model", None, AGG)
-        .expect("build request");
+    let proto =
+        build_generate_request(request, "req-1", "served-model", None, AGG).expect("build request");
     assert_eq!(proto.request_id, "req-1");
     assert_eq!(proto.model, "served-model");
     match proto.input.as_ref().expect("input") {
@@ -89,7 +89,7 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
         "image_url".to_string(),
         vec![Some("first-image".to_string()), None],
     )]));
-    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect("image request");
     assert_eq!(proto.media.len(), 2);
     assert_eq!(proto.media[0].modality, pb::Modality::Image as i32);
@@ -123,7 +123,7 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
         "mm_hashes": ["0123456789abcdef", "fedcba9876543210"]
     }));
 
-    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect("image request");
     assert!(proto.media.iter().all(|item| item.uuid.is_empty()));
 }
@@ -134,7 +134,7 @@ fn image_media_requires_the_loaded_models_advertised_capability() {
     add_images(&mut req, ["https://example.com/image.png"]);
 
     for model_limits in [None, limits(4096)] {
-        let error = build_generate_request(&req, "req", "model", model_limits, AGG)
+        let error = build_generate_request(req.clone(), "req", "model", model_limits, AGG)
             .expect_err("a text-only or unknown model must reject images");
         assert!(
             error
@@ -159,7 +159,7 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
                 "https://example.com/media".to_string(),
             )],
         )]));
-        let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+        let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
             .expect_err("only images are supported");
         assert!(
             error.to_string().contains(expected),
@@ -169,7 +169,7 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
 
     let mut req = request();
     add_images(&mut req, ["file:///tmp/image.png"]);
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("the engine cannot fetch a local Dynamo path");
     assert!(error.to_string().contains("http, https, or data URI"));
 
@@ -178,7 +178,7 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
         "image_url".to_string(),
         vec![MultimodalData::UuidOnly("cached-image".to_string())],
     )]));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("OpenEngine cannot resolve a source-less UUID");
     assert!(error.to_string().contains("requires an image source"));
 }
@@ -191,19 +191,19 @@ fn image_metadata_that_cannot_be_honored_is_rejected() {
         "image_url".to_string(),
         vec![Some("one".to_string()), Some("two".to_string())],
     )]));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG)
         .expect_err("UUIDs must align positionally");
     assert!(error.to_string().contains("UUID count"));
 
     req.multi_modal_uuids = None;
     req.mm_processor_kwargs = Some(serde_json::json!({"do_resize": false}));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG)
         .expect_err("processor overrides cannot be dropped");
     assert!(error.to_string().contains("mm_processor_kwargs"));
 
     req.mm_processor_kwargs = Some(serde_json::json!({}));
     req.media_io_kwargs = Some(serde_json::json!({"image": {"mode": "RGB"}}));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("media I/O overrides cannot be dropped");
     assert!(error.to_string().contains("media_io_kwargs"));
 }
@@ -213,7 +213,7 @@ fn image_request_without_max_tokens_is_left_for_engine_derivation() {
     let mut req = request();
     add_images(&mut req, ["https://example.com/image.png"]);
     req.stop_conditions.max_tokens = None;
-    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect("the engine derives against the expanded prompt");
     assert_eq!(proto.stopping.expect("stopping").max_tokens, None);
 }
@@ -222,7 +222,7 @@ fn image_request_without_max_tokens_is_left_for_engine_derivation() {
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
-    let error = build_generate_request(&req, "req", "model", None, AGG)
+    let error = build_generate_request(req, "req", "model", None, AGG)
         .expect_err("must require max_tokens");
     assert!(error.to_string().contains("max_tokens"));
 }
@@ -233,8 +233,8 @@ fn omitted_max_tokens_defaults_to_remaining_context() {
     req.stop_conditions.max_tokens = None;
     // request() carries three prompt tokens ([11, 22, 33]); the default fills the
     // remaining context: max(1, context_length - prompt_len).
-    let proto = build_generate_request(&req, "req", "model", limits(100), AGG)
-        .expect("build with fallback");
+    let proto =
+        build_generate_request(req, "req", "model", limits(100), AGG).expect("build with fallback");
     assert_eq!(proto.stopping.unwrap().max_tokens, Some(97));
 }
 
@@ -244,7 +244,7 @@ fn omitted_max_tokens_default_is_floored_at_one() {
     req.stop_conditions.max_tokens = None;
     // Prompt already fills (or exceeds) the context: default must not underflow to 0.
     let proto =
-        build_generate_request(&req, "req", "model", limits(2), AGG).expect("build with fallback");
+        build_generate_request(req, "req", "model", limits(2), AGG).expect("build with fallback");
     assert_eq!(proto.stopping.unwrap().max_tokens, Some(1));
 }
 
@@ -252,7 +252,7 @@ fn omitted_max_tokens_default_is_floored_at_one() {
 fn top_k_all_tokens_is_left_unset() {
     let mut req = request();
     req.sampling_options.top_k = Some(-1);
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
     assert_eq!(proto.sampling.unwrap().top_k, None);
 }
 
@@ -301,7 +301,7 @@ fn logprobs_zero_keeps_selected_without_alternatives() {
     req.output_options.logprobs = Some(0);
     // The wire request must still ask TRT-LLM for one candidate so the selected
     // token's logprob is computed.
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req.clone(), "req", "model", None, AGG).expect("build");
     match proto
         .response
         .unwrap()
@@ -331,13 +331,13 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
     let proto = build_generate_request(
-        &req,
+        req,
         "req",
         "model",
         Some(ModelMetadata {
             context_length: Some(4096),
             max_output_tokens: Some(256),
-            supports_image: false,
+            supports_image: Some(false),
         }),
         AGG,
     )
@@ -363,7 +363,7 @@ fn a_derived_budget_below_min_tokens_is_rejected() {
     let prompt_len = req.token_ids.len() as u32;
     let window = prompt_len + 8;
 
-    let error = build_generate_request(&req, "req", "model", limits(window), AGG)
+    let error = build_generate_request(req, "req", "model", limits(window), AGG)
         .expect_err("a minimum above the remaining budget cannot be served");
     let message = error.to_string();
     assert!(
@@ -383,7 +383,7 @@ fn a_prefill_request_does_not_judge_a_minimum_against_its_own_window() {
     req.stop_conditions.min_tokens = Some(64);
     let window = req.token_ids.len() as u32 + 8;
 
-    build_generate_request(&req, "req", "model", limits(window), PREFILL)
+    build_generate_request(req, "req", "model", limits(window), PREFILL)
         .expect("only the decode worker's window governs the minimum");
 }
 
@@ -396,7 +396,7 @@ fn a_minimum_within_the_derived_budget_is_served() {
     req.stop_conditions.min_tokens = Some(8);
     let window = req.token_ids.len() as u32 + 64;
 
-    let proto = build_generate_request(&req, "req", "model", limits(window), AGG)
+    let proto = build_generate_request(req, "req", "model", limits(window), AGG)
         .expect("a minimum that fits is not a conflict");
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));
