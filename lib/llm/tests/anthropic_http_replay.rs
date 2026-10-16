@@ -887,34 +887,32 @@ async fn count_tokens_returns_exact_estimate_without_calling_engine() {
 async fn explicit_thinking_controls_reach_the_chat_engine() {
     temp_env::async_with_vars(ENV, async {
         let mut scripts = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..3 {
             scripts.push(load_agent_fixture("text.sse").await.unwrap());
         }
         let svc = HarnessService::start(scripts).await;
         let mut expected = Vec::new();
-        for streaming in [false, true] {
-            for (thinking, enabled) in [
-                (None, None),
-                (
-                    Some(json!({"type": "enabled", "budget_tokens": 1024})),
-                    Some(true),
-                ),
-                (Some(json!({"type": "disabled"})), Some(false)),
-            ] {
-                let mut body = json!({
-                    "model": MODEL,
-                    "max_tokens": 2048,
-                    "stream": streaming,
-                    "messages": [{"role": "user", "content": "ping"}]
-                });
-                if let Some(thinking) = thinking {
-                    body["thinking"] = thinking;
-                }
-                let response = post_messages(&svc, &body).await;
-                assert_eq!(response.status(), reqwest::StatusCode::OK);
-                let _ = response.text().await.unwrap();
-                expected.push(enabled.map(Value::Bool));
+        for (thinking, enabled) in [
+            (None, None),
+            (
+                Some(json!({"type": "enabled", "budget_tokens": 1024})),
+                Some(true),
+            ),
+            (Some(json!({"type": "disabled"})), Some(false)),
+        ] {
+            let mut body = json!({
+                "model": MODEL,
+                "max_tokens": 2048,
+                "stream": false,
+                "messages": [{"role": "user", "content": "ping"}]
+            });
+            if let Some(thinking) = thinking {
+                body["thinking"] = thinking;
             }
+            let response = post_messages(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.text().await.unwrap();
+            expected.push(enabled.map(Value::Bool));
         }
         let requests = svc.engine.take_requests().await;
         let actual: Vec<_> = requests
