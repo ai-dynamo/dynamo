@@ -123,7 +123,7 @@ spec:
           - --host
           - 127.0.0.1
           - --port
-          - "50051"
+          - "30001"
           # Workaround, not a requirement: `GetModelInfo` reads the unresolved
           # `llm.args.max_seq_len`, which stays `None` on the PyTorch path even
           # though the executor has already resolved the real window from the
@@ -154,7 +154,7 @@ spec:
           - dynamo.trtllm.sidecar
           args:
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --model-path
           - Qwen/Qwen3-0.6B
           # Matches the engine's --max_seq_len above.

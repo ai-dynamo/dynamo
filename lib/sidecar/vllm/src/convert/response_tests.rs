@@ -381,47 +381,99 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
 
 #[test]
 fn empty_chunks_and_delta_tokens_preserve_terminal_usage() {
-    let request = minimal_request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-    assert!(
-        state
-            .convert(pb::GenerateResponse {
-                outputs: Some(pb::SequenceOutput::default()),
-                ..Default::default()
-            })
+    // Old servers omit cached usage; explicit zero from new servers is meaningful.
+    for cached in [None, Some(0), Some(2)] {
+        let request = minimal_request();
+        let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+        assert!(
+            state
+                .convert(pb::GenerateResponse {
+                    outputs: Some(pb::SequenceOutput::default()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+        let first = state
+            .convert(sequence_response(false, false, None))
             .unwrap()
-            .is_none()
-    );
-    let first = state
-        .convert(sequence_response(false, false, None))
-        .unwrap()
-        .unwrap();
-    assert_eq!(first.token_ids, vec![42]);
-    assert!(first.completion_usage.is_none());
-    let mut response = sequence_response(true, false, None);
-    let output = response.outputs.as_mut().unwrap();
-    output.token_ids = vec![43, 44];
-    output.num_tokens = 2;
-    output.finish_info.as_mut().unwrap().num_output_tokens = 3;
-    let terminal = state.convert(response).unwrap().unwrap();
-    assert_eq!(terminal.token_ids, vec![43, 44]);
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
-    assert!(terminal.disaggregated_params.is_none());
-    let usage = terminal.completion_usage.unwrap();
-    assert_eq!(
-        (
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.total_tokens
-        ),
-        (3, 3, 6)
-    );
+            .unwrap();
+        assert_eq!(first.token_ids, vec![42]);
+        assert!(first.completion_usage.is_none());
+        let mut response = sequence_response(true, false, None);
+        let output = response.outputs.as_mut().unwrap();
+        output.token_ids = vec![43, 44];
+        output.num_tokens = 2;
+        output.finish_info.as_mut().unwrap().num_output_tokens = 3;
+        output.finish_info.as_mut().unwrap().num_cached_tokens = cached;
+        let terminal = state.convert(response).unwrap().unwrap();
+        assert_eq!(terminal.token_ids, vec![43, 44]);
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        assert!(terminal.disaggregated_params.is_none());
+        let usage = terminal.completion_usage.unwrap();
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            cached
+        );
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (3, 3, 6)
+        );
 
-    let decode = ResponseState::new(&request, DisaggregationMode::Decode)
-        .convert(sequence_response(true, false, None))
-        .unwrap()
-        .unwrap();
-    assert!(decode.disaggregated_params.is_none());
+        let decode = ResponseState::new(&request, DisaggregationMode::Decode)
+            .convert(sequence_response(true, false, None))
+            .unwrap()
+            .unwrap();
+        assert!(decode.disaggregated_params.is_none());
+    }
+}
+
+#[test]
+fn decode_reports_prefill_cached_tokens_instead_of_transferred_kv() {
+    for prefill_cached in [None, Some(0), Some(2)] {
+        let mut request = minimal_request();
+        request.prefill_result = Some(PrefillResult {
+            prompt_tokens_details: prefill_cached.map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens),
+                ..Default::default()
+            }),
+            ..decode_request().prefill_result.unwrap()
+        });
+        let mut response = sequence_response(true, false, None);
+        // The decode engine counts the whole transferred prompt as cached.
+        response
+            .outputs
+            .as_mut()
+            .unwrap()
+            .finish_info
+            .as_mut()
+            .unwrap()
+            .num_cached_tokens = Some(3);
+        let mut state = ResponseState::new(&request, DisaggregationMode::Decode);
+        // Client cancellation reports usage without a terminal from vLLM.
+        assert_eq!(
+            state
+                .completion_usage(0, None)
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            prefill_cached
+        );
+        let terminal = state.convert(response).unwrap().unwrap();
+        assert_eq!(
+            terminal
+                .completion_usage
+                .unwrap()
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            prefill_cached
+        );
+    }
 }
 
 #[test]
@@ -524,14 +576,16 @@ fn prefill_terminal_has_zero_completion_usage() {
         FinishReason::Cancelled,
     ] {
         let mut response = terminal_response(reason.clone());
-        response
+        let finish = response
             .outputs
             .as_mut()
             .unwrap()
             .finish_info
             .as_mut()
-            .unwrap()
-            .kv_transfer_params = Some(
+            .unwrap();
+        // The frontend hands this count to decode through PrefillResult.
+        finish.num_cached_tokens = Some(2);
+        finish.kv_transfer_params = Some(
             json_to_struct_v14(
                 json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}}),
                 KV_TRANSFER_PARAMS,
@@ -552,6 +606,12 @@ fn prefill_terminal_has_zero_completion_usage() {
                 usage.total_tokens
             ),
             (3, 0, 3)
+        );
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(2)
         );
         assert_eq!(terminal.finish_reason, Some(reason.clone()));
         if reason == FinishReason::Cancelled {

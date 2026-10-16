@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 id: minimax-m3
-title: MiniMax M3 NVFP4
+title: MiniMax M3
 page: pages/recipes/model-recipes/minimax-m3.mdx
 provider: minimax
 model:
