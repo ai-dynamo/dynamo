@@ -102,7 +102,9 @@ impl HttpFrontend {
         {
             anyhow::bail!("request classifiers require --router-mode kv");
         }
-        if !self.plugins.is_empty() && !matches!(&engine_config, EngineConfig::Dynamic { .. }) {
+        if self.plugins.has_custom_plugins()
+            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
@@ -210,6 +212,7 @@ async fn run_with_router_plugins(
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder
         .metrics_config(local_model.metrics_config().clone())
+        .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).

@@ -6,6 +6,11 @@ name: Shared Local GPU and CPU Test
 on:
   workflow_call:
     inputs:
+      amd_runner_labels:
+        description: 'Optional JSON array of GPU tier, architecture, generation, and region labels for AMD64'
+        required: false
+        type: string
+        default: ''
       test_suite_name:
         description: 'Test suite name (vllm, sglang, trtllm)'
         required: true
@@ -174,9 +179,12 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    runs-on: ${{ matrix.platform == 'amd64' && (inputs.amd_runner_labels != '' && fromJson(inputs.amd_runner_labels) || inputs.amd_runner) || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      # Match the AMD64 runner region. ARM and callers without regional labels
+      # keep ECR_REGISTRY (west). The build publishes test tags to both regions.
+      # Regional registries are configured in GitHub Actions repository variables.
+      image: ${{ matrix.platform == 'amd64' && contains(fromJson(inputs.amd_runner_labels || '[]'), 'us-east-1') && vars.ECR_REGISTRY_EAST || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -185,9 +193,14 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'http://localhost:9000' || '' }}
+        DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'minioadmin' || '' }}
+        DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'minioadmin' || '' }}
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        # Replaced per-lane by the tagging step below; this is the
+        # fallback if that step does not run.
         DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
@@ -220,9 +233,6 @@ jobs:
           MINIO_ROOT_PASSWORD: minioadmin
           MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
-        ports:
-          - 9000:9000
-          - 9001:9001
     steps:
       - name: Checkout repository
         id: checkout
@@ -248,7 +258,7 @@ jobs:
           mkdir -p "${bin_dir}"
           install -m755 "sidecar-artifact/dynamo-${SIDECAR_BACKEND}-sidecar" \
             "${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar"
-          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          echo "DYNAMO_SIDECAR_BIN=${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar" >> "${GITHUB_ENV}"
           if [ -z "${CONTAINER_WORKSPACE}" ]; then
             echo "::error::container_workspace is empty; refusing to replace test files"
             exit 1
@@ -268,6 +278,37 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
+      # is the inner job id — "test" for every caller — so every test session
+      # lands under one job name and cannot be attributed to a CI lane.
+      # Measured: 105,505 Nightly test events on main over 14 days all under
+      # ci.job.name:test, against 69 distinct lane names on the pipeline side.
+      #
+      # Composed in a step rather than inline in DD_TAGS because DD_TAGS is
+      # comma-separated while lane names contain commas and spaces
+      # ("Test cuda13.0, amd64"), and GitHub expressions have no replace().
+      - name: Tag Datadog test sessions with the CI lane
+        shell: bash
+        env:
+          LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_TYPE: ${{ inputs.test_type }}
+          LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+          LANE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -uo pipefail
+          slug() {
+            local s
+            s="$(printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -c 'a-z0-9._-' '-' \
+              | tr -s '-')" || return
+            s="${s#-}"
+            printf '%s' "${s%-}"
+          }
+          lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
+          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          echo "Datadog lane tag: ${lane}"
+
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
@@ -285,7 +326,21 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
+      - name: Wait for MinIO before vLLM artifact tests
+        if: ${{ inputs.framework == 'vllm' && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
+        shell: bash
+        run: |
+          for ((attempt = 0; attempt < 30; attempt++)); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::MinIO was not ready before vLLM CPU tests"
+          exit 1
+
       - name: Run CPU-only tests (parallelized)
+        id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: $/.github/actions/pytest-local
@@ -301,6 +356,7 @@ jobs:
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
       - name: Run CPU end-to-end tests (isolated)
+        id: cpu-e2e-tests
         # Long-lived deployment tests should not compete with the xdist unit
         # pool or retry until the parent step kills the runner container.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
@@ -319,6 +375,7 @@ jobs:
           gpu_tests: 'false'
           dd_flaky_retry_enabled: 'false'
       - name: Run GPU tests (parallel)
+        id: gpu-parallel-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: $/.github/actions/pytest-local
@@ -338,6 +395,7 @@ jobs:
           gpu_tests: 'true'
           verify_gpu: ${{ inputs.verify_gpu }}
       - name: Run GPU tests (sequential)
+        id: gpu-sequential-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         # !cancelled() so a parallel-stage failure doesn't hide sequential results,
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
@@ -372,3 +430,96 @@ jobs:
           path: test-results/pytest_test_report_*.xml
           retention-days: 7
           if-no-files-found: warn
+
+      # A stage cut off mid-run is still reported as a successful step, so real
+      # test failures go green. Take the verdict only from the status file
+      # pytest-local writes last, never from the step outcome. Placed after the
+      # upload so results survive a failure here, and once per job rather than
+      # per stage to avoid three more container-hook round trips.
+      - name: Verify test stages completed
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          STAGE_OUTCOMES: |
+            pre_merge_cpu ${{ steps.cpu-only-tests.outcome }}
+            pre_merge_cpu_e2e ${{ steps.cpu-e2e-tests.outcome }}
+            pre_merge_gpu_parallel ${{ steps.gpu-parallel-tests.outcome }}
+            pre_merge_gpu ${{ steps.gpu-sequential-tests.outcome }}
+        run: |
+          # Runs inside the job's test container. The planner image is
+          # distroless and ships only the binaries listed in
+          # container/Dockerfile.test, so this stays on bash builtins.
+          set -uo pipefail
+          status_dir="${GITHUB_WORKSPACE}/test-results/status"
+          failed=0
+          checked=""
+
+          while read -r stage outcome; do
+            [[ -z "${stage}" ]] && continue
+            exitcode_file="${status_dir}/${stage}.exitcode"
+
+            case "${outcome}" in
+              ''|skipped)
+                # An unresolvable id renders empty, which would otherwise read
+                # as "skipped" and exempt a stage that really ran.
+                if [[ -f "${exitcode_file}" ]]; then
+                  echo "❌ ${stage}: wrote a status file but its outcome is"
+                  echo "   '${outcome:-<empty>}'. Its id in STAGE_OUTCOMES does not"
+                  echo "   resolve, so the stage ran unverified."
+                  failed=1
+                else
+                  echo "⏭️  ${stage}: did not run"
+                fi
+                ;;
+              success)
+                if [[ ! -f "${exitcode_file}" ]]; then
+                  echo "❌ ${stage}: reported success but wrote no status file."
+                  echo "   Its script did not run to completion, so the result is"
+                  echo "   unknown and cannot be treated as a pass."
+                  failed=1
+                else
+                  # An empty file means the stage created it on entry and never
+                  # reached the line that records an exit code. read is a
+                  # builtin and returns non-zero on an empty file.
+                  code=""
+                  read -r code < "${exitcode_file}" || true
+                  if [[ -z "${code}" ]]; then
+                    echo "❌ ${stage}: reported success but recorded no exit code."
+                    echo "   Its script was cut off mid-run, so the result is"
+                    echo "   unknown and cannot be treated as a pass."
+                    failed=1
+                  elif [[ "${code}" != "0" ]]; then
+                    echo "❌ ${stage}: pytest exited ${code}"
+                    failed=1
+                  else
+                    echo "✅ ${stage}: pytest exited 0"
+                  fi
+                fi
+                ;;
+              *)
+                echo "❌ ${stage}: step outcome '${outcome}'"
+                failed=1
+                ;;
+            esac
+            checked+=" ${stage}"
+          done <<< "${STAGE_OUTCOMES}"
+
+          # A stage added above but not listed here would escape this check.
+          shopt -s nullglob
+          for f in "${status_dir}"/*.exitcode; do
+            stage="${f##*/}"
+            stage="${stage%.exitcode}"
+            if [[ " ${checked} " != *" ${stage} "* ]]; then
+              echo "❌ ${stage}: ran but is not listed in STAGE_OUTCOMES, so its"
+              echo "   result is unverified. Add it to this step."
+              failed=1
+            fi
+          done
+
+          # Without this the checks tab shows only "Process completed with exit
+          # code 1" and the stage name stays buried in this step's log.
+          if [[ "${failed}" -ne 0 ]]; then
+            echo "::error title=Test stage verification failed::A pytest stage did not record a passing result. See this step's log for the stage."
+          fi
+
+          exit "${failed}"

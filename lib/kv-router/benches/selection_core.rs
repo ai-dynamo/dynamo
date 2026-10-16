@@ -45,6 +45,12 @@ fn core_with_workers(
         1,
         CancellationToken::new(),
         SelectionCacheConfig::default(),
+        std::sync::Arc::new(|config, role, _| {
+            dynamo_kv_router::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
+        }),
     )
     .expect("core");
     runtime.block_on(async {

@@ -163,10 +163,17 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				return updated.Status.Phase
 			}, timeout, interval).Should(Equal(nvidiacomv1beta1.DGDRPhasePending))
 
-			// Verify observedGeneration is set
+			GinkgoT().Log("verifying status generation and the complete validation condition")
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
-			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.ObservedGeneration).Should(Equal(updated.Generation))
+
+			validationCondition := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1beta1.ConditionTypeValidation)
+			Expect(validationCondition).NotTo(BeNil())
+			Expect(validationCondition.Status).Should(Equal(metav1.ConditionTrue))
+			Expect(validationCondition.Reason).Should(Equal("ValidationPassed"))
+			Expect(validationCondition.ObservedGeneration).Should(Equal(updated.Generation))
+			Expect(validationCondition.Message).Should(Equal("DGDR spec validation passed"))
 		})
 
 		It("Should pass validation with minimal config", func() {
@@ -455,6 +462,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				ETCDAddress:        "platform-etcd:2379",
 				ModelExpressURL:    "http://model-express:8000",
 				PrometheusEndpoint: "http://prometheus:9090",
+				NATSTLSCAPath:      "/certs/nats-ca.crt",
+				TCPTLSCertPath:     "/certs/tls.crt",
 			}
 
 			sa := &corev1.ServiceAccount{
@@ -526,6 +535,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(envByName).Should(HaveKeyWithValue("ETCD_ENDPOINTS", "platform-etcd:2379"))
 			Expect(envByName).Should(HaveKeyWithValue("MODEL_EXPRESS_URL", "http://model-express:8000"))
 			Expect(envByName).Should(HaveKeyWithValue("PROMETHEUS_ENDPOINT", "http://prometheus:9090"))
+			Expect(envByName).ShouldNot(HaveKey("NATS_TLS_CA_CERT_PATH"))
+			Expect(envByName).ShouldNot(HaveKey("DYN_TCP_TLS_CERT_PATH"))
 
 			_ = k8sClient.Delete(ctx, job)
 		})

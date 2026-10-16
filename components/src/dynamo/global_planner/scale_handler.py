@@ -48,7 +48,7 @@ class ScaleRequestHandler:
     def __init__(
         self,
         runtime: DistributedRuntime,
-        managed_namespaces: list,
+        managed_namespaces: list[str] | None,
         k8s_namespace: str,
         no_operation: bool = False,
         max_total_gpus: int = -1,

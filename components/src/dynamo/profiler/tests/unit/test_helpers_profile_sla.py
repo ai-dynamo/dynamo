@@ -1074,7 +1074,7 @@ class TestAssembleFinalConfig:
     def test_mocker_plus_planner_rapid_skips_profile_cm(self, tmp_path):
         """Mocker + planner + rapid: mocker base is created first, then planner
         layered. The profile-data ConfigMap is NOT emitted because the mocker
-        pulls AIC perf data at runtime via --aic-perf-model flags."""
+        pulls AIC perf data at runtime via --ais-perf-model flags."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(),
