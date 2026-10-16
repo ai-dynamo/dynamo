@@ -43,7 +43,8 @@ pub struct ImagesResponseNvExt {
 /// Per-request accounting in image units.
 ///
 /// `output_images` counts what the response carries, not the requested `n`.
-/// An unknown count is omitted, never written as 0. See
+/// The image counts are always present; only `num_inference_steps` can be
+/// omitted, and an unknown step count is omitted, never written as 0. See
 /// [`ImageAccounting::merge`] for how a multi-chunk response treats each field.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageAccounting {
@@ -55,8 +56,8 @@ pub struct ImageAccounting {
     #[serde(default)]
     pub input_images: u32,
 
-    /// The step count the request asked for (`nvext.num_inference_steps`).
-    /// Omitted when the model default applied.
+    /// The step count the backend ran. Omitted when the backend does not
+    /// know it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub num_inference_steps: Option<u8>,
 }

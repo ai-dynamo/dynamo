@@ -339,7 +339,7 @@ different contracts:
 | Field | Source contract | Value |
 |-------|-----------------|-------|
 | `usage` | OpenAI Images API token usage | The backend's token counts, or `null`. Diffusion models served through vLLM-Omni report no token counts, so the field is `null`. |
-| `nvext.usage` | Dynamo extension | Image-based accounting. Present whenever the backend reports it; no `extra_fields` opt-in. An unknown count is omitted, never written as `0`. |
+| `nvext.usage` | Dynamo extension | Image-based accounting. Present whenever the backend reports it; no `extra_fields` opt-in. The image counts are always present; an unknown step count is omitted, never written as `0`. |
 
 `nvext.usage` carries these fields:
 
@@ -347,7 +347,7 @@ different contracts:
 |-------|------|---------|
 | `output_images` | integer | Images generated and returned in `data`. Counts the output, not the requested `n`. |
 | `input_images` | integer | Reference images the request consumed: `0` for text-to-image, `1` for a request with `input_reference` or an `/v1/images/edits` request. |
-| `num_inference_steps` | integer, optional | The step count the request asked for in `nvext.num_inference_steps`. Omitted when the model default applied. |
+| `num_inference_steps` | integer, optional | The step count the backend ran. Omitted when the backend does not know it. |
 
 The response also fills the OpenAI `size` (`WIDTHxHEIGHT` of the generated images) and
 `output_format` fields from the images themselves.
@@ -384,6 +384,9 @@ Backend support:
 | vLLM-Omni | Yes | Yes |
 | SGLang | Not yet | Not yet |
 | TensorRT-LLM | Not yet | Not yet |
+
+vLLM-Omni reports the step count the request asked for in `nvext.num_inference_steps` and omits it
+when the model default applied: its engine output does not carry the count it ran.
 
 ## See Also
 

@@ -164,13 +164,12 @@ mod tests {
 
     #[test]
     fn merge_folds_accounting_across_chunks() {
-        let token_usage: dynamo_protocols::types::ImageGenUsage = serde_json::from_value(
-            serde_json::json!({
+        let token_usage: dynamo_protocols::types::ImageGenUsage =
+            serde_json::from_value(serde_json::json!({
                 "input_tokens": 3, "output_tokens": 4, "total_tokens": 7,
                 "input_tokens_details": {"text_tokens": 3, "image_tokens": 0}
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
 
         // Chunks that agree: output counts add up, the request-side fields hold.
         let mut first = response(100, Some("png"), Some("37x19"), "first");
