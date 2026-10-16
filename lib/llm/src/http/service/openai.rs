@@ -2645,6 +2645,7 @@ async fn handler_chat_completions(
     response
 }
 
+/// Parse typed JSON with the existing control-character recovery and error mapping.
 pub(super) fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
 where
     T: DeserializeOwned,
@@ -5159,6 +5160,7 @@ pub fn responses_router(
     (vec![doc, input_tokens_doc], router)
 }
 
+/// Apply shared edit limits before dispatching generation requests with references.
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -5170,6 +5172,7 @@ async fn images(
     images_with_request(state, headers, request).await
 }
 
+/// Select a compatible image engine and retain admission and disconnect state.
 async fn images_with_request(
     state: Arc<service_v2::State>,
     headers: HeaderMap,

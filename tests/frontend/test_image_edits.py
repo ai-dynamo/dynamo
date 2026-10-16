@@ -27,6 +27,7 @@ pytestmark = [
 
 class ImageWorkerProcess(ManagedProcess):
     def __init__(self, request, port, *, limit=None, legacy=False):
+        """Launch one isolated worker with explicit capability and reader versions."""
         env = os.environ.copy()
         env.pop("IMAGE_EDIT_CAPABILITY", None)
         if limit is not None:
@@ -53,6 +54,7 @@ class ImageWorkerProcess(ManagedProcess):
 
 @pytest.fixture
 def frontend(request, file_storage_backend, dynamo_dynamic_ports):
+    """Run the production HTTP frontend over TCP with file-backed discovery."""
     _ = file_storage_backend
     port = dynamo_dynamic_ports.frontend_port
     with DynamoFrontendProcess(
@@ -72,6 +74,7 @@ def frontend(request, file_storage_backend, dynamo_dynamic_ports):
 
 
 def references():
+    """Use distinct PNG bytes so hash comparisons detect input reordering."""
     result = []
     for color in ["red", "blue"]:
         with io.BytesIO() as buffer:
@@ -81,6 +84,7 @@ def references():
 
 
 def upload(port, images, alias="image"):
+    """Send real multipart parts in list order through the public edits route."""
     return requests.post(
         f"http://localhost:{port}/v1/images/edits",
         data={"model": MODEL_NAME, "prompt": "edit"},
@@ -90,6 +94,7 @@ def upload(port, images, alias="image"):
 
 
 def test_image_edits_order_json_parity_and_legacy_wire(frontend, request):
+    """Compare worker-observed order across multipart aliases and JSON endpoints."""
     with ImageWorkerProcess(request, frontend, limit=4):
         images = references()
         uris = [
@@ -125,6 +130,7 @@ def test_image_edits_order_json_parity_and_legacy_wire(frontend, request):
 def test_image_edits_unknown_unsupported_and_stale_worker(
     frontend, request, limit, legacy
 ):
+    """Exercise unknown metadata, explicit zero, and an inaccurately advertised reader."""
     with ImageWorkerProcess(request, frontend, limit=limit, legacy=legacy):
         response = upload(frontend, references())
         assert response.status_code == 400, response.text
@@ -134,6 +140,8 @@ def test_image_edits_unknown_unsupported_and_stale_worker(
 
 
 def test_image_edits_mixed_worker_join_and_removal(frontend, request):
+    """A legacy member lowers the set-wide limit until discovery removes it."""
+
     def wait_for_status(expected):
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:

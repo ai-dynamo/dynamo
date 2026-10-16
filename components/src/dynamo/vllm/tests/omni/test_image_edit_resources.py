@@ -26,6 +26,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def metadata_lookup(monkeypatch):
+    """Keep resource tests on a known four-reference capability contract."""
     monkeypatch.setattr(
         image_edit,
         "get_diffusion_model_metadata",
@@ -38,6 +39,7 @@ def metadata_lookup(monkeypatch):
 
 
 def image_reference(size=(2, 2)):
+    """Build a valid inline PNG with exact dimensions for pixel-budget checks."""
     with io.BytesIO() as buffer:
         Image.new("RGB", size, "red").save(buffer, format="PNG")
         return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
@@ -45,6 +47,7 @@ def image_reference(size=(2, 2)):
 
 @pytest.mark.asyncio
 async def test_aggregate_pixel_budget_applies_before_rgb_expansion(monkeypatch):
+    """The second image must respect the remaining budget before conversion."""
     reference = image_reference()
     loader = ImageLoader(max_pixels=4)
     original = Image.Image.convert
@@ -76,6 +79,7 @@ async def test_aggregate_pixel_budget_applies_before_rgb_expansion(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_inline_byte_limit_is_typed_and_redacted():
+    """Inline data must receive a bounded 413 error without echoing its payload."""
     reference = image_reference()
     with pytest.raises(HttpStatusError) as caught:
         await image_edit.load_image_edit_references(
@@ -90,6 +94,7 @@ async def test_inline_byte_limit_is_typed_and_redacted():
 
 @pytest.mark.asyncio
 async def test_request_budget_checks_shared_cache_before_decode(monkeypatch):
+    """Cached bytes still require request-specific admission before decoding."""
     reference = image_reference((3, 3))
     loader = ImageLoader(max_pixels=4)
     loader._shared_image_cache = SimpleNamespace(
@@ -109,6 +114,7 @@ async def test_request_budget_checks_shared_cache_before_decode(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancelled_edit_cancels_fetch_and_does_not_start_next(monkeypatch):
+    """Cancellation must reach the private fetch and prevent subsequent I/O."""
     started, stopped = asyncio.Event(), asyncio.Event()
 
     async def fetch(*args, **kwargs):
@@ -139,6 +145,7 @@ async def test_cancelled_edit_cancels_fetch_and_does_not_start_next(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_remote_error_preserves_status_but_not_url():
+    """Origin status survives sanitization while URL credentials stay private."""
     loader = SimpleNamespace(
         load_image=AsyncMock(
             side_effect=HttpStatusError(

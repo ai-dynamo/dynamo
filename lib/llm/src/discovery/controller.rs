@@ -422,6 +422,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         };
     }
 
+    /// Reconcile registrations without changing an existing worker incarnation.
+    /// Capability-only updates still refresh the incumbent cohort.
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
         if let Some(existing) = self.desired.get(&instance.key) {
             if existing.mdc_checksum == instance.mdc_checksum
@@ -1987,6 +1989,7 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     }
 
+    /// Capability changes must refresh admission without replacing the MDC identity.
     #[tokio::test]
     async fn image_edits_capability_update_reconciles_without_changing_identity() {
         let (host, mut starts) = FakeHost::new();

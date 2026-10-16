@@ -48,6 +48,7 @@ impl NvCreateImageRequest {
 }
 
 impl<'de> Deserialize<'de> for NvCreateImageRequest {
+    /// Normalize scalar or array references while separating typed and passthrough fields.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -108,6 +109,7 @@ impl<'de> Deserialize<'de> for NvCreateImageRequest {
 }
 
 impl Serialize for NvCreateImageRequest {
+    /// Borrow ordered references and emit singletons in the N-2-compatible string form.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -228,6 +230,7 @@ mod tests {
     use super::*;
 
     // --- NvCreateImageRequest ---
+    /// Legacy readers must accept singletons and reject arrays instead of losing inputs.
     #[test]
     fn image_references_preserve_order_and_legacy_singleton_wire_shape() {
         #[derive(Deserialize)]
@@ -262,6 +265,7 @@ mod tests {
         assert!(serde_json::from_value::<LegacyImageRequest>(wire).is_err());
     }
 
+    /// Wire-validation errors must not disclose the submitted reference contents.
     #[test]
     fn image_references_reject_empty_or_invalid_values_without_echoing_input() {
         for value in [
@@ -303,6 +307,7 @@ mod tests {
         assert!(serde_json::from_str::<NvCreateImageRequest>(json).is_err());
     }
 
+    /// Known request fields must not be forwarded a second time as backend extras.
     #[test]
     fn image_request_typed_fields_stay_out_of_passthrough() {
         let json = r#"{"prompt":"a cat","n":2,"input_reference":"ref.png","nvext":{"seed":7},"custom_knob":1}"#;

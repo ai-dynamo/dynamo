@@ -99,6 +99,7 @@ fn worker_set_key(
     .expect("serializing WorkerSet key strings cannot fail")
 }
 
+/// Refresh committed capability records without changing controller admission.
 fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
     if let Some(admission) = &worker_set.image_edit_admission {
         admission.replace(members.iter().map(|member| {

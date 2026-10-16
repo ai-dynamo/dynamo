@@ -627,6 +627,8 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_images_engine()))
     }
 
+    /// Choose a ready WorkerSet whose admitted members all accept the reference count.
+    /// Return `None` for an unsupported count, but retain errors for unavailable models.
     pub(crate) fn select_image_edit_engine(
         &self,
         count: usize,
@@ -909,6 +911,7 @@ mod tests {
         }
     }
 
+    /// Selection must carry the chosen set's admission snapshot into dispatch.
     #[test]
     fn image_edits_select_only_compatible_ready_sets_and_snapshot_membership() {
         use super::super::image_edits::ImageEditAdmission;

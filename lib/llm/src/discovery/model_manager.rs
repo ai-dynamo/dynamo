@@ -1485,6 +1485,7 @@ impl ModelManager {
             .get_images_engine()
     }
 
+    /// Resolve the model before applying its WorkerSet-level edit admission policy.
     pub(crate) fn select_image_edit_engine(
         &self,
         model: &str,

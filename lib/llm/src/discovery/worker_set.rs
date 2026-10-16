@@ -254,6 +254,7 @@ pub struct WorkerSet {
 }
 
 impl WorkerSet {
+    /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
@@ -514,6 +515,7 @@ impl WorkerSet {
         self.allocator_trim_wrapped = true;
     }
 
+    /// Share base-set engines, admission, and lifecycle under a LoRA model card.
     pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
         let lora_name = card
             .lora

@@ -1465,6 +1465,7 @@ class TestImageGenerationSizeValidation:
 
 @pytest.fixture
 def image_request_handler():
+    """Exercise real reference loading while replacing GPU generation with a mock."""
     handler = _make_handler()
     handler.config.output_modalities = ["image"]
     handler._image_edit_limits = ImageEditLimits()
@@ -1482,6 +1483,7 @@ class TestImageReferenceInputs:
     async def test_edit_capability_uses_resolved_pipeline_not_request_alias(
         self, image_request_handler
     ):
+        """Client-visible aliases must not select or override model capabilities."""
         handler = image_request_handler
         handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
         image = Image.new("RGB", (2, 2), "red")
@@ -1512,6 +1514,7 @@ class TestImageReferenceInputs:
 
     @pytest.mark.asyncio
     async def test_rejected_controls_do_not_load_reference(self, image_request_handler):
+        """Invalid generation controls must fail before any reference I/O."""
         handler = image_request_handler
         handler._image_edit_loader.load_image.side_effect = AssertionError(
             "Invalid controls must be rejected before image loading"
@@ -1583,6 +1586,7 @@ class TestImageReferenceInputs:
     async def test_references_reach_engine_and_do_not_leak(
         self, image_request_handler, model_class_name, image_modality, edit_prompt
     ):
+        """Check model-specific prompt placement and isolation between requests."""
         handler = image_request_handler
         handler.engine_client.engine.od_config.model_class_name = model_class_name
         # Text-only recovery bypasses the model-specific image builder.
@@ -1656,6 +1660,7 @@ class TestImageReferenceInputs:
     async def test_oversized_reference_rejected_before_generation(
         self, image_request_handler
     ):
+        """Preserve a byte-limit 413 and prove the engine was never called."""
         handler = image_request_handler
         handler._image_edit_loader = ImageLoader(max_bytes=1)
         with io.BytesIO() as buffer:
@@ -1702,6 +1707,7 @@ class TestImageReferenceInputs:
     async def test_reference_http_error_preserved_before_generation(
         self, image_request_handler, error
     ):
+        """Retain typed origin failures while redacting their reference details."""
         handler = image_request_handler
         handler._image_edit_loader.load_image.side_effect = error
         request = {
@@ -1756,6 +1762,7 @@ class TestImageReferenceInputs:
     async def test_reference_exceeding_pixel_limit_rejected(
         self, image_request_handler, monkeypatch
     ):
+        """Pillow decompression limits must become admission errors, not GPU work."""
         handler = image_request_handler
         monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
         with io.BytesIO() as buffer:
@@ -1799,6 +1806,7 @@ class TestImageEndpointSizeValidation:
     async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(
         self, image_request_handler, reference
     ):
+        """Image admission errors must reach HTTP mapping before response generation."""
         handler = image_request_handler
         handler._image_edit_loader.load_image.side_effect = AssertionError(
             "Invalid dimensions must be rejected before image loading"
@@ -1956,6 +1964,7 @@ class TestRefAudioRejection:
 
 @pytest.mark.asyncio
 async def test_multi_image_references_reach_omni_in_order(image_request_handler):
+    """Verify the engine-bound image list, not only protocol normalization."""
     handler = image_request_handler
     handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
     images = [Image.new("RGB", (2, 2), color) for color in ["red", "blue"]]
@@ -1982,6 +1991,7 @@ async def test_multi_image_references_reach_omni_in_order(image_request_handler)
 
 @pytest.mark.asyncio
 async def test_failed_second_image_never_generates_from_first(image_request_handler):
+    """An incomplete edit must not silently succeed using only its first image."""
     handler = image_request_handler
     handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
     handler._image_edit_loader.load_image = AsyncMock(
