@@ -957,6 +957,13 @@ navigation:
               - page: Motif-3 NVFP4
                 path: pages/recipes/model-recipes/motif-3.mdx
                 slug: motif-3
+          - section: Reflection
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Beam-1.0-501B-A23B
+                path: pages/recipes/model-recipes/beam.mdx
+                slug: beam
           # recipe-nav:end
 
       # ==================== Kubernetes Templates ====================
