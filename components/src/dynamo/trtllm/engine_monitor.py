@@ -223,7 +223,8 @@ class TrtllmEngineMonitor:
 
     def _watch_fatal_error(self) -> None:
         poll = _watchdog_poll_seconds(self.interval)
-        while not self._stop_watchdog.wait(poll):
+        while True:
+            self._stop_watchdog.wait(poll)
             fatal_error = self.engine.get_health_check_fatal_error()
             if fatal_error is not None:
                 logger.error("TRT-LLM engine recorded a fatal error: %r", fatal_error)
@@ -231,7 +232,9 @@ class TrtllmEngineMonitor:
                     self.engine, self.runtime, self.shutdown_timeout
                 )
                 return
-            if self.shutdown_event is not None and self.shutdown_event.is_set():
+            if self._stop_watchdog.is_set() or (
+                self.shutdown_event is not None and self.shutdown_event.is_set()
+            ):
                 return
 
     async def _run_health_check(self) -> bool:

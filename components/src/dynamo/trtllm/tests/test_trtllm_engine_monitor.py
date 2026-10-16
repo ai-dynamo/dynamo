@@ -321,8 +321,8 @@ def test_watchdog_poll_has_positive_floor_and_upper_bound(interval, expected):
 
 
 @pytest.mark.timeout(10)
-@pytest.mark.parametrize("shutdown_requested", [False, True])
-def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch, shutdown_requested):
+@pytest.mark.parametrize("stop_method", [None, "shutdown_event", "monitor_stop"])
+def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch, stop_method):
     """A dead rank can block the loop thread in a TRT-LLM IPC send; the
     watchdog thread must still end the process."""
     exit_calls = _record_exit(monkeypatch)
@@ -331,7 +331,7 @@ def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch, shutdown_request
 
     async def start_then_block_loop():
         shutdown_event = asyncio.Event()
-        TrtllmEngineMonitor(
+        monitor = TrtllmEngineMonitor(
             engine,
             runtime=runtime,
             shutdown_event=shutdown_event,
@@ -339,8 +339,10 @@ def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch, shutdown_request
             shutdown_timeout=60.0,
         )
         engine._fatal_error = RuntimeError("MPI worker rank 0 exited unexpectedly")
-        if shutdown_requested:
+        if stop_method == "shutdown_event":
             shutdown_event.set()
+        elif stop_method == "monitor_stop":
+            await monitor.stop()
         deadline = time.monotonic() + 5.0
         while not exit_calls and time.monotonic() < deadline:
             time.sleep(0.01)
