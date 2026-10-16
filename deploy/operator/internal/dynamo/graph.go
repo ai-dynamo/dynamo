@@ -2996,7 +2996,6 @@ func GenerateGrovePodCliqueSet(
 
 		if usesPCSG {
 			scalingGroups = append(scalingGroups, buildGroveScalingGroupConfig(
-				dynamoDeployment.Name,
 				componentName,
 				component,
 				dynamoDeployment.Spec.TopologyConstraint,
@@ -3120,7 +3119,6 @@ func newGrovePodCliqueSet(
 }
 
 func buildGroveScalingGroupConfig(
-	dgdName string,
 	componentName string,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	deploymentTopologyConstraint *v1beta1.SpecTopologyConstraint,
@@ -3137,7 +3135,6 @@ func buildGroveScalingGroupConfig(
 	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 		Name:               strings.ToLower(componentName),
 		CliqueNames:        cliqueNames,
-		Annotations:        map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName},
 		Replicas:           replicas,
 		MinAvailable:       minAvailable,
 		TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, deploymentTopologyConstraint),

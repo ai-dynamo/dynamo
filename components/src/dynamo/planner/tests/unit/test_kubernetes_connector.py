@@ -26,7 +26,7 @@ from kubernetes import client
 
 from dynamo.common.kubernetes import AmbiguousKubernetesWriteError
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
-from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.base import PlannerConnector, ReplicaUpdateResult
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.kubernetes import (
     KubernetesConnector,
@@ -3004,6 +3004,43 @@ async def test_set_component_replicas_unready_rejects_parent_replacement_before_
     assert mock_kube_api.get_graph_deployment.call_count == 2
     mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
     mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_rejects_adapter_replacement_before_write(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    initial_adapter = _scaling_adapter("worker", replicas=0)
+    replacement_adapter = deepcopy(initial_adapter)
+    replacement_adapter["metadata"]["uid"] = "replacement-adapter-uid"
+    replacement_adapter["metadata"]["resourceVersion"] = "102"
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        replacement_adapter,
+    ]
+
+    result = await kubernetes_connector.set_component_replicas_with_result(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ],
+        blocking=False,
+    )
+
+    assert result == ReplicaUpdateResult(accepted=False, applied=False)
+    assert mock_kube_api.get_service_scaling_adapter.call_count == 2
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+    mock_kube_api.update_dgd_replica_targets.assert_not_called()
 
 
 @pytest.mark.asyncio

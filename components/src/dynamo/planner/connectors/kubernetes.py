@@ -1243,22 +1243,7 @@ class KubernetesConnector(PlannerConnector):
                 )
                 return False
             raise
-        current_authorities = {
-            (
-                plan.target.sub_component_type.value,
-                plan.target.component_name,
-            ): self._replica_authority_identity(plan.service, plan.scaling_adapter)
-            for plan in plans
-        }
-        for selector, authority in current_authorities.items():
-            if (
-                selector in retry_authorities
-                and retry_authorities[selector] != authority
-            ):
-                raise RuntimeError(
-                    "component identity or replica authority changed during retry"
-                )
-        retry_authorities.update(current_authorities)
+        self._fence_replica_authorities(plans, retry_authorities)
         mutations = [
             plan
             for plan in plans
@@ -1377,6 +1362,7 @@ class KubernetesConnector(PlannerConnector):
                 plans, rejection = self._refresh_unready_recovery_plans(
                     deployment, target_replicas
                 )
+                self._fence_replica_authorities(plans, retry_authorities)
             except Exception as exc:
                 self._reject_not_ready_scaling(
                     f"replica-target revalidation failed: {type(exc).__name__}: {exc}"
@@ -1929,6 +1915,29 @@ class KubernetesConnector(PlannerConnector):
                 f"DGDSA metadata.uid for component {service.name!r} is unavailable"
             )
         return service.name, True, uid
+
+    def _fence_replica_authorities(
+        self,
+        plans: list[_ReplicaUpdatePlan],
+        retry_authorities: dict[tuple[str, str | None], tuple[str, bool, str | None]],
+    ) -> None:
+        """Bind every target selector to one component and replica authority."""
+        current_authorities = {
+            (
+                plan.target.sub_component_type.value,
+                plan.target.component_name,
+            ): self._replica_authority_identity(plan.service, plan.scaling_adapter)
+            for plan in plans
+        }
+        for selector, authority in current_authorities.items():
+            if (
+                selector in retry_authorities
+                and retry_authorities[selector] != authority
+            ):
+                raise RuntimeError(
+                    "component identity or replica authority changed during retry"
+                )
+        retry_authorities.update(current_authorities)
 
     def _change_component_replicas(
         self,

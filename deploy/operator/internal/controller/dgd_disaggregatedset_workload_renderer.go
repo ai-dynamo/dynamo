@@ -144,12 +144,5 @@ func (r *disaggregatedSetWorkloadRenderer) renderRole(
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert LeaderWorkerSet spec: %w", err)
 	}
-	return map[string]any{
-		"metadata": map[string]any{
-			"labels": map[string]any{
-				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-			},
-		},
-		"spec": lwsSpecUnstructured,
-	}, nil
+	return map[string]any{"spec": lwsSpecUnstructured}, nil
 }

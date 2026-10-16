@@ -144,7 +144,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 
 	}
 
-	stampDeploymentIdentity(deployment, dgd, pcs, resources)
+	stampDeploymentIdentity(deployment, pcs, resources)
 
 	// Enforce the aggregate size budget after identity and discovery metadata are final.
 	serialized, err := json.Marshal(pcs)
@@ -158,13 +158,12 @@ func (r *graphReconciler) renderPodCliqueSet(
 }
 
 // stampDeploymentIdentity propagates stable ownership labels and annotations, never DGD revision.
-func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, resources []client.Object) {
+func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, resources []client.Object) {
 	stamp := func(annotations *map[string]string) {
 		if *annotations == nil {
 			*annotations = make(map[string]string)
 		}
 		(*annotations)[lpx.DeploymentNameAnnotation] = deployment.Name
-		(*annotations)[consts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 	}
 	stampOwnerLabel := func(object client.Object) {
 		labels := object.GetLabels()

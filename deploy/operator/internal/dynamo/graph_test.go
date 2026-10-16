@@ -9730,7 +9730,6 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
 	assert.Equal(t, "worker", pcsg.Name)
 	assert.Equal(t, []string{"worker"}, pcsg.CliqueNames)
-	assert.Equal(t, "test-dgd", pcsg.Annotations[commonconsts.KubeLabelDynamoGraphDeploymentName])
 	require.NotNil(t, pcsg.Replicas)
 	assert.EqualValues(t, 4, *pcsg.Replicas, "PCSG replicas must carry the component replica count")
 	require.NotNil(t, pcsg.MinAvailable)

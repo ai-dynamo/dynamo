@@ -26,14 +26,6 @@ pytestmark = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _no_generation_confirmation_delay(monkeypatch):
-    monkeypatch.setattr(
-        "dynamo.global_planner.kubernetes_capacity_manager.DRAIN_CONFIRMATION_SECONDS",
-        0.0,
-    )
-
-
 def _accepted_replica_update(deployment):
     async def accept(targets, *, retry_state, **_kwargs):
         retry_state.dgd_uid = deployment["metadata"]["uid"]
@@ -93,7 +85,6 @@ async def test_handler_authorization_success(mock_runtime):
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=deployment
         )
-        mock_connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector.kube_api.list_graph_deployments.return_value = [
             _listed_dgd(deployment, "my-dgd")
         ]
@@ -187,7 +178,6 @@ async def test_handler_multiple_dgds(mock_runtime):
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=deployment
         )
-        mock_connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector.kube_api.list_graph_deployments.return_value = []
 
         # Process both requests
@@ -234,7 +224,6 @@ async def test_handler_error_handling(mock_runtime):
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.current_namespace = "default"
         mock_connector.kube_api.get_graph_deployment.return_value = deployment
-        mock_connector.kube_api.list_capacity_descendants.return_value = []
 
         # Process request (pass as dict to match endpoint behavior)
         results = []
@@ -349,7 +338,6 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value=deployment
         )
-        mock_connector.kube_api.list_capacity_descendants.return_value = []
         mock_connector.kube_api.list_graph_deployments.return_value = []
 
         # Process request (pass as dict to match endpoint behavior)
@@ -502,7 +490,6 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
     connector.kube_api = MagicMock()
     connector.kube_api.current_namespace = dgd_key.split("/", 1)[0]
     connector.kube_api.get_graph_deployment = MagicMock(return_value=dgd_spec_dict)
-    connector.kube_api.list_capacity_descendants.return_value = []
     connector._test_deployment = dgd_spec_dict
     connector.kube_api.list_graph_deployments = MagicMock(
         side_effect=lambda: _listed_deployments(
@@ -531,7 +518,6 @@ def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my
     connector.kube_api.list_graph_deployments.side_effect = lambda: _listed_deployments(
         handler, connector.kube_api.current_namespace
     )
-    connector.kube_api.list_capacity_descendants.return_value = []
     connector.kube_api.is_deployment_ready.return_value = True
     connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()
     handler.orchestrator.capacity_manager.connectors[dgd_key] = connector

@@ -43,7 +43,10 @@ from dynamo.planner.core import budget
 
 # Planner-level "not ready" signal a backend may raise from ``scale``; the
 # orchestrator treats it as a soft rejection. Not a Kubernetes SDK type.
-from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
+from dynamo.planner.errors import (
+    DynamoGraphDeploymentNotReadyError,
+    EmptyTargetReplicasError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -282,17 +285,6 @@ class Orchestrator:
         supports = getattr(self.capacity_manager, "supports_split_readiness", None)
         return bool(supports()) if supports is not None else False
 
-    def _discard_invalidated_intents(self) -> None:
-        consume = getattr(
-            self.capacity_manager, "consume_invalidated_participants", None
-        )
-        if consume is None:
-            return
-        for participant_id in consume():
-            prefix = f"{participant_id}/"
-            for key in [key for key in self._intent_cache if key.startswith(prefix)]:
-                del self._intent_cache[key]
-
     def _capture_request_intents(
         self, participant_id: str, targets: list[TargetReplica]
     ) -> dict[str, PoolIntent | None]:
@@ -330,8 +322,9 @@ class Orchestrator:
         grouped_targets: dict[str, list[TargetReplica]],
         all_pools: PoolSnapshot,
     ) -> list[dict[str, list[TargetReplica]]]:
-        """Split a hard-budget plan into settled reductions then increases."""
+        """Split a hard-budget plan into settled reductions, checks, and increases."""
         reductions: dict[str, list[TargetReplica]] = defaultdict(list)
+        verifications: dict[str, list[TargetReplica]] = defaultdict(list)
         increases: dict[str, list[TargetReplica]] = defaultdict(list)
         for participant_id, targets in grouped_targets.items():
             pools = all_pools.get(participant_id, {})
@@ -345,7 +338,27 @@ class Orchestrator:
                     reductions[participant_id].append(target)
                 elif target.desired_replicas > pool.current_replicas:
                     increases[participant_id].append(target)
-        return [stage for stage in (reductions, increases) if stage]
+                else:
+                    verifications[participant_id].append(target)
+        return [stage for stage in (reductions, verifications, increases) if stage]
+
+    def _validate_budget_targets(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        all_pools: PoolSnapshot,
+    ) -> None:
+        """Reject targets that resolve to the same observed pool."""
+        pools = all_pools.get(participant_id, {})
+        seen: set[str] = set()
+        for target in targets:
+            pool = self._target_pool(pools, target)
+            if pool is None:
+                continue
+            pool_id = pool.component_name or target.sub_component_type.value
+            if pool_id in seen:
+                raise ValueError(f"duplicate replica target for pool {pool_id!r}")
+            seen.add(pool_id)
 
     async def _scale_with_result(
         self,
@@ -388,6 +401,9 @@ class Orchestrator:
         failures propagate to the caller (the API layer maps them to REJECTED /
         ERROR).
         """
+
+        if not targets:
+            raise EmptyTargetReplicasError()
 
         admitted = asyncio.Event()
         committed_participants: list[str] = []
@@ -522,7 +538,6 @@ class Orchestrator:
         # performs a targeted post-write readback for the response.
         if self.budget_enforcement_enabled():
             all_pools = await run_sync_in_thread(self.capacity_manager.observe, True)
-            self._discard_invalidated_intents()
         else:
             refresh_participant = getattr(
                 self.capacity_manager, "refresh_participant", None
@@ -532,6 +547,8 @@ class Orchestrator:
             all_pools = {}
 
         previous_intents = self._capture_request_intents(participant_id, targets)
+        if self.budget_enforcement_enabled():
+            self._validate_budget_targets(participant_id, targets, all_pools)
         result = self.mediate(
             participant_id,
             targets,
@@ -575,7 +592,7 @@ class Orchestrator:
             pools = all_pools.get(pid, {})
             net = 0
             for t in tgts:
-                spec = pools.get(t.sub_component_type.value)
+                spec = self._target_pool(pools, t)
                 if spec is not None and spec.gpu_per_replica > 0:
                     net += (
                         t.desired_replicas - spec.current_replicas

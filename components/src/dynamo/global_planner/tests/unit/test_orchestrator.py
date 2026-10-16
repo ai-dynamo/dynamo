@@ -17,14 +17,11 @@ import pytest
 from kubernetes import client
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
-from dynamo.global_planner.orchestrator import (
-    Orchestrator,
-    PoolIntent,
-    _ParticipantMutationBusy,
-)
+from dynamo.global_planner.orchestrator import Orchestrator, _ParticipantMutationBusy
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import ReplicaUpdateResult
 from dynamo.planner.connectors.protocol import ScaleStatus
+from dynamo.planner.errors import EmptyTargetReplicasError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -258,6 +255,63 @@ async def test_submit_approves_and_actuates(use_lock):
 
 
 @pytest.mark.asyncio
+async def test_submit_rejects_empty_targets_before_backend_dispatch():
+    cm = FakeCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm, max_gpus=2)
+
+    with pytest.raises(EmptyTargetReplicasError):
+        await _submit(orch, "default/a", [])
+
+
+@pytest.mark.asyncio
+async def test_budget_submit_rejects_duplicate_resolved_pool_targets():
+    cm = FakeCapacityManager()
+    cm.add("default/a", decode=2)
+    orch = _orch(cm, max_gpus=2)
+    targets = [
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=10),
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate replica target"):
+        await _submit(orch, "default/a", targets)
+
+    assert cm.pools["default/a"]["decode"][0] == 2
+
+
+@pytest.mark.asyncio
+async def test_budget_submit_settles_equal_target_before_increase():
+    class RecordingCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.scale_targets = []
+            self.waits = []
+
+        async def scale(self, participant_id, targets, blocking):
+            self.scale_targets.append(
+                [
+                    (target.sub_component_type.value, target.desired_replicas)
+                    for target in targets
+                ]
+            )
+            return await super().scale(participant_id, targets, blocking)
+
+        async def wait_for_ready(self, participant_id):
+            self.waits.append(participant_id)
+
+    cm = RecordingCapacityManager()
+    cm.add("default/a", prefill=1, decode=1)
+    orch = _orch(cm, max_gpus=3)
+
+    result = await _submit(orch, "default/a", _targets(prefill=2, decode=1))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.scale_targets == [[("decode", 1)], [("prefill", 2)]]
+    assert cm.waits == ["default/a", "default/a"]
+
+
+@pytest.mark.asyncio
 async def test_cancelled_request_waiting_for_participant_reservation_never_scales():
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=1, decode=1)
@@ -285,32 +339,6 @@ async def test_cancelled_request_waiting_for_participant_reservation_never_scale
 
     assert cm.pools["default/a"]["prefill"][0] == 1
     assert "default/a/prefill" not in orch._intent_cache
-
-
-@pytest.mark.asyncio
-async def test_submit_discards_intents_from_invalidated_participant_generation():
-    class InvalidatingCapacityManager(FakeCapacityManager):
-        def __init__(self):
-            super().__init__()
-            self.invalidated = {"default/a"}
-
-        def consume_invalidated_participants(self):
-            invalidated = set(self.invalidated)
-            self.invalidated.clear()
-            return invalidated
-
-    cm = InvalidatingCapacityManager()
-    cm.add("default/a", prefill=1, decode=1)
-    cm.add("default/b", prefill=1, decode=1)
-    orch = _orch(cm, max_gpus=10)
-    orch._intent_cache["default/a/decode"] = PoolIntent(0, 1.0)
-    orch._intent_cache["default/b/decode"] = PoolIntent(0, 1.0)
-
-    await _submit(orch, "default/a", _targets(prefill=2))
-
-    assert "default/a/decode" not in orch._intent_cache
-    assert "default/a/prefill" in orch._intent_cache
-    assert "default/b/decode" in orch._intent_cache
 
 
 @pytest.mark.asyncio
