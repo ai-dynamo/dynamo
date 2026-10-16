@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
-    OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    MultimodalItemRef, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
+    StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -21,7 +22,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::client::{ModelMetadata, TrtllmClient};
+use crate::client::{ModelMetadata, SupportedMedia, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request, engine_error};
 use crate::engine::TrtllmSidecarEngine;
 use crate::model::ConfiguredModel;
@@ -64,6 +65,7 @@ struct FakeTrtllm {
     supports_multimodal: Arc<AtomicBool>,
     /// TensorRT-LLM's finer-grained modality advertisement.
     advertises_image: Arc<AtomicBool>,
+    advertises_video: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -257,13 +259,16 @@ impl pb::control_server::Control for FakeTrtllm {
             return Err(Status::unavailable("not serving yet"));
         }
         let supports_multimodal = self.supports_multimodal.load(Ordering::SeqCst);
-        let modalities = if self.advertises_image.load(Ordering::SeqCst) {
-            vec![prost_types::Value {
-                kind: Some(prost_types::value::Kind::StringValue("image".to_string())),
-            }]
-        } else {
-            Vec::new()
-        };
+        let modalities = [
+            (self.advertises_image.load(Ordering::SeqCst), "image"),
+            (self.advertises_video.load(Ordering::SeqCst), "video"),
+        ]
+        .into_iter()
+        .filter(|(advertised, _)| *advertised)
+        .map(|(_, modality)| prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(modality.to_string())),
+        })
+        .collect();
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
@@ -469,7 +474,7 @@ fn limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supports_image: Some(false),
+        supported_media: Some(SupportedMedia::default()),
     })
 }
 
@@ -477,7 +482,21 @@ fn image_limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supports_image: Some(true),
+        supported_media: Some(SupportedMedia {
+            image: true,
+            ..Default::default()
+        }),
+    })
+}
+
+fn image_video_limits(context_length: u32) -> Option<ModelMetadata> {
+    Some(ModelMetadata {
+        context_length: Some(context_length),
+        max_output_tokens: None,
+        supported_media: Some(SupportedMedia {
+            image: true,
+            video: true,
+        }),
     })
 }
 

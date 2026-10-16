@@ -59,40 +59,56 @@ fn prefill_request_is_marked_context_only() {
     assert!(proto.kv.is_none(), "prefill carries no session to replay");
 }
 
-/// Image inputs must survive both RPC legs. TensorRT-LLM reconstructs its
+/// Mixed media must survive both RPC legs. TensorRT-LLM reconstructs its
 /// multimodal position/hash state while resuming the KV session, so the decode
 /// request needs the same ordered media metadata as the context request.
 #[test]
-fn image_media_is_preserved_across_prefill_and_decode_requests() {
+fn mixed_media_is_preserved_across_prefill_and_decode_requests() {
     let mut req = request();
-    add_images(
-        &mut req,
-        [
-            "https://example.com/first.png",
-            "data:image/png;base64,c2Vjb25k",
-        ],
-    );
-    req.multi_modal_uuids = Some(HashMap::from([(
-        "image_url".to_string(),
-        vec![
-            Some("first-image".to_string()),
-            Some("second-image".to_string()),
-        ],
-    )]));
+    req.multi_modal_data = Some(HashMap::from([
+        (
+            "image_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.com/image.png".to_string(),
+            )],
+        ),
+        (
+            "video_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:video/mp4;base64,dmlkZW8=".to_string(),
+            )],
+        ),
+    ]));
+    req.multi_modal_uuids = Some(HashMap::from([
+        ("image_url".to_string(), vec![Some("image-id".to_string())]),
+        ("video_url".to_string(), vec![Some("video-id".to_string())]),
+    ]));
+    req.multi_modal_order = Some(vec![
+        MultimodalItemRef {
+            modality: "video_url".to_string(),
+            index: 0,
+        },
+        MultimodalItemRef {
+            modality: "image_url".to_string(),
+            index: 0,
+        },
+    ]);
 
     let prefill = build_generate_request(
         req.clone(),
         "req",
         "model",
-        image_limits(4096),
+        image_video_limits(4096),
         DisaggregationMode::Prefill,
     )
     .expect("build image prefill");
     assert!(is_context_only(&prefill));
     assert_eq!(prefill.stopping.as_ref().unwrap().max_tokens, Some(1));
     assert_eq!(prefill.media.len(), 2);
-    assert_eq!(prefill.media[0].uuid, "first-image");
-    assert_eq!(prefill.media[1].uuid, "second-image");
+    assert_eq!(prefill.media[0].modality, pb::Modality::Video as i32);
+    assert_eq!(prefill.media[0].uuid, "video-id");
+    assert_eq!(prefill.media[1].modality, pb::Modality::Image as i32);
+    assert_eq!(prefill.media[1].uuid, "image-id");
 
     req.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: crate::disagg::session_to_json(fake_session())
@@ -103,7 +119,7 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
         req,
         "req",
         "model",
-        image_limits(4096),
+        image_video_limits(4096),
         DisaggregationMode::Decode,
     )
     .expect("build image decode");
@@ -112,7 +128,7 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
     assert_eq!(
         decode.kv.and_then(|kv| kv.session),
         Some(fake_session()),
-        "decode must carry both the image metadata and the KV handoff"
+        "decode must carry both ordered media items and the KV handoff"
     );
 }
 

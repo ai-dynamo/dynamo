@@ -10,8 +10,14 @@ import pathlib
 
 import pytest
 
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.router.common import _test_frontend_kv_routing
 from tests.router.helper import generate_random_suffix
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_EXPECTED,
+    MULTIMODAL_VIDEO_URL,
+)
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -26,6 +32,7 @@ from tests.utils.engine_metrics import (
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
+    chat_payload,
     chat_logprobs_and_structured_output_payloads,
     chat_payload_default,
     disaggregated_chat_payload,
@@ -199,8 +206,8 @@ sidecar_configs = {
             chat_payload_default(),
         ],
     ),
-    "trtllm_aggregated_image": EngineConfig(
-        name="trtllm_aggregated_image",
+    "trtllm_aggregated_multimodal": EngineConfig(
+        name="trtllm_aggregated_multimodal",
         directory=trtllm_sidecar_dir,
         script_name="agg.sh",
         marks=[
@@ -211,16 +218,32 @@ sidecar_configs = {
             pytest.mark.requested_trtllm_kv_tokens(32768),
             pytest.mark.timeout(960),
             pytest.mark.pre_merge,
+            pytest.mark.installs_extra_dependencies,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         timeout=900,
         delayed_start=60,
-        env={"PYTHONUNBUFFERED": "1"},
+        env={
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["opencv-python-headless"],
+            "PYTHONUNBUFFERED": "1",
+            "TRTLLM_MEDIA_ALLOW_PRIVATE_URLS": "1",
+        },
         request_payloads=[
             multimodal_payload_default(
+                image_url=MULTIMODAL_IMG_URL,
                 text="Describe what you see in this image.",
-                expected_response=["mountain", "rock", "trees", "road"],
-            )
+                expected_response=["green", "square"],
+            ),
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail."},
+                    {"type": "video_url", "video_url": {"url": MULTIMODAL_VIDEO_URL}},
+                ],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                max_tokens=100,
+                temperature=0.0,
+            ),
         ],
     ),
     "trtllm_disaggregated": EngineConfig(
@@ -335,10 +358,15 @@ sidecar_configs = {
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
-    if config.name == "trtllm_aggregated_image" and not _trtllm_serves_openengine():
+    if (
+        config.name == "trtllm_aggregated_multimodal"
+        and not _trtllm_serves_openengine()
+    ):
         if os.environ.get("DYNAMO_TEST_SIDECAR_BACKEND") == "trtllm":
             pytest.fail(TRTLLM_OPENENGINE_SKIP_REASON)
         pytest.skip(TRTLLM_OPENENGINE_SKIP_REASON)
+    if config.name == "trtllm_aggregated_multimodal":
+        request.getfixturevalue("image_server")
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")

@@ -76,6 +76,36 @@ async fn advertised_image_media_reaches_openengine_and_uses_expanded_usage() {
 }
 
 #[tokio::test]
+async fn advertised_video_media_reaches_openengine() {
+    let service = FakeTrtllm::default();
+    service.supports_multimodal.store(true, Ordering::SeqCst);
+    service.advertises_video.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/video.mp4".to_string(),
+        )],
+    )]));
+    collect(&engine, req).await;
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(sent.media.len(), 1);
+    assert_eq!(sent.media[0].modality, pb::Modality::Video as i32);
+    assert_eq!(
+        sent.media[0].source,
+        Some(pb::media_item::Source::Url(
+            "https://example.com/video.mp4".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
 async fn both_multimodal_capability_signals_are_required() {
     for (coarse, image) in [(true, false), (false, true)] {
         let service = FakeTrtllm::default();
@@ -467,38 +497,50 @@ async fn a_configured_context_length_survives_a_server_without_control() {
 }
 
 #[tokio::test]
-async fn image_request_retries_transient_capability_discovery() {
-    let service = FakeTrtllm::default();
-    service.unavailable_model_info.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
-    engine.start(0).await.expect("start with configured window");
+async fn media_requests_retry_transient_capability_discovery() {
+    for (key, url, image, video) in [
+        ("image_url", "https://example.com/image.png", true, false),
+        ("video_url", "https://example.com/video.mp4", false, true),
+    ] {
+        let service = FakeTrtllm::default();
+        service.unavailable_model_info.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
+        engine.start(0).await.expect("start with configured window");
 
-    server
-        .service
-        .unavailable_model_info
-        .store(false, Ordering::SeqCst);
-    server
-        .service
-        .supports_multimodal
-        .store(true, Ordering::SeqCst);
-    server
-        .service
-        .advertises_image
-        .store(true, Ordering::SeqCst);
-    let mut image_request = request();
-    add_images(&mut image_request, ["https://example.com/image.png"]);
+        server
+            .service
+            .unavailable_model_info
+            .store(false, Ordering::SeqCst);
+        server
+            .service
+            .supports_multimodal
+            .store(true, Ordering::SeqCst);
+        server
+            .service
+            .advertises_image
+            .store(image, Ordering::SeqCst);
+        server
+            .service
+            .advertises_video
+            .store(video, Ordering::SeqCst);
+        let mut media_request = request();
+        media_request.multi_modal_data = Some(HashMap::from([(
+            key.to_string(),
+            vec![MultimodalData::RawUrl(url.to_string())],
+        )]));
 
-    let output = collect(&engine, image_request).await;
-    assert_eq!(
-        output.last().unwrap().finish_reason,
-        Some(FinishReason::Stop)
-    );
-    assert_eq!(
-        server.service.model_info_calls.load(Ordering::SeqCst),
-        2,
-        "the image request must retry the transient startup failure once"
-    );
+        let output = collect(&engine, media_request).await;
+        assert_eq!(
+            output.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
+        assert_eq!(
+            server.service.model_info_calls.load(Ordering::SeqCst),
+            2,
+            "the {key} request must retry the transient startup failure once"
+        );
+    }
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a
