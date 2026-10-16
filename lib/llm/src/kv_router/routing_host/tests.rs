@@ -42,7 +42,7 @@ use crate::{
     migration::Migration,
     protocols::common::{
         extensions::{AgentContextBuilder, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-        preprocessor::{MmRoutingInfo, RoutingHints},
+        preprocessor::{MigrationState, MmRoutingInfo, RoutingHints},
         timing::RequestTracker,
     },
 };
@@ -1650,6 +1650,19 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    Box::pin(router_with_recorded_dispatch_and_classifier(
+        namespace,
+        session_affinity_ttl,
+        None::<RecordingClassifier>,
+    ))
+    .await
+}
+
+async fn router_with_recorded_dispatch_and_classifier(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+    classifier: Option<impl RequestClassifier>,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1671,7 +1684,7 @@ async fn router_with_recorded_dispatch_and_affinity(
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new(
+    let mut chooser = KvRouter::new(
         endpoint,
         client.clone(),
         workers,
@@ -1688,6 +1701,9 @@ async fn router_with_recorded_dispatch_and_affinity(
     )
     .await
     .unwrap();
+    if let Some(classifier) = classifier {
+        chooser = chooser.with_request_classifier(classifier).unwrap();
+    }
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
     let inner = PushRouter::from_client_with_dispatch(
         client,
@@ -3432,24 +3448,259 @@ async fn stream_migration_retry_continues_one_classifier_lifecycle() {
     harness.runtime.shutdown();
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum LifecycleEvent {
+    Sent(u64),
+    Completed,
+    Aborted,
+}
+
+/// Logs the lifecycle events of every request, optionally holding admission
+/// until released, the way a program scheduler defers a paused session.
+struct LifecycleLogClassifier {
+    calls: Arc<AtomicUsize>,
+    events: mpsc::UnboundedSender<LifecycleEvent>,
+    hold: Option<(Arc<Notify>, Arc<Notify>)>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for LifecycleLogClassifier {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let hold = self.hold.clone();
+        Box::pin(async move {
+            if let Some((entered, released)) = hold {
+                entered.notify_one();
+                released.notified().await;
+            }
+            Ok(request)
+        })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        let event = match event {
+            ClassifyEvent::Sent { worker, .. } => LifecycleEvent::Sent(worker.worker_id),
+            ClassifyEvent::Completed { .. } => LifecycleEvent::Completed,
+            ClassifyEvent::Aborted { .. } => LifecycleEvent::Aborted,
+            _ => return,
+        };
+        let _ = self.events.send(event);
+    }
+}
+
+async fn next_lifecycle_event(
+    events: &mut mpsc::UnboundedReceiver<LifecycleEvent>,
+) -> LifecycleEvent {
+    tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("classifier event timed out")
+        .expect("classifier event channel closed")
+}
+
+/// A disaggregated request as the prefill router builds it: one tracker and one
+/// lifecycle handoff shared by its prefill and decode legs.
+async fn disaggregated_request(
+    migration_state: Option<MigrationState>,
+) -> (PreprocessedRequest, Arc<RequestTracker>) {
+    let tracker = Arc::new(RequestTracker::new());
+    drop(tracker.set_phase(RequestPhase::Prefill).await);
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    input.lifecycle_handoff = Some(LifecycleHandoff::default());
+    input.migration_state = migration_state;
+    (input, tracker)
+}
+
+async fn run_prefill_leg(
+    prefill: &RoutingHost,
+    input: &PreprocessedRequest,
+    id: &str,
+    client: &dyn AsyncEngineContext,
+) -> Result<(), Error> {
+    let request = Context::with_id_and_metadata(input.clone(), id.to_string(), Default::default());
+    let ((), mut stream) = prefill
+        .select_and_dispatch_prefill(request, client, |_, _| Ok(()))
+        .await?;
+    while stream.next().await.is_some() {}
+    Ok(())
+}
+
+async fn run_decode_leg(
+    decode: &RoutingHost,
+    input: PreprocessedRequest,
+    tracker: &RequestTracker,
+    id: &str,
+) {
+    drop(tracker.set_phase(RequestPhase::Decode).await);
+    let request = Context::with_id_and_metadata(input, id.to_string(), Default::default());
+    let mut stream = decode.generate(request).await.unwrap();
+    while stream.next().await.is_some() {}
+}
+
+/// In disaggregated serving the prefill hop owns the classifier: it admits and
+/// places the request before prefill dispatch, and the decode leg finishes the
+/// lifecycle without re-reporting placement.
 #[tokio::test]
 #[serial_test::serial]
-async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
+async fn prefill_hop_classifies_and_hands_the_lifecycle_to_decode() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
-    let (decode, decode_runtime) = Box::pin(router_with_classifier(
-        RecordingClassifier {
-            calls: Arc::clone(&calls),
-            observations: observations_tx,
-        },
-        None,
-    ))
-    .await;
-    let (prefill, prefill_runtime) = Box::pin(router(None)).await;
-    let mut content = request();
-    content.migration_state = Some(Default::default());
-    let request = Context::new(content);
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let (prefill, _, prefill_worker, prefill_runtime) =
+        Box::pin(router_with_recorded_dispatch_and_classifier(
+            "disagg-handoff-prefill",
+            None,
+            Some(LifecycleLogClassifier {
+                calls: Arc::clone(&calls),
+                events: events_tx,
+                hold: None,
+            }),
+        ))
+        .await;
+    let (decode, decode_dispatch, decode_worker, decode_runtime) =
+        router_with_recorded_dispatch("disagg-handoff-decode").await;
+    let (input, tracker) = disaggregated_request(None).await;
+    let client = Context::new(());
 
+    run_prefill_leg(
+        &prefill,
+        &input,
+        "disagg-handoff",
+        client.context().as_ref(),
+    )
+    .await
+    .unwrap();
+    let handoff = input.lifecycle_handoff.clone().unwrap();
+    let lifecycle = handoff
+        .take()
+        .expect("prefill completion must leave the lifecycle for the decode leg");
+    handoff.store(lifecycle);
+    run_decode_leg(&decode, input, &tracker, "disagg-handoff").await;
+
+    assert_eq!(
+        next_lifecycle_event(&mut events).await,
+        LifecycleEvent::Sent(prefill_worker)
+    );
+    assert_eq!(
+        next_lifecycle_event(&mut events).await,
+        LifecycleEvent::Completed
+    );
+    assert!(events.try_recv().is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        decode_dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[decode_worker]
+    );
+
+    drop(prefill);
+    drop(decode);
+    prefill_runtime.shutdown();
+    decode_runtime.shutdown();
+}
+
+/// A deferred admission holds the request before prefill dispatch, and a client
+/// that leaves during the wait abandons it without dispatching anything, even
+/// though prefill runs under a context that outlives the client.
+#[tokio::test]
+#[serial_test::serial]
+async fn prefill_hop_admission_wait_precedes_dispatch_and_ends_with_the_client() {
+    let entered = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let (prefill, dispatch, worker, runtime) =
+        Box::pin(router_with_recorded_dispatch_and_classifier(
+            "disagg-admission-wait",
+            None,
+            Some(LifecycleLogClassifier {
+                calls: Arc::new(AtomicUsize::new(0)),
+                events: events_tx,
+                hold: Some((Arc::clone(&entered), Arc::clone(&released))),
+            }),
+        ))
+        .await;
+    let prefill = Arc::new(prefill);
+    let spawn_prefill = |id: &'static str, client: Arc<dyn AsyncEngineContext>| {
+        let prefill = Arc::clone(&prefill);
+        tokio::spawn(async move {
+            let (input, _tracker) = disaggregated_request(None).await;
+            run_prefill_leg(&prefill, &input, id, client.as_ref()).await
+        })
+    };
+
+    let admission_wait = Duration::from_secs(5);
+    let resumed = spawn_prefill("disagg-resumed", Context::new(()).context());
+    tokio::time::timeout(admission_wait, entered.notified())
+        .await
+        .expect("the prefill hop must classify before dispatch");
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    released.notify_one();
+    resumed.await.unwrap().unwrap();
+    assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker]);
+    assert_eq!(
+        next_lifecycle_event(&mut events).await,
+        LifecycleEvent::Sent(worker)
+    );
+
+    let client = Context::new(()).context();
+    let cancelled = spawn_prefill("disagg-cancelled", Arc::clone(&client));
+    tokio::time::timeout(admission_wait, entered.notified())
+        .await
+        .unwrap();
+    client.stop();
+    let error = tokio::time::timeout(admission_wait, cancelled)
+        .await
+        .expect("a client stop must end the prefill admission wait")
+        .unwrap()
+        .unwrap_err();
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::Cancelled],
+        &[]
+    ));
+    assert_eq!(
+        next_lifecycle_event(&mut events).await,
+        LifecycleEvent::Aborted
+    );
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker],
+        "a request abandoned during admission must not reach a prefill worker"
+    );
+
+    drop(prefill);
+    runtime.shutdown();
+}
+
+/// A decode failure parks the lifecycle the prefill hop handed off; the retried
+/// prefill hop resumes it from its cached classification.
+#[tokio::test]
+#[serial_test::serial]
+async fn decode_retry_resumes_the_prefill_lifecycle_without_reclassifying() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let (prefill, _, prefill_worker, prefill_runtime) =
+        Box::pin(router_with_recorded_dispatch_and_classifier(
+            "disagg-retry-prefill",
+            None,
+            Some(LifecycleLogClassifier {
+                calls: Arc::clone(&calls),
+                events: events_tx,
+                hold: None,
+            }),
+        ))
+        .await;
+    let (decode, _, _, decode_runtime) = router_with_recorded_dispatch("disagg-retry-decode").await;
+    let (input, tracker) = disaggregated_request(Some(MigrationState::default())).await;
+    let client = Context::new(());
+
+    run_prefill_leg(&prefill, &input, "disagg-retry", client.context().as_ref())
+        .await
+        .unwrap();
+    drop(tracker.set_phase(RequestPhase::Decode).await);
+    let request = Context::with_id_and_metadata(
+        input.clone(),
+        "disagg-retry".to_string(),
+        Default::default(),
+    );
     let (mut selected, _) = decode
         .select_with_affinity(
             &request,
@@ -3459,6 +3710,10 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         )
         .await
         .unwrap();
+    assert!(
+        selected.request_lifecycle.is_some(),
+        "decode claims the handoff"
+    );
     let mut guard = decode
         .track_selection(
             &request,
@@ -3471,75 +3726,35 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         .unwrap();
     guard.mark_dispatched();
     assert!(guard.release_for_retry().await);
-    assert!(
-        potential_loads(&decode)
-            .await
-            .iter()
-            .all(|load| load.active_requests == 0)
-    );
 
-    let (mut selected, _) = prefill
-        .select_with_affinity(
-            &request,
-            RequestPhase::Prefill,
-            false,
-            &CleanupBudget::default(),
-        )
+    // Migration resends the request through the prefill router, which gives
+    // each attempt a fresh handoff.
+    let mut retry = input;
+    retry.lifecycle_handoff = Some(LifecycleHandoff::default());
+    drop(tracker.set_phase(RequestPhase::Prefill).await);
+    run_prefill_leg(&prefill, &retry, "disagg-retry", client.context().as_ref())
         .await
         .unwrap();
-    assert!(
-        selected.request_lifecycle.is_none(),
-        "prefill must not claim the decode lifecycle"
-    );
-    let mut guard = prefill
-        .track_selection(
-            &request,
-            &mut selected,
-            RequestPhase::Prefill,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
-    guard.mark_dispatched();
-    guard.finish().await;
+    run_decode_leg(&decode, retry, &tracker, "disagg-retry").await;
 
-    let (mut selected, _) = decode
-        .select_with_affinity(
-            &request,
-            RequestPhase::Decode,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
-    let mut guard = decode
-        .track_selection(
-            &request,
-            &mut selected,
-            RequestPhase::Decode,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
-    guard.mark_dispatched();
-    guard.finish().await;
-    let observation = tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(observation, ClassifierObservation::Completed(_)));
-    assert!(observations_rx.try_recv().is_err());
+    for expected in [
+        LifecycleEvent::Sent(prefill_worker),
+        LifecycleEvent::Sent(prefill_worker),
+        LifecycleEvent::Completed,
+    ] {
+        assert_eq!(next_lifecycle_event(&mut events).await, expected);
+    }
+    assert!(events.try_recv().is_err());
     assert_eq!(
         calls.load(Ordering::Relaxed),
         1,
-        "decode retry reuses its classification"
+        "the retry reuses the cached classification"
     );
-    drop(decode);
+
     drop(prefill);
-    decode_runtime.shutdown();
+    drop(decode);
     prefill_runtime.shutdown();
+    decode_runtime.shutdown();
 }
 
 #[tokio::test]

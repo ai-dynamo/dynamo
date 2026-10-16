@@ -56,6 +56,10 @@ impl RouterPluginBuilder {
         self.plugins.has_custom_worker_selection()
     }
 
+    pub(crate) fn has_request_classifier(&self) -> bool {
+        self.plugins.request_classifier().is_some()
+    }
+
     pub(crate) fn selection_policy(&self) -> SelectionPolicySource {
         self.plugins.worker_selection().cloned().map_or(
             SelectionPolicySource::Registry,

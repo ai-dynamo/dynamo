@@ -34,7 +34,18 @@ flowchart TD
 
 A classifier can work with either built-in or [custom worker selection](custom-worker-selection.mdx). Dynamo enforces worker eligibility, hard pins, and reservations.
 
-This guide uses the embedded KV router in `dynamo.frontend`. Classification runs on aggregated or decode routing; in disaggregated serving, remote prefill can start before this admission decision. Standalone selection, including standalone EPP, does not support a configured classifier.
+This guide uses the embedded KV router in `dynamo.frontend`. Classification runs on the pool that runs prefill: the aggregated workers, or the prefill workers in disaggregated serving. Standalone selection, including standalone EPP, does not support a configured classifier.
+
+### Disaggregated Serving
+
+In disaggregated serving, the classifier is installed on the prefill hop, so it admits each request before any prefill work starts:
+
+- `RequestClassifierContext` lists the prefill workers and their KV capacity.
+- A preferred worker steers prefill selection, and `Sent` reports the prefill worker.
+- The request's lifecycle continues on the decode leg, which reports progress and the final `Completed` or `Aborted`. The decode dispatch does not emit a second `Sent`.
+- A client that disconnects while `classify` is still waiting abandons the request, and no prefill is dispatched.
+
+Requests run unclassified while no prefill worker is available, or when the prefill hop does not use KV routing. Each prefill-router activation creates a fresh classifier instance. The frontend rejects a classifier combined with conditional disaggregation, because requests that skip remote prefill would bypass admission.
 
 ## Build the Classifier
 

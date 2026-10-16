@@ -11,7 +11,7 @@ subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-
 
 To implement your own admission policy, see [Write an Admission Control Plugin](../../developer-guide/knowledge-base/modular-components/router/custom-admission-control.md).
 
-Use this path for aggregated serving through `dynamo.frontend`. It requires a Dynamo build that includes the `thunderagent` builtin plugin; older wheels and images do not recognize that type. The plugin is included in the builtin catalog without a separate ThunderAgent build feature. Admission behavior remains unchanged until the plugin is selected in YAML.
+Use this path for aggregated or disaggregated serving through `dynamo.frontend`. It requires a Dynamo build that includes the `thunderagent` builtin plugin; older wheels and images do not recognize that type. The plugin is included in the builtin catalog without a separate ThunderAgent build feature. Admission behavior remains unchanged until the plugin is selected in YAML.
 
 Custom catalogs that already register `thunderagent` must remove that registration; duplicate type names fail startup.
 
@@ -71,7 +71,26 @@ Set admission parameters under `request_classifier.parameters`. Leave worker-sel
 
 The default deferral timeout permits waits of roughly 30 minutes under pressure. Set client deadlines to match the workload's acceptable wait. Router policy classes and queues still apply after classification releases a request.
 
-Program state is local to each frontend's router instance. This is not a cluster-wide admission budget; keep a session's turns on the same frontend when using multiple replicas. The native plugin has been exercised with aggregated vLLM workers. Standalone EPP and disaggregated deployment guidance are outside this example.
+Program state is local to each frontend's router instance. This is not a cluster-wide admission budget; keep a session's turns on the same frontend when using multiple replicas. Standalone EPP is not supported.
+
+### Disaggregated Serving
+
+In disaggregated serving, ThunderAgent schedules programs against the prefill pool. A program's reusable KV lives there between turns: KV moves to decode on every turn, so a prefix that prefill has evicted forces a full re-prefill of the context. The plugin admits each turn before prefill starts, places new programs on the least-used prefill worker/rank, and steers later turns back to it. Its capacity is each prefill rank's published GPU KV blocks.
+
+Decode is not budgeted. Decode KV pressure already delays incoming KV transfers; if transfers routinely wait on decode capacity, add decode workers rather than holding sessions back.
+
+Enable the classifier alone, and leave prefill and decode on the default selectors. When ThunderAgent's preferred prefill worker is ineligible, the default prefill selector falls back to KV-aware placement, and ThunderAgent records the worker that was actually used:
+
+```yaml
+request_classifier:
+  type: thunderagent
+```
+
+Start the frontend with the same flags as for aggregated serving. Disaggregated serving has these limits:
+
+- Conditional disaggregation (`DYN_ROUTER_CONDITIONAL_DISAGG`) cannot be combined with a request classifier; the frontend refuses to start.
+- The prefill hop must use KV routing. Requests are not classified while no prefill worker is available.
+- Program state resets when the prefill router is rebuilt, for example after every prefill worker leaves and one returns.
 
 The native plugin's classifier and worker selector register together in Dynamo's builtin catalog. It does not expose the Python prototype's soft-demotion controls, priority boosts, host-cache budget, or separate status endpoints described below.
 
