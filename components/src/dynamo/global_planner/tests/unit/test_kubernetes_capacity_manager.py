@@ -158,6 +158,29 @@ def test_refresh_participant_records_first_identity_in_one_request():
     connector.kube_api.get_graph_deployment.assert_called_once_with("model")
 
 
+def test_refresh_participant_accepts_replacement_in_unbounded_mode():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    connector = _install_connector(
+        cm, "default/model", deployment, parent_dgd_name="model"
+    )
+    replacement = deepcopy(deployment)
+    replacement["metadata"]["uid"] = "replacement-uid"
+    connector.kube_api.get_graph_deployment.return_value = replacement
+    cm._last_observed_pools["default/model"] = {"prefill": MagicMock()}
+    cm._replica_uids["default/model"] = "dgd-uid"
+    cm._replica_settlements["default/model"] = MagicMock()
+    cm._missing_participants.add("default/model")
+
+    cm.refresh_participant("default/model")
+
+    assert cm._observed_uids["default/model"] == "replacement-uid"
+    assert "default/model" not in cm._last_observed_pools
+    assert "default/model" not in cm._replica_uids
+    assert "default/model" not in cm._replica_settlements
+    assert cm.participant_exists("default/model")
+
+
 # ---------------------------------------------------------------------------- #
 # Deployment-name derivation (K8s operator convention)                         #
 # ---------------------------------------------------------------------------- #

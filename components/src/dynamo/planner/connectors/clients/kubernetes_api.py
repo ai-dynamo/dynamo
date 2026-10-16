@@ -56,7 +56,6 @@ DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
 # The legacy replica-stability path (require_backing_settled=False) does not
 # raise on Failed because it predates the rolling-update contract.
 ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress"})
-JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 # Stable labels the operator stamps on every worker Pod.
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
@@ -423,15 +422,16 @@ class KubernetesAPI:
         *,
         deployment: dict | None = None,
     ) -> None:
-        """Patch only the DGD replica field when the DGD still owns scaling.
+        """Update the DGD replica field when the DGD still owns scaling.
 
         Callers use this after proving the component does not declare a
         ``scalingAdapter``. It deliberately ignores any convention-named stray
         DGDSA so preflight and execution use the same replica authority. A
-        supplied deployment is the caller's validated snapshot. Its resource
-        version makes the patch fail with 409 if the DGD changes before the
-        write. Standalone callers get the same behavior through a complete
-        read-modify-write retry.
+        supplied deployment is the caller's validated snapshot. The merge
+        patch replaces its complete component list, and its resource version
+        makes the write fail with 409 if the DGD changes first. Standalone
+        callers get the same behavior through a complete read-modify-write
+        retry.
         """
         self.update_dgd_replica_targets(
             graph_deployment_name,
@@ -452,16 +452,10 @@ class KubernetesAPI:
 
         def update(snapshot: dict) -> None:
             resource_version = self._resource_version(snapshot, graph_deployment_name)
-            uid = self._resource_uid(snapshot, graph_deployment_name)
-            components = self._dgd_components(snapshot, graph_deployment_name)
-            patch: list[dict[str, object]] = [
-                {"op": "test", "path": "/metadata/uid", "value": uid},
-                {
-                    "op": "test",
-                    "path": "/metadata/resourceVersion",
-                    "value": resource_version,
-                },
-            ]
+            self._resource_uid(snapshot, graph_deployment_name)
+            components = copy.deepcopy(
+                self._dgd_components(snapshot, graph_deployment_name)
+            )
             for service_name, replicas in replica_targets.items():
                 index = self._find_component_index(
                     graph_deployment_name, components, service_name
@@ -470,21 +464,14 @@ class KubernetesAPI:
                     raise RuntimeError(
                         f"component {service_name!r} now declares a scalingAdapter"
                     )
-                patch.extend(
-                    [
-                        {
-                            "op": "test",
-                            "path": f"/spec/components/{index}/name",
-                            "value": service_name,
-                        },
-                        {
-                            "op": "add",
-                            "path": f"/spec/components/{index}/replicas",
-                            "value": replicas,
-                        },
-                    ]
-                )
-            self._patch_dgd_with_json_patch(graph_deployment_name, patch)
+                components[index]["replicas"] = replicas
+            self._patch_dgd_with_merge_patch(
+                graph_deployment_name,
+                {
+                    "metadata": {"resourceVersion": resource_version},
+                    "spec": {"components": components},
+                },
+            )
 
         if deployment is None:
             expected_uid: str | None = None
@@ -550,24 +537,10 @@ class KubernetesAPI:
             f"component {component_name!r} not found in DGD {graph_deployment_name!r}"
         )
 
-    @staticmethod
-    def _is_json_patch_test_failure(error: client.ApiException) -> bool:
-        if error.status != 422:
-            return False
-        detail = " ".join(
-            str(value)
-            for value in (error.reason, error.body, getattr(error, "data", None))
-            if value is not None
-        ).lower()
-        return any(
-            marker in detail
-            for marker in ("test operation", "test failed", "testing value")
-        )
-
-    def _patch_dgd_with_json_patch(
-        self, graph_deployment_name: str, patch: list[dict[str, object]]
+    def _patch_dgd_with_merge_patch(
+        self, graph_deployment_name: str, patch: dict
     ) -> None:
-        """Apply a DGD JSON Patch and surface a failed CAS test as 409."""
+        """Apply a DGD merge patch guarded by metadata.resourceVersion."""
 
         def request() -> None:
             self.custom_api.patch_namespaced_custom_object(
@@ -577,20 +550,9 @@ class KubernetesAPI:
                 plural=DGD_PLURAL,
                 name=graph_deployment_name,
                 body=patch,
-                _content_type=JSON_PATCH_CONTENT_TYPE,
             )
 
-        try:
-            retry_kubernetes_request(request)
-        except AmbiguousKubernetesWriteError:
-            raise
-        except client.ApiException as error:
-            if self._is_json_patch_test_failure(error):
-                raise client.ApiException(
-                    status=409,
-                    reason="DGD changed while applying replica targets",
-                ) from error
-            raise
+        retry_kubernetes_request(request)
 
     def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
@@ -752,6 +714,12 @@ class KubernetesAPI:
                 name=name, service=components.get(name, {})
             ).number_replicas()
             for pod in pods_by_component.get(name, []):
+                # Terminal Pods no longer belong to the active replica range.
+                if pod.status is not None and pod.status.phase in (
+                    "Succeeded",
+                    "Failed",
+                ):
+                    continue
                 replica_index = (pod.metadata.labels or {}).get(
                     GROVE_PCSG_REPLICA_INDEX_LABEL
                 )

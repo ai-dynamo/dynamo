@@ -229,6 +229,8 @@ class KubernetesCapacityManager(CapacityManager):
         self,
         participant_id: str,
         deployment: dict,
+        *,
+        allow_replacement: bool = False,
     ) -> None:
         metadata = deployment.get("metadata")
         if not isinstance(metadata, Mapping):
@@ -238,10 +240,17 @@ class KubernetesCapacityManager(CapacityManager):
             raise ValueError("DGD metadata.uid is unavailable")
         observed_uid = self._observed_uids.get(participant_id)
         if observed_uid is not None and observed_uid != uid:
-            raise RuntimeError(
-                f"DGD identity changed from {observed_uid!r} to {uid!r}; "
-                "capacity drain cannot be proven"
-            )
+            if not allow_replacement:
+                raise RuntimeError(
+                    f"DGD identity changed from {observed_uid!r} to {uid!r}; "
+                    "capacity drain cannot be proven"
+                )
+
+            # Unbounded refresh may adopt the replacement after dropping all
+            # observations tied to the previous DGD generation.
+            self._last_observed_pools.pop(participant_id, None)
+            self._replica_uids.pop(participant_id, None)
+            self._replica_settlements.pop(participant_id, None)
         self._observed_uids[participant_id] = uid
 
     def _record_observed_pools(
@@ -296,7 +305,9 @@ class KubernetesCapacityManager(CapacityManager):
                     "cannot be proven"
                 )
             return
-        self._record_observed_identity(participant_id, deployment)
+        self._record_observed_identity(
+            participant_id, deployment, allow_replacement=True
+        )
         if self.connectors.get(participant_id) is connector:
             self._missing_participants.discard(participant_id)
 

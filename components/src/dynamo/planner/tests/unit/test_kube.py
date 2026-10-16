@@ -202,13 +202,13 @@ def test_list_graph_deployments_restarts_expired_pagination(k8s_api, mock_custom
     ] == [None, "expired-page", None, "fresh-page"]
 
 
-def _dgd_json_patch_bodies(mock_custom_api):
+def _dgd_merge_patch_bodies(mock_custom_api):
     calls = mock_custom_api.patch_namespaced_custom_object.call_args_list
     for api_call in calls:
         assert api_call.kwargs["group"] == "nvidia.com"
         assert api_call.kwargs["version"] == "v1beta1"
         assert api_call.kwargs["plural"] == "dynamographdeployments"
-        assert api_call.kwargs["_content_type"] == "application/json-patch+json"
+        assert "_content_type" not in api_call.kwargs
     mock_custom_api.api_client.call_api.assert_not_called()
     return [api_call.kwargs["body"] for api_call in calls]
 
@@ -430,25 +430,16 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
     mock_custom_api.patch_namespaced_custom_object_scale.assert_not_called()
 
-    assert _dgd_json_patch_bodies(mock_custom_api) == [
-        [
-            {"op": "test", "path": "/metadata/uid", "value": "dgd-uid"},
-            {
-                "op": "test",
-                "path": "/metadata/resourceVersion",
-                "value": "dgd-rv-1",
+    assert _dgd_merge_patch_bodies(mock_custom_api) == [
+        {
+            "metadata": {"resourceVersion": "dgd-rv-1"},
+            "spec": {
+                "components": [
+                    {"name": "test-component", "type": "decode", "replicas": 1},
+                    {"name": "other-component", "type": "prefill", "replicas": 2},
+                ]
             },
-            {
-                "op": "test",
-                "path": "/spec/components/0/name",
-                "value": "test-component",
-            },
-            {
-                "op": "add",
-                "path": "/spec/components/0/replicas",
-                "value": 1,
-            },
-        ]
+        }
     ]
 
 
@@ -472,25 +463,26 @@ def test_update_service_replicas_rereads_dgd_on_conflict(k8s_api, mock_custom_ap
         },
     ]
     mock_custom_api.patch_namespaced_custom_object.side_effect = [
-        client.ApiException(status=422, reason="testing value failed"),
+        client.ApiException(status=409),
         None,
     ]
 
     k8s_api.update_service_replicas("test-deployment", "target", 2)
 
     assert mock_custom_api.get_namespaced_custom_object.call_count == 2
-    bodies = _dgd_json_patch_bodies(mock_custom_api)
-    assert bodies[0][1]["value"] == "dgd-rv-1"
-    assert bodies[0][-1] == {
-        "op": "add",
-        "path": "/spec/components/0/replicas",
-        "value": 2,
+    bodies = _dgd_merge_patch_bodies(mock_custom_api)
+    assert bodies[0] == {
+        "metadata": {"resourceVersion": "dgd-rv-1"},
+        "spec": {"components": [{"name": "target", "replicas": 2}]},
     }
-    assert bodies[1][1]["value"] == "dgd-rv-2"
-    assert bodies[1][-1] == {
-        "op": "add",
-        "path": "/spec/components/1/replicas",
-        "value": 2,
+    assert bodies[1] == {
+        "metadata": {"resourceVersion": "dgd-rv-2"},
+        "spec": {
+            "components": [
+                {"name": "other", "replicas": 1},
+                {"name": "target", "replicas": 2},
+            ]
+        },
     }
 
 
@@ -511,7 +503,7 @@ def test_update_service_replicas_stops_retry_after_dgd_recreation(
         },
     ]
     mock_custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(
-        status=422, reason="test operation failed"
+        status=409
     )
 
     with pytest.raises(RuntimeError, match="identity changed during retry"):
@@ -520,7 +512,7 @@ def test_update_service_replicas_stops_retry_after_dgd_recreation(
     assert mock_custom_api.patch_namespaced_custom_object.call_count == 1
 
 
-def test_update_service_replicas_preserves_non_cas_json_patch_error(
+def test_update_service_replicas_preserves_non_cas_merge_patch_error(
     k8s_api, mock_custom_api
 ):
     mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
@@ -608,31 +600,23 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     }
     k8s_api.update_dgd_replicas_directly("test-deployment", "test-component", 1)
 
-    assert _dgd_json_patch_bodies(mock_custom_api) == [
-        [
-            {"op": "test", "path": "/metadata/uid", "value": "dgd-uid"},
-            {
-                "op": "test",
-                "path": "/metadata/resourceVersion",
-                "value": "42",
+    assert _dgd_merge_patch_bodies(mock_custom_api) == [
+        {
+            "metadata": {"resourceVersion": "42"},
+            "spec": {
+                "components": [
+                    {
+                        "name": "test-component",
+                        "type": "prefill",
+                        "replicas": 1,
+                    }
+                ]
             },
-            {
-                "op": "test",
-                "path": "/spec/components/0/name",
-                "value": "test-component",
-            },
-            {
-                "op": "add",
-                "path": "/spec/components/0/replicas",
-                "value": 1,
-            },
-        ]
+        }
     ]
 
 
-def test_update_dgd_replica_targets_uses_one_targeted_json_patch(
-    k8s_api, mock_custom_api
-):
+def test_update_dgd_replica_targets_uses_one_cas_merge_patch(k8s_api, mock_custom_api):
     deployment = {
         "metadata": {
             "name": "test-deployment",
@@ -653,35 +637,16 @@ def test_update_dgd_replica_targets_uses_one_targeted_json_patch(
         deployment=deployment,
     )
 
-    assert _dgd_json_patch_bodies(mock_custom_api) == [
-        [
-            {"op": "test", "path": "/metadata/uid", "value": "dgd-uid"},
-            {
-                "op": "test",
-                "path": "/metadata/resourceVersion",
-                "value": "42",
+    assert _dgd_merge_patch_bodies(mock_custom_api) == [
+        {
+            "metadata": {"resourceVersion": "42"},
+            "spec": {
+                "components": [
+                    {"name": "prefill", "type": "prefill", "replicas": 3},
+                    {"name": "decode", "type": "decode", "replicas": 4},
+                ]
             },
-            {
-                "op": "test",
-                "path": "/spec/components/0/name",
-                "value": "prefill",
-            },
-            {
-                "op": "add",
-                "path": "/spec/components/0/replicas",
-                "value": 3,
-            },
-            {
-                "op": "test",
-                "path": "/spec/components/1/name",
-                "value": "decode",
-            },
-            {
-                "op": "add",
-                "path": "/spec/components/1/replicas",
-                "value": 4,
-            },
-        ]
+        }
     ]
 
 
@@ -1216,6 +1181,19 @@ def test_is_spec_generation_observed_requires_catch_up(k8s_api):
         is True
     )
     assert k8s_api.is_spec_generation_observed({"status": {}}) is False
+
+
+@pytest.mark.parametrize("phase", ["Succeeded", "Failed"])
+def test_pcsg_replica_range_ignores_terminal_pods(k8s_api, phase):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    deployment["spec"]["components"][0]["replicas"] = 0
+    deployment["status"]["components"]["decode"][
+        "componentKind"
+    ] = "PodCliqueScalingGroup"
+    terminal = _make_pod("terminal", phase=phase)
+    terminal.metadata.labels["grove.io/podcliquescalinggroup-replica-index"] = "7"
+
+    assert k8s_api.pcsg_pods_within_desired_replicas(deployment, [terminal])
 
 
 @pytest.mark.asyncio
