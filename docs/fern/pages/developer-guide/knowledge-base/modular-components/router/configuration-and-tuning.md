@@ -266,9 +266,14 @@ Each class owns a shared FCFS or WSPT heap plus one heap for each exact-worker
 lane, along with its busy thresholds, queue limits, quantum, deficit, and
 counters. Arbitration compares the shared head with the currently dispatchable
 exact-worker lane heads. Absolute and fractional busy thresholds use OR
-semantics. A class queues only when at least one threshold is configured and
-every eligible worker is busy for that class, but a new arrival cannot bypass
-an existing backlog in the same class.
+semantics. `decode_busy_threshold_frac` also marks a worker busy when the KV
+blocks its active requests hold exceed that fraction of its `total_kv_blocks`,
+so a worker filled by long-running decodes stops taking new work even after
+their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
+not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
+when at least one threshold is configured and every eligible worker is busy
+for that class, but a new arrival cannot bypass an existing backlog in the
+same class.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
