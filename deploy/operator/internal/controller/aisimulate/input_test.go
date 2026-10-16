@@ -65,11 +65,20 @@ func lower(t *testing.T, spec *v1beta2.DynamoGraphDeploymentRequestSpec) map[str
 
 func encode(t *testing.T, input map[string]any) string {
 	t.Helper()
-	raw, err := JSON(input)
+	raw, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func underlay(t *testing.T, spec *v1beta2.DynamoGraphDeploymentRequestSpec) map[string]any {
+	t.Helper()
+	input, err := Underlay(spec)
+	if err != nil {
+		t.Fatalf("Underlay: %v", err)
+	}
+	return input
 }
 
 func nested(t *testing.T, input map[string]any, path ...string) any {
@@ -283,24 +292,24 @@ func TestUnderlayParetoObjective(t *testing.T) {
 	spec.Objective.Mode = v1beta2.ObjectiveModePareto
 	spec.Objective.Metric = nil
 	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"ThroughputPerGPU", "ThroughputPerUser", "Unknown"}
-	input := Underlay(spec)
+	input := underlay(t, spec)
 	if nested(t, input, "goal", "target") != TargetPareto {
 		t.Fatalf("not a pareto goal: %v", input["goal"])
 	}
 	objectives, _, _ := unstructured.NestedSlice(input, "goal", "pareto_objectives")
 	got, _ := json.Marshal(objectives)
-	if string(got) != `["throughput_per_gpu","throughput_per_user","Unknown"]` {
+	if string(got) != `["throughput_per_gpu","throughput_per_user","unknown"]` {
 		t.Fatalf("pareto_objectives = %s", got)
 	}
 }
 
 func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
 	spec := &v1beta2.DynamoGraphDeploymentRequestSpec{Model: &v1beta2.ModelSpec{Name: "m"}}
-	if got := encode(t, Underlay(spec)); got != `{"search_space":{"model_name":"m"}}` {
+	if got := encode(t, underlay(t, spec)); got != `{"search_space":{"model_name":"m"}}` {
 		t.Fatalf("got %s", got)
 	}
 	spec.Hardware = &v1beta2.HardwareSpec{GPU: &v1beta2.GPUHardwareSpec{SKU: ptrTo("")}}
-	if got := encode(t, Underlay(spec)); got != `{"search_space":{"model_name":"m"}}` {
+	if got := encode(t, underlay(t, spec)); got != `{"search_space":{"model_name":"m"}}` {
 		t.Fatalf("an empty SKU must not lower: %s", got)
 	}
 }
@@ -308,11 +317,11 @@ func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
 func TestUnderlayKVLoadRatioShapes(t *testing.T) {
 	spec := defaultedSpec()
 	spec.Workload.Static.KVLoadRatio = v1beta2.KVLoadRatio{0.25}
-	if nested(t, Underlay(spec), "workload", "kv_load_ratio") != 0.25 {
+	if nested(t, underlay(t, spec), "workload", "kv_load_ratio") != 0.25 {
 		t.Fatal("a single ratio lowers to a scalar")
 	}
 	spec.Workload.Static.KVLoadRatio = v1beta2.KVLoadRatio{0.1, 0.2, 0.3}
-	if ratios, _ := nested(t, Underlay(spec), "workload", "kv_load_ratio").([]any); len(ratios) != 3 {
+	if ratios, _ := nested(t, underlay(t, spec), "workload", "kv_load_ratio").([]any); len(ratios) != 3 {
 		t.Fatal("longer lists lower unchanged so validation can report them")
 	}
 }
@@ -330,7 +339,7 @@ func TestParametersMustBeAnObject(t *testing.T) {
 	}
 }
 
-func TestHas(t *testing.T) {
+func TestHasPath(t *testing.T) {
 	parameters := map[string]any{
 		"goal":     map[string]any{"target": nil, "sla": map[string]any{"ttft_ms": 1.0}},
 		"workload": map[string]any{"isl": 8.0},
@@ -346,11 +355,27 @@ func TestHas(t *testing.T) {
 		"goal.target.deeper":  false,
 		"workload.isl.deeper": false,
 	} {
-		if got := Has(parameters, strings.Split(path, ".")...); got != want {
-			t.Errorf("Has(%s) = %v, want %v", path, got, want)
+		if got := has(parameters, strings.Split(path, ".")...); got != want {
+			t.Errorf("has(%s) = %v, want %v", path, got, want)
 		}
 	}
-	if Has(nil, "goal") {
+	if has(nil, "goal") {
 		t.Error("nothing is named in nil parameters")
+	}
+}
+
+func TestNativeMetricNames(t *testing.T) {
+	for metric, want := range map[v1beta2.ObjectiveMetric]string{
+		"Throughput":        "throughput",
+		"ThroughputPerGPU":  "throughput_per_gpu",
+		"ThroughputPerUser": "throughput_per_user",
+		"TTFT":              "ttft",
+		"E2ELatency":        "e2e_latency",
+		"Goodput":           "goodput",
+		"GoodputPerGPU":     "goodput_per_gpu",
+	} {
+		if got := nativeMetric(metric); got != want {
+			t.Errorf("nativeMetric(%s) = %q, want %q", metric, got, want)
+		}
 	}
 }

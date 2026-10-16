@@ -24,6 +24,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
+	admissionv1 "k8s.io/api/admission/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -74,21 +75,27 @@ type DGDRV1beta2Options struct {
 // validating admission reports the exact field.
 func (o DGDRV1beta2Options) resolveDefaults(
 	ctx context.Context,
+	operation admissionv1.Operation,
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 ) dynamoGraphDeploymentRequestV1beta2DefaultOptions {
 	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        o.resolveHardware(ctx, spec),
+		hardware:        o.resolveHardware(ctx, operation, spec),
 		aisimulateImage: o.AISimulateImage,
 	}
 }
 
-// resolveHardware returns the SKU and budget the typed spec omits. It asks the cluster only
+// resolveHardware returns the SKU and budget the typed spec omits on CREATE. It asks the cluster only
 // when something is missing, restricted to the typed SKU when there is one.
 func (o DGDRV1beta2Options) resolveHardware(
 	ctx context.Context,
+	operation admissionv1.Operation,
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 ) hardwareDefaultsV1beta2 {
-	if o.Hardware == nil {
+	// Discovery is a CREATE-time decision. A Request that omitted its hardware and was
+	// created while discovery had nothing to offer must not pick hardware up on a later
+	// metadata-only update: that would change the spec, and its generation, behind the
+	// writer's back. Any other operation, known or not, leaves the hardware alone.
+	if operation != admissionv1.Create || o.Hardware == nil {
 		return hardwareDefaultsV1beta2{}
 	}
 	var sku string

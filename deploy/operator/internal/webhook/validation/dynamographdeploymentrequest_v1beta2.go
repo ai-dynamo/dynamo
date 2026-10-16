@@ -21,9 +21,9 @@ import (
 	"encoding/json"
 	"strings"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -31,41 +31,30 @@ import (
 var parametersPath = field.NewPath("spec", "aisimulate", "parameters")
 
 // validateDynamoGraphDeploymentRequestEnvelopeV1beta2 validates the v1beta2 spec carried in
-// spec.v1beta2 of a v1beta1 object. errors use the v1beta2 spec's own field paths (spec.model, spec.aisimulate, ...), which are
-// what the user wrote.
+// spec.v1beta2 of a v1beta1 object. raw is that field and fldPath is its path; a spec that
+// does not decode is reported there. Errors about the decoded spec use the v1beta2 spec's own
+// field paths (spec.model, spec.aisimulate, ...), which are what the user wrote, so they are
+// rooted at spec rather than at fldPath.
 func validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
-	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	raw *apiextensionsv1.JSON,
 	fldPath *field.Path,
 ) field.ErrorList {
-	var v2 nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
-	if err := json.Unmarshal(spec.V1Beta2.Raw, &v2); err != nil {
-		return field.ErrorList{field.Invalid(fldPath.Child("v1beta2"), "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
+	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal(raw.Raw, &spec); err != nil {
+		return field.ErrorList{field.Invalid(fldPath, "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
 	}
-	return validateDynamoGraphDeploymentRequestV1beta2(&v2)
+	return validateDynamoGraphDeploymentRequestV1beta2(&spec)
 }
 
-// validateDynamoGraphDeploymentRequestV1beta2 validates a defaulted v1beta2 Request spec in
-// two explicit stages and reports the errors of both:
-//
-//  1. The typed spec on its own, with typed field paths. spec.aisimulate.parameters cannot
-//     excuse an invalid typed value.
-//  2. The effective AISimulate input, which is the typed spec lowered and then overridden by
-//     spec.aisimulate.parameters. It carries the cross-field rules that only hold after the
-//     override. Each error points at the field that has to change: below
-//     spec.aisimulate.parameters when the parameters name the key, otherwise at the typed
-//     field that produced it.
+// validateDynamoGraphDeploymentRequestV1beta2 validates a defaulted v1beta2 Request spec: the
+// typed fields, then that spec.aisimulate.parameters is an object. The content of the
+// parameters is not validated here; the AISimulate input schema owns it.
 func validateDynamoGraphDeploymentRequestV1beta2(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) field.ErrorList {
 	errs := validateDynamoGraphDeploymentRequestSpecV1beta2(spec, field.NewPath("spec"))
-
-	parameters, err := aisimulate.Parameters(spec)
-	if err != nil {
-		return append(errs, field.Invalid(parametersPath, "<redacted>", err.Error()))
+	if _, err := aisimulate.Parameters(spec); err != nil {
+		errs = append(errs, field.Invalid(parametersPath, "<redacted>", err.Error()))
 	}
-	input, err := aisimulate.Lower(spec)
-	if err != nil {
-		return append(errs, field.Invalid(parametersPath, "<redacted>", err.Error()))
-	}
-	return append(errs, validateEffectiveAISimulateInput(input, parameters)...)
+	return errs
 }
 
 // validateDynamoGraphDeploymentRequestSpecV1beta2 validates spec. spec and fldPath must not be nil.
@@ -126,7 +115,7 @@ func validateStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSp
 func validateAISimulateSpecV1beta2(spec *nvidiacomv1beta2.AISimulateSpec, fldPath *field.Path) field.ErrorList {
 	if spec == nil || spec.Image == "" {
 		return field.ErrorList{field.Required(fldPath.Child("image"),
-			"no AISimulate image: set it, or configure the operator's default AISimulate image")}
+			"an AISimulate image is required; set it, or configure the operator's default AISimulate image")}
 	}
 	if _, err := aisimulate.ResolveVersion(spec.Image, spec.VersionOverride); err != nil {
 		return field.ErrorList{field.Required(fldPath.Child("versionOverride"),

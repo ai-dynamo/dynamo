@@ -34,32 +34,29 @@ const (
 // applyDefaults adds the derived defaults to the merged input. A default is skipped when
 // the parameters name its key, including with null: the caller's native value overrides or
 // deletes the default.
-func applyDefaults(input, parameters map[string]any) {
-	set := func(value any, path []string) {
-		if err := unstructured.SetNestedField(input, value, path...); err != nil {
-			panic("aisimulate: " + err.Error())
-		}
-	}
+func applyDefaults(input, parameters map[string]any) error {
+	b := builder{root: input}
 
-	if Has(input, Workload...) {
-		if !Has(input, WorkloadRequestCount...) && !Has(input, WorkloadNumRequestRatio...) &&
-			!Has(parameters, WorkloadRequestCount...) {
-			set(float64(DefaultRequestCount), WorkloadRequestCount)
+	if has(input, Workload...) {
+		if !has(input, WorkloadRequestCount...) && !has(input, WorkloadNumRequestRatio...) &&
+			!has(parameters, WorkloadRequestCount...) {
+			b.set(float64(DefaultRequestCount), WorkloadRequestCount)
 		}
 		kvLoadRatio, _, _ := unstructured.NestedFieldNoCopy(input, WorkloadKVLoadRatio...)
 		if _, isRange := kvLoadRatio.([]any); isRange &&
-			!Has(input, SweepMaxTrials...) && !Has(parameters, SweepMaxTrials...) {
-			set(float64(DefaultMaxTrials), SweepMaxTrials)
+			!has(input, SweepMaxTrials...) && !has(parameters, SweepMaxTrials...) {
+			b.set(float64(DefaultMaxTrials), SweepMaxTrials)
 		}
 	}
 
-	if HasSLABound(input) && !Has(input, GoalStrictSLA...) && !Has(parameters, GoalStrictSLA...) {
-		set(true, GoalStrictSLA)
+	if hasSLABound(input) && !has(input, GoalStrictSLA...) && !has(parameters, GoalStrictSLA...) {
+		b.set(true, GoalStrictSLA)
 	}
+	return b.err
 }
 
-// HasSLABound reports whether the effective input bounds at least one latency.
-func HasSLABound(input map[string]any) bool {
+// hasSLABound reports whether the effective input bounds at least one latency.
+func hasSLABound(input map[string]any) bool {
 	for _, path := range [][]string{GoalSLATTFTMs, GoalSLAITLMs, GoalSLAE2EMs} {
 		if bound, _, _ := unstructured.NestedFieldNoCopy(input, path...); bound != nil {
 			return true

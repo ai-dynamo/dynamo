@@ -4289,8 +4289,8 @@ Image selects a Dynamo-compatible AISimulate runner. When omitted, admission per
 </ParamField>
 
 <ParamField path="versionOverride" type="string">
-VersionOverride declares the AISimulate compatibility version. It is required when the image tag is not a version and wins over a version in the tag.
-**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+VersionOverride declares the AISimulate compatibility version as three numeric parts (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required when the image tag is not a version and wins over a version in the tag.
+**Validation:** MinLength: 1  Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="parameters" type="RawExtension">

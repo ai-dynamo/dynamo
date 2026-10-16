@@ -191,10 +191,12 @@ type AISimulateSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image,omitempty"`
 
-	// VersionOverride declares the AISimulate compatibility version. It is required
+	// VersionOverride declares the AISimulate compatibility version as three numeric parts
+    // (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
 	// when the image tag is not a version and wins over a version in the tag.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	VersionOverride string `json:"versionOverride,omitempty"`
 
 	// Parameters contains native AISimulate input. Field names and nesting use
@@ -282,7 +284,6 @@ type DynamoGraphDeploymentRequestStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:unservedversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.name`
 // +kubebuilder:printcolumn:name="Active Run",type=string,JSONPath=`.status.activeRunRef.name`

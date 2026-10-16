@@ -54,10 +54,10 @@ var (
 // TargetPareto is the goal.target of a multi-objective search.
 const TargetPareto = "pareto"
 
-// Has reports whether obj contains the path, even with a null value. Applied to
+// has reports whether obj contains the path, even with a null value. Applied to
 // spec.aisimulate.parameters it tells whether the caller named a key, including to delete
 // it.
-func Has(obj map[string]any, path ...string) bool {
+func has(obj map[string]any, path ...string) bool {
 	_, found, _ := unstructured.NestedFieldNoCopy(obj, path...)
 	return found
 }

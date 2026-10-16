@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -36,7 +35,6 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -68,11 +66,6 @@ var (
 	// Fixture barriers observe the same cache used by webhook validation.
 	admissionReader client.Reader
 
-	// The DGDR CRD ships v1beta2 unserved while that API is unfinished. The v1beta2 admission
-	// tests need the API server to accept it, so the suite serves a patched copy of the CRDs.
-	admissionCRDRoot  = mustTempDir()
-	admissionCRDPaths = mustAdmissionCRDPaths(admissionCRDRoot)
-
 	// Hardware that the v1beta2 defaulter discovers; tests set it before each case.
 	admissionHardware = &fakeHardwareDiscoverer{}
 
@@ -85,63 +78,13 @@ var (
 			BypassUsers: []string{legacySeedUsername},
 		},
 		SetupWebhooks:     setupAdmissionWebhooks,
-		CRDDirectoryPaths: admissionCRDPaths,
 		OperatorVersion:   "1.6.0",
 		OperatorPrincipal: admissionOperatorPrincipal,
 	})
 )
 
 func TestMain(m *testing.M) {
-	code := admissionEnv.RunM(m)
-	_ = os.RemoveAll(admissionCRDRoot)
-	os.Exit(code)
-}
-
-func mustTempDir() string {
-	dir, err := os.MkdirTemp("", "admission-crds-")
-	if err != nil {
-		panic(err)
-	}
-	return dir
-}
-
-// mustAdmissionCRDPaths returns the CRD directories operatorenv loads by default, with the
-// DGDR CRD copied into root and its v1beta2 version marked served.
-func mustAdmissionCRDPaths(root string) []string {
-	const operatorRoot = "../../.."
-	bases := filepath.Join(operatorRoot, "config", "crd", "bases")
-	entries, err := os.ReadDir(bases)
-	if err != nil {
-		panic(err)
-	}
-	for _, entry := range entries {
-		data, err := os.ReadFile(filepath.Join(bases, entry.Name()))
-		if err != nil {
-			panic(err)
-		}
-		if entry.Name() == "nvidia.com_dynamographdeploymentrequests.yaml" {
-			crd := &apiextensionsv1.CustomResourceDefinition{}
-			if err := yaml.Unmarshal(data, crd); err != nil {
-				panic(err)
-			}
-			for i := range crd.Spec.Versions {
-				if crd.Spec.Versions[i].Name == "v1beta2" {
-					crd.Spec.Versions[i].Served = true
-				}
-			}
-			if data, err = yaml.Marshal(crd); err != nil {
-				panic(err)
-			}
-		}
-		if err := os.WriteFile(filepath.Join(root, entry.Name()), data, 0o600); err != nil {
-			panic(err)
-		}
-	}
-	paths := []string{root}
-	for _, dir := range []string{"disaggregatedset", "prometheus", "volcano.sh", "run.ai", "inference.networking.k8s.io", "grove.io"} {
-		paths = append(paths, filepath.Join(operatorRoot, "internal", "controller", "testing", dir))
-	}
-	return paths
+	os.Exit(admissionEnv.RunM(m))
 }
 
 func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
@@ -207,6 +150,10 @@ type admissionTestCase struct {
 	terminating        bool
 	username           string
 
+	// beforeUpdate runs after the old state is seeded and before the update is submitted. Use
+	// it to change what the webhooks see between the two writes, such as hardware discovery.
+	beforeUpdate func(*testing.T)
+
 	wantSchemaError   string
 	wantCELError      string
 	wantAdmissionErrs []string
@@ -248,6 +195,10 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		admissionGate.set(test.gates)
 		if test.terminating {
 			old = beginTermination(t, seedClient, old)
+		}
+
+		if test.beforeUpdate != nil {
+			test.beforeUpdate(t)
 		}
 
 		t.Log("Submit the update request through the Kubernetes API server")

@@ -20,6 +20,8 @@ package aisimulate
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,22 +36,21 @@ func Lower(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
-	underlay, err := normalize(Underlay(spec))
+	underlay, err := Underlay(spec)
 	if err != nil {
+		return nil, err
+	}
+	if underlay, err = normalize(underlay); err != nil {
 		return nil, err
 	}
 	input, _ := mergePatch(underlay, parameters).(map[string]any)
 	if input == nil {
 		input = map[string]any{}
 	}
-	applyDefaults(input, parameters)
+	if err := applyDefaults(input, parameters); err != nil {
+		return nil, err
+	}
 	return input, nil
-}
-
-// JSON returns the canonical encoding of an effective input. Object keys are sorted, so
-// equal inputs produce equal bytes.
-func JSON(input map[string]any) ([]byte, error) {
-	return json.Marshal(input)
 }
 
 // Parameters returns spec.aisimulate.parameters as a JSON object, or nil when absent.
@@ -83,111 +84,126 @@ func Parameters(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (map[string]any,
 
 // Underlay translates the typed spec into native input. Typed fields that are unset
 // produce no key, so the native defaults and the parameters decide them.
-func Underlay(spec *v1beta2.DynamoGraphDeploymentRequestSpec) map[string]any {
-	root := map[string]any{}
-	// Every path below is written under a map this function created, and every value is a
-	// JSON scalar, so a failure here is a programming error.
-	set := func(value any, path []string) {
-		if err := unstructured.SetNestedField(root, value, path...); err != nil {
-			panic("aisimulate: " + err.Error())
-		}
-	}
-	setStrings := func(values []string, path []string) {
-		if err := unstructured.SetNestedStringSlice(root, values, path...); err != nil {
-			panic("aisimulate: " + err.Error())
-		}
-	}
+func Underlay(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (map[string]any, error) {
+	b := builder{root: map[string]any{}}
 
 	if spec.Model != nil {
-		set(spec.Model.Name, SearchSpaceModelName)
+		b.set(spec.Model.Name, SearchSpaceModelName)
 	}
 	if len(spec.Backends) > 0 {
 		backends := make([]string, len(spec.Backends))
 		for i, backend := range spec.Backends {
 			backends[i] = string(backend)
 		}
-		setStrings(backends, SearchSpaceBackend)
+		b.setStrings(backends, SearchSpaceBackend)
 	}
 	if spec.Hardware != nil && spec.Hardware.GPU != nil {
 		if sku := spec.Hardware.GPU.SKU; sku != nil && *sku != "" {
-			set(*sku, SearchSpaceHardwareSKU)
+			b.set(*sku, SearchSpaceHardwareSKU)
 		}
 		if budget := spec.Hardware.GPU.Budget; budget != nil {
-			set(int64(*budget), SearchSpaceGPUBudget)
+			b.set(int64(*budget), SearchSpaceGPUBudget)
 		}
 	}
 
 	if spec.Workload != nil && spec.Workload.Static != nil {
 		static := spec.Workload.Static
 		if static.ISL != nil {
-			set(int64(*static.ISL), WorkloadISL)
+			b.set(int64(*static.ISL), WorkloadISL)
 		}
 		if static.OSL != nil {
-			set(int64(*static.OSL), WorkloadOSL)
+			b.set(int64(*static.OSL), WorkloadOSL)
 		}
 		if static.NumRequestRatio != nil {
-			set(*static.NumRequestRatio, WorkloadNumRequestRatio)
+			b.set(*static.NumRequestRatio, WorkloadNumRequestRatio)
 		}
 		if static.RequestRate != nil {
-			set(*static.RequestRate, WorkloadRequestRate)
+			b.set(*static.RequestRate, WorkloadRequestRate)
 		}
 		if static.Concurrency != nil {
-			set(int64(*static.Concurrency), WorkloadConcurrency)
+			b.set(int64(*static.Concurrency), WorkloadConcurrency)
 		}
 		switch len(static.KVLoadRatio) {
 		case 0:
 		case 1:
-			set(static.KVLoadRatio[0], WorkloadKVLoadRatio)
+			b.set(static.KVLoadRatio[0], WorkloadKVLoadRatio)
 		default:
 			ratios := make([]any, len(static.KVLoadRatio))
 			for i, ratio := range static.KVLoadRatio {
 				ratios[i] = ratio
 			}
-			set(ratios, WorkloadKVLoadRatio)
+			b.set(ratios, WorkloadKVLoadRatio)
 		}
 	}
 
 	if objective := spec.Objective; objective != nil {
 		if objective.Mode == v1beta2.ObjectiveModePareto {
-			set(TargetPareto, GoalTarget)
+			b.set(TargetPareto, GoalTarget)
 			if len(objective.Metrics) > 0 {
-				setStrings(nativeMetrics(objective.Metrics), GoalParetoObjectives)
+				b.setStrings(nativeMetrics(objective.Metrics), GoalParetoObjectives)
 			}
 		} else if objective.Metric != nil {
-			set(nativeMetric(*objective.Metric), GoalTarget)
+			b.set(nativeMetric(*objective.Metric), GoalTarget)
 		}
 		if sla := objective.SLA; sla != nil {
 			if sla.TTFTMs != nil {
-				set(*sla.TTFTMs, GoalSLATTFTMs)
+				b.set(*sla.TTFTMs, GoalSLATTFTMs)
 			}
 			if sla.ITLMs != nil {
-				set(*sla.ITLMs, GoalSLAITLMs)
+				b.set(*sla.ITLMs, GoalSLAITLMs)
 			}
 			if sla.E2EMs != nil {
-				set(*sla.E2EMs, GoalSLAE2EMs)
+				b.set(*sla.E2EMs, GoalSLAE2EMs)
 			}
 		}
 	}
-	return root
+	return b.root, b.err
 }
 
-var nativeMetricNames = map[v1beta2.ObjectiveMetric]string{
-	"Throughput":        "throughput",
-	"ThroughputPerGPU":  "throughput_per_gpu",
-	"ThroughputPerUser": "throughput_per_user",
-	"TTFT":              "ttft",
-	"E2ELatency":        "e2e_latency",
-	"Goodput":           "goodput",
-	"GoodputPerGPU":     "goodput_per_gpu",
+// builder writes native input values, remembering the first failure so the translation reads
+// as a straight list of assignments. Every path is written under a map the caller created
+// and every value is a JSON scalar or a list of them, so a failure means a bad path.
+type builder struct {
+	root map[string]any
+	err  error
 }
 
-// nativeMetric maps an API metric to AISimulate's goal.target. An unknown metric is
-// passed through so validation reports it instead of silently dropping it.
-func nativeMetric(metric v1beta2.ObjectiveMetric) string {
-	if name, ok := nativeMetricNames[metric]; ok {
-		return name
+func (b *builder) set(value any, path []string) {
+	if b.err != nil {
+		return
 	}
-	return string(metric)
+	if err := unstructured.SetNestedField(b.root, value, path...); err != nil {
+		b.err = fmt.Errorf("set %s: %w", strings.Join(path, "."), err)
+	}
+}
+
+func (b *builder) setStrings(values []string, path []string) {
+	if b.err != nil {
+		return
+	}
+	if err := unstructured.SetNestedStringSlice(b.root, values, path...); err != nil {
+		b.err = fmt.Errorf("set %s: %w", strings.Join(path, "."), err)
+	}
+}
+
+// nativeMetric maps an API metric to AISimulate's goal.target by converting its CamelCase
+// name to snake_case: ThroughputPerGPU becomes throughput_per_gpu and E2ELatency becomes
+// e2e_latency. A run of capitals stays together, a digit does not start a word, and the last
+// capital of a run starts the next word when a lowercase letter follows it.
+func nativeMetric(metric v1beta2.ObjectiveMetric) string {
+	name := []rune(string(metric))
+	var out []rune
+	for i, r := range name {
+		if i > 0 && unicode.IsUpper(r) {
+			prev := name[i-1]
+			nextLower := i+1 < len(name) && unicode.IsLower(name[i+1])
+			if unicode.IsLower(prev) || (unicode.IsUpper(prev) && nextLower) {
+				out = append(out, '_')
+			}
+		}
+		out = append(out, unicode.ToLower(r))
+	}
+	return string(out)
 }
 
 func nativeMetrics(metrics []v1beta2.ObjectiveMetric) []string {

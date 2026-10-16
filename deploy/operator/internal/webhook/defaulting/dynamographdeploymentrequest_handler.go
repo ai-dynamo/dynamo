@@ -84,7 +84,7 @@ func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
 // UPDATE requests are admitted unchanged so an omitted image is not rewritten after
 // creation.
 func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
-	
+
 	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
@@ -96,15 +96,16 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return fmt.Errorf("expected DynamoGraphDeploymentRequest but got %T", obj)
 	}
 
-	// A v1beta2 Request is defaulted from its envelope on CREATE and UPDATE.
-	if dgdr.Spec.V1Beta2 != nil {
-		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, d.v1beta2)
-	}
-
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		logger.Error(err, "failed to get admission request from context, skipping defaulting")
 		return nil
+	}
+
+	// A v1beta2 Request is defaulted from its envelope on CREATE and UPDATE; only CREATE
+	// reads the cluster.
+	if dgdr.Spec.V1Beta2 != nil {
+		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, d.v1beta2)
 	}
 
 	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {

@@ -92,7 +92,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
 	// the v1beta1 rules below do not apply to it.
 	if spec.V1Beta2 != nil {
-		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec, fldPath)
+		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec.V1Beta2, fldPath.Child("v1beta2"))
 	}
 
 	allErrs := field.ErrorList{}
@@ -254,7 +254,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
 			return nil
 		}
-		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec, fldPath)
+		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, fldPath.Child("v1beta2"))
 	}
 
 	allErrs := field.ErrorList{}

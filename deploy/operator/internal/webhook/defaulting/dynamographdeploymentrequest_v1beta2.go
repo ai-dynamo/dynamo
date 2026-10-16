@@ -25,6 +25,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
@@ -44,12 +45,15 @@ const defaultMetricV1beta2 = nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU"
 // defaulted typed values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
-// spec.v1beta2. The environment is read once, before any mutation. The envelope is rewritten
+// spec.v1beta2. The environment is read once, before any mutation, and only on CREATE:
+// discovered hardware is persisted with the Request, so a later write never replaces what
+// the Request was created with. The envelope is rewritten
 // only when defaulting changed the spec, so a defaulted object stays byte-identical across
 // repeated admissions.
 func defaultDynamoGraphDeploymentRequestV1beta2(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	operation admissionv1.Operation,
 	options DGDRV1beta2Options,
 ) error {
 	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
@@ -61,7 +65,7 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 		return fmt.Errorf("encode spec.v1beta2: %w", err)
 	}
 
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, &spec))
+	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, operation, &spec))
 
 	after, err := json.Marshal(&spec)
 	if err != nil {
@@ -91,7 +95,7 @@ type hardwareDefaultsV1beta2 struct {
 func (h hardwareDefaultsV1beta2) empty() bool { return h.sku == "" && h.budget == 0 }
 
 // defaultDynamoGraphDeploymentRequestSpecV1beta2 defaults spec in place. It applies on
-// CREATE and UPDATE and is idempotent. spec must not be nil.
+// CREATE and UPDATE and is idempotent; opts carries no hardware on UPDATE. spec must not be nil.
 func defaultDynamoGraphDeploymentRequestSpecV1beta2(
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
