@@ -542,9 +542,8 @@ jobs:
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
       diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
-      # Drop these overrides after the upstream TensorRT-LLM change ships.
+      # Drop this source overlay after the upstream TensorRT-LLM change ships.
       extra_build_args: |
-        RUNTIME_IMAGE_TAG=1.4.0rc1.dev202610140007@sha256:7a728cd307bfa1651b4ad0787e71e69f7506fb1a698a0f4f04aef719ad43525f
         TRTLLM_SOURCE_REPOSITORY=https://github.com/krishung5/TensorRT-LLM
         TRTLLM_SOURCE_COMMIT=5d2e3b2c758b4ccc0fa0a3eb0e01cdef934e8089
     # actions: read lets the build download a prior run's baseline compliance
