@@ -201,10 +201,22 @@ impl Collector {
         match outcome {
             Ok(families) => {
                 self.health.success.set(1);
+                let parsed = families.len();
                 let families = self.shape(families);
                 let previous = self.last_succeeded.lock().replace(true);
                 if previous == Some(false) {
                     tracing::info!(source = %self.name, families = families.len(), "engine metrics available again");
+                }
+                if previous.is_none() && parsed > 0 && families.is_empty() {
+                    // A healthy fetch that re-exports nothing is a naming
+                    // mismatch, not an outage; say so once rather than let the
+                    // success gauge read 1 over an empty surface.
+                    tracing::warn!(
+                        source = %self.name,
+                        parsed,
+                        include = ?self.filter.include_prefixes,
+                        "engine exposition parsed but no family matched the configured prefixes"
+                    );
                 }
                 Some(families)
             }

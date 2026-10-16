@@ -17,8 +17,16 @@
 //! it cannot read as a sample is an error, because a half-read scrape would
 //! silently drop series; a comment it does not know, including `# EOF`, is
 //! skipped. Exemplars are dropped.
+//!
+//! Names may use the UTF-8 quoted syntax (`{"a.b",c="d"} 1`, `# TYPE "a.b"
+//! gauge`), which servers emit when the scraper accepts
+//! `escaping=allow-utf-8`. Every name is mapped to the legacy character set
+//! with the `underscores` scheme, so the families fit the `prometheus` crate
+//! and the OTLP exporter unchanged; legacy-valid names pass through as is.
 
 use std::collections::{BTreeMap, HashMap};
+use std::iter::Peekable;
+use std::str::CharIndices;
 
 use anyhow::{Context, bail};
 
@@ -104,12 +112,10 @@ impl Parser {
             // `# EOF` and free-text comments.
             return;
         };
-        let (name, remainder) = rest
-            .split_once(' ')
-            .map_or((rest, ""), |(name, remainder)| (name, remainder));
-        if name.is_empty() {
+        let Some((name, remainder)) = metadata_name(rest) else {
             return;
-        }
+        };
+        let name = &legacy_metric_name(&name);
         match keyword {
             "HELP" => {
                 let index = self.family_for_metadata(name);
@@ -132,18 +138,27 @@ impl Parser {
     }
 
     fn sample(&mut self, line: &str) -> anyhow::Result<()> {
-        let name_end = line
-            .find(|c: char| c == '{' || c.is_whitespace())
-            .unwrap_or(line.len());
-        let (name, rest) = line.split_at(name_end);
-        if name.is_empty() {
-            bail!("sample has no metric name");
-        }
-        let (labels, rest) = if rest.starts_with('{') {
-            parse_labels(rest)?
+        let (name, labels, rest) = if line.starts_with('{') {
+            // UTF-8 syntax: the quoted metric name leads the label set.
+            let (name, labels, rest) = parse_labels(line, true)?;
+            (name.context("sample has no metric name")?, labels, rest)
         } else {
-            (BTreeMap::new(), rest)
+            let name_end = line
+                .find(|c: char| c == '{' || c.is_whitespace())
+                .unwrap_or(line.len());
+            let (name, rest) = line.split_at(name_end);
+            if name.is_empty() {
+                bail!("sample has no metric name");
+            }
+            let (labels, rest) = if rest.starts_with('{') {
+                let (_, labels, rest) = parse_labels(rest, false)?;
+                (labels, rest)
+            } else {
+                (BTreeMap::new(), rest)
+            };
+            (legacy_metric_name(name), labels, rest)
         };
+        let name = name.as_str();
         let mut tokens = rest.split_whitespace();
         let value = tokens.next().context("sample has no value")?;
         let value: f64 = value
@@ -273,12 +288,19 @@ fn parse_timestamp(raw: &str, format: TextFormat) -> anyhow::Result<f64> {
 }
 
 /// Parse `{name="value",...}` at the start of `text`, returning the labels and
-/// the remainder after the closing brace.
-fn parse_labels(text: &str) -> anyhow::Result<(BTreeMap<String, String>, &str)> {
+/// the remainder after the closing brace. With `leading_name`, a quoted first
+/// item that is not followed by `=` is the metric name (UTF-8 syntax); it is
+/// returned already mapped to the legacy form, as are the label names.
+fn parse_labels(
+    text: &str,
+    leading_name: bool,
+) -> anyhow::Result<(Option<String>, BTreeMap<String, String>, &str)> {
+    let mut metric = None;
     let mut labels = BTreeMap::new();
     let mut chars = text.char_indices().peekable();
     // Consume the opening brace.
     chars.next();
+    let mut first = true;
     loop {
         // Skip whitespace and separators between pairs.
         while chars
@@ -291,52 +313,117 @@ fn parse_labels(text: &str) -> anyhow::Result<(BTreeMap<String, String>, &str)> 
             bail!("labels are not closed");
         };
         if c == '}' {
-            return Ok((labels, &text[position + 1..]));
+            return Ok((metric, labels, &text[position + 1..]));
         }
-        let name_start = position;
-        let mut name_end = name_start;
-        while let Some(&(position, c)) = chars.peek() {
-            if c == '=' {
-                break;
+        let name = if c == '"' {
+            let quoted = read_quoted(&mut chars, "quoted name")?;
+            while chars.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+                chars.next();
             }
-            if c.is_whitespace() || c == ',' || c == '}' || c == '"' {
-                bail!("label name is not followed by `=`");
+            if first && leading_name && chars.peek().is_some_and(|(_, c)| matches!(c, ',' | '}')) {
+                metric = Some(legacy_metric_name(&quoted));
+                first = false;
+                continue;
             }
-            chars.next();
-            name_end = position + c.len_utf8();
-        }
-        let name = &text[name_start..name_end];
+            legacy_label_name(&quoted)
+        } else {
+            let name_start = position;
+            let mut name_end = name_start;
+            while let Some(&(position, c)) = chars.peek() {
+                if c == '=' {
+                    break;
+                }
+                if c.is_whitespace() || c == ',' || c == '}' || c == '"' {
+                    bail!("label name is not followed by `=`");
+                }
+                chars.next();
+                name_end = position + c.len_utf8();
+            }
+            legacy_label_name(&text[name_start..name_end])
+        };
+        first = false;
         if name.is_empty() {
             bail!("empty label name");
         }
         if chars.next().map(|(_, c)| c) != Some('=') {
             bail!("label `{name}` has no value");
         }
-        if chars.next().map(|(_, c)| c) != Some('"') {
+        if chars.peek().map(|(_, c)| *c) != Some('"') {
             bail!("label `{name}` value is not quoted");
         }
-        let mut value = String::new();
-        loop {
-            let Some((_, c)) = chars.next() else {
-                bail!("label `{name}` value is not closed");
-            };
-            match c {
-                '"' => break,
-                '\\' => match chars.next().map(|(_, c)| c) {
-                    Some('n') => value.push('\n'),
-                    Some('"') => value.push('"'),
-                    Some('\\') => value.push('\\'),
-                    Some(other) => {
-                        value.push('\\');
-                        value.push(other);
-                    }
-                    None => bail!("label `{name}` value ends in a backslash"),
-                },
-                other => value.push(other),
-            }
-        }
-        labels.insert(name.to_string(), value);
+        let value = read_quoted(&mut chars, &format!("label `{name}` value"))?;
+        labels.insert(name, value);
     }
+}
+
+/// Read a `"..."` string whose opening quote is the next character, undoing
+/// the `\"`, `\\`, and `\n` escapes both dialects use.
+fn read_quoted(chars: &mut Peekable<CharIndices<'_>>, what: &str) -> anyhow::Result<String> {
+    if chars.next().map(|(_, c)| c) != Some('"') {
+        bail!("{what} is not quoted");
+    }
+    let mut value = String::new();
+    loop {
+        let Some((_, c)) = chars.next() else {
+            bail!("{what} is not closed");
+        };
+        match c {
+            '"' => return Ok(value),
+            '\\' => match chars.next().map(|(_, c)| c) {
+                Some('n') => value.push('\n'),
+                Some('"') => value.push('"'),
+                Some('\\') => value.push('\\'),
+                Some(other) => {
+                    value.push('\\');
+                    value.push(other);
+                }
+                None => bail!("{what} ends in a backslash"),
+            },
+            other => value.push(other),
+        }
+    }
+}
+
+/// Split the name off a `# HELP`/`# TYPE`/`# UNIT` payload. The name is bare
+/// or, in the UTF-8 syntax, quoted; the remainder follows one space.
+fn metadata_name(rest: &str) -> Option<(String, &str)> {
+    if rest.starts_with('"') {
+        let mut chars = rest.char_indices().peekable();
+        let name = read_quoted(&mut chars, "metadata name").ok()?;
+        let remainder = chars
+            .next()
+            .map_or("", |(position, _)| rest[position..].trim_start_matches(' '));
+        return (!name.is_empty()).then_some((name, remainder));
+    }
+    let (name, remainder) = rest
+        .split_once(' ')
+        .map_or((rest, ""), |(name, remainder)| (name, remainder));
+    (!name.is_empty()).then(|| (name.to_string(), remainder))
+}
+
+/// The Prometheus `underscores` escaping scheme for metric names: every
+/// character outside `[a-zA-Z0-9_:]` becomes `_`, and a leading digit gains a
+/// `_` prefix. Legacy-valid names are unchanged.
+fn legacy_metric_name(name: &str) -> String {
+    legacy_name(name, true)
+}
+
+/// The same scheme for label names, where `:` is not legacy-valid either.
+fn legacy_label_name(name: &str) -> String {
+    legacy_name(name, false)
+}
+
+fn legacy_name(name: &str, allow_colon: bool) -> String {
+    let valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || (allow_colon && c == ':');
+    if name.chars().all(valid) && !name.starts_with(|c: char| c.is_ascii_digit()) {
+        return name.to_string();
+    }
+    let mut out = String::with_capacity(name.len() + 1);
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        out.push('_');
+    }
+    out.extend(name.chars().map(|c| if valid(c) { c } else { '_' }));
+    out
 }
 
 /// Undo the escaping both dialects apply to help text.
@@ -426,6 +513,64 @@ latency_count 40
         assert_eq!(summary.kind, "summary");
         assert_eq!(summary.samples.len(), 4);
         assert_eq!(summary.samples[0].labels.get("quantile").unwrap(), "0.5");
+    }
+
+    #[test]
+    fn utf8_quoted_names_are_mapped_to_the_underscores_form() {
+        // What prometheus_client 0.26 serves for `escaping=allow-utf-8`: legacy
+        // names verbatim, anything else quoted.
+        let text = "\
+# HELP sglang:test_gauge h
+# TYPE sglang:test_gauge gauge
+sglang:test_gauge{model_name=\"m\"} 1.0
+# HELP \"dotted.name\" dotted help
+# TYPE \"dotted.name\" gauge
+{\"dotted.name\"} 2.0
+# HELP \"label.dots\" h
+# TYPE \"label.dots\" counter
+{\"label.dots_total\",\"a.b\"=\"v\"} 3.0
+{\"label.dots_created\",\"a.b\"=\"v\"} 1.7e9
+# TYPE \"q\\\"x\" gauge
+{ \"q\\\"x\" , z=\"2\" } 4
+plain{\"x.y\"=\"1\",z=\"2\"} 5
+# EOF
+";
+        let families = parse_text(text, TextFormat::OpenMetrics).unwrap();
+        assert_eq!(families.len(), 5, "{families:?}");
+        let colon = family(&families, "sglang:test_gauge");
+        assert_eq!(colon.samples[0].name, "sglang:test_gauge");
+        let dotted = family(&families, "dotted_name");
+        assert_eq!(dotted.help, "dotted help");
+        assert_eq!(dotted.samples[0].name, "dotted_name");
+        assert_eq!(dotted.samples[0].value, 2.0);
+        let counter = family(&families, "label_dots");
+        assert_eq!(counter.kind, "counter");
+        assert_eq!(counter.samples.len(), 2);
+        assert_eq!(counter.samples[0].name, "label_dots_total");
+        assert_eq!(counter.samples[0].labels.get("a_b").unwrap(), "v");
+        let quoted = family(&families, "q_x");
+        assert_eq!(quoted.samples[0].labels.get("z").unwrap(), "2");
+        assert_eq!(quoted.samples[0].value, 4.0);
+        let plain = family(&families, "plain");
+        assert_eq!(plain.samples[0].labels.get("x_y").unwrap(), "1");
+        assert_eq!(legacy_metric_name("9lives"), "_9lives");
+        assert_eq!(legacy_label_name("a:b"), "a_b");
+    }
+
+    #[test]
+    fn mismatched_metadata_and_sample_names_leave_the_family_empty() {
+        // prometheus_client 0.26 without `escaping=allow-utf-8`
+        // (prometheus/client_python#1177): the samples become their own
+        // untyped families, so a `sglang:` prefix filter keeps nothing.
+        let text = "\
+# HELP sglang:x h
+# TYPE sglang:x gauge
+sglang_x 1
+# EOF
+";
+        let families = parse_text(text, TextFormat::OpenMetrics).unwrap();
+        assert!(family(&families, "sglang:x").samples.is_empty());
+        assert_eq!(family(&families, "sglang_x").kind, "unknown");
     }
 
     #[test]

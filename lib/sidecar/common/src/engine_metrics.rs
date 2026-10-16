@@ -40,8 +40,15 @@ pub const ENGINE_METRICS_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const ENGINE_METRICS_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Prefer classic text from engines that negotiate; parse either dialect.
-const ACCEPT_VALUE: &str =
-    "text/plain;version=0.0.4;q=1, application/openmetrics-text;version=1.0.0;q=0.5, */*;q=0.1";
+///
+/// `escaping=allow-utf-8` is what Prometheus 3 sends and it matters for
+/// Python engines: without it `prometheus_client` 0.26 applies its
+/// `underscores` scheme to sample names but not to `# HELP`/`# TYPE` lines, so
+/// `sglang:x` metadata arrives over `sglang_x` samples and the families parse
+/// empty (prometheus/client_python#1177). With it the names come back verbatim;
+/// the parser maps any non-legacy name to the underscores form itself.
+const ACCEPT_VALUE: &str = "text/plain;version=0.0.4;escaping=allow-utf-8;q=1, \
+     application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.5, */*;q=0.1";
 
 /// CLI surface shared by the sidecars that re-export engine metrics.
 #[derive(Args, Clone, Debug)]
@@ -307,7 +314,17 @@ mod tests {
         let router = Router::new()
             .route(
                 "/metrics",
-                get(|| async {
+                get(|headers: axum::http::HeaderMap| async move {
+                    // Python engines only serve consistent names when asked
+                    // for UTF-8 escaping; refuse the fetch otherwise.
+                    let accept = headers
+                        .get(header::ACCEPT)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    assert!(
+                        accept.contains("escaping=allow-utf-8"),
+                        "Accept lacks escaping=allow-utf-8: {accept}"
+                    );
                     (
                         [(
                             header::CONTENT_TYPE,
