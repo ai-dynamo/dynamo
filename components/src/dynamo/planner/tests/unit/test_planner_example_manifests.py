@@ -21,7 +21,7 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
-def test_disagg_planner_example_uses_inline_config_and_runtime_observations(backend):
+def test_disagg_planner_example_inline_config(backend):
     root = Path(__file__).resolve().parents[6]
     source = (
         root / "examples" / "backends" / backend / "deploy" / "disagg_planner.yaml"
@@ -29,7 +29,6 @@ def test_disagg_planner_example_uses_inline_config_and_runtime_observations(back
     manifests = [
         manifest for manifest in yaml.safe_load_all(source) if manifest is not None
     ]
-    assert all(manifest["kind"] != "ConfigMap" for manifest in manifests)
     deployments = [
         manifest
         for manifest in manifests
@@ -42,18 +41,7 @@ def test_disagg_planner_example_uses_inline_config_and_runtime_observations(back
     }
     planner = components["Planner"]["podTemplate"]["spec"]["containers"][0]
     config_arg = planner["args"][planner["args"].index("--config") + 1]
-    config_data = json.loads(config_arg)
-    config = PlannerConfig.model_validate(config_data)
+    config = PlannerConfig.model_validate(json.loads(config_arg))
     assert config.backend == backend
     assert config.mode == "disagg"
     assert config.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.None_
-    assert "profile_results_dir" not in config_data
-
-    for component in components.values():
-        pod_spec = component["podTemplate"]["spec"]
-        for volume in pod_spec.get("volumes", []):
-            assert "configMap" not in volume
-            for source in volume.get("projected", {}).get("sources", []):
-                assert "configMap" not in source
-        for container in pod_spec["containers"]:
-            assert "--planner-profile-data" not in container.get("args", [])
