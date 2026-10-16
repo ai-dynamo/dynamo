@@ -585,6 +585,7 @@ def test_sidecar_kv_routing(
         pytest.param(
             "vllm",
             (3, 4),
+            id="vllm",
             marks=[
                 pytest.mark.vllm,
                 pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
@@ -593,6 +594,7 @@ def test_sidecar_kv_routing(
         pytest.param(
             "sglang",
             (1, 2),
+            id="sglang",
             marks=[pytest.mark.sglang, pytest.mark.requested_sglang_kv_tokens(2048)],
         ),
     ],
