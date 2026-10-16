@@ -1099,6 +1099,44 @@ async def test_post_write_readback_releases_scale_lock():
 
 
 @pytest.mark.asyncio
+async def test_post_write_readback_releases_settled_partner():
+    class BlockingRequesterReadbackCapacityManager(FakeCapacityManager):
+        def __init__(self):
+            super().__init__()
+            self.readback_started = Event()
+            self.release_readback = Event()
+            self.blocked_requester = False
+
+        def current_replicas(self, participant_id):
+            if participant_id == "default/b" and not self.blocked_requester:
+                self.blocked_requester = True
+                self.readback_started.set()
+                self.release_readback.wait()
+            return super().current_replicas(participant_id)
+
+    cm = BlockingRequesterReadbackCapacityManager()
+    cm.add("default/a", decode=2)
+    cm.add("default/b", decode=2)
+    orch = _orch(cm, max_gpus=4, min_gpus=4)
+    rejected = await _submit(orch, "default/a", _targets(decode=1))
+    assert rejected.status == ScaleStatus.REJECTED
+
+    paired = asyncio.create_task(_submit(orch, "default/b", _targets(decode=3)))
+    assert await asyncio.to_thread(cm.readback_started.wait, 1)
+
+    partner = asyncio.create_task(_submit(orch, "default/a", _targets(decode=1)))
+    try:
+        partner_result = await asyncio.wait_for(partner, 1)
+        assert partner_result.status == ScaleStatus.SUCCESS
+        assert not paired.done()
+    finally:
+        cm.release_readback.set()
+
+    paired_result = await asyncio.wait_for(paired, 1)
+    assert paired_result.status == ScaleStatus.SUCCESS
+
+
+@pytest.mark.asyncio
 async def test_post_write_readback_serializes_same_participant():
     class BlockingFirstReadbackCapacityManager(FakeCapacityManager):
         def __init__(self):

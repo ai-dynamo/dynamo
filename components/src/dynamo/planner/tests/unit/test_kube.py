@@ -18,7 +18,7 @@ import threading
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch, sentinel
+from unittest.mock import AsyncMock, MagicMock, patch, sentinel
 
 import pytest
 from kubernetes import client
@@ -944,6 +944,22 @@ async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api)
         await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment", max_attempts=2, delay_seconds=0.1
         )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_graph_deployment_ready_checks_before_sleep(
+    k8s_api, mock_custom_api
+):
+    deployment = {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    with (
+        patch.object(k8s_api, "get_graph_deployment", return_value=deployment),
+        patch.object(asyncio, "sleep", new_callable=AsyncMock) as sleep,
+    ):
+        await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment", max_attempts=1, delay_seconds=10
+        )
+
+    sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio

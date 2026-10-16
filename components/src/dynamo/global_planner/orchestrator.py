@@ -478,6 +478,12 @@ class Orchestrator:
                 return terminal
             assert readback is not None
 
+            # The captured readback depends only on the requester.
+            for locked_participant_id in tuple(held_participant_locks):
+                if locked_participant_id == participant_id:
+                    continue
+                held_participant_locks.pop(locked_participant_id).release()
+
             # Preserve the response contract: current_replicas is an observed
             # post-transaction snapshot, not the requested desired state.
             current_replicas = await run_sync_in_thread(readback)
@@ -496,7 +502,10 @@ class Orchestrator:
         participant_ids: list[str],
         held_participant_locks: dict[str, asyncio.Lock],
     ) -> None:
-        """Reserve every participant through the request readback."""
+        """Reserve participants through settlement.
+
+        The requester remains reserved through its response readback.
+        """
         pending: list[tuple[str, asyncio.Lock]] = []
         for participant_id in sorted(set(participant_ids)):
             if participant_id in held_participant_locks:

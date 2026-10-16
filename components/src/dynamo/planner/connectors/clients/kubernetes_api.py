@@ -1266,7 +1266,8 @@ class KubernetesAPI:
             callers should use for startup-static reads such as power caps).
         """
         for attempt in range(max_attempts):
-            await asyncio.sleep(delay_seconds)
+            if attempt:
+                await asyncio.sleep(delay_seconds)
 
             graph_deployment = await asyncio.to_thread(
                 self.get_graph_deployment, graph_deployment_name
