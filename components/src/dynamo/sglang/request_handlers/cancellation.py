@@ -121,8 +121,9 @@ class CancellationMixin:
                 try:
                     item = await anext(iterator)
                 except (Exception, asyncio.CancelledError) as exc:
-                    if not pending.done():
-                        pending.set_exception(exc)
+                    if pending.done():
+                        raise  # surfaced by _consume_detached_task
+                    pending.set_exception(exc)
                     return
                 if pending.done():  # the consumer stopped waiting
                     return
@@ -160,8 +161,7 @@ class CancellationMixin:
             cancellation_task.remove_done_callback(on_cancellation)
             if timer is not None:
                 timer.cancel()
-            if not reader.done():
-                _cancel_and_detach(reader)
+            _cancel_and_detach(reader)
 
     @asynccontextmanager
     async def _wait_for_signal(self, context: Context) -> AsyncGenerator[bool, None]:
