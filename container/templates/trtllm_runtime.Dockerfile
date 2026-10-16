@@ -41,6 +41,26 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
+ARG TRTLLM_SOURCE_REPOSITORY
+ARG TRTLLM_SOURCE_COMMIT
+
+# Optional exact-source overlay for cross-repository CI.
+RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
+        test -n "${TRTLLM_SOURCE_REPOSITORY}" && \
+        source_dir=$(mktemp -d) && \
+        wget --quiet --tries=3 \
+            "${TRTLLM_SOURCE_REPOSITORY}/archive/${TRTLLM_SOURCE_COMMIT}.tar.gz" \
+            -O "${source_dir}/source.tar.gz" && \
+        tar -xzf "${source_dir}/source.tar.gz" -C "${source_dir}" \
+            --strip-components=1 && \
+        package_dir=$(/usr/bin/python3 -c \
+            'import importlib.util; print(next(iter(importlib.util.find_spec("tensorrt_llm").submodule_search_locations)))') && \
+        cp -a "${source_dir}/tensorrt_llm/grpc/openengine/." \
+            "${package_dir}/grpc/openengine/" && \
+        install -m 0644 "${source_dir}/tensorrt_llm/inputs/media_io.py" \
+            "${package_dir}/inputs/media_io.py" && \
+        rm -rf "${source_dir}"; \
+    fi
 
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*

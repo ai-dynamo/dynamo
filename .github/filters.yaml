@@ -404,6 +404,7 @@ trtllm:
   - 'container/deps/requirements.trtllm.txt'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
+  - 'lib/sidecar/trtllm/**'
   - 'container/templates/trtllm_*'
   - '!**/*.md'
   - '!**/*.rst'
