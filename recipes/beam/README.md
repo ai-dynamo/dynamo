@@ -66,7 +66,8 @@ fabric in your cluster overlay:
 
 - **RDMA.** Hand GPUDirect-capable NICs to both worker pods (device-plugin
   resource or a DRA `ResourceClaimTemplate`). SGLang pins
-  `UCX_TLS=cuda_ipc,cuda_copy,rc`; vLLM lets UCX choose.
+  `UCX_TLS=cuda_ipc,cuda_copy,rc` on GB200/GB300 and `UCX_TLS=cuda_copy,rc`
+  on H200/B200/B300; vLLM lets UCX choose.
 - **vLLM registers its whole KV pool as one memory region** (about 172 GB per
   rank on GB300). If the NIC rejects it (`ibv_reg_dmabuf_mr ... Resource
   temporarily unavailable`, `NIXL_ERR_BACKEND`), lower
