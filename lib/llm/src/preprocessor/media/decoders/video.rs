@@ -220,15 +220,14 @@ fn video_open_error(error: ffmpeg_next::Error) -> anyhow::Error {
     )
 }
 
-/// FFmpeg errors that report a host fault (memory, file descriptors, or I/O on the
-/// frontend's own memfd) or an FFmpeg defect, not a problem with the client's media.
-/// These stay 500; every other FFmpeg error is a format or codec rejection.
+/// Preserve explicit resource, access, and FFmpeg internal failures as host faults.
+/// EIO is ambiguous: the Matroska demuxer also uses it for truncated client input.
 fn ffmpeg_host_fault(action: &str, error: &ffmpeg_next::Error) -> Option<anyhow::Error> {
     let host_fault = match error {
         ffmpeg_next::Error::Bug | ffmpeg_next::Error::Bug2 => true,
         ffmpeg_next::Error::Other { errno } => matches!(
             *errno,
-            libc::ENOMEM | libc::EMFILE | libc::ENFILE | libc::EIO | libc::EACCES | libc::EPERM
+            libc::ENOMEM | libc::EMFILE | libc::ENFILE | libc::EACCES | libc::EPERM
         ),
         _ => false,
     };
@@ -854,7 +853,7 @@ mod tests {
     #[rstest]
     #[case(ffmpeg_next::Error::Other { errno: libc::ENOMEM }, true)]
     #[case(ffmpeg_next::Error::Other { errno: libc::EMFILE }, true)]
-    #[case(ffmpeg_next::Error::Other { errno: libc::EIO }, true)]
+    #[case(ffmpeg_next::Error::Other { errno: libc::EIO }, false)]
     #[case(ffmpeg_next::Error::Bug, true)]
     #[case(ffmpeg_next::Error::InvalidData, false)]
     #[case(ffmpeg_next::Error::DecoderNotFound, false)]

@@ -139,15 +139,29 @@ fn policy_rejection(message: impl Into<String>) -> DynamoError {
         .build()
 }
 
-/// Classify a client-media fetch or decode failure as a 400. Errors that already carry
-/// a class, such as policy rejections or the video decoder's host faults, pass through.
-/// The client sees only `public`; the cause may hold a presigned URL or decoder output.
+/// Classify media failures as 400, preserving typed errors and local resource faults.
+/// New errors expose only a fixed message; causes may hold presigned URLs or decoder output.
 fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Error {
     if error
         .chain()
         .any(|cause| cause.downcast_ref::<DynamoError>().is_some())
     {
         return error;
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .is_some_and(|errno| matches!(errno, libc::EMFILE | libc::ENFILE | libc::ENOMEM))
+    }) {
+        return DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message(format!(
+                "Media processing exhausted frontend resources: {error:#}"
+            ))
+            .public_message("Frontend resources unavailable while processing media")
+            .build()
+            .into();
     }
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
@@ -621,7 +635,6 @@ impl MediaLoader {
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
                 let url = require_image_url(image_part)?;
-                // Fetch and decode failures come from the client's media: 400, not 500.
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await
@@ -1133,9 +1146,6 @@ mod tests_non_nixl {
 
     #[test]
     fn media_input_error_keeps_classified_errors() {
-        let bad_media = media_input_error(IMAGE_DECODE_FAILED, anyhow::anyhow!("bad bytes"));
-        assert_invalid_argument_in_chain(bad_media.as_ref());
-
         let host_fault: anyhow::Error = DynamoError::builder()
             .error_type(ErrorType::Internal)
             .message("memfd failed")
@@ -1146,6 +1156,67 @@ mod tests_non_nixl {
             .downcast_ref::<DynamoError>()
             .expect("classified error passes through");
         assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
+    }
+
+    #[rstest::rstest]
+    #[case(libc::EMFILE, ErrorType::Internal)]
+    #[case(libc::ENFILE, ErrorType::Internal)]
+    #[case(libc::ENOMEM, ErrorType::Internal)]
+    #[case(libc::ECONNREFUSED, ErrorType::InvalidArgument)]
+    #[tokio::test]
+    async fn media_fetch_preserves_resource_failures(
+        #[case] errno: i32,
+        #[case] expected: ErrorType,
+    ) {
+        struct FailingResolver(i32);
+        impl Resolve for FailingResolver {
+            fn resolve(&self, _name: Name) -> Resolving {
+                let errno = self.0;
+                Box::pin(async move {
+                    Err(Box::new(std::io::Error::from_raw_os_error(errno))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                })
+            }
+        }
+
+        // Inject an OS error through reqwest's real source chain without exhausting
+        // process-wide resources or depending on external DNS or HTTP services.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FailingResolver(errno)))
+            .build()
+            .unwrap();
+        let url = "http://media.invalid/image?token=secret".parse().unwrap();
+        let error = EncodedMediaData::from_url(&url, &client)
+            .await
+            .expect_err("injected resolver error must prevent the fetch");
+        let error = media_input_error(IMAGE_FETCH_FAILED, MediaFetcher::map_fetch_error(error));
+        let classified = error.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(classified.error_type(), expected);
+        assert!(!classified.public_message().unwrap().contains("secret"));
+    }
+
+    #[cfg(feature = "media-ffmpeg")]
+    #[test]
+    fn test_truncated_webm_is_invalid_argument() {
+        // A WebM EBML header followed by a damaged segment and a truncated Info
+        // element. Matroska resync finds Info, then returns EIO on premature EOF.
+        let bytes =
+            b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm\x00\x15\x49\xa9\x66\x8c\x2a\xd7\xb1\x88\x00";
+        let decoder = super::super::decoders::video::VideoDecoder::default();
+        let error = decoder
+            .decode(EncodedMediaData::from_bytes(bytes.to_vec()))
+            .expect_err("truncated WebM must fail to decode");
+        assert!(
+            error
+                .to_string()
+                .contains(&ffmpeg_next::Error::Other { errno: libc::EIO }.to_string()),
+            "expected the Matroska premature-EOF error: {error:#}"
+        );
+        let error = media_input_error(VIDEO_DECODE_FAILED, error);
+        assert_invalid_argument_in_chain(error.as_ref());
+        let classified = error.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(classified.public_message(), Some(VIDEO_DECODE_FAILED));
     }
 
     #[test]
