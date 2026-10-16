@@ -76,6 +76,7 @@ pub type RejectThresholdsProvider = Arc<dyn Fn() -> BusyThresholds + Send + Sync
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BusyThresholds {
     /// Booked prefill tokens above which a rank is full.
+    // TODO(v1.7): Remove the absolute threshold; use `prefill_busy_threshold_frac`.
     pub prefill_busy_threshold: Option<usize>,
     /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
     /// rank does not report it, the fraction is taken of
@@ -733,6 +734,12 @@ fn resolve_policy_class(
             )));
         }
     };
+    if raw.prefill_busy_threshold.is_some() {
+        tracing::warn!(
+            policy_class = %raw.name,
+            "prefill_busy_threshold is deprecated and will be removed in v1.7; use prefill_busy_threshold_frac"
+        );
+    }
     Ok(ResolvedPolicyClass {
         config: PolicyClassConfig {
             name: raw.name,

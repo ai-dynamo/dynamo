@@ -40,6 +40,12 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "session_affinity_mode",
 )
 
+# TODO(v1.7): Remove --active-prefill-tokens-threshold.
+_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
+    "--active-prefill-tokens-threshold is deprecated and will be removed in v1.7; "
+    "use --active-prefill-tokens-threshold-frac"
+)
+
 _ENFORCE_DISAGG_DEPRECATION = (
     "%s is deprecated and ignored; disaggregated routing topology and readiness "
     "are determined automatically from registered worker types"
@@ -100,6 +106,8 @@ class RouterConfigBase(ConfigBase):
         prefill_threshold = self.active_prefill_tokens_threshold
         if prefill_threshold is not None and prefill_threshold < 0:
             raise ValueError("--active-prefill-tokens-threshold must be >= 0")
+        if prefill_threshold is not None:
+            logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
 
         prefill_threshold_frac = self.active_prefill_tokens_threshold_frac
         if prefill_threshold_frac is not None and not (
@@ -289,6 +297,7 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
             default=None,
             help=(
+                "Deprecated; will be removed in v1.7. Use --active-prefill-tokens-threshold-frac. "
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
                 "threshold, the worker is marked as busy. Setting a numeric value enables this "
