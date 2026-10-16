@@ -10,7 +10,8 @@ use dynamo_kv_router::plugins::worker_selection::{
 };
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
-/// each worker score. The shared-cache specialization also omits range traversal code.
+/// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV
+/// prefixes) also omits range traversal code.
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
@@ -150,7 +151,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 let shared = cache
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-                self.shared_cache_multiplier * shared as f64
+                // Blocks a KV fetch would add beyond everything this worker holds.
+                let fetchable = candidate
+                    .kv_transfer()
+                    .and_then(|transfer| {
+                        let local = transfer
+                            .local_prefix_blocks()
+                            .saturating_add(cache.disk_overlap_blocks() as u32);
+                        Some(transfer.source_prefix_blocks()?.saturating_sub(local))
+                    })
+                    .unwrap_or(0);
+                self.shared_cache_multiplier * (shared + fetchable) as f64
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
@@ -202,10 +213,12 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if self.overlap_score_credit != 0.0
+        if SHARED_CREDIT {
+            // The host builds fetch sources per selection only for policies that ask.
+            inputs | WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
+        } else if self.overlap_score_credit != 0.0
             || self.host_cache_hit_weight != 0.0
             || self.disk_cache_hit_weight != 0.0
-            || self.shared_cache_multiplier != 0.0
         {
             inputs | WorkerInputs::CACHE
         } else {

@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
-use crate::kv_hints::KvHint;
+use crate::kv_hints::{KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache};
 use crate::protocols::{
     DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement, RoutingConstraints,
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -62,6 +63,10 @@ pub struct SelectionWorkerConfig {
     /// a router-hint source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// Derived from the fields above on first use; published configs are
+    /// replaced, never mutated.
+    #[serde(skip)]
+    pub kv_transfer_keys: WorkerKvTransferKeysCache,
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
@@ -113,14 +118,20 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         if worker_type.is_empty() {
             return None;
         }
+        // A state-agent worker's blocks are served by its cache owner.
+        let is_source = self.kv_event_source_mode.as_deref() != Some("state_agent_v2");
         Some(KvHintTransferWorkerMetadata {
             worker_type,
             source_control_endpoint: self
                 .router_hint_source_control_endpoints
                 .get(&dp_rank)
                 .map(String::as_str)
-                .filter(|endpoint| !endpoint.is_empty()),
+                .filter(|endpoint| is_source && !endpoint.is_empty()),
         })
+    }
+
+    fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
+        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
     }
 }
 
@@ -224,6 +235,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: self.router_hint_worker_type.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
             kv_event_source_mode: self.kv_event_source_mode.clone(),
+            kv_transfer_keys: Default::default(),
         })
     }
 
