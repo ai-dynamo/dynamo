@@ -430,7 +430,9 @@ def test_validate_gpu_identity_reports_minor_numbers_without_refusing():
     notes = validate_gpu_identity(4, {0: 2, 1: 0, 2: 3, 3: 1}, (0, 1, 2, 3))
     assert len(notes) == 4
     assert "NVML device 0 is /dev/nvidia2" in notes[0]
-    assert validate_gpu_identity(4, {}, (0,)) == ["GPU index 0: NVML reported no minor number"]
+    assert validate_gpu_identity(4, {}, (0,)) == [
+        "GPU index 0: NVML reported no minor number"
+    ]
 
 
 def test_nupd_budget_binds_only_below_the_max_tgp():
