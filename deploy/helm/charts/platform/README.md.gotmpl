@@ -41,6 +41,23 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
+Dynamo supports Helm upgrades within the installed minor release and from minor `N.M` to
+`N.(M+1)` only. Upgrade through every intermediate minor release; skipping a minor release is
+unsupported.
+
+The chart runs an upgrade preflight Job before changing the release. It reads the installed
+operator version and rejects skipped minor releases, major-version changes, and earlier minor
+releases. Use `helm rollback` for rollbacks. To bypass the check after validating the complete
+upgrade path separately, set:
+
+```yaml
+dynamo-operator:
+  upgradePreflight:
+    enabled: false
+```
+
+Disabling the preflight does not make a skipped-minor upgrade supported.
+
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler

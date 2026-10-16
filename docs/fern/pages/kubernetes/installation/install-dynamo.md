@@ -307,6 +307,25 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 </Steps>
 
+## Upgrade Dynamo
+
+Dynamo supports Helm upgrades within the installed minor release and from minor `N.M` to
+`N.(M+1)` only. Install the latest patch of the next minor release before advancing again. For
+example, upgrade `1.2.x` to `1.3.x`, then `1.3.x` to `1.4.x`. Skipping directly from `1.2.x` to
+`1.4.x` is unsupported.
+
+The Helm chart checks this path in a `pre-upgrade` Job before it changes the release. The check also
+rejects major-version changes and earlier minor releases; use `helm rollback` for rollbacks. If a
+separate process has validated the complete path, you can bypass the check:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --set dynamo-operator.upgradePreflight.enabled=false
+```
+
+> [!WARNING]
+> Disabling the preflight does not make a skipped-minor upgrade supported.
 
 ## Alternative: Install with AICR
 

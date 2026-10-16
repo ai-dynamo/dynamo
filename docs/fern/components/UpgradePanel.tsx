@@ -46,6 +46,16 @@ const UP_CSS = `
     margin-top: 4px;
 }
 
+.dynref-up-policy {
+    margin: 0 0 10px;
+    padding: 9px 12px;
+    border-left: 3px solid var(--nv-color-green, #76B900);
+    background: rgba(118, 185, 0, 0.07);
+    color: var(--pst-color-text-base);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
 .dynref-up-row {
     display: flex;
     flex-wrap: wrap;
@@ -229,6 +239,16 @@ export function UpgradePanelStyles() {
   return <style>{UP_CSS}</style>;
 }
 
+export function UpgradePolicyNotice() {
+  return (
+    <p className="dynref-up-policy">
+      Supported upgrade path: within one minor release or from <span className="dynref-mono">N.M</span>{" "}
+      to <span className="dynref-mono">N.(M+1)</span>. Apply every intermediate minor release in
+      order; skipping a minor release is unsupported.
+    </p>
+  );
+}
+
 export interface ReadingItem {
   version: string;
   kind: "breaking" | "known-issues";
@@ -338,6 +358,8 @@ export function UpgradePanel(props: {
             <span className="dynref-mono dynref-up-fromver">{props.fromVersion.label}</span>
           </div>
         </div>
+
+        <UpgradePolicyNotice />
 
         <MigrationStrip rows={rows} />
 

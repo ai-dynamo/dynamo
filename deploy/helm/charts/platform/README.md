@@ -41,6 +41,23 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
+Dynamo supports Helm upgrades within the installed minor release and from minor `N.M` to
+`N.(M+1)` only. Upgrade through every intermediate minor release; skipping a minor release is
+unsupported.
+
+The chart runs an upgrade preflight Job before changing the release. It reads the installed
+operator version and rejects skipped minor releases, major-version changes, and earlier minor
+releases. Use `helm rollback` for rollbacks. To bypass the check after validating the complete
+upgrade path separately, set:
+
+```yaml
+dynamo-operator:
+  upgradePreflight:
+    enabled: false
+```
+
+Disabling the preflight does not make a skipped-minor upgrade supported.
+
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
@@ -365,6 +382,10 @@ Kubernetes: `>=1.30.0-0`
 | global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
+| dynamo-operator.upgradePreflight.enabled | bool | `true` | Whether to reject Helm upgrades outside the installed minor or its immediate successor. |
+| dynamo-operator.upgradePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image used by the upgrade preflight Job. |
+| dynamo-operator.upgradePreflight.imagePullSecrets | list | `[]` | Image pull secrets used by the upgrade preflight Job. |
+| dynamo-operator.upgradePreflight.activeDeadlineSeconds | int | `120` | Maximum runtime in seconds for the upgrade preflight Job. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2 API schemas. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. The operator does not reconcile v1beta2 resources. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |

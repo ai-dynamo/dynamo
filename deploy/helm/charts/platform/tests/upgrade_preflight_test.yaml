@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Dynamo upgrade preflight
+templates:
+  - charts/dynamo-operator/templates/upgrade-preflight.yaml
+tests:
+  - it: omits the preflight on install
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a read-only pre-upgrade check by default
+    release:
+      name: dynamo-platform
+      namespace: dynamo-system
+      upgrade: true
+    asserts:
+      - hasDocuments:
+          count: 4
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-upgrade
+        documentIndex: 3
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["deployments"]
+            verbs: ["list"]
+        documentIndex: 1
+      - equal:
+          path: spec.template.spec.containers[0].env[2].value
+          value: "1.6.0"
+        documentIndex: 3
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "Upgrade through every intermediate minor release"
+        documentIndex: 3
+
+  - it: supports an explicit opt-out
+    release:
+      upgrade: true
+    set:
+      dynamo-operator.upgradePreflight.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
