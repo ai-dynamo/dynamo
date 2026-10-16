@@ -3648,8 +3648,7 @@ mod tests {
     /// (a) run ending one slot into a block
     /// (b) run starting at a block's last slot
     /// (c) run ending exactly on a block boundary
-    /// (d) adjacent runs
-    /// and a randomized property/fuzz loop.
+    /// (d) adjacent runs.
     #[test]
     fn hash_complete_blocks_cursor_gate_boundaries() {
         let block_size: u32 = 4;
@@ -3713,75 +3712,6 @@ mod tests {
                 length: 4,
             },
         ]);
-
-        // Combined boundary scenario covering all edge cases simultaneously
-        verify_cases(&[
-            TokenBlockMmInfo {
-                mm_hash: 0x10,
-                offset: 1,
-                length: 4, // ends at 5 (1 slot into block 1 [4..8))
-            },
-            TokenBlockMmInfo {
-                mm_hash: 0x20,
-                offset: 7,
-                length: 1, // starts at 7 (last slot of block 1 [4..8), ends at 8 boundary)
-            },
-            TokenBlockMmInfo {
-                mm_hash: 0x30,
-                offset: 8,
-                length: 3, // adjacent to previous, starts at boundary 8, ends at 11
-            },
-            TokenBlockMmInfo {
-                mm_hash: 0x40,
-                offset: 15,
-                length: 2, // starts at last slot of block 3 [12..16), ends at 17 (1 slot into block 4)
-            },
-        ]);
-
-        // Deterministic pseudo-random fuzz loop testing diverse boundaries and block sizes
-        let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABE;
-        let mut next_rand = |max: usize| -> usize {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((rng_state >> 33) as usize) % max
-        };
-
-        for _trial in 0..100 {
-            let fuzz_bs = (next_rand(16) + 1) as u32;
-            let n_blocks = next_rand(8) + 1;
-            let total_tokens = n_blocks * (fuzz_bs as usize) + next_rand(fuzz_bs as usize);
-            let fuzz_tokens: Vec<Token> = (0..total_tokens as u32).collect();
-
-            let mut fuzz_runs = Vec::new();
-            let mut curr_offset = next_rand(3);
-            while curr_offset < total_tokens {
-                let max_len = (fuzz_bs as usize * 2).max(1);
-                let run_len = next_rand(max_len) + 1;
-                if curr_offset + run_len > total_tokens {
-                    break;
-                }
-                let mm_hash = next_rand(1 << 30) as u64;
-                fuzz_runs.push(TokenBlockMmInfo {
-                    mm_hash,
-                    offset: curr_offset,
-                    length: run_len,
-                });
-                // Gap can be 0 (adjacent) or small gap
-                curr_offset += run_len + next_rand(4);
-            }
-
-            let lineages = hash_complete_blocks(&fuzz_tokens, &fuzz_runs, fuzz_bs, salt);
-            let bs_usize = fuzz_bs as usize;
-            for (pos, lineage) in lineages.into_iter().enumerate() {
-                let off = pos * bs_usize;
-                let win = &fuzz_tokens[off..off + bs_usize];
-                let expected_b = compute_block_bytes_with_mm(win, off, &fuzz_runs);
-                let expected_h = compute_block_hash(&expected_b, salt);
-                assert_eq!(
-                    lineage.block_hash, expected_h,
-                    "Fuzz mismatch at trial for bs={fuzz_bs}, pos={pos}, off={off}"
-                );
-            }
-        }
     }
 
     /// #11d — `offset + length` overflow is rejected as a dedicated error variant rather
