@@ -2349,9 +2349,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.2"
+version = "10.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1564d5bbb66372f478df3f9158df8071b45c523ca4e07b4f82a4ac257038c962"
+checksum = "d3d22c36e7881d61cc540d733e434d752d7ff77b1578309d68b38ebe7bf004cf"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2390,13 +2390,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.1.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aca812fe988abff693c44c158147bae058f3051c0585570c2d59cf61d1253e5b"
+checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
 dependencies = [
  "async-openai",
  "derive_builder",
  "futures",
+ "indexmap 2.14.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
