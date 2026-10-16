@@ -6,18 +6,19 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DisaggregationMode, DynamoError, ErrorType};
 use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig, format_error_chain,
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
@@ -222,7 +223,6 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
-const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Metadata exposed by SGLang's model/server discovery RPCs.
 #[derive(Clone, Debug)]
@@ -268,70 +268,33 @@ pub async fn connect(
     deadline: Instant,
     bootstrap: bool,
 ) -> Result<Client, DynamoError> {
-    let endpoint = Endpoint::from_shared(uri.to_string())
-        .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
-    let started = Instant::now();
-    let mut attempt = 0_u64;
-    let mut last_err;
-    let mut last_logged_at: Option<Instant> = None;
-    loop {
-        attempt += 1;
-        match try_connect_once(&endpoint, cfg, deadline).await {
-            Ok(client) => return Ok(client),
-            Err(err) => {
-                last_err = err;
-                if Instant::now() >= deadline {
-                    return Err(cannot_connect(format!(
-                        "could not reach SGLang gRPC at {uri} within {:?}: {last_err}",
-                        cfg.startup_deadline
-                    )));
-                }
-                let now = Instant::now();
-                if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
-                {
-                    // Synchronous constructors may precede logging setup;
-                    // deferred launcher discovery already has a subscriber.
-                    if bootstrap {
-                        eprintln!(
-                            "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
-                            started.elapsed(),
-                            cfg.retry_interval,
-                        );
-                    } else {
-                        tracing::warn!(
-                            endpoint = %uri,
-                            attempt,
-                            elapsed = ?started.elapsed(),
-                            retry_interval = ?cfg.retry_interval,
-                            error = %last_err,
-                            "SGLang gRPC connection attempt failed; retrying"
-                        );
-                    }
-                    last_logged_at = Some(now);
-                }
-                tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
-            }
-        }
-    }
+    let cfg = GrpcTransportConfig {
+        connections: NonZeroUsize::MIN,
+        ..*cfg
+    };
+    let pool = connect_pool(uri, cfg, deadline, bootstrap).await?;
+    Ok(client_from_channel(pool.next_channel()))
 }
 
-async fn try_connect_once(
-    endpoint: &Endpoint,
-    cfg: &GrpcTransportConfig,
+/// `GrpcChannelPool` starts its own deadline from `cfg.startup_deadline`;
+/// `deadline` also bounds it, because callers start their startup budget
+/// before connecting.
+async fn connect_pool(
+    uri: &GrpcEndpoint,
+    cfg: GrpcTransportConfig,
     deadline: Instant,
-) -> Result<Client, String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err("startup deadline elapsed".to_string());
-    }
-    let endpoint = endpoint
-        .clone()
-        .connect_timeout(cfg.connect_attempt_timeout.min(remaining));
-    let channel = timeout_at(deadline, endpoint.connect())
-        .await
-        .map_err(|_| "startup deadline elapsed while connecting".to_string())?
-        .map_err(|e| format_error_chain(&e))?;
-    Ok(client_from_channel(channel))
+    bootstrap: bool,
+) -> Result<GrpcChannelPool, DynamoError> {
+    timeout_at(
+        deadline,
+        GrpcChannelPool::connect("SGLang", uri, cfg, bootstrap),
+    )
+    .await
+    .map_err(|_| {
+        cannot_connect(format!(
+            "could not reach SGLang gRPC at {uri} within the startup deadline"
+        ))
+    })?
 }
 
 fn client_from_channel(channel: Channel) -> Client {
@@ -356,11 +319,10 @@ impl Pool {
         cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
-        let size = cfg.connections.get();
-        let mut clients = Vec::with_capacity(size);
-        for _ in 0..size {
-            clients.push(connect(uri, cfg, deadline, false).await?);
-        }
+        let pool = connect_pool(uri, *cfg, deadline, false).await?;
+        let clients = (0..pool.len())
+            .map(|_| client_from_channel(pool.next_channel()))
+            .collect();
         Ok(Self {
             clients,
             next: AtomicUsize::new(0),
