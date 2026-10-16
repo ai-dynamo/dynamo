@@ -36,8 +36,8 @@ pub(crate) struct NodeMetadata {
     pub node_rank: u32,
     pub nnodes: u32,
     pub dp_size: u32,
-    // SGLang 0.5.22 reports model DP and attention DP separately. KV publisher
-    // ranks span their product; older releases omit this field.
+    // SGLang reports model DP and attention DP separately. KV publisher ranks
+    // span their product; default to one when attention DP is not reported.
     #[serde(default = "default_parallel_size")]
     pub attn_dp_size: u32,
     pub dist_init_addr: Option<String>,

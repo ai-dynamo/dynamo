@@ -1096,8 +1096,8 @@ fn build_engine_config(
     let attn_dp_size = client::json_u32(&discovery.server_info, "attn_dp_size")
         .unwrap_or(1)
         .max(1);
-    // Since 0.5.22, dp_size describes model DP while attn_dp_size describes
-    // the additional attention-DP rank space used by KV event publishers.
+    // dp_size describes model DP while attn_dp_size describes the additional
+    // attention-DP rank space used by KV event publishers.
     let deployment_dp_size = model_dp_size.checked_mul(attn_dp_size).ok_or_else(|| {
         client::invalid_arg("SGLang deployment DP size exceeds the supported range")
     })?;
