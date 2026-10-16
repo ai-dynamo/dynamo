@@ -212,11 +212,35 @@ unconditional. `priority: <n>` is shorthand for exactly one such rule:
         - priority: 900
 ```
 
-Rule *conditions* — "this priority while traffic is above X", "that priority
-while the pool is breaching its SLA" — are not implemented yet, and a config that
-declares one is rejected at startup rather than silently treated as
-always-matching. The structure is in place so adding them does not change the
-declaration surface or any caller.
+A rule may carry a `when:` block, in which case it applies only while its
+predicates hold:
+
+```yaml
+    - selector: prod/batch
+      rules:
+        - when: {predicted_requests_below: 50}   # quiet: yield to everyone
+          priority: 10
+        - priority: 100                          # busy: normal standing
+```
+
+Available predicates today, both read from the `predicted_load` a local planner
+already attaches to every scale request:
+
+| Predicate | Matches when |
+|-----------|--------------|
+| `predicted_requests_at_least` | predicted request rate is at or above the value |
+| `predicted_requests_below` | predicted request rate is strictly below the value |
+
+Two properties worth knowing. A predicate whose signal is **absent or
+unusable** — missing, wrong type, negative, NaN, or infinite — does not match,
+so a pool falls through to its unconditional rule instead of being reclassified
+on bad data. And conditions are evaluated
+against **that pool's own** signals — a partner's context comes from the intent
+it published, so "while its traffic is low" means the partner's traffic, not the
+traffic of whichever pool happens to be requesting.
+
+SLA-breach predicates are not implemented; they need signals that are not on the
+scale-request contract yet.
 
 ### How priorities affect scaling
 
