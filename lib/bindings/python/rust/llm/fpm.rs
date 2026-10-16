@@ -40,6 +40,7 @@ use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RuntimeConfig;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 const DEFAULT_REMOVAL_GRACE_SECS: u64 = 15;
+const FPM_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 
 struct TrackedFpm {
     payload: Vec<u8>,
@@ -133,6 +134,10 @@ fn prune_removed_workers(
     max_age: Duration,
 ) {
     let mut expired = HashSet::new();
+    let tracked_workers: HashSet<_> = worker_lifecycles
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
     worker_lifecycles.retain(|worker, state| {
         if matches!(
             state,
@@ -146,12 +151,10 @@ fn prune_removed_workers(
         }
     });
     // Do not hold lifecycle shard locks while sweeping all sample shards.
-    if !expired.is_empty() {
-        latest.retain(|(worker, _), sample| {
-            !expired.contains(worker)
-                || now.saturating_duration_since(sample.received_at) <= max_age
-        });
-    }
+    latest.retain(|(worker, _), sample| {
+        let needs_age_prune = expired.contains(worker) || !tracked_workers.contains(worker);
+        !needs_age_prune || now.saturating_duration_since(sample.received_at) <= max_age
+    });
 }
 
 fn fresh_fpm_snapshot(
@@ -940,6 +943,7 @@ impl FpmEventSubscriber {
         let stats = self.latest_stats.clone();
         let known = self.known_workers.clone();
         let worker_lifecycles = self.worker_lifecycles.clone();
+        let removal_grace_secs = self.removal_grace_secs.clone();
 
         // Task 1: event consumption.
         //
@@ -955,6 +959,7 @@ impl FpmEventSubscriber {
             let endpoint = endpoint.clone();
             let stats = stats.clone();
             let worker_lifecycles = worker_lifecycles.clone();
+            let removal_grace_secs = removal_grace_secs.clone();
             async move {
                 let mut subscriber =
                     match EventSubscriber::for_endpoint(&endpoint, FPM_TOPIC).await {
@@ -966,6 +971,8 @@ impl FpmEventSubscriber {
                     };
 
                 tracing::info!("FPM tracker: listening for forward-pass-metrics events");
+                let mut cleanup_tick = tokio::time::interval(FPM_CLEANUP_INTERVAL);
+                cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 loop {
                     tokio::select! {
@@ -973,6 +980,14 @@ impl FpmEventSubscriber {
                         _ = cancel.cancelled() => {
                             tracing::info!("FPM tracker: shutting down event task");
                             break;
+                        }
+                        _ = cleanup_tick.tick() => {
+                            prune_removed_workers(
+                                &stats,
+                                &worker_lifecycles,
+                                Instant::now(),
+                                Duration::from_secs(removal_grace_secs.load(Ordering::Relaxed)),
+                            );
                         }
                         event = subscriber.next() => {
                             match event {
@@ -1015,7 +1030,6 @@ impl FpmEventSubscriber {
         // condition (FPM arriving *after* the Removed event) are caught by the
         // known_workers filter in get_recent_stats().
         let cards = self.worker_model_cards.clone();
-        let removal_grace_secs = self.removal_grace_secs.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
@@ -1463,10 +1477,24 @@ mod tests {
     #[test]
     fn snapshot_separates_missing_identity_and_stale_samples() {
         let now = Instant::now();
-        let worker_lifecycles = DashMap::from_iter([(
-            "removed".to_string(),
-            FpmWorkerLifecycle::Removed { last_activity: now },
-        )]);
+        let worker_lifecycles = DashMap::from_iter([
+            (
+                "removed".to_string(),
+                FpmWorkerLifecycle::Removed { last_activity: now },
+            ),
+            (
+                "fresh".to_string(),
+                FpmWorkerLifecycle::Active {
+                    registered_at: now - Duration::from_secs(3),
+                },
+            ),
+            (
+                "stale".to_string(),
+                FpmWorkerLifecycle::Active {
+                    registered_at: now - Duration::from_secs(3),
+                },
+            ),
+        ]);
         let latest = DashMap::new();
         let mut expected = HashMap::new();
         expected.insert("fresh".to_string(), Some(0..1));
@@ -1500,6 +1528,9 @@ mod tests {
         assert_eq!(unjoined, ["orphan"]);
         assert_eq!(stale, 1);
         assert_eq!(missing, 1);
+        assert!(!latest.contains_key(&("expired-orphan".to_string(), 0)));
+        assert!(latest.contains_key(&("orphan".to_string(), 0)));
+        assert!(latest.contains_key(&("stale".to_string(), 0)));
 
         // An identical idle heartbeat is fresh when it was received again.
         latest.insert(
@@ -1510,6 +1541,10 @@ mod tests {
             },
         );
         expected.insert("orphan".to_string(), Some(0..1));
+        worker_lifecycles.insert(
+            "orphan".to_string(),
+            FpmWorkerLifecycle::Active { registered_at: now },
+        );
         expected.remove("removed");
         let (snapshot, unjoined, stale, missing) = fresh_fpm_snapshot(
             &latest,
