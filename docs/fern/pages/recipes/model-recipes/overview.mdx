@@ -27,6 +27,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <input className="dynamo-filter-input" type="radio" id="provider-lg" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-upstage" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-minimax" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-motif" name="provider" />
 {/* provider-inputs:end */}
@@ -68,6 +69,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <label className="dynamo-recipe-chip" htmlFor="provider-lg">LG AI Research</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-upstage">Upstage</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-minimax">MiniMax</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-motif">Motif Technologies</label></div></div>
 {/* provider-chips:end */}
@@ -229,6 +231,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>TRT-LLM</span><span>2-8x GPU</span><span>Static ISL-OSL</span></div>
   <a className="dynamo-card-link" href="qwen3-32b-fp8.mdx" aria-label="Open the Qwen3-32B FP8 recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 b300 gb200 gb300 vr200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-h100 vllm-disagg-h100 vllm-agg-h200 vllm-disagg-h200 vllm-agg-b200 vllm-disagg-b200 vllm-agg-gb200 vllm-disagg-gb200 vllm-agg-b300 vllm-disagg-b300 vllm-agg-gb300 vllm-disagg-gb300 vllm-agg-vr200 vllm-disagg-vr200 trtllm-agg-b200 trtllm-disagg-b200">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Nemotron 3.5 Super VL</h3><p>NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">1M context, MTP, KV offloading and session affinity on Hopper, Blackwell, and Rubin.</p>
+    <div className="dynamo-model-tags"><span>vLLM + TensorRT-LLM</span><span>Hopper + Blackwell + Rubin</span><span>Experimental</span></div>
+    <a className="dynamo-card-link" href="nemotron-3-5-super-vl-120b-a12b.mdx" aria-label="Open the Nemotron 3.5 Super VL recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="trtllm vllm" data-hardware="h100 h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-h100-dspark vllm-agg-h100-dspark-kv-router vllm-agg-h100-dflash vllm-agg-h100-mtp vllm-agg-h200-dspark vllm-agg-h200-dspark-kv-router vllm-agg-h200-dflash vllm-agg-h200-mtp vllm-disagg-h100-dflash vllm-disagg-h100-dspark vllm-disagg-h200-dflash vllm-disagg-h200-dspark trtllm-agg-h100-mtp trtllm-agg-h200-mtp vllm-agg-b200-dspark-bf16 vllm-agg-b200-dspark-kv-router-bf16 vllm-agg-b200-mtp-bf16 vllm-agg-gb200-dspark-bf16 vllm-agg-gb200-mtp-bf16 vllm-disagg-b200-dspark-bf16 vllm-disagg-gb200-dflash-bf16 vllm-disagg-gb200-dspark-bf16 trtllm-agg-b200-bf16 trtllm-agg-b200-mtp-bf16 trtllm-agg-gb200-bf16 trtllm-agg-gb200-mtp-bf16">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
@@ -306,6 +317,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <p className="dynamo-model-summary">NVFP4 checkpoint with a 1M-token context on B200: two KV-routed TP2 replicas, or disaggregated 1P:2D with an expert-parallel prefill worker.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x/8x B200</span><span>Chat trace replay</span></div>
     <a className="dynamo-card-link" href="solar-open2-250b.mdx" aria-label="Open the Solar Open2 250B recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="meta" data-runtime="sglang vllm trtllm" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing" data-workload="agentic-coding long-context-reuse" data-targets="sglang-agg-gb200 sglang-disagg-gb200 sglang-kv-router-gb200 sglang-agg-gb300 sglang-disagg-gb300 sglang-kv-router-gb300 vllm-agg-gb200 vllm-agg-gb300 trtllm-agg-gb200 trtllm-agg-gb300">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/meta-llama.webp" alt="" />
+      <div><h3>Muse-Spark-Open-816B-A42B</h3><p>Meta</p></div>
+    </div>
+    <p className="dynamo-model-summary">SGLang and experimental vLLM and TensorRT-LLM recipes for agentic serving on GB200 and GB300. SGLang includes aggregated, disaggregated, and KV-aware routed targets; vLLM and TensorRT-LLM include aggregated targets.</p>
+    <div className="dynamo-model-tags"><span>SGLang + vLLM + TensorRT-LLM</span><span>GB200 · GB300</span><span>Agentic</span></div>
+  <a className="dynamo-card-link" href="Muse-Spark-Open.mdx" aria-label="Open the Muse-Spark-Open-816B-A42B recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="minimax" data-runtime="vllm" data-hardware="gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-gb200-agentic vllm-disagg-gb200-agentic">
     <div className="dynamo-model-card-top">

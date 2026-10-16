@@ -33,8 +33,8 @@ use super::types::{
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
-    WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
+    WorkerId, WorkerSelectionResult, WorkerWithDpRank,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
@@ -78,6 +78,7 @@ struct QueuedRequest {
 
 struct SelectedWorkerForRequest {
     selection: WorkerSelectionResult,
+    selection_trace: Option<SelectionTrace>,
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
@@ -512,6 +513,8 @@ struct SchedulerQueueActor<
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    /// Per-candidate cost capture for admitted selections, installed once by the host.
+    selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -541,6 +544,8 @@ pub struct SchedulerQueue<
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    /// Per-candidate cost capture for admitted selections, installed once by the host.
+    selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     #[allow(clippy::type_complexity)]
     // Covariant type markers, without ownership or auto-trait bounds.
     _marker: PhantomData<fn() -> (P, C, Sel, RF)>,
@@ -640,6 +645,7 @@ impl<
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
+        let selection_trace = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
         let direct_release: DirectBookingRelease = {
@@ -680,6 +686,7 @@ impl<
             overloaded_worker_provider,
             available_worker_provider: available_worker_provider.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
+            selection_trace: Arc::clone(&selection_trace),
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
@@ -696,6 +703,7 @@ impl<
             available_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
+            selection_trace,
             _marker: PhantomData,
         }
     }
@@ -718,6 +726,13 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install per-candidate cost capture for admitted selections.
+    ///
+    /// Returns `false` when a spec is already installed.
+    pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
+        self.selection_trace.set(spec).is_ok()
     }
 
     /// Enqueue a new request through the router-owned policy queue.
@@ -1633,9 +1648,12 @@ impl<
         result
     }
 
+    /// `admitted` selections may carry the installed selection trace; advisory
+    /// probes never do, so they do not pay for capture.
     fn select_worker_for_request(
         &self,
         request: &SchedulingRequest,
+        admitted: bool,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         let available_worker_ids = self
             .available_worker_provider
@@ -1657,14 +1675,22 @@ impl<
             {
                 eligibility = eligibility.with_affinity_target(target);
             }
+            let trace = if admitted {
+                self.selection_trace.get().copied()
+            } else {
+                None
+            };
             self.selector
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    request,
-                    eligibility,
-                    self.block_size,
-                ))
-                .map(|mut selection| {
+                .select_worker_traced(
+                    WorkerSelectionInput::configured(
+                        &workers,
+                        request,
+                        eligibility,
+                        self.block_size,
+                    ),
+                    trace,
+                )
+                .map(|(mut selection, selection_trace)| {
                     // Measure affinity selections against every eligible worker so cache
                     // metrics still mean "best eligible worker". Explicit pins are not
                     // widened, nor are selectors whose own filters may reject workers.
@@ -1727,6 +1753,7 @@ impl<
                     };
                     SelectedWorkerForRequest {
                         selection,
+                        selection_trace,
                         selected_worker_tiers,
                         selected_worker_load,
                         non_max_overlap_selection,
@@ -1741,7 +1768,7 @@ impl<
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, |actor, request| {
-            let selected = actor.select_worker_for_request(request)?;
+            let selected = actor.select_worker_for_request(request, false)?;
             let target_cached_prefix_blocks =
                 target_cached_prefix_blocks(request, selected.selection.worker);
 
@@ -1757,6 +1784,7 @@ impl<
                     target_cached_prefix_blocks,
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
+                    selection_trace: selected.selection_trace,
                 },
             })
         })
@@ -1782,7 +1810,7 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
     ) -> bool {
-        let selected = match self.select_worker_for_request(request) {
+        let selected = match self.select_worker_for_request(request, true) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1803,6 +1831,7 @@ impl<
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            selection_trace: selected.selection_trace,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -3462,6 +3491,7 @@ policy_classes:
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
+            selection_trace: Arc::clone(&queue.selection_trace),
         }
     }
 
