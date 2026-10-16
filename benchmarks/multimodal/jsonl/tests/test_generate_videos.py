@@ -68,18 +68,20 @@ def stub_imageio(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_long_clip_does_not_overflow_the_index_grids(stub_imageio, tmp_path) -> None:
-    # 1280x720 at 24 fps for 30 s is the configuration from the bug report:
-    # frame_idx reaches 719 and seed 4 draws speed_x = 150, so the gradient
-    # adds 107850 -- far past the 65535 a uint16 grid accepted.
+    # The overflow needs only frame_idx * speed to pass 65535, so this is the
+    # smallest clip that still crosses it: seed 4 draws speed_x = 150 at width
+    # 1280 and frame_idx reaches 455, so the gradient adds 68250. The bug
+    # report's 1280x720 for 30 s crosses the same bound but moves 71x more
+    # pixel data for the same assertions.
     writer = stub_imageio()
 
     generate_videos._write_synthetic_video(
-        tmp_path / "clip.mp4", seed=4, width=1280, height=720, fps=24, seconds=30
+        tmp_path / "clip.mp4", seed=4, width=1280, height=16, fps=24, seconds=19
     )
 
-    assert writer.frame_count == 24 * 30
+    assert writer.frame_count == 24 * 19
     assert writer.last_dtype == np.uint8
-    assert writer.last_shape == (720, 1280, 3)
+    assert writer.last_shape == (16, 1280, 3)
 
 
 def test_pixels_are_unchanged_for_a_clip_that_never_overflowed(
