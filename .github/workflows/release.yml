@@ -1043,7 +1043,6 @@ jobs:
               case ",${HELM_SUBSET}," in *,"${TOKEN}",*) ;; *) echo "skip ${TOKEN} chart (not selected)"; continue ;; esac
             fi
             CHART_NAME=$(awk '/^name:/ {print $2; exit}' "${CHART_DIR}/Chart.yaml")
-            make -C "${CHART_DIR}" sync-grove-version
             ( cd "${CHART_DIR}" && helm dep build . )
             echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
             helm package \
@@ -1151,7 +1150,6 @@ jobs:
           for TOKEN in ${CHARTS//,/ }; do
             CHART_DIR="deploy/helm/charts/${TOKEN}"
             CHART_NAME=$(awk '/^name:/ {print $2}' "${CHART_DIR}/Chart.yaml")
-            make -C "${CHART_DIR}" sync-grove-version
             pushd "${CHART_DIR}"
             helm dep build .
             popd

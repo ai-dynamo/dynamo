@@ -3,7 +3,7 @@
 
 suite: external Grove preflight
 templates:
-  - charts/dynamo-operator/templates/grove-preflight.yaml
+  - templates/grove-preflight.yaml
 tests:
   - it: preserves the first hook resource apiVersion
     set: {global.grove.enabled: true}
@@ -15,6 +15,10 @@ tests:
       - hasDocuments: {count: 0}
   - it: omits the hook for bundled Grove
     set: {global.grove.enabled: true, global.grove.install: true}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: omits the hook when the operator is disabled
+    set: {global.grove.enabled: true, dynamo-operator.enabled: false}
     asserts:
       - hasDocuments: {count: 0}
   - it: supports a separate compatibility gate
