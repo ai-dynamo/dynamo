@@ -93,6 +93,77 @@ impl WorkerKvTransferKeys {
     fn is_source(&self, dp_rank: u32) -> bool {
         self.source_ranks.binary_search(&dp_rank).is_ok()
     }
+
+    /// What a selection needs to find this worker's source; `None` when the
+    /// worker cannot consume hints.
+    pub fn target(&self) -> Option<KvTransferTarget> {
+        Some(KvTransferTarget {
+            worker_type: self.worker_type?,
+            transfer_domain: self.transfer_domain,
+            transfer_island: self.transfer_island,
+            preferred: self.preferred,
+        })
+    }
+}
+
+/// The hashed labels that choose a target worker's source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvTransferTarget {
+    worker_type: u64,
+    transfer_domain: Option<u64>,
+    transfer_island: Option<u64>,
+    preferred: bool,
+}
+
+/// The targets a [`KvTransferSourceSummary`] answers, so it groups only the
+/// sources they can use.
+#[derive(Clone, Debug)]
+pub struct KvTransferScope {
+    /// The shortest local prefix of any target; shorter sources are skipped.
+    min_local_prefix_blocks: usize,
+    /// Whether some target takes a source from any island: it has no
+    /// transfer domain, or `preferred` enforcement allows a fallback.
+    any_island: bool,
+    /// The transfer domains whose islands targets fetch within; `None` for all.
+    domains: Option<Vec<u64>>,
+}
+
+impl KvTransferScope {
+    /// Every target, for sources summarized before the targets are known.
+    pub fn all() -> Self {
+        Self {
+            min_local_prefix_blocks: 0,
+            any_island: true,
+            domains: None,
+        }
+    }
+
+    /// Exactly these targets, each with its local prefix in blocks.
+    pub fn of(targets: impl IntoIterator<Item = (KvTransferTarget, usize)>) -> Self {
+        let mut min_local_prefix_blocks = usize::MAX;
+        let mut any_island = false;
+        let mut domains = Vec::new();
+        for (target, local_prefix_blocks) in targets {
+            min_local_prefix_blocks = min_local_prefix_blocks.min(local_prefix_blocks);
+            any_island |= target.transfer_domain.is_none() || target.preferred;
+            if let (Some(domain), Some(_)) = (target.transfer_domain, target.transfer_island)
+                && !domains.contains(&domain)
+            {
+                domains.push(domain);
+            }
+        }
+        Self {
+            min_local_prefix_blocks,
+            any_island,
+            domains: Some(domains),
+        }
+    }
+
+    fn covers(&self, domain: u64) -> bool {
+        self.domains
+            .as_ref()
+            .is_none_or(|domains| domains.contains(&domain))
+    }
 }
 
 fn island(topology: &[(u64, u64)], domain: u64) -> Option<u64> {
@@ -210,24 +281,35 @@ impl TopSources {
     }
 }
 
-/// Every eligible source of one request, grouped so the source for any target
-/// is found in O(1) after one pass over the sources.
-#[derive(Default)]
+/// The eligible sources of one request, grouped so the source for any target
+/// in its scope is found in O(1) after one pass over the sources.
 pub struct KvTransferSourceSummary {
     by_type: FxHashMap<u64, TopSources>,
     by_island: FxHashMap<(u64, u64, u64), TopSources>,
+    scope: KvTransferScope,
 }
 
 impl KvTransferSourceSummary {
+    /// Summarize the sources the targets in `scope` can use. Sources no
+    /// longer than every target's local prefix are skipped before their
+    /// metadata is read.
     pub fn new<C: WorkerConfigLike>(
         candidates: &KvTransferCandidates,
         workers: &HashMap<WorkerId, C>,
+        scope: KvTransferScope,
     ) -> Self {
-        let mut summary = Self::default();
+        let min_local_prefix_blocks = scope.min_local_prefix_blocks;
+        let mut summary = Self {
+            by_type: FxHashMap::default(),
+            by_island: FxHashMap::default(),
+            scope,
+        };
         let snapshot = candidates.routing_snapshot.as_deref();
         for &(source, prefix_blocks) in &candidates.owner_prefix_blocks {
             // A source cannot share more of the prompt than the retained chain.
-            if prefix_blocks == 0 || prefix_blocks > candidates.block_hashes.len() {
+            if prefix_blocks <= min_local_prefix_blocks
+                || prefix_blocks > candidates.block_hashes.len()
+            {
                 continue;
             }
             let worker_keys;
@@ -278,38 +360,43 @@ impl KvTransferSourceSummary {
                 },
                 attachment,
             };
-            TopSources::offer(summary.by_type.entry(worker_type), ranked);
+            if summary.scope.any_island {
+                TopSources::offer(summary.by_type.entry(worker_type), ranked);
+            }
             for &(domain, value) in topology {
-                TopSources::offer(
-                    summary.by_island.entry((worker_type, domain, value)),
-                    ranked,
-                );
+                if summary.scope.covers(domain) {
+                    TopSources::offer(
+                        summary.by_island.entry((worker_type, domain, value)),
+                        ranked,
+                    );
+                }
             }
         }
         summary
     }
 
-    /// The source `target` fetches from: the eligible source with the longest
+    /// The source `worker` fetches from: the eligible source with the longest
     /// prefix beyond `local_prefix_blocks`, or `None` when there is none.
     pub fn source_for(
         &self,
-        target: WorkerWithDpRank,
-        target_keys: &WorkerKvTransferKeys,
+        worker: WorkerWithDpRank,
+        target: KvTransferTarget,
         local_prefix_blocks: usize,
     ) -> Option<KvTransferSourceChoice> {
-        let worker_type = target_keys.worker_type?;
+        debug_assert!(local_prefix_blocks >= self.scope.min_local_prefix_blocks);
         let pick = |top: Option<&TopSources>| {
-            top?.best_for(target)
+            top?.best_for(worker)
                 .filter(|choice| choice.prefix_blocks > local_prefix_blocks)
         };
-        let Some(domain) = target_keys.transfer_domain else {
+        let worker_type = target.worker_type;
+        let Some(domain) = target.transfer_domain else {
             return pick(self.by_type.get(&worker_type));
         };
-        target_keys
+        target
             .transfer_island
             .and_then(|island| pick(self.by_island.get(&(worker_type, domain, island))))
             .or_else(|| {
-                target_keys
+                target
                     .preferred
                     .then(|| pick(self.by_type.get(&worker_type)))
                     .flatten()
@@ -379,12 +466,10 @@ mod tests {
         local_prefix_blocks: usize,
     ) -> Option<(KvTransferCandidateSource, usize)> {
         let workers = workers();
-        KvTransferSourceSummary::new(candidates, &workers)
-            .source_for(
-                target,
-                &workers[&target.worker_id].kv_transfer_keys(),
-                local_prefix_blocks,
-            )
+        let target_keys = workers[&target.worker_id].kv_transfer_keys().target()?;
+        let scope = KvTransferScope::of([(target_keys, local_prefix_blocks)]);
+        KvTransferSourceSummary::new(candidates, &workers, scope)
+            .source_for(target, target_keys, local_prefix_blocks)
             .map(|choice| (choice.source, choice.prefix_blocks))
     }
 

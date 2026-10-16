@@ -10,6 +10,7 @@ use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 
+use crate::kv_hints::{KvTransferScope, KvTransferTarget};
 use crate::protocols::{
     SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerSelectionResult,
 };
@@ -53,6 +54,8 @@ pub(super) struct ComposedPolicyState {
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
+    /// Each unscored row's fetch target while its source waits for every row.
+    transfer_targets: Vec<Option<KvTransferTarget>>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
@@ -127,6 +130,7 @@ impl WorkerSelectionPolicy {
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
+                transfer_targets: Vec::new(),
             })),
         }
     }
@@ -315,6 +319,20 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     state.candidates.clear();
     state.cache_inputs.clear();
     state.load_inputs.clear();
+    state.transfer_targets.clear();
+    let has_transfer_candidates = request.kv_transfer_candidates.is_some();
+    // Filters read fetch inputs while rows are built, so build the sources
+    // first. Otherwise scorers' inputs are filled once every row is built.
+    let filters_read_transfer = state.filter_inputs.contains(WorkerInputs::KV_TRANSFER);
+    if has_transfer_candidates && filters_read_transfer {
+        input.kv_transfer_sources(workers, KvTransferScope::all);
+    }
+    let defer_transfer = has_transfer_candidates
+        && !filters_read_transfer
+        && !state.scorers.is_empty()
+        && state
+            .scorer_picker_inputs
+            .contains(WorkerInputs::KV_TRANSFER);
     if state.filters.is_empty() {
         let materialize_preferred_taint = eligibility.pinned_worker().is_none()
             && state
@@ -329,16 +347,26 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 None
             };
             let candidate = input.row(
-                workers,
                 worker,
-                config,
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
             input.track_kept_candidate(worker);
             state.push_candidate(candidate);
+            if defer_transfer {
+                state
+                    .transfer_targets
+                    .push(config.kv_transfer_keys().target());
+            }
             false
         });
+        if defer_transfer {
+            input.fill_kv_transfer_sources(
+                workers,
+                &mut state.unscored_candidates,
+                &state.transfer_targets,
+            );
+        }
         state.score_candidates(&input.context, &input.cache_snapshot)?;
         return Ok(!state.candidates.is_empty());
     }
@@ -359,13 +387,14 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         } else {
             None
         };
-        let filter_candidate = input.row(
-            workers,
+        let mut filter_candidate = input.row(
             worker,
-            config,
             filter_preferred_taint_multiplier,
             state.filter_inputs,
         );
+        if filters_read_transfer {
+            filter_candidate.transfer = input.kv_transfer_input(worker, config);
+        }
         for (inputs, filter) in &mut state.filters {
             match filter.keep(
                 &input.context,
@@ -388,19 +417,29 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             None
         };
         let additional = input.row(
-            workers,
             worker,
-            config,
             additional_preferred_taint_multiplier,
             additional_inputs,
         );
         let candidate = filter_candidate.with_inputs_from(&additional, state.scorer_picker_inputs);
         input.track_kept_candidate(worker);
         state.push_candidate(candidate);
+        if defer_transfer {
+            state
+                .transfer_targets
+                .push(config.kv_transfer_keys().target());
+        }
         false
     });
     if let Some(error) = error {
         return Err(error);
+    }
+    if defer_transfer {
+        input.fill_kv_transfer_sources(
+            workers,
+            &mut state.unscored_candidates,
+            &state.transfer_targets,
+        );
     }
     state.score_candidates(&input.context, &input.cache_snapshot)?;
     Ok(has_eligible_worker)
@@ -727,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn scorers_read_fetchable_prefixes_only_when_declared() {
+    fn components_read_fetchable_prefixes_only_when_declared() {
         use crate::kv_hints::KvTransferCandidates;
         use crate::protocols::{ExternalSequenceBlockHash, KvHintTransferWorkerMetadata};
         use std::sync::{Arc, Mutex};
@@ -797,16 +836,44 @@ mod tests {
             }
         }
 
+        struct TransferFilter(Seen);
+
+        impl WorkerFilter for TransferFilter {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::KV_TRANSFER
+            }
+
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                let transfer = candidate.kv_transfer().map(|transfer| {
+                    (
+                        transfer.local_prefix_blocks(),
+                        transfer.source_prefix_blocks(),
+                    )
+                });
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((candidate.worker().worker_id, transfer));
+                Ok(true)
+            }
+        }
+
         let warm = WorkerWithDpRank::from_worker_id(0);
         let workers = HashMap::from([(0, HintWorker), (1, HintWorker)]);
         let select = |candidates: Option<KvTransferCandidates>| {
-            let (declared, undeclared) = (Seen::default(), Seen::default());
+            let (filtered, declared, undeclared) =
+                (Seen::default(), Seen::default(), Seen::default());
             let mut request = base_request(64);
             request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
             request.kv_transfer_candidates = candidates;
-            let policy = WorkerSelectionPolicy::new(
+            let policy = WorkerSelectionPolicy::new_with_filters(
                 KvRouterConfig::default(),
                 "test",
+                vec![Box::new(TransferFilter(filtered.clone()))],
                 vec![
                     Box::new(TransferScorer {
                         inputs: WorkerInputs::KV_TRANSFER,
@@ -832,7 +899,10 @@ mod tests {
                 seen.sort_unstable();
                 seen
             };
-            (sorted(declared), sorted(undeclared))
+            let declared = sorted(declared);
+            // Filters see fetch inputs while rows are built, scorers after.
+            assert_eq!(sorted(filtered), declared);
+            (declared, sorted(undeclared))
         };
 
         let (declared, undeclared) = select(Some(KvTransferCandidates {

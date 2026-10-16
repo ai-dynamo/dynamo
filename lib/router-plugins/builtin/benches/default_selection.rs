@@ -281,8 +281,10 @@ fn shared_cache(c: &mut Criterion) {
 }
 
 /// A KVCR-style worker: hint capable, a source, and in an island of eight.
+/// Like the selection service's config, it caches its hashed keys.
 struct HintWorker {
     topology: std::collections::HashMap<String, String>,
+    keys: dynamo_kv_router::kv_hints::WorkerKvTransferKeysCache,
 }
 impl dynamo_kv_router::protocols::WorkerConfigLike for HintWorker {
     fn data_parallel_start_rank(&self) -> u32 {
@@ -312,15 +314,25 @@ impl dynamo_kv_router::protocols::WorkerConfigLike for HintWorker {
     fn kv_transfer_domain(&self) -> Option<&str> {
         Some("rdma-island")
     }
+    fn kv_transfer_keys(
+        &self,
+    ) -> std::borrow::Cow<'_, dynamo_kv_router::kv_hints::WorkerKvTransferKeys> {
+        std::borrow::Cow::Borrowed(self.keys.get_or_init(self))
+    }
 }
 
-// Every worker rank is a fetch source (S = 2W), so each selection builds the
-// full source summary. `none` carries no transfer candidates (no KVCR).
+// Every worker rank is a fetch source (S = 2W). `none` carries no transfer
+// candidates (no KVCR). `credit0.5` is the worst case: every source holds a
+// different prefix, so the summary keeps nearly all of them. In
+// `credit0.5_shared_prompt` every rank holds the same system prompt and one
+// worker in eight also holds a longer session prefix, so sources no longer
+// than every rank's own prefix are skipped.
 fn kv_transfer(c: &mut Criterion) {
-    for (name, credit, candidates) in [
-        ("none", 0.5, false),
-        ("credit0", 0.0, true),
-        ("credit0.5", 0.5, true),
+    for (name, credit, candidates, shared_prompt) in [
+        ("none", 0.5, false, false),
+        ("credit0", 0.0, true, false),
+        ("credit0.5", 0.5, true, false),
+        ("credit0.5_shared_prompt", 0.5, true, true),
     ] {
         let mut group = c.benchmark_group(format!("kv_transfer/{name}"));
         group
@@ -334,16 +346,25 @@ fn kv_transfer(c: &mut Criterion) {
                 .map(|id| {
                     let island = format!("island-{}", id / 8);
                     let topology = [("rdma-island".to_string(), island)].into();
-                    (id, HintWorker { topology })
+                    let keys = Default::default();
+                    (id, HintWorker { topology, keys })
                 })
                 .collect();
+            if shared_prompt {
+                for blocks in request.overlap.tier_overlap_blocks.device.values_mut() {
+                    *blocks = 16;
+                }
+            }
             if candidates {
                 let mut sources: Vec<_> = request
                     .overlap
                     .tier_overlap_blocks
                     .device
                     .iter()
-                    .map(|(&worker, &blocks)| (worker.into(), blocks + 2))
+                    .map(|(&worker, &blocks)| {
+                        let session = shared_prompt && worker.worker_id % 8 == 0;
+                        (worker.into(), if session { 40 } else { blocks + 2 })
+                    })
                     .collect();
                 sources.sort_unstable();
                 request.kv_transfer_candidates =

@@ -13,6 +13,7 @@ use super::{
     CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
     WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
+use crate::kv_hints::KvTransferScope;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
@@ -268,28 +269,24 @@ impl DefaultScoringContext {
 fn default_row<C: WorkerConfigLike>(
     input: &MaterializedSelectionInput<'_>,
     context: DefaultScoringContext,
-    workers: &HashMap<WorkerId, C>,
     worker: WorkerWithDpRank,
     config: &C,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
     input.track_kept_candidate(worker);
-    // Like the builtin scorer, read fetchable prefixes only when they earn credit.
-    let inputs = if context.weights.shared_cache_multiplier != 0.0 {
-        WorkerInputs::ALL | WorkerInputs::KV_TRANSFER
-    } else {
-        WorkerInputs::ALL
-    };
-    input.row_with_device_overlap(
-        workers,
+    let mut row = input.row_with_device_overlap(
         worker,
-        config,
         preferred_taint_multiplier,
-        inputs,
+        WorkerInputs::ALL,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },
-    )
+    );
+    // Like the builtin scorer, read fetchable prefixes only when they earn credit.
+    if context.weights.shared_cache_multiplier != 0.0 {
+        row.transfer = input.kv_transfer_input(worker, config);
+    }
+    row
 }
 
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
@@ -483,11 +480,14 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         eligibility,
         selection_weights(scorer.kv_router_config, request),
     );
+    // Rows are scored as they are built, so build every fetch source first.
+    if default_context.weights.shared_cache_multiplier != 0.0 {
+        input.kv_transfer_sources(workers, KvTransferScope::all);
+    }
     if let Some(worker) = eligibility.pinned_worker() {
         let row = default_row(
             input,
             default_context,
-            workers,
             worker,
             &workers[&worker.worker_id],
             None,
@@ -512,7 +512,6 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             &default_row(
                 input,
                 default_context,
-                workers,
                 worker,
                 config,
                 preferred_taint_multiplier,
@@ -671,7 +670,6 @@ mod tests {
                 &default_row(
                     &input,
                     default_context,
-                    &workers,
                     worker,
                     &workers[&worker.worker_id],
                     None,
@@ -2010,8 +2008,8 @@ mod tests {
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
         let config = &workers[&worker.worker_id];
-        let custom_row = input.row(&workers, worker, config, None, WorkerInputs::CACHE);
-        let default_row = default_row(&input, default_context, &workers, worker, config, None);
+        let custom_row = input.row(worker, None, WorkerInputs::CACHE);
+        let default_row = default_row(&input, default_context, worker, config, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
         assert_eq!(
