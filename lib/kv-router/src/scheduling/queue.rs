@@ -1766,14 +1766,14 @@ impl<
                         .overlap
                         .selected_worker_tiers(selection.worker, config);
                     let worker_load = request.worker_load_for(selection.worker);
+                    let capacity = WorkerCapacity::of(config);
                     let selected_worker_load = AdvisoryWorkerLoad {
                         active_prefill_tokens: worker_load.active_prefill_tokens,
-                        prefill_token_capacity: WorkerCapacity::of(config).prefill_budget()
-                            as usize,
+                        prefill_token_capacity: capacity.prefill_budget() as usize,
                         // TODO(rank-aware-kv-capacity): resolve the selected DP rank and preserve
                         // capacity quality. Estimated fallbacks must not authorize load-based
                         // admission/bypass decisions that require an exact or conservative bound.
-                        total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
+                        total_kv_blocks: capacity.total_kv_blocks().map(|blocks| blocks as usize),
                     };
                     SelectedWorkerForRequest {
                         selection,
@@ -4171,6 +4171,59 @@ policy_classes:
                 .unwrap();
             slots.free(&request_id.to_string(), decay_now()).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn decode_limit_holds_new_work_until_held_kv_frees() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: decode-bound
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+    decode_busy_threshold_frac: 0.5
+"#,
+        );
+        let (queue, slots, cfg_tx) = make_queue_with_profile_and_sender(1, 16, 1_000_000, profile);
+        cfg_tx
+            .send(HashMap::from([(
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(1_000_000),
+                    total_kv_blocks: Some(8),
+                    ..Default::default()
+                },
+            )]))
+            .unwrap();
+
+        // A decoding request holds 6 of the worker's 8 KV blocks; its prefill load is gone.
+        let (mut held, held_rx) = make_request("held", 96);
+        held.token_seq = Some((0..6).collect());
+        queue.enqueue(held).await;
+        held_rx.await.unwrap().unwrap();
+        slots
+            .mark_prefill_completed(&"held".to_string(), decay_now())
+            .unwrap();
+
+        let (next, mut next_rx) = make_request("next", 16);
+        queue.enqueue(next).await;
+        queue.update().await;
+        assert!(
+            next_rx.try_recv().is_err(),
+            "held KV above the decode limit must keep new work queued"
+        );
+
+        slots.free(&"held".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        next_rx
+            .await
+            .unwrap()
+            .expect("freed KV must release the queued request");
     }
 
     #[tokio::test(flavor = "multi_thread")]
