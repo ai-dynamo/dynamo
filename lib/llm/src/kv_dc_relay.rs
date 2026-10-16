@@ -11,6 +11,7 @@ mod identity;
 mod load;
 mod membership_watch;
 mod namespace_source;
+pub mod pool_discovery;
 mod pool_registry;
 mod publication;
 mod resolution;
