@@ -4163,6 +4163,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument("artifact capture requires an exact token prompt")
             artifact_runtime = None
             if artifact_settings.get("mode") != "inline_base64":
+                # Object-store delivery needs opendal from the optional
+                # artifact-delivery extra, so load it only for these requests.
                 from dynamo.artifacts.runtime import (
                     ArtifactAuthorityClosed,
                     configured_artifact_runtime,

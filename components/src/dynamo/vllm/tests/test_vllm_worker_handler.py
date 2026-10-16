@@ -1493,7 +1493,7 @@ async def test_artifact_destination_rejection_is_invalid_argument(
         async for _ in handler.generate(request, MagicMock()):
             pass
     handler.engine_client.generate.assert_not_called()
-    authority.submit.assert_not_awaited()
+    authority.submit.assert_not_called()
     assert budget.used == 0
 
 
