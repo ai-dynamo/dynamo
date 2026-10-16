@@ -397,7 +397,9 @@ export PROFILE=vllm/disagg-gb300-nvfp4
 
 </div>
 
-Use the namespace containing your staged model cache.
+Before deploying, follow the
+[model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam/README.md#2-stage-the-model-and-drafter)
+for your selected `PROFILE`. Use the namespace containing that staged model cache.
 Use your cluster overlay for GPU and CPU-architecture placement when nodes differ.
 On a cluster with matching hardware, apply the portable manifest below:
 
