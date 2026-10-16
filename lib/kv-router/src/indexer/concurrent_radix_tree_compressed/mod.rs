@@ -32,6 +32,7 @@ use lane_lookup::LaneLookup;
 use node::*;
 use types::*;
 use worker_set::WorkerSet;
+pub(crate) use worker_set::mix_worker;
 
 mod dump;
 mod matches;

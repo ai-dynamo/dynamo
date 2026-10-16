@@ -1311,9 +1311,9 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 
     assert_eq!(core.list_workers(None, None).len(), 1);
     assert_eq!(core.loads(None, None).len(), 1);
-    let deleted = core
-        .delete_worker(1)
+    let deleted = tokio::time::timeout(Duration::from_secs(5), core.delete_worker(1))
         .await
+        .expect("delete must not wait for a stopped config monitor")
         .expect("delete should remain available after shutdown");
     assert_eq!(deleted.lifecycle, WorkerLifecycle::Unschedulable);
 }
@@ -3566,6 +3566,125 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+#[tokio::test]
+async fn deleting_worker_releases_booking_before_same_id_returns() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let core = local_core(test_config(false));
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let old = core.indexed_booking("old").unwrap().1;
+        assert!(entry.scheduler.has_booking(&old));
+
+        // With no event ingress, both catalog operations can finish without
+        // yielding. A watch-only consumer can miss the intervening removal.
+        core.delete_worker(1).await.unwrap();
+        core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "completed deletion left a booking on the replacement worker"
+        );
+        assert!(core.prefill_complete("old").await.is_err());
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let fresh = core.indexed_booking("old").unwrap().1;
+        assert_ne!(old.attempt_id, fresh.attempt_id);
+        assert!(!entry.scheduler.has_booking(&old));
+        assert_eq!(
+            entry.scheduler.free_if_booking(&old).await.unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(entry.scheduler.has_booking(&fresh));
+        core.free_reservation("old").await.unwrap();
+        assert!(core.loads(None, None).iter().all(|p| p.pending_count == 0
+            && p.loads.iter().all(|w| w.active_requests == 0
+                && w.potential_prefill_tokens == 0
+                && w.potential_decode_blocks == 0)));
+        core.shutdown();
+    })
+    .await
+    .expect("worker deletion deadline");
+}
+
+#[tokio::test]
+async fn cancelled_worker_delete_is_finished_before_re_registration() {
+    struct PausedDetach {
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedDetach {
+        fn open(
+            &self,
+            registry: &WorkerRegistry,
+            key: &RoutingPartitionId,
+            block_size: u32,
+        ) -> Indexer {
+            registry.get_or_create_indexer(key.clone(), block_size)
+        }
+        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let ingress = Arc::new(PausedDetach {
+            calls: AtomicUsize::new(0),
+        });
+        let core = core_with_host(SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(ingress.clone()),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        });
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let old = core.indexed_booking("old").unwrap().1;
+        {
+            let deletion = core.delete_worker(1);
+            tokio::pin!(deletion);
+            let pending = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(deletion.as_mut(), cx).is_pending(),
+                )
+            })
+            .await;
+            assert!(pending, "deletion must wait for the paused indexer detach");
+            assert_eq!(ingress.calls.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            core.catalog.get(1).unwrap().lifecycle,
+            WorkerLifecycle::Draining
+        );
+        core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "cancelled deletion left a booking on the replacement worker"
+        );
+        assert_eq!(ingress.calls.load(Ordering::SeqCst), 2);
+        core.select(select_request()).await.unwrap();
+        assert!(core.free_reservation("old").await.is_err());
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        core.free_reservation("old").await.unwrap();
+        assert!(core.loads(None, None).iter().all(|p| p.pending_count == 0
+            && p.loads.iter().all(|w| w.active_requests == 0
+                && w.potential_prefill_tokens == 0
+                && w.potential_decode_blocks == 0)));
+        core.shutdown();
+    })
+    .await
+    .expect("cancelled worker deletion deadline");
 }
 
 #[tokio::test]

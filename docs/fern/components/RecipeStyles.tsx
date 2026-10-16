@@ -210,6 +210,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-lg:checked ~ .dynamo-recipe-browser label[for="provider-lg"],
 #provider-skt:checked ~ .dynamo-recipe-browser label[for="provider-skt"],
 #provider-upstage:checked ~ .dynamo-recipe-browser label[for="provider-upstage"],
+#provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
 #provider-minimax:checked ~ .dynamo-recipe-browser label[for="provider-minimax"],
 #provider-motif:checked ~ .dynamo-recipe-browser label[for="provider-motif"],
 /* provider-chip-rules:end */
@@ -694,6 +695,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-lg:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="lg"]),
 #provider-skt:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="skt"]),
 #provider-upstage:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="upstage"]),
+#provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
 #provider-minimax:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="minimax"]),
 #provider-motif:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="motif"]),
 /* provider-filter-rules:end */
@@ -2191,12 +2193,15 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 /* Variant visibility: hide blocks that do not match the checked framework/sku/usecase */
 body:has(input[name="recipe-framework"][value="vllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="vllm"]),
+body:has(input[name="recipe-framework"][value="trtllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="trtllm"]),
 body:has(input[name="recipe-framework"][value="sglang"]:checked) [data-recipe-framework]:not([data-recipe-framework~="sglang"]),
 body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sku~="b200"]),
+body:has(input[name="recipe-sku"][value="b300"]:checked) [data-sku]:not([data-sku~="b300"]),
 body:has(input[name="recipe-sku"][value="h200"]:checked) [data-sku]:not([data-sku~="h200"]),
 body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sku~="h100"]),
 body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-sku]:not([data-sku~="gb200"]),
 body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-sku]:not([data-sku~="gb300"]),
+body:has(input[name="recipe-sku"][value="vr200"]:checked) [data-sku]:not([data-sku~="vr200"]),
 body:has(input[name="recipe-usecase"][value="chat"]:checked) [data-usecase]:not([data-usecase~="chat"]),
 body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]) {
     display: none;
@@ -2253,6 +2258,7 @@ body:has(input[name="recipe-variant"][value="trtllm-disagg"]:checked) [data-vari
 body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) [data-variant]:not([data-variant~="vllm-disagg"]),
 body:has(input[name="recipe-variant"][value="standard"]:checked) [data-variant]:not([data-variant~="standard"]),
 body:has(input[name="recipe-variant"][value="efa"]:checked) [data-variant]:not([data-variant~="efa"]),
+body:has(input[name="recipe-variant"][value="kv-router"]:checked) [data-variant]:not([data-variant~="kv-router"]),
 body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]) {
     display: none;
 }
@@ -2271,9 +2277,27 @@ body:has(input[name="recipe-variant"][value="trtllm-disagg"]:checked) tr[data-va
 body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-variant~="vllm-disagg"],
 body:has(input[name="recipe-variant"][value="standard"]:checked) tr[data-variant~="standard"],
 body:has(input[name="recipe-variant"][value="efa"]:checked) tr[data-variant~="efa"],
+body:has(input[name="recipe-variant"][value="kv-router"]:checked) tr[data-variant~="kv-router"],
 body:has(input[name="recipe-variant"][value="kvbm"]:checked) tr[data-variant~="kvbm"] {
     opacity: 1;
     font-weight: 600;
+}
+
+/* Recipe matrices keep every target readable; only the selected target is highlighted. */
+body:has(input[name="recipe-sku"]:checked):has(input[name="recipe-variant"]:checked) tr.dynamo-muse-spark-performance-row {
+    opacity: 1;
+    font-weight: 400;
+}
+
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="kv-router"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="kv-router"] {
+    opacity: 1;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
 }
 
 /* Combined sku x variant row highlighting (matrix pages) */
