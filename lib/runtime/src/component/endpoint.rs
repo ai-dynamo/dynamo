@@ -134,6 +134,8 @@ impl EndpointConfigBuilder {
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
+        let runtime = endpoint.drt().runtime().clone();
+        let _registration = runtime.endpoint_registration_guard().await?;
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -432,6 +434,7 @@ impl Endpoint {
     /// and should start receiving requests.
     pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
         let drt = self.drt();
+        let _registration = drt.runtime().endpoint_registration_guard().await?;
         let instance_id = drt.connection_id();
         let endpoint_id = self.id();
 
