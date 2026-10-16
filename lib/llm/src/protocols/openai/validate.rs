@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, collections::HashSet, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
@@ -567,22 +567,23 @@ pub fn validate_messages(
     validate_tool_results(messages)
 }
 
-/// The tool calls of the latest assistant message, awaiting their tool results.
 struct PendingToolCalls<'a> {
     message_index: usize,
-    issued: Vec<&'a str>,
-    unanswered: Vec<&'a str>,
+    issued: HashSet<&'a str>,
+    unanswered: HashSet<&'a str>,
     has_results: bool,
 }
 
 impl PendingToolCalls<'_> {
     fn ensure_answered(&self) -> Result<(), anyhow::Error> {
         if !self.unanswered.is_empty() {
+            let mut unanswered: Vec<&str> = self.unanswered.iter().copied().collect();
+            unanswered.sort_unstable();
             anyhow::bail!(
                 "`messages[{}].tool_calls` must be followed by tool messages responding to each \
                  `tool_call_id`; missing responses for: {}",
                 self.message_index,
-                self.unanswered.join(", ")
+                unanswered.join(", ")
             );
         }
         Ok(())
@@ -607,14 +608,14 @@ fn validate_tool_results(
                 );
             };
             let id = tool.tool_call_id.as_str();
-            if !calls.issued.contains(&id) {
+            if !calls.issued.contains(id) {
                 anyhow::bail!(
                     "`messages[{message_index}].tool_call_id` '{id}' does not match any \
                      `tool_calls` id of `messages[{}]`",
                     calls.message_index
                 );
             }
-            calls.unanswered.retain(|unanswered| *unanswered != id);
+            calls.unanswered.remove(id);
             calls.has_results = true;
             continue;
         }
@@ -627,7 +628,7 @@ fn validate_tool_results(
                 .as_ref()
                 .filter(|calls| !calls.is_empty())
         {
-            let issued: Vec<&str> = tool_calls.iter().map(|call| call.id.as_str()).collect();
+            let issued: HashSet<&str> = tool_calls.iter().map(|call| call.id.as_str()).collect();
             pending = Some(PendingToolCalls {
                 message_index,
                 unanswered: issued.clone(),
