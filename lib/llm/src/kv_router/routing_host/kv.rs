@@ -125,16 +125,7 @@ impl RoutingHost {
         // An existing lifecycle travels with the request instead: the decode
         // leg claims the one its prefill hop handed off, and a retry resumes
         // the one a failed attempt parked.
-        let mut lifecycle = request
-            .lifecycle_handoff
-            .as_ref()
-            .and_then(LifecycleHandoff::take)
-            .or_else(|| {
-                request
-                    .migration_state
-                    .as_ref()
-                    .and_then(|state| state.take_request_lifecycle())
-            });
+        let mut lifecycle = claim_request_lifecycle(request.content());
         if lifecycle.is_none() {
             lifecycle = self
                 .kv_router()

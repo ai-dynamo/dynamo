@@ -164,6 +164,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         Some(selection.reservation),
         None,
         &request(),
+        None,
     );
     assert_eq!(guard.retarget_worker(1), Some(1));
     guard.abort().await;
@@ -2663,7 +2664,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     assert_eq!(metrics.requests_total.get(), 1);
 
     let mut builtin_guard =
-        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
+        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request(), None);
     assert_eq!(metrics.requests_started_total.get(), 4);
     builtin_guard.abort().await;
     drop(builtin_guard);
@@ -3538,63 +3539,70 @@ async fn run_decode_leg(
 }
 
 /// In disaggregated serving the prefill hop owns the classifier: it admits and
-/// places the request before prefill dispatch, and the decode leg finishes the
-/// lifecycle without re-reporting placement.
+/// places the request before prefill dispatch, and the decode leg, KV-routed or
+/// builtin, finishes the lifecycle without re-reporting placement.
 #[tokio::test]
 #[serial_test::serial]
 async fn prefill_hop_classifies_and_hands_the_lifecycle_to_decode() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (events_tx, mut events) = mpsc::unbounded_channel();
-    let (prefill, _, prefill_worker, prefill_runtime) =
-        Box::pin(router_with_recorded_dispatch_and_classifier(
-            "disagg-handoff-prefill",
-            None,
-            Some(LifecycleLogClassifier {
-                calls: Arc::clone(&calls),
-                events: events_tx,
-                hold: None,
-            }),
-        ))
-        .await;
-    let (decode, decode_dispatch, decode_worker, decode_runtime) =
-        router_with_recorded_dispatch("disagg-handoff-decode").await;
-    let (input, tracker) = disaggregated_request(None).await;
-    let client = Context::new(());
+    for builtin_decode in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let (prefill, _, prefill_worker, prefill_runtime) =
+            Box::pin(router_with_recorded_dispatch_and_classifier(
+                &format!("disagg-handoff-prefill-{builtin_decode}"),
+                None,
+                Some(LifecycleLogClassifier {
+                    calls: Arc::clone(&calls),
+                    events: events_tx,
+                    hold: None,
+                }),
+            ))
+            .await;
+        let decode_namespace = format!("disagg-handoff-decode-{builtin_decode}");
+        let (decode, decode_dispatch, decode_worker, decode_runtime) = if builtin_decode {
+            builtin_host_with_recorded_dispatch(&decode_namespace, RouterMode::RoundRobin).await
+        } else {
+            router_with_recorded_dispatch(&decode_namespace).await
+        };
+        let (input, tracker) = disaggregated_request(None).await;
+        let client = Context::new(());
 
-    run_prefill_leg(
-        &prefill,
-        &input,
-        "disagg-handoff",
-        client.context().as_ref(),
-    )
-    .await
-    .unwrap();
-    let handoff = input.lifecycle_handoff.clone().unwrap();
-    let lifecycle = handoff
-        .take()
-        .expect("prefill completion must leave the lifecycle for the decode leg");
-    handoff.store(lifecycle);
-    run_decode_leg(&decode, input, &tracker, "disagg-handoff").await;
+        run_prefill_leg(
+            &prefill,
+            &input,
+            "disagg-handoff",
+            client.context().as_ref(),
+        )
+        .await
+        .unwrap();
+        let handoff = input.lifecycle_handoff.clone().unwrap();
+        let lifecycle = handoff
+            .take()
+            .expect("prefill completion must leave the lifecycle for the decode leg");
+        handoff.store(lifecycle);
+        run_decode_leg(&decode, input, &tracker, "disagg-handoff").await;
 
-    assert_eq!(
-        next_lifecycle_event(&mut events).await,
-        LifecycleEvent::Sent(prefill_worker)
-    );
-    assert_eq!(
-        next_lifecycle_event(&mut events).await,
-        LifecycleEvent::Completed
-    );
-    assert!(events.try_recv().is_err());
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        decode_dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[decode_worker]
-    );
+        assert_eq!(
+            next_lifecycle_event(&mut events).await,
+            LifecycleEvent::Sent(prefill_worker)
+        );
+        assert_eq!(
+            next_lifecycle_event(&mut events).await,
+            LifecycleEvent::Completed,
+            "builtin_decode={builtin_decode}"
+        );
+        assert!(events.try_recv().is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            decode_dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[decode_worker]
+        );
 
-    drop(prefill);
-    drop(decode);
-    prefill_runtime.shutdown();
-    decode_runtime.shutdown();
+        drop(prefill);
+        drop(decode);
+        prefill_runtime.shutdown();
+        decode_runtime.shutdown();
+    }
 }
 
 /// A deferred admission holds the request before prefill dispatch, and a client
