@@ -99,6 +99,8 @@ uuid = { version = "1.18.1" }
 dynamo-kv-router = { path = "../../kv-router" }
 dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
+# The replaceable /generate format catalog; custom images point this name at their own.
+dynamo-generate-format-catalog = { path = "../../generate-format-catalog" }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 

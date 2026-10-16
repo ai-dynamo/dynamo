@@ -290,6 +290,11 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
+    let mut formats = dynamo_llm::generate_format::Registry::default();
+    dynamo_generate_format_catalog::register(&mut formats)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    dynamo_llm::generate_format::install(formats);
+
     // Size the runtime the bridge may build for itself.
     //
     // `DistributedRuntime::new` gives the bridge a configured runtime, but only when it gets

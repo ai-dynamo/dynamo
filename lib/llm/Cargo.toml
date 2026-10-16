@@ -37,6 +37,8 @@ mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
+# Simulator and property laws for testing /generate formats.
+generate-testkit = ["dep:proptest"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -118,6 +120,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
 tokio = { workspace = true }
+proptest = { version = "1.5", optional = true }
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

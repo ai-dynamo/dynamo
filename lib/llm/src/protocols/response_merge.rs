@@ -3,12 +3,14 @@
 
 //! Joining the pieces of one engine response.
 //!
-//! A response reaches the frontend in pieces at two seams: an engine streams it
-//! in chunks, and in P/D only the prefill worker computes prompt-side outputs.
-//! A [`ResponseMerger`] owns one engine's rules for both seams; [`RuleSet`]
-//! implements it from declarative [`FieldRule`]s, the intended plugin format.
-//! Merges move or swap values, so no field is copied.
+//! A response reaches the frontend in pieces at three seams: an engine streams
+//! it in chunks, in P/D only the prefill worker computes prompt-side outputs,
+//! and a migrated request continues on another worker. Each response field has
+//! one [`FieldClass`], which fixes how it joins at all three; [`RuleSet`] holds
+//! a format's table and [`Assembler`] applies it to one request. Joins move or
+//! swap values, so streaming copies no field per chunk.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -23,8 +25,9 @@ pub const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 pub const PREFILL_OUTPUT_FIRST_ANNOTATION: &str = "prefill_output_first";
 
 /// When a response needs prefill's output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrefillNeed {
+    #[default]
     None,
     /// Only the final chunk carries prefill's values.
     BeforeLast,
@@ -32,114 +35,124 @@ pub enum PrefillNeed {
     BeforeFirst,
 }
 
-pub trait ResponseMerger: Send + Sync {
-    /// Whether, and how early, the request needs output only prefill produces.
-    fn prefill_need(&self, request: &Value) -> PrefillNeed;
-
-    /// Join the next streamed chunk onto the response so far. Fields without
-    /// a rule take `next`'s value.
-    fn join_step(&self, joined: &mut Value, next: Value);
-
-    /// Move prefill's prompt-side values into a decode response or chunk.
-    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value);
-
-    /// Undo [`Self::join_prefill`]'s moves, so `prefill` serves the next chunk.
-    fn restore_prefill(&self, prefill: &mut Value, decode: &mut Value);
+/// The annotations asking the prefill router for prefill's output. Decode
+/// output waits for it when every chunk needs it, unary too: a decode failure
+/// before a late prefill output would lose it, and a retry's prefill computes
+/// prompt-side values over a prompt that now holds output.
+pub fn prefill_annotations(need: PrefillNeed) -> Vec<String> {
+    match need {
+        PrefillNeed::None => vec![],
+        PrefillNeed::BeforeLast => vec![PREFILL_OUTPUT_ANNOTATION.to_string()],
+        PrefillNeed::BeforeFirst => vec![
+            PREFILL_OUTPUT_ANNOTATION.to_string(),
+            PREFILL_OUTPUT_FIRST_ANNOTATION.to_string(),
+        ],
+    }
 }
 
+/// How one response field behaves across chunks, P/D, and migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum JoinOp {
-    /// Streamed chunks: earlier items or text, then later ones.
-    Append,
-    /// P/D: prefill's value replaces decode's.
-    TakePrefill,
-    /// P/D: prefill's base64 bytes overwrite the start of decode's.
-    OverlayBase64Prefix,
+pub enum FieldClass {
+    /// Output-side deltas: chunks append, decode reports them, and a retry
+    /// keeps appending.
+    Delta,
+    /// A prompt-side value repeated in full on every chunk: prefill computes
+    /// it in P/D, and the first attempt's value survives migration because a
+    /// retry's prompt includes the delivered tokens.
+    Prompt,
+    /// Base64 rows for the whole sequence, on the final chunk only: prefill's
+    /// bytes replace decode's stale prompt rows, and a retry's value already
+    /// covers the whole sequence. Dropped when prefill sends none, since
+    /// decode's prompt rows are wrong on their own.
+    SequenceFinal,
+    /// A snapshot fixed by the first attempt, such as prompt length or cache
+    /// hits; a retry reports its own longer prompt.
+    FirstAttempt,
+    /// A count over the output: a retry reports only its own part, so earlier
+    /// attempts' last counts are added.
+    Cumulative,
+    /// A count measured from the attempt's first output token, such as
+    /// completed tokens or the budget a length finish reports: tokens
+    /// delivered by earlier attempts are added.
+    OutputOffset,
+    /// A snapshot about one attempt: the last value wins everywhere.
+    Attempt,
 }
 
-/// One rule; `path` is a JSON pointer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FieldRule {
-    pub path: String,
-    pub op: JoinOp,
-    /// Remove decode's value when prefill has none, for values that look
-    /// complete but are wrong without prefill's part.
-    #[serde(default)]
-    pub drop_if_missing: bool,
-}
-
-struct Rule {
+struct Field {
+    path: String,
     parent: Vec<String>,
     key: String,
-    op: JoinOp,
-    drop_if_missing: bool,
+    class: FieldClass,
 }
 
+/// A request needs prefill's output when every top-level field of some group
+/// is set: `true`, a non-negative number, or a list holding one.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PrefillFlags {
+    /// Groups asking for values every chunk carries.
+    #[serde(default)]
+    pub before_first: Vec<Vec<String>>,
+    /// Groups asking for values only the final chunk carries.
+    #[serde(default)]
+    pub before_last: Vec<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct RulesFile {
+    fields: BTreeMap<String, FieldClass>,
+    #[serde(default)]
+    prefill_request_flags: PrefillFlags,
+}
+
+/// One format's join table. Fields without a class keep the last value.
 pub struct RuleSet {
-    rules: Vec<Rule>,
-    before_first: Vec<Vec<String>>,
-    before_last: Vec<Vec<String>>,
+    fields: Vec<Field>,
+    cumulative: Vec<usize>,
+    prefill_flags: PrefillFlags,
 }
 
 impl RuleSet {
-    /// A request needs prefill's output when every top-level field of some
-    /// group is set: `true`, a non-negative number, or a list holding one.
-    /// `before_first` groups ask for values every chunk carries; `before_last`
-    /// groups for values only the final chunk carries.
+    /// `fields` maps JSON pointers to classes.
     pub fn new(
-        rules: impl IntoIterator<Item = FieldRule>,
-        before_first: &[&[&str]],
-        before_last: &[&[&str]],
+        fields: impl IntoIterator<Item = (String, FieldClass)>,
+        prefill_flags: PrefillFlags,
     ) -> Self {
-        let rules = rules
+        let fields: Vec<Field> = fields
             .into_iter()
-            .map(|rule| {
-                let mut parent: Vec<String> = rule.path.split('/').skip(1).map(unescape).collect();
+            .map(|(path, class)| {
+                let mut parent: Vec<String> = path.split('/').skip(1).map(unescape).collect();
                 let key = parent.pop().unwrap_or_default();
-                Rule {
+                Field {
+                    path,
                     parent,
                     key,
-                    op: rule.op,
-                    drop_if_missing: rule.drop_if_missing,
+                    class,
                 }
             })
             .collect();
-        let groups = |groups: &[&[&str]]| {
-            groups
-                .iter()
-                .map(|group| group.iter().map(|field| field.to_string()).collect())
-                .collect()
-        };
+        let cumulative = (0..fields.len())
+            .filter(|&i| fields[i].class == FieldClass::Cumulative)
+            .collect();
         Self {
-            rules,
-            before_first: groups(before_first),
-            before_last: groups(before_last),
+            fields,
+            cumulative,
+            prefill_flags,
         }
     }
-}
 
-fn unescape(token: &str) -> String {
-    token.replace("~1", "/").replace("~0", "~")
-}
-
-fn object<'a>(mut value: &'a mut Value, path: &[String]) -> Option<&'a mut Map<String, Value>> {
-    for key in path {
-        value = value.get_mut(key.as_str())?;
+    /// Parse `{"fields": {pointer: class}, "prefill_request_flags": {...}}`.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let file: RulesFile = serde_json::from_str(json)?;
+        Ok(Self::new(file.fields, file.prefill_request_flags))
     }
-    value.as_object_mut()
-}
 
-/// The field's value, inserting `null` first when the key is absent.
-fn slot<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Value {
-    if !object.contains_key(key) {
-        object.insert(key.to_owned(), Value::Null);
+    pub fn fields(&self) -> impl Iterator<Item = (&str, FieldClass)> {
+        self.fields.iter().map(|f| (f.path.as_str(), f.class))
     }
-    object.get_mut(key).expect("key was just inserted")
-}
 
-impl ResponseMerger for RuleSet {
-    fn prefill_need(&self, request: &Value) -> PrefillNeed {
+    pub fn prefill_need(&self, request: &Map<String, Value>) -> PrefillNeed {
         fn set(value: &Value) -> bool {
             match value {
                 Value::Bool(value) => *value,
@@ -153,24 +166,30 @@ impl ResponseMerger for RuleSet {
                 .iter()
                 .any(|group| group.iter().all(|f| request.get(f).is_some_and(set)))
         };
-        if any(&self.before_first) {
+        if any(&self.prefill_flags.before_first) {
             PrefillNeed::BeforeFirst
-        } else if any(&self.before_last) {
+        } else if any(&self.prefill_flags.before_last) {
             PrefillNeed::BeforeLast
         } else {
             PrefillNeed::None
         }
     }
 
+    fn of(&self, class: FieldClass) -> impl Iterator<Item = &Field> {
+        self.fields.iter().filter(move |f| f.class == class)
+    }
+
+    /// Join the next streamed chunk onto the response so far.
     fn join_step(&self, joined: &mut Value, mut next: Value) {
-        for rule in self.rules.iter().filter(|rule| rule.op == JoinOp::Append) {
-            let Some(head) = object(joined, &rule.parent).and_then(|o| o.remove(&rule.key)) else {
+        for field in self.of(FieldClass::Delta) {
+            let Some(head) = object(joined, &field.parent).and_then(|o| o.remove(&field.key))
+            else {
                 continue;
             };
-            let Some(target) = object(&mut next, &rule.parent) else {
+            let Some(target) = object(&mut next, &field.parent) else {
                 continue;
             };
-            match (head, slot(target, &rule.key)) {
+            match (head, slot(target, &field.key)) {
                 (Value::Array(mut head), Value::Array(tail)) => {
                     head.append(tail);
                     *tail = head;
@@ -180,49 +199,144 @@ impl ResponseMerger for RuleSet {
                     *tail = head;
                 }
                 (head, tail) if tail.is_null() => *tail = head,
-                _ => tracing::warn!(key = %rule.key, "cannot append mismatched values"),
+                _ => tracing::warn!(key = %field.key, "cannot append mismatched values"),
             }
         }
         *joined = next;
     }
 
-    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value) {
-        self.swap_prefill(prefill, decode, true);
-    }
-
-    fn restore_prefill(&self, prefill: &mut Value, decode: &mut Value) {
-        self.swap_prefill(prefill, decode, false);
-    }
-}
-
-impl RuleSet {
-    /// TakePrefill values are swapped, so swapping again restores them; only
-    /// a join overlays and drops.
-    fn swap_prefill(&self, prefill: &mut Value, decode: &mut Value, join: bool) {
-        for rule in self.rules.iter().filter(|rule| rule.op != JoinOp::Append) {
-            let Some(target) = object(decode, &rule.parent) else {
+    /// Swap `class` values present in `source` into `target`. Swapping again
+    /// restores both.
+    fn swap(&self, class: FieldClass, source: &mut Value, target: &mut Value) {
+        for field in self.of(class) {
+            let Some(from) = object(source, &field.parent).and_then(|o| o.get_mut(&field.key))
+            else {
                 continue;
             };
-            let source = object(prefill, &rule.parent).and_then(|o| o.get_mut(&rule.key));
-            let joined = match (rule.op, source) {
-                (JoinOp::TakePrefill, Some(source)) => {
-                    std::mem::swap(source, slot(target, &rule.key));
-                    true
-                }
-                (JoinOp::OverlayBase64Prefix, _) if !join => true,
-                (JoinOp::OverlayBase64Prefix, Some(Value::String(source))) => {
-                    match target.get_mut(&rule.key) {
-                        Some(Value::String(target)) => overlay_base64_prefix(source, target),
-                        _ => true,
-                    }
-                }
-                _ => false,
-            };
-            if join && !joined && rule.drop_if_missing {
-                target.remove(&rule.key);
+            if let Some(to) = object(target, &field.parent) {
+                std::mem::swap(from, slot(to, &field.key));
             }
         }
     }
+
+    /// P/D: prompt values are swapped in; prefill's base64 prefix overwrites
+    /// decode's in place, and decode's value is dropped without one.
+    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value) {
+        self.swap(FieldClass::Prompt, prefill, decode);
+        for field in self.of(FieldClass::SequenceFinal) {
+            let Some(target) = object(decode, &field.parent) else {
+                continue;
+            };
+            let source = object(prefill, &field.parent).and_then(|o| o.get(&field.key));
+            let joined = match (source, target.get_mut(&field.key)) {
+                (_, None) => true,
+                (Some(Value::String(source)), Some(Value::String(target))) => {
+                    overlay_base64_prefix(source, target)
+                }
+                _ => false,
+            };
+            if !joined {
+                target.remove(&field.key);
+            }
+        }
+    }
+
+    /// A copy of the `class` values in `from`, or `None` when it has none.
+    fn capture(&self, class: FieldClass, from: &Value) -> Option<Value> {
+        let mut captured = Value::Object(Map::new());
+        let mut any = false;
+        for field in self.of(class) {
+            let Some(value) = lookup(from, field) else {
+                continue;
+            };
+            object_or_insert(&mut captured, &field.parent)
+                .expect("captured parents are objects")
+                .insert(field.key.clone(), value.clone());
+            any = true;
+        }
+        any.then_some(captured)
+    }
+
+    fn has(&self, class: FieldClass, value: &Value) -> bool {
+        self.of(class).any(|field| lookup(value, field).is_some())
+    }
+
+    /// Keep `old`'s prompt values in `new`: the first prefill computed them
+    /// over the client's prompt.
+    fn adopt_prompt(&self, old: &mut Value, new: &mut Value) {
+        for field in self.of(FieldClass::Prompt) {
+            let Some(value) = object(old, &field.parent).and_then(|o| o.remove(&field.key)) else {
+                continue;
+            };
+            if let Some(target) = object_or_insert(new, &field.parent) {
+                target.insert(field.key.clone(), value);
+            }
+        }
+    }
+
+    fn cumulative_values(&self, chunk: &Value, seen: &mut [Option<u64>]) {
+        for (slot, &index) in seen.iter_mut().zip(&self.cumulative) {
+            if let Some(n) = lookup(chunk, &self.fields[index]).and_then(Value::as_u64) {
+                *slot = Some(n);
+            }
+        }
+    }
+
+    fn add_offsets(&self, offsets: &[u64], delivered: u64, chunk: &mut Value) {
+        let add = |field: &Field, chunk: &mut Value, offset: u64| {
+            if let Some(value) = object(chunk, &field.parent).and_then(|o| o.get_mut(&field.key))
+                && let Some(n) = value.as_u64()
+            {
+                *value = Value::from(n + offset);
+            }
+        };
+        for (&offset, &index) in offsets.iter().zip(&self.cumulative) {
+            add(&self.fields[index], chunk, offset);
+        }
+        for field in self.of(FieldClass::OutputOffset) {
+            add(field, chunk, delivered);
+        }
+    }
+}
+
+fn unescape(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+fn lookup<'a>(value: &'a Value, field: &Field) -> Option<&'a Value> {
+    field
+        .parent
+        .iter()
+        .try_fold(value, |v, k| v.get(k))?
+        .get(&field.key)
+}
+
+fn object<'a>(mut value: &'a mut Value, path: &[String]) -> Option<&'a mut Map<String, Value>> {
+    for key in path {
+        value = value.get_mut(key.as_str())?;
+    }
+    value.as_object_mut()
+}
+
+fn object_or_insert<'a>(
+    mut value: &'a mut Value,
+    path: &[String],
+) -> Option<&'a mut Map<String, Value>> {
+    for key in path {
+        value = value
+            .as_object_mut()?
+            .entry(key.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+    }
+    value.as_object_mut()
+}
+
+/// The field's value, inserting `null` first when the key is absent.
+fn slot<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Value {
+    if !object.contains_key(key) {
+        object.insert(key.to_owned(), Value::Null);
+    }
+    object.get_mut(key).expect("key was just inserted")
 }
 
 /// Make `target` encode `prefix`'s bytes followed by `target`'s bytes past
@@ -279,214 +393,148 @@ fn is_padded_base64(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
 }
 
-/// Builds one client response from engine pieces.
-pub struct ResponseAssembler {
-    merger: Arc<dyn ResponseMerger>,
+/// Builds one client response from engine pieces across every attempt.
+pub struct Assembler {
+    rules: Arc<RuleSet>,
+    /// Keep what a retry needs from the first attempt.
+    capture: bool,
     prefill: Option<Value>,
+    /// Prompt values from the first attempt, without P/D.
+    prompt: Option<Value>,
+    first: Option<Value>,
+    /// Earlier attempts' cumulative counts, and the current attempt's.
+    offsets: Vec<u64>,
+    seen: Vec<Option<u64>>,
+    /// Generated tokens delivered before the current attempt.
+    delivered: u64,
+    attempt: u32,
     joined: Option<Value>,
 }
 
-impl ResponseAssembler {
-    pub fn new(merger: Arc<dyn ResponseMerger>) -> Self {
+impl Assembler {
+    /// `capture` keeps the first attempt's prompt-side values for migration.
+    pub fn new(rules: Arc<RuleSet>, capture: bool) -> Self {
+        let n = rules.cumulative.len();
         Self {
-            merger,
+            rules,
+            capture,
             prefill: None,
+            prompt: None,
+            first: None,
+            offsets: vec![0; n],
+            seen: vec![None; n],
+            delivered: 0,
+            attempt: 0,
             joined: None,
         }
     }
 
-    pub fn set_prefill(&mut self, prefill: Value) {
+    /// Whether to keep the first attempt's prompt-side values for migration.
+    pub fn set_capture(&mut self, capture: bool) {
+        self.capture = capture;
+    }
+
+    /// A later prefill keeps the first one's prompt values.
+    pub fn set_prefill(&mut self, mut prefill: Value) {
+        if let Some(mut old) = self.prefill.take() {
+            self.rules.adopt_prompt(&mut old, &mut prefill);
+        }
         self.prefill = Some(prefill);
     }
 
-    /// Streaming: `render` sees `chunk` with prefill's values swapped in;
-    /// they are swapped back out afterwards for the next chunk.
-    pub fn render_chunk<T>(&mut self, mut chunk: Value, render: impl FnOnce(&Value) -> T) -> T {
-        let Some(prefill) = &mut self.prefill else {
-            return render(&chunk);
-        };
-        self.merger.join_prefill(prefill, &mut chunk);
+    /// Whether the client has prompt-side values a retry need not recompute.
+    pub fn prompt_delivered(&self) -> bool {
+        self.prompt.is_some()
+            || self
+                .prefill
+                .as_ref()
+                .is_some_and(|p| self.rules.has(FieldClass::Prompt, p))
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// End the current attempt after `delivered` generated tokens in total;
+    /// later chunks continue it.
+    pub fn migrate(&mut self, delivered: u64) {
+        for (offset, seen) in self.offsets.iter_mut().zip(&mut self.seen) {
+            *offset += seen.take().unwrap_or(0);
+        }
+        self.delivered = delivered;
+        self.attempt += 1;
+    }
+
+    fn observe(&mut self, chunk: &Value) {
+        self.rules.cumulative_values(chunk, &mut self.seen);
+        // Until a token is delivered, a retry's prompt is the client's.
+        if self.capture && self.delivered == 0 {
+            if self.first.is_none() {
+                self.first = self.rules.capture(FieldClass::FirstAttempt, chunk);
+            }
+            if self.prompt.is_none() && self.prefill.is_none() {
+                self.prompt = self.rules.capture(FieldClass::Prompt, chunk);
+            }
+        }
+    }
+
+    /// Swap the request's joined values into `chunk`; `undo` swaps them back.
+    fn apply(&mut self, chunk: &mut Value, undo: bool) {
+        let retry = self.attempt > 0;
+        if let Some(prefill) = &mut self.prefill {
+            if undo {
+                self.rules.swap(FieldClass::Prompt, prefill, chunk);
+            } else {
+                self.rules.join_prefill(prefill, chunk);
+            }
+        } else if retry && let Some(prompt) = &mut self.prompt {
+            self.rules.swap(FieldClass::Prompt, prompt, chunk);
+        }
+        if retry && let Some(first) = &mut self.first {
+            self.rules.swap(FieldClass::FirstAttempt, first, chunk);
+        }
+        if retry && !undo {
+            self.rules.add_offsets(&self.offsets, self.delivered, chunk);
+        }
+    }
+
+    /// Streaming: `render` sees `chunk` joined with prefill and earlier
+    /// attempts; the joined values are swapped back out afterwards.
+    pub fn render<T>(&mut self, mut chunk: Value, render: impl FnOnce(&Value) -> T) -> T {
+        self.observe(&chunk);
+        self.apply(&mut chunk, false);
         let rendered = render(&chunk);
-        self.merger.restore_prefill(prefill, &mut chunk);
+        self.apply(&mut chunk, true);
         rendered
     }
 
     /// Unary: join `chunk` onto the response so far.
     pub fn push(&mut self, chunk: Value) {
+        self.observe(&chunk);
         match &mut self.joined {
-            Some(joined) => self.merger.join_step(joined, chunk),
+            Some(joined) => self.rules.join_step(joined, chunk),
             None => self.joined = Some(chunk),
         }
     }
 
     /// Unary: the joined response, or `None` when no chunk arrived.
-    pub fn finish(self) -> Option<Value> {
-        let mut response = self.joined?;
-        if let Some(mut prefill) = self.prefill {
-            self.merger.join_prefill(&mut prefill, &mut response);
-        }
+    pub fn finish(&mut self) -> Option<Value> {
+        let mut response = self.joined.take()?;
+        self.apply(&mut response, false);
         Some(response)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! Joining, P/D, and migration are checked end to end by the
+    //! `generate_format::testkit` laws; these pin the byte-level overlay.
     use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
 
-    /// `/text` and `/m/ids` stream as deltas, `/m/prompt` and `/m/blob` come
-    /// from prefill, and `/m/n` is a snapshot without a rule.
-    fn rules() -> Arc<dyn ResponseMerger> {
-        let rule = |path: &str, op, drop_if_missing| FieldRule {
-            path: path.into(),
-            op,
-            drop_if_missing,
-        };
-        Arc::new(RuleSet::new(
-            [
-                rule("/text", JoinOp::Append, false),
-                rule("/m/ids", JoinOp::Append, false),
-                rule("/m/prompt", JoinOp::TakePrefill, false),
-                rule("/m/blob", JoinOp::OverlayBase64Prefix, true),
-            ],
-            &[&["need", "start"]],
-            &[&["want"]],
-        ))
-    }
-
-    /// One streamed chunk: a text delta, an optional ids delta (absent key
-    /// when `None`), and the current snapshot `n`.
-    fn step() -> impl Strategy<Value = (String, Option<Vec<u32>>, u32)> {
-        (
-            "\\PC{0,4}",
-            prop::option::of(prop::collection::vec(any::<u32>(), 0..4)),
-            any::<u32>(),
-        )
-    }
-
-    /// A decode chunk: an optional prompt value and an optional blob, plus a
-    /// snapshot that prefill must not touch.
-    fn decode_chunk() -> impl Strategy<Value = Value> {
-        (
-            prop::option::of(prop::collection::vec(any::<u32>(), 0..3)),
-            prop::option::of(prop::collection::vec(any::<u8>(), 0..24)),
-            any::<u32>(),
-        )
-            .prop_map(|(prompt, blob, n)| {
-                let mut m = json!({ "n": n });
-                if let Some(prompt) = prompt {
-                    m["prompt"] = json!(prompt);
-                }
-                if let Some(blob) = blob {
-                    m["blob"] = json!(STANDARD.encode(blob));
-                }
-                json!({ "m": m })
-            })
-    }
-
-    fn prefill() -> impl Strategy<Value = Value> {
-        (
-            prop::option::of(prop::collection::vec(any::<u32>(), 0..3)),
-            prop::option::of(prop::collection::vec(any::<u8>(), 0..24)),
-        )
-            .prop_map(|(prompt, blob)| {
-                let mut m = json!({ "other": "prefill-only" });
-                if let Some(prompt) = prompt {
-                    m["prompt"] = json!(prompt);
-                }
-                if let Some(blob) = blob {
-                    m["blob"] = json!(STANDARD.encode(blob));
-                }
-                json!({ "m": m })
-            })
-    }
-
-    /// What one decode chunk must look like with prefill's values joined in.
-    fn expected_join(prefill: &Value, decode: &Value) -> Value {
-        let mut expected = decode.clone();
-        let m = expected["m"].as_object_mut().unwrap();
-        if let Some(prompt) = prefill["m"].get("prompt") {
-            m.insert("prompt".into(), prompt.clone());
-        }
-        match (prefill["m"].get("blob"), m.get("blob").cloned()) {
-            (Some(head), Some(tail)) => {
-                let mut bytes = STANDARD.decode(head.as_str().unwrap()).unwrap();
-                let tail = STANDARD.decode(tail.as_str().unwrap()).unwrap();
-                bytes.extend_from_slice(tail.get(bytes.len()..).unwrap_or_default());
-                m.insert("blob".into(), json!(STANDARD.encode(bytes)));
-            }
-            (None, Some(_)) => {
-                m.remove("blob");
-            }
-            _ => {}
-        }
-        expected
-    }
-
     proptest! {
-        /// Joining streamed chunks appends the delta fields in order and keeps
-        /// the last chunk's other fields; a delta field missing from every
-        /// chunk stays missing (SGLang's `_coalesce_streaming_chunks`).
-        #[test]
-        fn steps_append_deltas_and_keep_the_last_snapshot(
-            steps in prop::collection::vec(step(), 1..6)
-        ) {
-            let mut assembler = ResponseAssembler::new(rules());
-            for (text, ids, n) in &steps {
-                let mut m = json!({ "n": n });
-                if let Some(ids) = ids {
-                    m["ids"] = json!(ids);
-                }
-                assembler.push(json!({ "text": text, "m": m }));
-            }
-            let mut expected = json!({
-                "text": steps.iter().map(|(text, ..)| text.as_str()).collect::<String>(),
-                "m": { "n": steps.last().unwrap().2 },
-            });
-            if steps.iter().any(|(_, ids, _)| ids.is_some()) {
-                let ids: Vec<u32> = steps.iter().flat_map(|(_, ids, _)| ids.iter().flatten()).copied().collect();
-                expected["m"]["ids"] = json!(ids);
-            }
-            prop_assert_eq!(assembler.finish().unwrap(), expected);
-        }
-
-        /// Streaming joins prefill's values into every chunk and leaves
-        /// prefill intact for the next one.
-        #[test]
-        fn streamed_chunks_get_prefill_values_and_prefill_survives(
-            prefill in prefill(),
-            chunks in prop::collection::vec(decode_chunk(), 1..5),
-        ) {
-            let mut assembler = ResponseAssembler::new(rules());
-            assembler.set_prefill(prefill.clone());
-            for chunk in chunks {
-                let expected = expected_join(&prefill, &chunk);
-                prop_assert_eq!(assembler.render_chunk(chunk, Value::clone), expected);
-                prop_assert_eq!(assembler.prefill.as_ref(), Some(&prefill));
-            }
-        }
-
-        /// A client that joins the streamed chunks itself gets the unary
-        /// response: joining prefill commutes with joining chunks.
-        #[test]
-        fn unary_response_equals_joined_streamed_chunks(
-            prefill in prefill(),
-            chunks in prop::collection::vec(decode_chunk(), 1..5),
-        ) {
-            let mut streamed = ResponseAssembler::new(rules());
-            streamed.set_prefill(prefill.clone());
-            let mut client = ResponseAssembler::new(rules());
-            let mut unary = ResponseAssembler::new(rules());
-            unary.set_prefill(prefill);
-            for chunk in chunks {
-                client.push(streamed.render_chunk(chunk.clone(), Value::clone));
-                unary.push(chunk);
-            }
-            prop_assert_eq!(unary.finish(), client.finish());
-        }
-
         /// The in-place overlay equals decode, splice, encode.
         #[test]
         fn overlay_matches_decode_splice_encode(
@@ -500,9 +548,8 @@ mod tests {
             prop_assert_eq!(encoded, STANDARD.encode(&expected));
         }
 
-        /// Near-base64 text (stray `=`, invalid and multi-byte characters)
-        /// never panics or yields invalid base64; a refused overlay leaves
-        /// the target unchanged.
+        /// Near-base64 text never panics or yields invalid base64; a refused
+        /// overlay leaves the target unchanged.
         #[test]
         fn overlay_of_arbitrary_text_is_safe(
             prefix in "[A-Za-z0-9+/=!é]{0,12}",
@@ -519,7 +566,11 @@ mod tests {
 
     #[test]
     fn prefill_need_requires_every_field_of_a_group() {
-        let merger = rules();
+        let rules = RuleSet::from_json(
+            r#"{"fields": {}, "prefill_request_flags":
+                {"before_first": [["need", "start"]], "before_last": [["want"]]}}"#,
+        )
+        .unwrap();
         for (request, need) in [
             (json!({"want": [false, true]}), PrefillNeed::BeforeLast),
             (
@@ -530,17 +581,11 @@ mod tests {
             (json!({"need": true}), PrefillNeed::None),
             (json!({"need": true, "start": -1}), PrefillNeed::None),
         ] {
-            assert_eq!(merger.prefill_need(&request), need, "{request}");
+            assert_eq!(
+                rules.prefill_need(request.as_object().unwrap()),
+                need,
+                "{request}"
+            );
         }
-    }
-
-    #[test]
-    fn rules_have_a_declarative_format() {
-        let rule: FieldRule = serde_json::from_value(json!({
-            "path": "/meta_info/routed_experts", "op": "overlay_base64_prefix", "drop_if_missing": true,
-        }))
-        .unwrap();
-        assert_eq!(rule.op, JoinOp::OverlayBase64Prefix);
-        assert!(rule.drop_if_missing);
     }
 }

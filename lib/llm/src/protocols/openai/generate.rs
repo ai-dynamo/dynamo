@@ -650,7 +650,7 @@ fn prompt_logprobs_from_output(output: &LLMEngineOutput) -> Result<Option<Prompt
 /// Folds a stream of [`Annotated<LLMEngineOutput>`] deltas into a single
 /// [`GenerateResponse`]. Each chunk carries a delta of newly generated
 /// `token_ids` keyed by `index` (default 0).
-struct GenerateAggregator {
+pub(crate) struct GenerateAggregator {
     request_id: String,
     choices: HashMap<u32, GenerateChoiceAcc>,
     prompt_logprobs: Option<PromptLogprobs>,
@@ -659,7 +659,7 @@ struct GenerateAggregator {
 }
 
 impl GenerateAggregator {
-    fn new(request_id: String) -> Self {
+    pub(crate) fn new(request_id: String) -> Self {
         Self {
             request_id,
             choices: HashMap::new(),
@@ -669,7 +669,7 @@ impl GenerateAggregator {
         }
     }
 
-    fn apply_output(
+    pub(crate) fn apply_output(
         &mut self,
         output: LLMEngineOutput,
         options: GenerateResponseOptions,
@@ -733,7 +733,11 @@ impl GenerateAggregator {
                 aggregator.apply_output(output, options)?;
             }
         }
+        aggregator.finish(options)
+    }
 
+    pub(crate) fn finish(self, options: GenerateResponseOptions) -> Result<GenerateResponse> {
+        let aggregator = self;
         let GenerateAggregator {
             request_id,
             choices,

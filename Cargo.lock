@@ -2620,6 +2620,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-generate-format-catalog"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "dynamo-llm",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [

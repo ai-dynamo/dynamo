@@ -49,9 +49,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
-use crate::local_model::runtime_config::{
-    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-};
+use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -1348,9 +1346,12 @@ impl HttpServiceConfigBuilder {
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
         let sglang_generate_enabled =
             config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
+        let generate_format = sglang_generate_enabled
+            .then(crate::generate_format::selected)
+            .transpose()?;
         let generate_engine_capabilities = [
             vllm_generate_enabled.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-            sglang_generate_enabled.then_some(SGLANG_GENERATE_CAPABILITY),
+            generate_format.as_ref().map(|format| format.capability()),
         ]
         .into_iter()
         .flatten()
@@ -1517,7 +1518,7 @@ impl HttpServiceConfigBuilder {
             &config.request_template,
             anthropic_endpoints_enabled,
             vllm_generate_enabled,
-            sglang_generate_enabled,
+            generate_format,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
         let mut inference_router = axum::Router::new();
@@ -1673,7 +1674,7 @@ impl HttpServiceConfigBuilder {
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
         vllm_generate_enabled: bool,
-        sglang_generate_enabled: bool,
+        generate_format: Option<crate::generate_format::SharedFormat>,
         enable_batch_endpoints: bool,
     ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
@@ -1737,7 +1738,7 @@ impl HttpServiceConfigBuilder {
             );
         }
 
-        if vllm_generate_enabled || sglang_generate_enabled {
+        if vllm_generate_enabled || generate_format.is_some() {
             tracing::warn!("The engine-native Generate APIs are experimental.");
             let mut generate_docs = Vec::new();
             let mut generate_route = axum::Router::new();
@@ -1746,16 +1747,22 @@ impl HttpServiceConfigBuilder {
                 if let Some(path) = generate_path.as_deref() {
                     validate_generate_route_path(path)?;
                 }
-                let (docs, route) = super::generate::generate_router(state.clone(), generate_path);
+                let generate_path =
+                    generate_path.or_else(|| Some("/inference/v1/generate".to_string()));
+                let format =
+                    crate::generate_format::named(crate::protocols::openai::vllm_generate::NAME)?;
+                let (docs, route) =
+                    super::format_generate::router(state.clone(), generate_path, format);
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }
-            if sglang_generate_enabled {
+            if let Some(format) = generate_format {
                 let generate_path = var(HTTP_SVC_SGLANG_GENERATE_PATH_ENV).ok();
                 if let Some(path) = generate_path.as_deref() {
                     validate_generate_route_path(path)?;
                 }
-                let (docs, route) = super::sglang_generate::router(state.clone(), generate_path);
+                let (docs, route) =
+                    super::format_generate::router(state.clone(), generate_path, format);
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }
@@ -1793,6 +1800,7 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
     use std::io::Write;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
