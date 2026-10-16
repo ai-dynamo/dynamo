@@ -13,6 +13,17 @@ use crate::telemetry::parse_sink_names;
 
 use super::DEFAULT_TOOL_EVENTS_TOPIC;
 
+pub(super) const DEFAULT_HTTP_HEADER_REDACT_LIST: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "x-auth-token",
+    "x-access-token",
+];
+
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_FILE_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_FILE_FLUSH_INTERVAL_MS: u64 = 1000;
@@ -96,6 +107,7 @@ pub struct RequestTracePolicy {
     pub nats_subject: String,
     pub otel_max_payload_bytes: usize,
     pub http_header_capture_list: Vec<String>,
+    pub http_header_redact_list: Vec<String>,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
     pub s3_bucket: Option<String>,
@@ -197,20 +209,17 @@ fn load_from_env() -> RequestTracePolicy {
     let http_header_capture_list =
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST)
             .ok()
-            .map(|raw| {
-                let mut names = Vec::new();
-                for name in raw
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .map(str::to_ascii_lowercase)
-                    .filter(|name| !name.is_empty())
-                {
-                    if !names.contains(&name) {
-                        names.push(name);
-                    }
-                }
-                names
-            })
+            .map(|raw| parse_header_names(&raw))
             .unwrap_or_default();
+    let http_header_redact_list =
+        std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST)
+            .map(|raw| parse_header_names(&raw))
+            .unwrap_or_else(|_| {
+                DEFAULT_HTTP_HEADER_REDACT_LIST
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect()
+            });
     let tool_events_zmq_endpoint =
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
@@ -249,6 +258,7 @@ fn load_from_env() -> RequestTracePolicy {
         nats_subject,
         otel_max_payload_bytes,
         http_header_capture_list,
+        http_header_redact_list,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
         s3_bucket,
@@ -257,6 +267,20 @@ fn load_from_env() -> RequestTracePolicy {
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
     }
+}
+
+fn parse_header_names(raw: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::to_ascii_lowercase)
+        .filter(|name| !name.is_empty())
+    {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn load_records(
@@ -455,6 +479,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
         env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+        env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,
@@ -564,6 +589,49 @@ mod tests {
             let policy = load_from_env();
             assert!(policy.http_header_capture_list.is_empty());
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn http_header_redact_list_defaults_and_replacement_overrides() {
+        with_request_trace_env(&[], || {
+            let policy = load_from_env();
+            assert_eq!(
+                policy.http_header_redact_list,
+                vec![
+                    "authorization",
+                    "proxy-authorization",
+                    "cookie",
+                    "set-cookie",
+                    "x-api-key",
+                    "api-key",
+                    "x-auth-token",
+                    "x-access-token"
+                ]
+            );
+            assert!(policy.http_header_capture_list.is_empty());
+        });
+
+        for (raw, expected) in [
+            (
+                " X-Custom, COOKIE\tx-custom ,, ",
+                vec!["x-custom", "cookie"],
+            ),
+            ("", vec![]),
+            (" , \t", vec![]),
+        ] {
+            with_request_trace_env(
+                &[(
+                    env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST,
+                    raw,
+                )],
+                || {
+                    let policy = load_from_env();
+                    assert_eq!(policy.http_header_redact_list, expected);
+                    assert!(policy.http_header_capture_list.is_empty());
+                },
+            );
+        }
     }
 
     #[test]
