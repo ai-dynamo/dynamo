@@ -1415,6 +1415,7 @@ class KubernetesConnector(PlannerConnector):
                 transaction.run(
                     lambda plan=plan: self._write_adapter_stage_after_prior_updates(
                         deployment,
+                        plans,
                         committed_adapter_plans,
                         [],
                         plan,
@@ -1474,6 +1475,7 @@ class KubernetesConnector(PlannerConnector):
                 transaction.run(
                     lambda plan=plan: self._write_adapter_stage_after_prior_updates(
                         deployment,
+                        plans,
                         committed_adapter_plans,
                         dgd_mutations,
                         plan,
@@ -1667,13 +1669,10 @@ class KubernetesConnector(PlannerConnector):
             plan.service.name: plan.target.desired_replicas
             for plan in adapter_reductions
         }
-        adapter_replica_transitions = {
-            plan.service.name: (
-                plan.current_replicas,
-                plan.target.desired_replicas,
-            )
-            for plan in adapter_reductions
-        }
+        adapter_projection_values = self._adapter_projection_values(
+            plans,
+            {plan.service.name for plan in adapter_reductions},
+        )
         expected_replicas = {
             plan.service.name: committed_adapter_targets.get(
                 plan.service.name, plan.current_replicas
@@ -1694,7 +1693,7 @@ class KubernetesConnector(PlannerConnector):
             self._validate_dgd_spec_after_replica_updates(
                 deployment,
                 refreshed,
-                adapter_replica_transitions=adapter_replica_transitions,
+                adapter_projection_values=adapter_projection_values,
                 direct_targets={},
             )
             refreshed_plans = self._preflight_replica_updates(refreshed, targets)
@@ -1737,6 +1736,7 @@ class KubernetesConnector(PlannerConnector):
     def _write_adapter_stage_after_prior_updates(
         self,
         deployment: dict,
+        all_plans: list[_ReplicaUpdatePlan],
         committed_adapter_plans: list[_ReplicaUpdatePlan],
         committed_direct_plans: list[_ReplicaUpdatePlan],
         pending_plan: _ReplicaUpdatePlan,
@@ -1755,13 +1755,10 @@ class KubernetesConnector(PlannerConnector):
         pending_target = pending_plan.target.desired_replicas
         initial_replicas = pending_plan.current_replicas
         stage_plans = [*committed_adapter_plans, pending_plan]
-        adapter_replica_transitions = {
-            plan.service.name: (
-                plan.current_replicas,
-                plan.target.desired_replicas,
-            )
-            for plan in stage_plans
-        }
+        adapter_projection_values = self._adapter_projection_values(
+            all_plans,
+            {plan.service.name for plan in stage_plans},
+        )
         expected_authorities = {
             plan.service.name: self._replica_authority_identity(
                 plan.service, plan.scaling_adapter
@@ -1776,7 +1773,7 @@ class KubernetesConnector(PlannerConnector):
             self._validate_dgd_spec_after_replica_updates(
                 deployment,
                 refreshed,
-                adapter_replica_transitions=adapter_replica_transitions,
+                adapter_projection_values=adapter_projection_values,
                 direct_targets=committed_direct_targets,
             )
             components = get_components_by_name(refreshed)
@@ -1836,10 +1833,25 @@ class KubernetesConnector(PlannerConnector):
         retry_kubernetes_write(write)
 
     @staticmethod
+    def _adapter_projection_values(
+        plans: list[_ReplicaUpdatePlan], target_allowed_names: set[str]
+    ) -> dict[str, tuple[int, ...]]:
+        """Return safe DGD projection values for every preflighted adapter."""
+        return {
+            plan.service.name: (
+                (plan.current_replicas, plan.target.desired_replicas)
+                if plan.service.name in target_allowed_names
+                else (plan.current_replicas,)
+            )
+            for plan in plans
+            if plan.scaling_adapter is not None
+        }
+
+    @staticmethod
     def _validate_dgd_spec_after_replica_updates(
         expected: dict,
         current: dict,
-        adapter_replica_transitions: Mapping[str, tuple[int, int]],
+        adapter_projection_values: Mapping[str, tuple[int, ...]],
         direct_targets: Mapping[str, int],
     ) -> None:
         """Validate DGD spec after committed writes through separate authorities."""
@@ -1847,14 +1859,11 @@ class KubernetesConnector(PlannerConnector):
         current_copy = {"spec": copy.deepcopy(current.get("spec", {}))}
         expected_components = get_components_by_name(expected_copy)
         current_components = get_components_by_name(current_copy)
-        targets = {
-            **{
-                name: target
-                for name, (_, target) in adapter_replica_transitions.items()
-            },
-            **direct_targets,
+        projection_values = {
+            **adapter_projection_values,
+            **{name: (target,) for name, target in direct_targets.items()},
         }
-        for name, target in targets.items():
+        for name, values in projection_values.items():
             expected_component = expected_components.get(name)
             current_component = current_components.get(name)
             if expected_component is None or current_component is None:
@@ -1864,15 +1873,7 @@ class KubernetesConnector(PlannerConnector):
 
             # Adapter projections can lag at either side of the authoritative
             # preflight value while the operator reconciles the DGDSA write.
-            allowed = (
-                (target,)
-                if name in direct_targets
-                else (
-                    initial,
-                    adapter_replica_transitions[name][0],
-                    target,
-                )
-            )
+            allowed = values if name in direct_targets else (initial, *values)
             if observed not in allowed:
                 raise RuntimeError(
                     f"DGD replica projection for component {name!r} changed "

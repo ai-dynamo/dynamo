@@ -1319,7 +1319,7 @@ async def test_delegated_conflict_retry_allows_reduced_target_set(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_orders_reductions_before_increases(
+async def test_set_component_replicas_orders_stages_across_future_adapter_projection(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(
@@ -1333,7 +1333,7 @@ async def test_set_component_replicas_orders_reductions_before_increases(
     )
     mock_kube_api.is_deployment_ready.return_value = True
     mock_kube_api.is_spec_generation_observed.return_value = True
-    adapter_targets = {"adapter-down": 2, "adapter-up": 0}
+    adapter_targets = {"adapter-down": 2, "adapter-up": 1}
     mock_kube_api.get_service_scaling_adapter.side_effect = lambda _graph, name: (
         _scaling_adapter(name, replicas=adapter_targets[name])
     )
@@ -1341,6 +1341,10 @@ async def test_set_component_replicas_orders_reductions_before_increases(
 
     def update_adapter(_graph, name, replicas, **_kwargs):
         adapter_targets[name] = replicas
+
+        # Let the operator project the preflight value of the future increase.
+        if name == "adapter-down":
+            get_components_by_name(current_deployment)["adapter-up"]["replicas"] = 1
         writes.append((name, replicas))
 
     mock_kube_api.update_scaling_adapter_replicas.side_effect = update_adapter
@@ -1366,13 +1370,13 @@ async def test_set_component_replicas_orders_reductions_before_increases(
             TargetReplica(
                 sub_component_type=SubComponentType.DECODE,
                 component_name="adapter-up",
-                desired_replicas=1,
+                desired_replicas=2,
             ),
         ],
         blocking=False,
     )
 
-    assert writes == [("adapter-down", 1), ("direct", 1), ("adapter-up", 1)]
+    assert writes == [("adapter-down", 1), ("direct", 1), ("adapter-up", 2)]
 
 
 @pytest.mark.asyncio
