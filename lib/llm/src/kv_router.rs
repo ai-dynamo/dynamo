@@ -1423,6 +1423,13 @@ impl KvRouter {
         if update_states && is_admitted_routing && booking.is_none() {
             anyhow::bail!("booked selection returned no booking handle");
         }
+        // Publish the selection trace here, on the routing task and before any
+        // awaited bookkeeping (the session prefix refresh below can be cancelled),
+        // so every caller of this method (routing hosts, prefill reservations, the
+        // Python binding) emits exactly one row.
+        if let (Some(request_id), Some(trace)) = (context_id, response.selection_trace.take()) {
+            crate::request_trace::emit_router_selection(request_id, self.worker_type(), trace);
+        }
         // Indexing failures never affect routing.
         if let (Some(session_id), Some(block_hashes)) =
             (session_index_context.as_ref(), routing_hashes.as_deref())
@@ -1518,12 +1525,6 @@ impl KvRouter {
             !is_admitted_routing,
             "advisory load is set exactly for without-admission selection"
         );
-        // Publish the selection trace here, on the routing task and before any
-        // fallible bookkeeping, so every caller of this method (routing hosts,
-        // prefill reservations, the Python binding) emits exactly one row.
-        if let (Some(request_id), Some(trace)) = (context_id, response.selection_trace.take()) {
-            crate::request_trace::emit_router_selection(request_id, self.worker_type(), trace);
-        }
         Ok(AdmittedFindBestMatchOutcome {
             outcome: FindBestMatchOutcome::Routed {
                 worker: response.best_worker,
