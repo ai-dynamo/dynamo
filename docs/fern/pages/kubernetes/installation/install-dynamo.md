@@ -309,23 +309,43 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 ## Upgrade Dynamo
 
-Dynamo supports Helm upgrades within the installed minor release and from minor `N.M` to
-`N.(M+1)` only. Install the latest patch of the next minor release before advancing again. For
-example, upgrade `1.2.x` to `1.3.x`, then `1.3.x` to `1.4.x`. Skipping directly from `1.2.x` to
-`1.4.x` is unsupported.
+Dynamo supports Helm transitions within the installed minor release and between adjacent minor
+releases. Upgrade from `N.M` to `N.(M+1)` or downgrade from `N.(M+1)` to `N.M`. Move through every
+intermediate minor release for larger changes. For example, upgrade `1.2.x` to `1.3.x`, then
+`1.3.x` to `1.4.x`; a direct transition from `1.2.x` to `1.4.x` is unsupported.
 
-The Helm chart checks this path in a `pre-upgrade` Job before it changes the release. The check also
-rejects major-version changes and earlier minor releases; use `helm rollback` for rollbacks. If a
-separate process has validated the complete path, you can bypass the check:
+The Helm chart checks this path in a read-only `pre-install,pre-upgrade` Job before it changes the
+operator Deployment. A first installation has no existing Deployment and passes. Helm and Flux run
+the hook directly; Argo CD maps it to a PreSync hook. Raw `kubectl apply`, Argo CD selective sync,
+or disabled hooks do not enforce the check.
+
+If you have separately validated an unsupported forward upgrade, set
+`unsupportedUpgradeOverride` to the currently installed minor version:
 
 ```bash
 helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
-  --set dynamo-operator.upgradePreflight.enabled=false
+  --set-string dynamo-operator.unsupportedUpgradeOverride=1.2
 ```
 
-> [!WARNING]
-> Disabling the preflight does not make a skipped-minor upgrade supported.
+For an unsupported downgrade, use the corresponding downgrade override:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --set-string dynamo-operator.unsupportedDowngradeOverride=1.5
+```
+
+The override must match the installed operator's `N.M` version. After the transition changes the
+installed minor, the old value no longer matches and cannot authorize another unsupported
+transition. An override permits the Helm operation; it does not make that transition a supported
+upgrade or downgrade path.
+
+The check uses Python's standard library with read-only access to the operator Deployment. Set
+`dynamo-operator.upgradePreflight.image` and `imagePullSecrets` if the cluster must pull the image
+from an internal registry. A failed Job is retained so you can inspect its logs. The supporting
+ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual removal when
+retiring the release.
 
 ## Alternative: Install with AICR
 

@@ -1,110 +1,109 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reject unsupported Dynamo Helm upgrade paths before the release is changed."""
+"""Read-only Dynamo version check for the Helm pre-install/pre-upgrade Job."""
 
-import json
-import os
 import re
-import ssl
 import sys
-from pathlib import Path
-from urllib.parse import quote, urlencode
-from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
+from urllib.parse import quote
 
-SERVICE_ACCOUNT_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
+MINOR_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)$")
 
 
-class PreflightError(Exception):
-    """An upgrade condition that must stop the Helm release."""
-
-
-def parse_version(value):
-    """Parse a Dynamo semantic version into its numeric components."""
+def version(value):
+    """Parse a Dynamo semantic version into numeric components."""
     match = VERSION_PATTERN.fullmatch(value.strip())
     if match is None:
-        raise PreflightError(f"version {value!r} is not a supported semantic version")
+        raise ValueError(f"Version {value!r} is not a supported semantic version")
     return tuple(int(component) for component in match.groups())
 
 
-def validate_upgrade(installed_version, target_version):
-    """Allow patch upgrades and exactly one forward minor step."""
-    installed = parse_version(installed_version)
-    target = parse_version(target_version)
+def minor_version(value, field_name):
+    """Parse an override that identifies one installed minor release."""
+    match = MINOR_VERSION_PATTERN.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(
+            f"{field_name} must be a minor version in N.M form, got {value!r}"
+        )
+    return tuple(int(component) for component in match.groups())
 
-    same_minor = target[:2] == installed[:2]
-    next_minor = target[0] == installed[0] and target[1] == installed[1] + 1
-    if same_minor or next_minor:
+
+def validate_transition(
+    installed_value,
+    target_value,
+    unsupported_upgrade_override="",
+    unsupported_downgrade_override="",
+):
+    """Allow transitions within the same minor or to an adjacent minor."""
+    installed = version(installed_value)
+    target = version(target_value)
+    if target[:2] == installed[:2] or (
+        target[0] == installed[0] and abs(target[1] - installed[1]) == 1
+    ):
         return
 
-    raise PreflightError(
-        f"unsupported Dynamo upgrade from {installed_version} to {target_version}. "
-        "Dynamo supports Helm upgrades only within the installed minor release or "
-        "to the next minor release. Upgrade through every intermediate minor release."
+    is_upgrade = target[:2] > installed[:2]
+    direction = "upgrade" if is_upgrade else "downgrade"
+    field_name = (
+        "unsupportedUpgradeOverride" if is_upgrade else "unsupportedDowngradeOverride"
+    )
+    override = (
+        unsupported_upgrade_override if is_upgrade else unsupported_downgrade_override
+    )
+    if override and minor_version(override, field_name) == installed[:2]:
+        print(
+            f"WARNING: allowing unsupported Dynamo {direction} from {installed_value} to {target_value} "
+            f"because {field_name}={override} matches the installed minor release."
+        )
+        return
+
+    installed_minor = f"{installed[0]}.{installed[1]}"
+    raise ValueError(
+        f"Unsupported Dynamo {direction} from {installed_value} to {target_value}. "
+        "Dynamo supports Helm transitions only within the installed minor release or to an adjacent minor release. "
+        "Move through every intermediate minor release. "
+        f"To allow this specific unsupported {direction}, set "
+        f"dynamo-operator.{field_name}={installed_minor}. The override applies only while "
+        f"the installed operator minor is {installed_minor}"
     )
 
 
-def installed_version(payload):
-    """Extract the installed Dynamo version from one operator Deployment."""
-    items = payload.get("items", [])
-    if len(items) != 1:
-        raise PreflightError(
-            f"expected exactly one operator Deployment for this Helm release, found {len(items)}"
+def check(
+    get, namespace, deployment, target, upgrade_override="", downgrade_override=""
+):
+    """Read the installed operator Deployment and validate the requested transition."""
+    path = (
+        f"/apis/apps/v1/namespaces/{quote(namespace, safe='')}/deployments/"
+        f"{quote(deployment, safe='')}"
+    )
+    payload = get(path)
+    if payload is None:
+        print(
+            f"No existing operator Deployment {namespace}/{deployment}; allowing initial installation."
+        )
+        return
+
+    installed = (
+        payload.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/version")
+    )
+    if not installed:
+        raise ValueError(
+            "Installed operator Deployment has no app.kubernetes.io/version label"
         )
 
-    labels = items[0].get("metadata", {}).get("labels", {})
-    version = labels.get("app.kubernetes.io/version")
-    if not version:
-        raise PreflightError(
-            "the installed operator Deployment has no app.kubernetes.io/version label"
-        )
-    return version
-
-
-def kubernetes_get_json(path):
-    """Read JSON from the in-cluster Kubernetes API."""
-    token = (SERVICE_ACCOUNT_PATH / "token").read_text(encoding="utf-8").strip()
-    host = os.environ["KUBERNETES_SERVICE_HOST"]
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
-    request = Request(f"https://{host}:{port}{path}")
-    request.add_header("Authorization", f"Bearer {token}")
-    context = ssl.create_default_context(cafile=str(SERVICE_ACCOUNT_PATH / "ca.crt"))
-    opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
-    with opener.open(request, timeout=15) as response:
-        return json.load(response)
+    print(f"Checking Dynamo Helm transition {installed} -> {target}")
+    validate_transition(installed, target, upgrade_override, downgrade_override)
+    print("Dynamo version transition is supported.")
 
 
 def main():
-    """Check the installed release against the chart being applied."""
-    namespace = os.environ["RELEASE_NAMESPACE"]
-    release_name = os.environ["RELEASE_NAME"]
-    target_version = os.environ["TARGET_VERSION"]
-    selector = (
-        f"app.kubernetes.io/instance={release_name},"
-        "app.kubernetes.io/component=manager"
-    )
-    query = urlencode({"labelSelector": selector})
-    path = f"/apis/apps/v1/namespaces/{quote(namespace, safe='')}/deployments?{query}"
-
-    try:
-        current_version = installed_version(kubernetes_get_json(path))
-        print(f"Checking Dynamo Helm upgrade {current_version} -> {target_version}")
-        validate_upgrade(current_version, target_version)
-    except Exception as error:
-        print(f"ERROR: Dynamo upgrade preflight failed: {error}", file=sys.stderr)
-        print(
-            "To bypass this check after validating the complete upgrade path, set "
-            "dynamo-operator.upgradePreflight.enabled=false.",
-            file=sys.stderr,
-        )
-        return 1
-
-    print("Dynamo upgrade path is supported.")
-    return 0
+    get = globals()["kubernetes_client"]()
+    check(lambda path: get(path, missing_ok=True), *sys.argv[1:])
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        main()
+    except (OSError, ValueError, KeyError) as error:
+        sys.exit(f"Dynamo version preflight failed: {error}.")

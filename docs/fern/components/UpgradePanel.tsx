@@ -242,9 +242,9 @@ export function UpgradePanelStyles() {
 export function UpgradePolicyNotice() {
   return (
     <p className="dynref-up-policy">
-      Supported upgrade path: within one minor release or from <span className="dynref-mono">N.M</span>{" "}
-      to <span className="dynref-mono">N.(M+1)</span>. Apply every intermediate minor release in
-      order; skipping a minor release is unsupported.
+      Supported Helm path: within one minor release or between adjacent minors. Upgrade from{" "}
+      <span className="dynref-mono">N.M</span> to <span className="dynref-mono">N.(M+1)</span> and
+      downgrade in the reverse direction. Apply every intermediate minor release in order.
     </p>
   );
 }
