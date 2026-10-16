@@ -268,6 +268,26 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "cuda" %}
+# Apply source hotfixes from container/deps/vllm/patches to the installed vLLM,
+# in name order. Each patch is regenerated against the pinned vLLM and applied
+# without fuzz, so a vLLM bump that moves the patched code fails the build
+# instead of silently shipping an unpatched image. A `for` loop returns only the
+# status of its last command, so every failure exits explicitly; an empty patch
+# directory is an error too.
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
+    set -eu; \
+    SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')"; \
+    n=0; \
+    for p in /tmp/vllm_patches/*.patch; do \
+        [ -e "$p" ] || { echo "ERROR: no .patch files under /tmp/vllm_patches" >&2; exit 1; }; \
+        echo "applying $(basename "$p")"; \
+        patch -p1 --forward --fuzz=0 -d "${SITE_PACKAGES}" < "$p" || { echo "ERROR: failed to apply $p" >&2; exit 1; }; \
+        n=$((n+1)); \
+    done; \
+    echo "applied ${n} vLLM patch(es)"
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton

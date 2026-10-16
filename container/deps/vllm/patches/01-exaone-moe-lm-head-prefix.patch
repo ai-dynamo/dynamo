@@ -1,0 +1,29 @@
+Subject: [PATCH] exaone_moe: pass prefix to ParallelLMHead so quantization exclusions match
+
+Regenerated against vLLM v0.31.0. Delete this file once the pinned vLLM
+release passes `prefix=maybe_prefix(prefix, "lm_head")` here itself.
+
+K-EXAONE-2.0-750B-A37B-NVFP4 fails to load on stock vLLM v0.31.0:
+
+  vocab_parallel_embedding.py weight_loader
+  RuntimeError: The size of tensor a (3072) must match the size of tensor b
+                (6144) at non-singleton dimension 1
+
+exaone_moe.py builds ParallelLMHead without `prefix`, so the layer prefix is
+"". ModelOptNvFp4Config.is_layer_excluded("") matches none of the checkpoint's
+quantization exclusions (which include `lm_head`), so lm_head gets the NVFP4
+linear method and a packed uint8 weight of [vocab, hidden / 2] = [.., 3072].
+The checkpoint stores lm_head.weight unquantized as BF16 [153600, 6144], and
+the copy fails on dim 1. With prefix "lm_head" the exclusion matches and the
+layer is unquantized.
+
+--- a/vllm/model_executor/models/exaone_moe.py
++++ b/vllm/model_executor/models/exaone_moe.py
+@@ -504,6 +504,7 @@
+                 self.unpadded_vocab_size,
+                 config.hidden_size,
+                 quant_config=quant_config,
++                prefix=maybe_prefix(prefix, "lm_head"),
+             )
+             if config.tie_word_embeddings:
+                 self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
