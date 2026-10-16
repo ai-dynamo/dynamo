@@ -84,7 +84,9 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
         vllm_main, "prepare_snapshot_engine", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(
-        vllm_main, "create_runtime", Mock(return_value=(Mock(), Mock()))
+        vllm_main,
+        "create_runtime",
+        Mock(return_value=(Mock(shutdown_and_wait=AsyncMock()), Mock())),
     )
     monkeypatch.setattr(vllm_main, "install_signal_handlers", signal_handlers)
     monkeypatch.setattr(vllm_main, "StateAgentLifecycle", Mock(return_value=lifecycle))
