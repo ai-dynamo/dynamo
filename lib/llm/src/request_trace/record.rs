@@ -55,6 +55,14 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
+    emit_request_end_with_optional_replay(request_id, tracker, Some(replay));
+}
+
+pub(crate) fn emit_request_end_with_optional_replay(
+    request_id: String,
+    tracker: &RequestTracker,
+    replay: Option<RequestReplayMetrics>,
+) {
     let timing = tracker.get_timing_info();
     let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
         timing
@@ -87,7 +95,7 @@ pub(crate) fn emit_request_end(
         kv_transfer_estimated_latency_ms: timing.kv_transfer_estimated_latency_ms,
         queue_depth: timing.router_queue_depth.map(|v| v as u64),
         worker,
-        replay: Some(replay),
+        replay,
         finish_reason_metadata: None,
     };
     sanitize_request(&mut request);
@@ -242,6 +250,39 @@ mod tests {
                 .input_length,
             3
         );
+    }
+
+    #[tokio::test]
+    async fn emits_routing_metadata_without_replay_hashes() {
+        BUS.init(16);
+        let mut rx = BUS.subscribe();
+        let tracker = RequestTracker::new();
+        tracker.record_isl(12, Some(4));
+        tracker.record_kv_hit(1.0, 3);
+        tracker.record_worker(42, Some(2), "decode");
+        tracker.record_osl(5);
+        tracker.record_finish();
+
+        emit_request_end_with_optional_replay("media-req".to_string(), &tracker, None);
+
+        let record = loop {
+            let record = rx.recv().await.unwrap();
+            if record
+                .request
+                .as_ref()
+                .is_some_and(|request| request.request_id == "media-req")
+            {
+                break record;
+            }
+        };
+        assert_eq!(record.event_type, RequestTraceEventType::RequestEnd);
+        let request = record.request.expect("request metadata");
+        assert_eq!(request.input_tokens, Some(12));
+        assert_eq!(request.output_tokens, Some(5));
+        assert_eq!(request.cached_tokens, Some(4));
+        assert_eq!(request.kv_hit_rate, Some(1.0 / 3.0));
+        assert_eq!(request.worker.unwrap().decode_worker_id, Some(42));
+        assert!(request.replay.is_none());
     }
 
     #[test]

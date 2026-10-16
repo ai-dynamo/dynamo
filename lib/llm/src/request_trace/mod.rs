@@ -106,6 +106,23 @@ pub fn publish(record: RequestTraceRecord) {
     BUS.publish(record);
 }
 
+/// Record a Python-chat routed request after its raw engine stream has ended.
+/// The binding enables this only for configured request-end capture and supplies
+/// the same tracker used by the router. Media requests retain timing and routing
+/// data but cannot be represented by text replay hashes.
+pub fn emit_python_routed_request_end(
+    request_id: String,
+    tracker: &crate::protocols::common::timing::RequestTracker,
+    token_ids: &[crate::protocols::TokenIdType],
+    kv_block_size: usize,
+    replayable: bool,
+) {
+    let replay = replayable
+        .then(|| replay_metrics(token_ids, kv_block_size))
+        .flatten();
+    record::emit_request_end_with_optional_replay(request_id, tracker, replay);
+}
+
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<RequestTraceRecord> {
     BUS.subscribe()
 }
