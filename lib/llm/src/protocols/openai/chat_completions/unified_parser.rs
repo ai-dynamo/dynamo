@@ -3998,11 +3998,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn pairs_only_qwen3_coder_with_qwen3() {
+    fn pairs_qwen3_coder_with_compatible_reasoning() {
         assert_eq!(
             configured_family(Some("qwen3_coder"), Some("qwen3")),
             Some(QWEN3_UNIFIED_FAMILY)
         );
+        for reasoning in ["nemotron3", "nemotron_v3"] {
+            assert_eq!(
+                configured_family(Some("qwen3_coder"), Some(reasoning)),
+                Some(QWEN3_UNIFIED_FAMILY)
+            );
+        }
         // A single configured half selects the same family.
         assert_eq!(configured_family(Some("qwen3_coder"), None), Some("qwen3"));
         assert_eq!(configured_family(None, Some("qwen3")), Some("qwen3"));

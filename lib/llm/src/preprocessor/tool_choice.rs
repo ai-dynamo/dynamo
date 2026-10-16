@@ -83,7 +83,6 @@ impl OpenAIPreprocessor {
         );
         let has_explicit_guided_decoding = has_explicit_guided_decoding(request);
         let has_response_format_constraint = has_response_format_constraint(request);
-        let parser_tool_choice = convert_tool_choice(tool_choice);
 
         self.validate_structured_output_composition(request, tool_choice, tools.as_ref())?;
 
@@ -111,9 +110,31 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
+        let parallel_named = parallel_named_tool(
+            request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        let guidance_choice = if parallel_named.is_some() {
+            &ChatCompletionToolChoiceOption::Required
+        } else {
+            tool_choice
+        };
+        let guidance_tools = match parallel_named {
+            Some(name) => Cow::Owned(
+                tools
+                    .iter()
+                    .filter(|tool| tool.function.name == name)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            None => Cow::Borrowed(tools.as_ref()),
+        };
+        let parser_tool_choice = convert_tool_choice(guidance_choice);
+
         if self.apply_tool_choice_structural_tag(
             &parser_tool_choice,
-            &convert_tools(tools.as_ref()),
+            &convert_tools(guidance_tools.as_ref()),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
             request.inner.response_format.as_ref(),
@@ -143,8 +164,8 @@ impl OpenAIPreprocessor {
         }
 
         match get_tool_choice_guidance_from_tools(
-            Some(tool_choice),
-            Some(tools.as_ref()),
+            Some(guidance_choice),
+            Some(guidance_tools.as_ref()),
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
@@ -160,7 +181,7 @@ impl OpenAIPreprocessor {
                 // Report the parser constraint implied by the installed grammar,
                 // not merely the tool_choice that requested it. Both JSON and
                 // regex guidance still use the guided-JSON tool-output parser.
-                return Ok(installed_json_constraint(tool_choice));
+                return Ok(installed_json_constraint(guidance_choice));
             }
             Ok(None) => {}
             Err(err) => {
@@ -333,6 +354,9 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
     {
         return Ok(GuidedToolConstraint::None);
     }
+    if parallel_named_tool(request, tool_call_parser, reasoning_parser).is_some() {
+        return Ok(GuidedToolConstraint::GuidedJsonRequired);
+    }
     // Validate the forced choice against the actual tools the same way
     // `apply_tool_choice_guided_decoding` does, instead of blindly installing a
     // constraint for a `tool_choice` that names a tool absent from `tools` (or an
@@ -346,6 +370,24 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         Ok(None) => Ok(GuidedToolConstraint::None),
         Err(e) => Err(invalid_argument(e.to_string(), None)),
     }
+}
+
+/// V2 Qwen supports repeated named calls only when parallel calls are explicitly enabled.
+/// Required guidance over the selected tool preserves that identity in both wire formats.
+fn parallel_named_tool<'a>(
+    request: &'a NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> Option<&'a str> {
+    use crate::protocols::openai::chat_completions::unified_parser;
+    let Some(ChatCompletionToolChoiceOption::Named(named)) = request.inner.tool_choice.as_ref()
+    else {
+        return None;
+    };
+    (request.inner.parallel_tool_calls == Some(true)
+        && unified_parser::selected_family(tool_call_parser, reasoning_parser)
+            == Some(unified_parser::QWEN3_UNIFIED_FAMILY))
+    .then_some(named.function.name.as_str())
 }
 
 /// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.
@@ -671,6 +713,87 @@ mod tests {
                 tool_name: "get_weather".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn v2_named_parallel_guidance_filters_tools_and_carries_the_array_mode() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::v2_named_parallel_guidance_filters_tools_and_carries_the_array_mode"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for mode in [StructuralTagMode::Off, StructuralTagMode::On] {
+            let preprocessor = preprocessor("qwen3_coder", mode);
+            for parallel in [None, Some(true), Some(false)] {
+                let request = request(json!({
+                    "tools": [
+                        {"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}},
+                        {"type":"function","function":{"name":"distractor","parameters":{"type":"object","properties":{}}}}
+                    ],
+                    "tool_choice":{"type":"function","function":{"name":"get_weather"}},
+                    "parallel_tool_calls":parallel
+                }));
+                let mut backend = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut backend, false)
+                    .unwrap();
+                assert_eq!(
+                    guided_tool_constraint(
+                        &request,
+                        Some("qwen3_coder"),
+                        None,
+                        mode == StructuralTagMode::On
+                    )
+                    .unwrap(),
+                    constraint,
+                    "remote postprocessing must use the installed backend wire shape"
+                );
+                assert!(matches!(
+                    request.inner.tool_choice,
+                    Some(ChatCompletionToolChoiceOption::Named(_))
+                ));
+                let guidance = backend.sampling_options.guided_decoding.unwrap();
+                if mode == StructuralTagMode::On {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    let tag = guidance.structural_tag.unwrap();
+                    let serialized = serde_json::to_string(&tag).unwrap();
+                    assert!(serialized.contains("get_weather"));
+                    assert!(!serialized.contains("distractor"));
+                    // Required emits one-or-more calls; Named retains its single-call format.
+                    assert_eq!(
+                        serialized.contains("\"stop_after_first\":false"),
+                        parallel == Some(true)
+                    );
+                    continue;
+                }
+                let schema = guidance.json.unwrap();
+                if parallel != Some(true) {
+                    assert_eq!(
+                        constraint,
+                        GuidedToolConstraint::GuidedJsonNamed {
+                            tool_name: "get_weather".into()
+                        }
+                    );
+                    assert_eq!(schema["type"], "object");
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                    assert_eq!(schema["type"], "array");
+                    assert_eq!(schema["items"]["anyOf"].as_array().unwrap().len(), 1);
+                    assert_eq!(
+                        schema["items"]["anyOf"][0]["properties"]["name"]["enum"],
+                        json!(["get_weather"])
+                    );
+                    assert!(schema.get("maxItems").is_none());
+                }
+            }
+        }
     }
 
     #[test]
