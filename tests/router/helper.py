@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
@@ -10,14 +12,16 @@ import random
 import string
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import aiohttp
 
-from dynamo.llm import KvRouter
 from dynamo.prometheus_names import kv_publisher, name_prefix
 from dynamo.runtime import DistributedRuntime
 from tests.utils.prometheus import sum_metric_samples
+
+if TYPE_CHECKING:
+    from dynamo.llm import KvRouter
 
 logger = logging.getLogger(__name__)
 
