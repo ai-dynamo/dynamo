@@ -89,6 +89,12 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
+	// the v1beta1 rules below do not apply to it.
+	if spec.V1Beta2 != nil {
+		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec, fldPath)
+	}
+
 	allErrs := field.ErrorList{}
 
 	if !features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery) && !hasManualDGDRHardware(spec.Hardware) {
@@ -241,6 +247,16 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	fldPath *field.Path,
 	oldPhase nvidiacomv1beta1.DGDRPhase,
 ) field.ErrorList {
+	// A v1beta2 spec is unconstrained by phase: an unchanged spec is always allowed, so
+	// status-preserving writes and defaulting-only updates pass, and any change is fully
+	// validated as if it were new.
+	if newSpec.V1Beta2 != nil {
+		if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+			return nil
+		}
+		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec, fldPath)
+	}
+
 	allErrs := field.ErrorList{}
 
 	gpuDiscoveryEnabled := features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery)

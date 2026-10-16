@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -42,6 +45,7 @@ const (
 	frontendImage150           = "registry.example/dynamo-frontend:1.5.0"
 	legacyEPPImage140          = "registry.example/epp-image:1.4.0"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
+	admissionAISimulateImage   = "registry.example/aisimulate:1.2.0"
 )
 
 func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {
@@ -64,6 +68,14 @@ var (
 	// Fixture barriers observe the same cache used by webhook validation.
 	admissionReader client.Reader
 
+	// The DGDR CRD ships v1beta2 unserved while that API is unfinished. The v1beta2 admission
+	// tests need the API server to accept it, so the suite serves a patched copy of the CRDs.
+	admissionCRDRoot  = mustTempDir()
+	admissionCRDPaths = mustAdmissionCRDPaths(admissionCRDRoot)
+
+	// Hardware that the v1beta2 defaulter discovers; tests set it before each case.
+	admissionHardware = &fakeHardwareDiscoverer{}
+
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
 	admissionGate = &mutableFeatureGate{}
 	admissionEnv  = operatorenv.New(operatorenv.Options{
@@ -73,13 +85,63 @@ var (
 			BypassUsers: []string{legacySeedUsername},
 		},
 		SetupWebhooks:     setupAdmissionWebhooks,
+		CRDDirectoryPaths: admissionCRDPaths,
 		OperatorVersion:   "1.6.0",
 		OperatorPrincipal: admissionOperatorPrincipal,
 	})
 )
 
 func TestMain(m *testing.M) {
-	os.Exit(admissionEnv.RunM(m))
+	code := admissionEnv.RunM(m)
+	_ = os.RemoveAll(admissionCRDRoot)
+	os.Exit(code)
+}
+
+func mustTempDir() string {
+	dir, err := os.MkdirTemp("", "admission-crds-")
+	if err != nil {
+		panic(err)
+	}
+	return dir
+}
+
+// mustAdmissionCRDPaths returns the CRD directories operatorenv loads by default, with the
+// DGDR CRD copied into root and its v1beta2 version marked served.
+func mustAdmissionCRDPaths(root string) []string {
+	const operatorRoot = "../../.."
+	bases := filepath.Join(operatorRoot, "config", "crd", "bases")
+	entries, err := os.ReadDir(bases)
+	if err != nil {
+		panic(err)
+	}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(bases, entry.Name()))
+		if err != nil {
+			panic(err)
+		}
+		if entry.Name() == "nvidia.com_dynamographdeploymentrequests.yaml" {
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			if err := yaml.Unmarshal(data, crd); err != nil {
+				panic(err)
+			}
+			for i := range crd.Spec.Versions {
+				if crd.Spec.Versions[i].Name == "v1beta2" {
+					crd.Spec.Versions[i].Served = true
+				}
+			}
+			if data, err = yaml.Marshal(crd); err != nil {
+				panic(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, entry.Name()), data, 0o600); err != nil {
+			panic(err)
+		}
+	}
+	paths := []string{root}
+	for _, dir := range []string{"disaggregatedset", "prometheus", "volcano.sh", "run.ai", "inference.networking.k8s.io", "grove.io"} {
+		paths = append(paths, filepath.Join(operatorRoot, "internal", "controller", "testing", dir))
+	}
+	return paths
 }
 
 func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
@@ -90,7 +152,31 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 		OperatorVersion:   opts.OperatorVersion,
 		OperatorPrincipal: opts.OperatorPrincipal,
 		Gate:              admissionGate,
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			AISimulateImage: admissionAISimulateImage,
+			Hardware:        admissionHardware,
+		},
 	})
+}
+
+// fakeHardwareDiscoverer stands in for the cluster's GPU discovery. Cases run sequentially,
+// so a plain mutex-guarded value is enough.
+type fakeHardwareDiscoverer struct {
+	mu    sync.Mutex
+	found webhookdefaulting.DiscoveredHardware
+	err   error
+}
+
+func (f *fakeHardwareDiscoverer) set(found webhookdefaulting.DiscoveredHardware, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.found, f.err = found, err
+}
+
+func (f *fakeHardwareDiscoverer) Discover(context.Context, string) (webhookdefaulting.DiscoveredHardware, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.found, f.err
 }
 
 type mutableFeatureGate struct {

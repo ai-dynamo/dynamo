@@ -9551,7 +9551,7 @@ spec:
                     image:
                       description: |-
                         Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-                        and execution defaults are resolved outside this API.
+                        persists the operator's configured image.
                       minLength: 1
                       type: string
                     parameters:
@@ -9562,8 +9562,8 @@ spec:
                       x-kubernetes-preserve-unknown-fields: true
                     versionOverride:
                       description: |-
-                        VersionOverride declares the AISimulate compatibility version when it
-                        cannot be inferred from the effective image.
+                        VersionOverride declares the AISimulate compatibility version. It is required
+                        when the image tag is not a version and wins over a version in the tag.
                       minLength: 1
                       type: string
                   type: object
@@ -9621,7 +9621,7 @@ spec:
                   default: {}
                   description: |-
                     Objective defines scalar optimization or a multi-objective Pareto search.
-                    When omitted, the schema supplies the default Optimize mode and SLA;
+                    When omitted, the schema supplies the default Optimize mode and SLA bounds;
                     admission supplies the conditional scalar metric.
                   properties:
                     metric:
@@ -9665,7 +9665,11 @@ spec:
                       default:
                         itlMs: 30
                         ttftMs: 2000
-                      description: SLA defines per-request latency bounds used to calculate goodput.
+                      description: |-
+                        SLA defines per-request latency bounds used to calculate goodput. When omitted,
+                        the schema sets a TTFT bound of 2000 ms and an ITL bound of 30 ms. An explicit
+                        empty object disables all bounds. spec.aisimulate.parameters.goal.sla overrides
+                        the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.
@@ -9710,20 +9714,25 @@ spec:
                       type: integer
                   type: object
                 workload:
-                  default: {}
-                  description: Workload defines the synthetic traffic model used for every candidate evaluation.
+                  default:
+                    static:
+                      isl: 4000
+                      kvLoadRatio:
+                        - 0
+                        - 1
+                      osl: 1000
+                  description: |-
+                    Workload defines the synthetic traffic model used for every candidate evaluation.
+                    When omitted, the schema searches the full KV-load ratio range at ISL 4000 and
+                    OSL 1000. An explicit empty object opts out of that default, leaving the workload
+                    to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload
+                    overrides the fields it names.
                   properties:
                     static:
-                      default:
-                        isl: 4000
-                        kvLoadRatio:
-                          - 0
-                          - 1
-                        osl: 1000
                       description: |-
-                        Static defines one of AISimulate's synthetic workload shapes. When omitted,
-                        it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
-                        An explicit empty object opts out of this underlay.
+                        Static defines one of AISimulate's synthetic workload shapes. Its fields are not
+                        defaulted individually: the default belongs to spec.workload as a whole, so an
+                        explicit workload object keeps exactly the fields it names.
                       properties:
                         concurrency:
                           description: Concurrency is a fixed closed-loop in-flight request cap.

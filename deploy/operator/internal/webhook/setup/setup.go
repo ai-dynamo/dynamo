@@ -26,7 +26,10 @@ type Options struct {
 	// DGDRDefaultImage is the default DGDR profiler image, put into
 	// DGDR spec.image when unset; empty derives
 	// dynamo-planner:<OperatorVersion>.
-	DGDRDefaultImage  string
+	DGDRDefaultImage string
+	// DGDRV1beta2 configures the defaults of v1beta2 Requests: the AISimulate runner
+	// image and the cluster hardware discovery.
+	DGDRV1beta2       webhookdefaulting.DGDRV1beta2Options
 	OperatorPrincipal string
 	Gate              features.Gate
 }
@@ -104,7 +107,8 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}
 
-	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRDefaultImage)
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRDefaultImage).
+		WithV1beta2(opts.DGDRV1beta2)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
 	}
