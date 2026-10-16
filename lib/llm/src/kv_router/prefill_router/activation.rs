@@ -289,10 +289,6 @@ impl PrefillRouter {
         let endpoint = target.endpoint();
         let endpoint_id = endpoint.id();
         let client = target.client(context.parent_token.clone()).await?;
-        let member_capabilities = match &target {
-            WorkerSetTarget::Committed(target) => Some(target.member_capabilities.clone()),
-            WorkerSetTarget::Legacy(_) => None,
-        };
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
@@ -394,12 +390,12 @@ impl PrefillRouter {
             )
             .await?;
 
-            RoutingHost::new_with_load_context_and_coordinator(
+            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
                 push_router,
                 kv_chooser,
                 load_context.clone(),
                 affinity,
-            )
+            ))
         } else {
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
@@ -418,13 +414,17 @@ impl PrefillRouter {
             )
             .await?;
 
-            RoutingHost::new_builtin_with_coordinator(push_router, load_context.clone(), affinity)?
+            Arc::new(RoutingHost::new_builtin_with_coordinator(
+                push_router,
+                load_context.clone(),
+                affinity,
+            )?)
         };
 
         Ok(PrefillBinding {
             target_id,
             endpoint_id,
-            router: Arc::new(router.with_member_capabilities(member_capabilities)),
+            router,
             prefill_router_mode,
         })
     }
@@ -883,7 +883,6 @@ mod tests {
                 generation,
                 card: Arc::new(selected),
                 admitted_ids,
-                member_capabilities: Default::default(),
             })
         };
         let router = PrefillRouter::new_with_selection_policy(

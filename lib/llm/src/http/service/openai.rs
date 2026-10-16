@@ -511,9 +511,15 @@ impl ErrorMessage {
             crate::discovery::ModelManagerError::ModelUnavailable(model) => {
                 Self::service_unavailable_with_body(model_not_ready_message(model))
             }
-            crate::discovery::ModelManagerError::CapabilityUnsupported { capability, .. } => {
+            crate::discovery::ModelManagerError::CapabilityUnsupported { capabilities, .. } => {
+                let verb = if capabilities.len() == 1 { "is" } else { "are" };
+                let capabilities = capabilities
+                    .iter()
+                    .map(|capability| format!("`{capability}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 Self::unsupported_content_error(format!(
-                    "`{capability}` is not supported by the workers serving this model"
+                    "{capabilities} {verb} not supported by the workers serving this model"
                 ))
             }
             _ => Self::model_not_found(),
@@ -1306,7 +1312,7 @@ async fn completions_single(
         .manager()
         .get_completions_engine_with_parsing(
             &model,
-            validate::required_worker_capability(&request.unsupported_fields),
+            &validate::required_worker_capabilities(&request.unsupported_fields),
         )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
@@ -1603,7 +1609,7 @@ async fn completions_batch(
         .manager()
         .get_completions_engine_with_parsing(
             &model,
-            validate::required_worker_capability(&request.unsupported_fields),
+            &validate::required_worker_capabilities(&request.unsupported_fields),
         )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
@@ -3564,7 +3570,7 @@ async fn chat_completions(
         .manager()
         .get_chat_completions_engine_with_parsing(
             &model,
-            validate::required_worker_capability(&request.unsupported_fields),
+            &validate::required_worker_capabilities(&request.unsupported_fields),
         )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
@@ -4276,7 +4282,7 @@ async fn responses(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model, None)
+        .get_chat_completions_engine_with_parsing(&model, &[])
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -9728,7 +9734,7 @@ mod tests {
 
         let unsupported = ModelManagerError::CapabilityUnsupported {
             model: "x".to_string(),
-            capability: "vllm_xargs".to_string(),
+            capabilities: vec!["vllm_xargs".to_string()],
         };
         let (status, body) = ErrorMessage::from_model_error(&unsupported);
         assert_eq!(status, StatusCode::BAD_REQUEST);

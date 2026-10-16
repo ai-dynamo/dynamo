@@ -631,7 +631,6 @@ mod tests {
                 generation,
                 card: card.clone(),
                 admitted_ids,
-                member_capabilities: Default::default(),
             })
         };
         let router = EncoderRouter::new("model".into(), namespace);

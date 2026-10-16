@@ -126,16 +126,26 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
 /// forwards router-generated `kv_transfer_params`, so clients may not set them.
 const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
 
-/// Worker runtime capability that a request's passthrough extra fields require.
+/// Passthrough extra fields honored only by workers advertising a runtime
+/// capability, as `(field, capability)`.
 ///
 /// Only token-input vLLM workers consume `vllm_xargs`, so such requests must be
 /// routed to WorkerSets advertising it rather than silently dropping the field.
-pub fn required_worker_capability(
+const CAPABILITY_GATED_FIELDS: &[(&str, &str)] = &[(
+    "vllm_xargs",
+    crate::local_model::runtime_config::VLLM_XARGS_CAPABILITY,
+)];
+
+/// Worker runtime capabilities a request's passthrough extra fields require.
+/// A WorkerSet must advertise all of them to serve the request.
+pub fn required_worker_capabilities(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
-) -> Option<&'static str> {
-    unsupported_fields
-        .contains_key("vllm_xargs")
-        .then_some(crate::local_model::runtime_config::VLLM_XARGS_CAPABILITY)
+) -> Vec<&'static str> {
+    CAPABILITY_GATED_FIELDS
+        .iter()
+        .filter(|(field, _)| unsupported_fields.contains_key(*field))
+        .map(|(_, capability)| *capability)
+        .collect()
 }
 
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
