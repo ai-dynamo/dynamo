@@ -166,6 +166,21 @@ dynamo-operator:
     deploymentName: grove-operator
 ```
 
+The preflight uses its own `grovePreflight.affinity` (empty by default), so it can run
+before controller Pods exist. On OpenShift, omit the fixed UID and let admission assign it:
+
+```yaml
+dynamo-operator:
+  grovePreflight:
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+```
+
+An explicit map replaces the entire pod security context; `null` uses the chart's secure
+defaults (including UID 65532). This does not change the operator's security context.
+
 Helm and Flux execute these hooks; Argo CD maps them to PreSync. Offline rendering does not
 run the check. Disabled hooks, selective sync, and raw `kubectl apply` bypass the gate;
 independent Grove releases must be upgraded first. Set `grovePreflight.enabled=false` only

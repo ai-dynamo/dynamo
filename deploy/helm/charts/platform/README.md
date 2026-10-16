@@ -166,6 +166,21 @@ dynamo-operator:
     deploymentName: grove-operator
 ```
 
+The preflight uses its own `grovePreflight.affinity` (empty by default), so it can run
+before controller Pods exist. On OpenShift, omit the fixed UID and let admission assign it:
+
+```yaml
+dynamo-operator:
+  grovePreflight:
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+```
+
+An explicit map replaces the entire pod security context; `null` uses the chart's secure
+defaults (including UID 65532). This does not change the operator's security context.
+
 Helm and Flux execute these hooks; Argo CD maps them to PreSync. Offline rendering does not
 run the check. Disabled hooks, selective sync, and raw `kubectl apply` bypass the gate;
 independent Grove releases must be upgraded first. Set `grovePreflight.enabled=false` only
@@ -393,6 +408,8 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.grovePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
 | dynamo-operator.grovePreflight.imagePullSecrets | list | `[]` | Existing pull secrets for the Grove preflight image. |
 | dynamo-operator.grovePreflight.activeDeadlineSeconds | int | `120` | Maximum Job duration in seconds, including retries. |
+| dynamo-operator.grovePreflight.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
+| dynamo-operator.grovePreflight.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
 | dynamo-operator.grovePreflight.namespace | string | `""` | Namespace of external Grove. Empty discovers across all namespaces. |
 | dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |

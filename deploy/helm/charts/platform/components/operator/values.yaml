@@ -30,6 +30,11 @@ grovePreflight:
   image: docker.io/library/python:3.12-slim
   imagePullSecrets: []
   activeDeadlineSeconds: 120
+  # Independent of controller affinity: the Job runs before the controller exists.
+  affinity: {}
+  # Null uses runAsNonRoot=true, runAsUser=65532, seccompProfile.type=RuntimeDefault.
+  # A map replaces the entire context; omit runAsUser on OpenShift for admission to assign it.
+  podSecurityContext: null
   # Empty namespace discovers the controller across all namespaces.
   namespace: ""
   # Requires namespace; empty discovers Deployments containing containerName.

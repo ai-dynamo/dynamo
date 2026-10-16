@@ -3,6 +3,10 @@
 
 {{ $grove := dig "grove" dict (.Values.global | default dict) -}}
 {{- $config := .Values.grovePreflight -}}
+{{- $podSecurityContext := $config.podSecurityContext -}}
+{{- if eq $podSecurityContext nil -}}
+{{- $podSecurityContext = dict "runAsNonRoot" true "runAsUser" 65532 "seccompProfile" (dict "type" "RuntimeDefault") -}}
+{{- end -}}
 {{- if and ($grove.enabled | default false) (not ($grove.install | default false)) $config.enabled -}}
 {{- if and $config.deploymentName (not $config.namespace) -}}
 {{- fail "grovePreflight.namespace is required when grovePreflight.deploymentName is set" -}}
@@ -68,14 +72,12 @@ spec:
       {{- with .Values.controllerManager.tolerations }}
       tolerations: {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.controllerManager.affinity }}
+      {{- with $config.affinity }}
       affinity: {{- toYaml . | nindent 8 }}
       {{- end }}
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        seccompProfile:
-          type: RuntimeDefault
+      {{- with $podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: preflight
           image: {{ $config.image | quote }}

@@ -39,6 +39,60 @@ tests:
     documentSelector: {path: kind, value: Job}
     asserts:
       - matchRegex: {path: metadata.name, pattern: '^.{1,37}-check-grove-compatibility$'}
+  - it: retains secure pod defaults
+    set: {global.grove.enabled: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile: {type: RuntimeDefault}
+  - it: lets OpenShift assign the UID while retaining other security defaults
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.podSecurityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.securityContext.runAsUser}
+      - equal: {path: spec.template.spec.securityContext.runAsNonRoot, value: true}
+      - equal: {path: spec.template.spec.securityContext.seccompProfile.type, value: RuntimeDefault}
+  - it: supports a namespace-specific UID
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.podSecurityContext.runAsUser: 1000750000
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: spec.template.spec.securityContext.runAsUser, value: 1000750000}
+  - it: does not wait on controller-specific required pod affinity
+    set:
+      global.grove.enabled: true
+      dynamo-operator.controllerManager.affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {control-plane: controller-manager}
+              topologyKey: kubernetes.io/hostname
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.affinity}
+  - it: uses independently configured preflight affinity
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: kubernetes.io/os, operator: In, values: [linux]}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value: {key: kubernetes.io/os, operator: In, values: [linux]}
   - it: prepares only read permissions before the Job and retains them until the next attempt
     set: {global.grove.enabled: true}
     documentSelector: {path: kind, value: ClusterRole}
