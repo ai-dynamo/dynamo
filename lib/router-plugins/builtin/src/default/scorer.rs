@@ -49,6 +49,8 @@ struct PreparedRequest {
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
+    // The host supplies fetch inputs for every candidate or for none.
+    has_kv_transfer: bool,
 }
 
 /// Division by a power-of-two integer has an exact reciprocal. Both inputs to this helper
@@ -118,6 +120,10 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             overlap_credit: self.overlap_score_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
             needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
+            has_kv_transfer: SHARED_CREDIT
+                && candidates
+                    .get(0)
+                    .is_some_and(|candidate| candidate.kv_transfer().is_some()),
         };
         if self.prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -152,15 +158,19 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
                 // Blocks a KV fetch would add beyond everything this worker holds.
-                let fetchable = candidate
-                    .kv_transfer()
-                    .and_then(|transfer| {
-                        let local = transfer
-                            .local_prefix_blocks()
-                            .saturating_add(cache.disk_overlap_blocks() as u32);
-                        Some(transfer.source_prefix_blocks()?.saturating_sub(local))
-                    })
-                    .unwrap_or(0);
+                let fetchable = if self.prepared.has_kv_transfer {
+                    candidate
+                        .kv_transfer()
+                        .and_then(|transfer| {
+                            let local = transfer
+                                .local_prefix_blocks()
+                                .saturating_add(cache.disk_overlap_blocks() as u32);
+                            Some(transfer.source_prefix_blocks()?.saturating_sub(local))
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 self.shared_cache_multiplier * (shared + fetchable) as f64
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
