@@ -941,7 +941,7 @@ pub struct PlacementEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Positive text-only provenance required for shared-cache learning.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, rename = "sce", skip_serializing_if = "std::ops::Not::not")]
     pub shared_cache_eligible: bool,
 }
 
@@ -1509,7 +1509,7 @@ pub struct RouterEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Positive text-only provenance required for shared-cache learning.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, rename = "sce", skip_serializing_if = "std::ops::Not::not")]
     pub shared_cache_eligible: bool,
 }
 
@@ -1947,7 +1947,8 @@ mod tests {
                 let placement =
                     PlacementEvent::local_gpu(7, stored(1)).with_shared_cache_eligibility(eligible);
                 let value = serde_json::to_value(&placement).unwrap();
-                assert_eq!(value.get("shared_cache_eligible").is_some(), eligible);
+                assert_eq!(value.get("sce").is_some(), eligible);
+                assert!(value.get("shared_cache_eligible").is_none());
                 let json: PlacementEvent = serde_json::from_value(value).unwrap();
                 let named: PlacementEvent =
                     rmp_serde::from_slice(&rmp_serde::to_vec_named(&placement).unwrap()).unwrap();
@@ -1961,15 +1962,17 @@ mod tests {
                     RouterEvent::new(7, stored(1)).with_shared_cache_eligibility(eligible)
                 );
                 let value = serde_json::to_value(&router).unwrap();
-                assert_eq!(value.get("shared_cache_eligible").is_some(), eligible);
+                assert_eq!(value.get("sce").is_some(), eligible);
+                assert!(value.get("shared_cache_eligible").is_none());
+                let wire = rmp_serde::to_vec_named(&router).unwrap();
+                let baseline = rmp_serde::to_vec_named(&RouterEvent::new(7, stored(1))).unwrap();
+                assert_eq!(wire.len(), baseline.len() + if eligible { 5 } else { 0 });
                 let old_json: LegacyRouterEvent = serde_json::from_value(value.clone()).unwrap();
-                let old_named: LegacyRouterEvent =
-                    rmp_serde::from_slice(&rmp_serde::to_vec_named(&router).unwrap()).unwrap();
+                let old_named: LegacyRouterEvent = rmp_serde::from_slice(&wire).unwrap();
                 assert_eq!(old_json.event, stored(1));
                 assert_eq!(old_named.event, stored(1));
                 let json: RouterEvent = serde_json::from_value(value).unwrap();
-                let named: RouterEvent =
-                    rmp_serde::from_slice(&rmp_serde::to_vec_named(&router).unwrap()).unwrap();
+                let named: RouterEvent = rmp_serde::from_slice(&wire).unwrap();
                 assert_eq!(json, router);
                 assert_eq!(named, router);
             }
