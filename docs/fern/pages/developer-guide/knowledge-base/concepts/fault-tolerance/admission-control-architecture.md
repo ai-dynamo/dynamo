@@ -12,19 +12,25 @@ For deployment instructions, see [Admission Control on Kubernetes](../../../../k
 
 ## Goal
 
-Admission control decides which requests to admit, delay, or reject before they consume engine
-capacity. For inference providers, it serves four goals:
+Admission control protects **goodput** and **quality of service (QoS)** by deciding which requests
+to admit, delay, or reject before they consume engine capacity.
 
-- **Goodput:** sustain the rate of successful requests that meet their service-level objectives (SLOs).
+**Goodput:**
+
+- **Useful throughput:** sustain the rate of successful requests that meet their service-level
+  objectives (SLOs).
 - **Overload protection:** bound concurrent work and backlog so excess demand does not overwhelm
   serving resources.
+
+**Quality of service (QoS):**
+
 - **Priority:** favor requests according to the provider's priorities and service objectives when
   capacity is contested.
 - **Fairness:** share capacity among competing request classes according to provider-defined shares,
   preventing one class from monopolizing service.
 
-The graph illustrates the goodput and overload-protection goals: useful work should remain near
-sustainable capacity as demand grows.
+The graph illustrates the goodput goal: useful work should remain near sustainable capacity as
+demand grows.
 
 ![Conceptual goodput curves: admission control sustains a plateau as offered load grows, while overload erodes goodput without it.](../../../../../assets/img/admission-control-goodput-goal.png)
 
@@ -82,6 +88,11 @@ combined capacity. These rules apply to both engine limits and queue space, so r
 requests can hold each other back when the worker's combined capacity is full.
 
 ### Configuration
+
+> [!NOTE]
+> **Tune these limits to your traffic shape.** The engine-based defaults are starting points; validate
+> the limits with representative request sizes, concurrency, and bursts, watching goodput and latency.
+> Dynamic adaptation to changing traffic is planned as separate router work.
 
 Set these on the backend worker. All values apply **per DP rank**; the worker's total capacity is the
 combined capacity of its ranks. Restart the worker to change an explicit setting.
