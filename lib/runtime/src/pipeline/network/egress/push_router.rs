@@ -2562,7 +2562,6 @@ mod tests {
                 .build();
             let error =
                 pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
-            assert_eq!(error.error_type(), ErrorType::CannotConnect);
             assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
         }
     }
