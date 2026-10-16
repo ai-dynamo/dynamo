@@ -54,6 +54,7 @@ type upgradeReplaySnapshot struct {
 	PCS                 json.RawMessage
 }
 
+// readUpgradeReplayJSON rejects unrecognized fixture fields instead of silently losing evidence.
 func readUpgradeReplayJSON(t *testing.T, path string, target any) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -64,6 +65,7 @@ func readUpgradeReplayJSON(t *testing.T, path string, target any) []byte {
 	return data
 }
 
+// loadUpgradeReplayCatalog verifies source provenance and complete snapshot inventory before replay.
 func loadUpgradeReplayCatalog(t *testing.T) upgradeReplayCatalog {
 	t.Helper()
 	var lock struct {
@@ -99,6 +101,7 @@ func loadUpgradeReplayCatalog(t *testing.T) upgradeReplayCatalog {
 	return catalog
 }
 
+// loadUpgradeReplaySnapshot checks release and runtime identity while retaining raw PCS evidence.
 func loadUpgradeReplaySnapshot(t *testing.T, catalog upgradeReplayCatalog, profile upgradeReplayProfile) (upgradeReplaySnapshot, *grove.PodCliqueSet) {
 	t.Helper()
 	var snapshot upgradeReplaySnapshot
@@ -113,6 +116,8 @@ func loadUpgradeReplaySnapshot(t *testing.T, catalog upgradeReplayCatalog, profi
 	return snapshot, &pcs
 }
 
+// newUpgradeReplayReconciler seeds the production Grove reconciler with non-nil historical objects.
+// Its fake client exercises resource writes, not real Grove controllers or Pod lifecycles.
 func newUpgradeReplayReconciler(t *testing.T, dgd *api.DynamoGraphDeployment, pcs *grove.PodCliqueSet, hooks interceptor.Funcs) (*groveWorkloadsReconciler, client.Client) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(upgradeScheme).WithObjects(dgd, pcs).
@@ -125,7 +130,7 @@ func newUpgradeReplayReconciler(t *testing.T, dgd *api.DynamoGraphDeployment, pc
 	return r, c
 }
 
-// Inspect raw historical JSON so a newer API type cannot silently discard an old Pod field.
+// upgradeReplayTemplates inspects raw JSON so a newer API type cannot discard an old Pod field.
 func upgradeReplayTemplates(t *testing.T, data []byte) map[string]any {
 	t.Helper()
 	var object map[string]any
@@ -146,6 +151,7 @@ func upgradeReplayTemplates(t *testing.T, data []byte) map[string]any {
 	return templates
 }
 
+// writeUpgradeReplayArtifact retains per-test evidence in the configured CI directory or a temporary one.
 func writeUpgradeReplayArtifact(t *testing.T, name string, value any) []byte {
 	t.Helper()
 	data, err := json.MarshalIndent(value, "", "  ")
@@ -161,6 +167,7 @@ func writeUpgradeReplayArtifact(t *testing.T, name string, value any) []byte {
 	return data
 }
 
+// TestOperatorUpgradeReplay requires unchanged workloads to retain their historical worker templates.
 func TestOperatorUpgradeReplay(t *testing.T) {
 	t.Log("Validate the frozen release catalog and source-generated snapshots")
 	catalog := loadUpgradeReplayCatalog(t)
@@ -198,6 +205,8 @@ func TestOperatorUpgradeReplay(t *testing.T) {
 	}
 }
 
+// TestOperatorUpgradeReplayIntentionalChangeAndRetry checks hash convergence after a real worker edit,
+// including a failed PCS write and one stale observation.
 func TestOperatorUpgradeReplayIntentionalChangeAndRetry(t *testing.T) {
 	t.Log("Load a released suffixed generation for a real worker edit")
 	catalog := loadUpgradeReplayCatalog(t)

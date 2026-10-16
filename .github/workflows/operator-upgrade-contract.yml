@@ -50,8 +50,9 @@ jobs:
         run: python3 deploy/operator/hack/generate_upgrade_fixtures.py --check 2>&1 | tee "$DYNAMO_UPGRADE_REPLAY_OUTPUT_DIR/baseline.log"
       - name: Replay historical state through the candidate
         working-directory: deploy/operator
+        shell: bash
         run: |
-          go test -p 2 ./internal/controller -run '^TestOperatorUpgradeReplay' -count=1 -json > "$DYNAMO_UPGRADE_REPLAY_OUTPUT_DIR/tests.jsonl"
+          go test -p 2 ./internal/controller -run '^TestOperatorUpgradeReplay' -count=1 -json | tee "$DYNAMO_UPGRADE_REPLAY_OUTPUT_DIR/tests.jsonl"
       - name: Retain CPU evidence, including failed contracts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

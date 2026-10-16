@@ -20,10 +20,17 @@ TEMPLATE = OPERATOR / "hack/upgrade_capture_test.go.tmpl"
 
 
 def sha256(data):
+    """Hash exact file bytes for the snapshot provenance lock."""
     return hashlib.sha256(data).hexdigest()
 
 
 def generate(check):
+    """Capture baselines with pinned release code, never candidate rendering.
+
+    With check=True, compare regenerated snapshots and provenance without
+    writing fixtures. Otherwise, write both snapshots and their lock; even
+    comment-only generator edits require regeneration because it is hashed.
+    """
     catalog = json.loads((FIXTURES / "catalog.json").read_text())
     chart = (ROOT / "deploy/helm/charts/platform/Chart.yaml").read_text()
     version = next(
