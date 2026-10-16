@@ -13,6 +13,7 @@
 //!   - **tracking mode**: call `start_tracking()` once, then `get_recent_stats()` to
 //!     retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 
+use dashmap::mapref::entry::Entry;
 use dashmap::{DashMap, DashSet};
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher};
 use futures::StreamExt;
@@ -45,17 +46,75 @@ struct TrackedFpm {
     received_at: Instant,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum FpmWorkerLifecycle {
+    Active { registered_at: Instant },
+    Removed { last_activity: Instant },
+}
+
 type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
+
+fn activate_fpm_worker(
+    latest: &DashMap<(String, i64), TrackedFpm>,
+    known: &DashSet<String>,
+    worker_lifecycles: &DashMap<String, FpmWorkerLifecycle>,
+    worker_id: &str,
+    registered_at: Instant,
+) {
+    let lifecycle = worker_lifecycles.entry(worker_id.to_owned());
+    let new_registration = !matches!(
+        &lifecycle,
+        Entry::Occupied(entry) if matches!(entry.get(), FpmWorkerLifecycle::Active { .. })
+    );
+    if new_registration {
+        latest.retain(|(worker, _), _| worker != worker_id);
+    }
+    let lifecycle_guard = lifecycle
+        .and_modify(|state| {
+            if new_registration {
+                *state = FpmWorkerLifecycle::Active { registered_at };
+            }
+        })
+        .or_insert(FpmWorkerLifecycle::Active { registered_at });
+    known.insert(worker_id.to_owned());
+    drop(lifecycle_guard);
+}
 
 fn record_fpm(
     latest: &DashMap<(String, i64), TrackedFpm>,
-    removed_workers: &DashMap<String, Instant>,
+    worker_lifecycles: &DashMap<String, FpmWorkerLifecycle>,
     key: (String, i64),
     payload: Vec<u8>,
     received_at: Instant,
 ) {
-    if let Some(mut last_activity) = removed_workers.get_mut(&key.0) {
-        *last_activity = (*last_activity).max(received_at);
+    if let Some(lifecycle) = worker_lifecycles.get(&key.0)
+        && let FpmWorkerLifecycle::Active { registered_at } = lifecycle.value()
+    {
+        if received_at >= *registered_at {
+            latest.insert(
+                key,
+                TrackedFpm {
+                    payload,
+                    received_at,
+                },
+            );
+        }
+        drop(lifecycle);
+        return;
+    }
+    // Hold even a vacant entry through insertion so first registration cannot
+    // race an unknown publisher's pending write. Both paths lock lifecycle first.
+    let mut lifecycle = worker_lifecycles.entry(key.0.clone());
+    if let Entry::Occupied(entry) = &mut lifecycle {
+        match entry.get_mut() {
+            FpmWorkerLifecycle::Active { registered_at } if received_at < *registered_at => {
+                return;
+            }
+            FpmWorkerLifecycle::Removed { last_activity } => {
+                *last_activity = (*last_activity).max(received_at);
+            }
+            FpmWorkerLifecycle::Active { .. } => {}
+        }
     }
     latest.insert(
         key,
@@ -64,24 +123,29 @@ fn record_fpm(
             received_at,
         },
     );
+    drop(lifecycle);
 }
 
 fn prune_removed_workers(
     latest: &DashMap<(String, i64), TrackedFpm>,
-    removed_workers: &DashMap<String, Instant>,
+    worker_lifecycles: &DashMap<String, FpmWorkerLifecycle>,
     now: Instant,
     max_age: Duration,
 ) {
     let mut expired = HashSet::new();
-    removed_workers.retain(|worker, last_activity| {
-        if now.saturating_duration_since(*last_activity) > max_age {
+    worker_lifecycles.retain(|worker, state| {
+        if matches!(
+            state,
+            FpmWorkerLifecycle::Removed { last_activity }
+                if now.saturating_duration_since(*last_activity) > max_age
+        ) {
             expired.insert(worker.clone());
             false
         } else {
             true
         }
     });
-    // Drop tombstone locks before touching samples; snapshot readers lock samples first.
+    // Do not hold lifecycle shard locks while sweeping all sample shards.
     if !expired.is_empty() {
         latest.retain(|(worker, _), sample| {
             !expired.contains(worker)
@@ -93,16 +157,22 @@ fn prune_removed_workers(
 fn fresh_fpm_snapshot(
     latest: &DashMap<(String, i64), TrackedFpm>,
     expected: &HashMap<String, Option<Range<u32>>>,
-    removed_workers: &DashMap<String, Instant>,
+    worker_lifecycles: &DashMap<String, FpmWorkerLifecycle>,
     now: Instant,
     max_age: Duration,
 ) -> (FpmSnapshot, Vec<String>, usize, usize) {
-    prune_removed_workers(latest, removed_workers, now, max_age);
+    prune_removed_workers(latest, worker_lifecycles, now, max_age);
+    // Match the lifecycle -> samples lock order used by registration and writers.
+    let removed: HashSet<_> = worker_lifecycles
+        .iter()
+        .filter(|entry| matches!(entry.value(), FpmWorkerLifecycle::Removed { .. }))
+        .map(|entry| entry.key().clone())
+        .collect();
     let mut snapshot = HashMap::new();
     let mut unjoined = HashSet::new();
     let mut stale = 0;
     for entry in latest {
-        if removed_workers.contains_key(&entry.key().0) {
+        if removed.contains(&entry.key().0) {
             continue;
         }
         let expired = now.saturating_duration_since(entry.value().received_at) > max_age;
@@ -130,7 +200,7 @@ fn fresh_fpm_snapshot(
     }
     let missing = expected
         .iter()
-        .filter(|(worker, _)| !removed_workers.contains_key(worker.as_str()))
+        .filter(|(worker, _)| !removed.contains(worker.as_str()))
         .map(|(worker, ranks)| {
             ranks.as_ref().map_or(1, |ranks| {
                 ranks
@@ -515,10 +585,10 @@ fn read_u32(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u32> {
 /// - **`get_recent_stats()`** (Python thread): reads both `latest_stats` and
 ///   `known_workers` to produce a filtered snapshot.
 ///
-/// Both collections use `DashMap`/`DashSet` (sharded concurrent maps) so that
-/// `get_recent_stats()` never blocks Task 1's high-frequency writes.  Per-shard
-/// locking means readers and writers only contend if they happen to hit the same
-/// shard, which is rare in practice.
+/// Collections use per-shard locking. Event recording and registration take the
+/// lifecycle shard before sample shards, while health snapshots capture lifecycle
+/// state before iterating samples. Re-registration clears the previous lifecycle's
+/// samples before exposing the worker as known.
 ///
 /// Ghost entries (FPM arriving after its worker's MDC `Removed` event) are
 /// filtered out by the `known_workers` check in `get_recent_stats()` and eagerly
@@ -539,9 +609,9 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
-    // Keep retired publishers distinct from unknown publishers until they have
-    // been quiet for a freshness window. Late FPMs refresh this timestamp.
-    removed_workers: Arc<DashMap<String, Instant>>,
+    // Active epochs reject pre-registration samples; removed epochs suppress
+    // late publishers until a quiet freshness window permits reclamation.
+    worker_lifecycles: Arc<DashMap<String, FpmWorkerLifecycle>>,
     removal_grace_secs: Arc<AtomicU64>,
     // Serialized ModelDeploymentCards grouped by worker. Each worker retains
     // complete card identities for exact removal and one selected base/fallback
@@ -705,12 +775,17 @@ fn update_worker_model_card_taints(
 
 fn remove_worker_model_card(
     cards: &DashMap<String, WorkerModelCards>,
-    removed_workers: &DashMap<String, Instant>,
+    worker_lifecycles: &DashMap<String, FpmWorkerLifecycle>,
     worker_id: &str,
     card_id: &ModelCardInstanceId,
 ) -> bool {
     let Some(mut worker_cards) = cards.get_mut(worker_id) else {
-        removed_workers.insert(worker_id.to_string(), Instant::now());
+        worker_lifecycles.insert(
+            worker_id.to_string(),
+            FpmWorkerLifecycle::Removed {
+                last_activity: Instant::now(),
+            },
+        );
         return false;
     };
     worker_cards.remove(card_id);
@@ -718,7 +793,12 @@ fn remove_worker_model_card(
         return true;
     }
 
-    removed_workers.insert(worker_id.to_string(), Instant::now());
+    worker_lifecycles.insert(
+        worker_id.to_string(),
+        FpmWorkerLifecycle::Removed {
+            last_activity: Instant::now(),
+        },
+    );
     drop(worker_cards);
     cards.remove(worker_id);
     false
@@ -743,7 +823,7 @@ impl FpmEventSubscriber {
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
-            removed_workers: Arc::new(DashMap::new()),
+            worker_lifecycles: Arc::new(DashMap::new()),
             removal_grace_secs: Arc::new(AtomicU64::new(DEFAULT_REMOVAL_GRACE_SECS)),
             worker_model_cards: Arc::new(DashMap::new()),
         })
@@ -859,7 +939,7 @@ impl FpmEventSubscriber {
         let cancel = self.cancel.clone();
         let stats = self.latest_stats.clone();
         let known = self.known_workers.clone();
-        let removed_workers = self.removed_workers.clone();
+        let worker_lifecycles = self.worker_lifecycles.clone();
 
         // Task 1: event consumption.
         //
@@ -874,7 +954,7 @@ impl FpmEventSubscriber {
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
             let stats = stats.clone();
-            let removed_workers = removed_workers.clone();
+            let worker_lifecycles = worker_lifecycles.clone();
             async move {
                 let mut subscriber =
                     match EventSubscriber::for_endpoint(&endpoint, FPM_TOPIC).await {
@@ -901,7 +981,7 @@ impl FpmEventSubscriber {
                                     if let Some(key) = extract_fpm_key(&payload) {
                                         record_fpm(
                                             &stats,
-                                            &removed_workers,
+                                            &worker_lifecycles,
                                             key,
                                             payload,
                                             Instant::now(),
@@ -996,8 +1076,13 @@ impl FpmEventSubscriber {
                                             }
                                         }
                                     }
-                                    known.insert(wid.clone());
-                                    removed_workers.remove(&wid);
+                                    activate_fpm_worker(
+                                        &stats,
+                                        &known,
+                                        &worker_lifecycles,
+                                        &wid,
+                                        Instant::now(),
+                                    );
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::ModelTaintsUpdated(update))) => {
@@ -1025,7 +1110,7 @@ impl FpmEventSubscriber {
                                         continue;
                                     };
                                     let removed_id = card_id.instance_id.to_string();
-                                    if remove_worker_model_card(&cards, &removed_workers, &removed_id, &card_id) {
+                                    if remove_worker_model_card(&cards, &worker_lifecycles, &removed_id, &card_id) {
                                         tracing::debug!(
                                             "FPM tracker: model card removed for worker {removed_id}; \
                                              other cards remain"
@@ -1049,7 +1134,7 @@ impl FpmEventSubscriber {
                                     // Bound retirement history even for legacy snapshot consumers.
                                     prune_removed_workers(
                                         &stats,
-                                        &removed_workers,
+                                        &worker_lifecycles,
                                         Instant::now(),
                                         Duration::from_secs(removal_grace_secs.load(Ordering::Relaxed)),
                                     );
@@ -1137,7 +1222,7 @@ impl FpmEventSubscriber {
         Ok(fresh_fpm_snapshot(
             &self.latest_stats,
             &expected,
-            &self.removed_workers,
+            &self.worker_lifecycles,
             Instant::now(),
             max_age,
         ))
@@ -1191,23 +1276,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn re_registration_discards_prior_lifecycle_samples() {
+        let now = Instant::now();
+        let latest = DashMap::new();
+        let known = DashSet::new();
+        let lifecycles = DashMap::new();
+        activate_fpm_worker(&latest, &known, &lifecycles, "peer", now);
+        record_fpm(&latest, &lifecycles, ("peer".to_string(), 0), vec![9], now);
+        record_fpm(
+            &latest,
+            &lifecycles,
+            ("worker".to_string(), 0),
+            vec![0],
+            now,
+        );
+        activate_fpm_worker(
+            &latest,
+            &known,
+            &lifecycles,
+            "worker",
+            now + Duration::from_secs(1),
+        );
+        assert!(!latest.contains_key(&("worker".to_string(), 0)));
+        lifecycles.insert(
+            "worker".to_string(),
+            FpmWorkerLifecycle::Removed {
+                last_activity: now + Duration::from_secs(2),
+            },
+        );
+        known.remove("worker");
+        for rank in 0..2 {
+            record_fpm(
+                &latest,
+                &lifecycles,
+                ("worker".to_string(), rank),
+                vec![1],
+                now + Duration::from_millis(2500),
+            );
+        }
+        let registered_at = now + Duration::from_secs(3);
+        activate_fpm_worker(&latest, &known, &lifecycles, "worker", registered_at);
+        // A writer captured before registration must not restore the old lifecycle.
+        record_fpm(
+            &latest,
+            &lifecycles,
+            ("worker".to_string(), 0),
+            vec![2],
+            now + Duration::from_millis(2900),
+        );
+        let expected = HashMap::from([
+            ("peer".to_string(), Some(0..1)),
+            ("worker".to_string(), Some(0..2)),
+        ]);
+        let (snapshot, unjoined, stale, missing) = fresh_fpm_snapshot(
+            &latest,
+            &expected,
+            &lifecycles,
+            registered_at,
+            Duration::from_secs(10),
+        );
+        assert_eq!(
+            snapshot,
+            HashMap::from([(("peer".to_string(), 0), vec![9])])
+        );
+        assert!(unjoined.is_empty());
+        assert_eq!((stale, missing), (0, 2));
+        for rank in 0..2 {
+            record_fpm(
+                &latest,
+                &lifecycles,
+                ("worker".to_string(), rank),
+                vec![3],
+                now + Duration::from_millis(3100),
+            );
+        }
+        // A card update in the same lifecycle must preserve samples and its epoch.
+        activate_fpm_worker(
+            &latest,
+            &known,
+            &lifecycles,
+            "worker",
+            now + Duration::from_secs(4),
+        );
+        record_fpm(
+            &latest,
+            &lifecycles,
+            ("worker".to_string(), 0),
+            vec![4],
+            now + Duration::from_millis(3500),
+        );
+        let (snapshot, _, _, missing) = fresh_fpm_snapshot(
+            &latest,
+            &expected,
+            &lifecycles,
+            now + Duration::from_secs(4),
+            Duration::from_secs(10),
+        );
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot[&("worker".to_string(), 0)], vec![4]);
+        assert_eq!(missing, 0);
+    }
+
+    #[test]
     fn quiet_removed_workers_release_tombstones_and_cached_samples() {
         let now = Instant::now();
         let removed_at = now + Duration::from_millis(500);
-        let removed_workers = DashMap::from_iter([("retired".to_string(), removed_at)]);
+        let worker_lifecycles = DashMap::from_iter([(
+            "retired".to_string(),
+            FpmWorkerLifecycle::Removed {
+                last_activity: removed_at,
+            },
+        )]);
         let latest = DashMap::new();
         // An event captured before removal must not shorten its grace period.
         record_fpm(
             &latest,
-            &removed_workers,
+            &worker_lifecycles,
             ("retired".to_string(), 0),
             vec![0],
             now,
         );
-        assert_eq!(*removed_workers.get("retired").unwrap(), removed_at);
+        assert_eq!(
+            *worker_lifecycles.get("retired").unwrap(),
+            FpmWorkerLifecycle::Removed {
+                last_activity: removed_at
+            }
+        );
         record_fpm(
             &latest,
-            &removed_workers,
+            &worker_lifecycles,
             ("retired".to_string(), 0),
             vec![1],
             now + Duration::from_millis(750),
@@ -1215,20 +1412,20 @@ mod tests {
         fresh_fpm_snapshot(
             &latest,
             &HashMap::new(),
-            &removed_workers,
+            &worker_lifecycles,
             now + Duration::from_millis(1600),
             Duration::from_secs(1),
         );
-        assert!(removed_workers.contains_key("retired"));
+        assert!(worker_lifecycles.contains_key("retired"));
         assert_eq!(latest.len(), 1);
         fresh_fpm_snapshot(
             &latest,
             &HashMap::new(),
-            &removed_workers,
+            &worker_lifecycles,
             now + Duration::from_secs(2),
             Duration::from_secs(1),
         );
-        assert!(removed_workers.is_empty());
+        assert!(worker_lifecycles.is_empty());
         assert!(latest.is_empty());
     }
 
@@ -1236,7 +1433,12 @@ mod tests {
     fn retirement_cleanup_preserves_a_sample_inserted_after_expiry() {
         let removed_at = Instant::now();
         let now = removed_at + Duration::from_secs(2);
-        let removed_workers = DashMap::from_iter([("retired".to_string(), removed_at)]);
+        let worker_lifecycles = DashMap::from_iter([(
+            "retired".to_string(),
+            FpmWorkerLifecycle::Removed {
+                last_activity: removed_at,
+            },
+        )]);
         let latest = DashMap::new();
         // Model an insert racing cleanup after the retired identity was forgotten.
         latest.insert(
@@ -1249,11 +1451,11 @@ mod tests {
         let (_, unjoined, _, _) = fresh_fpm_snapshot(
             &latest,
             &HashMap::new(),
-            &removed_workers,
+            &worker_lifecycles,
             now,
             Duration::from_secs(1),
         );
-        assert!(removed_workers.is_empty());
+        assert!(worker_lifecycles.is_empty());
         assert_eq!(latest.len(), 1);
         assert_eq!(unjoined, ["retired"]);
     }
@@ -1261,7 +1463,10 @@ mod tests {
     #[test]
     fn snapshot_separates_missing_identity_and_stale_samples() {
         let now = Instant::now();
-        let removed_workers = DashMap::from_iter([("removed".to_string(), now)]);
+        let worker_lifecycles = DashMap::from_iter([(
+            "removed".to_string(),
+            FpmWorkerLifecycle::Removed { last_activity: now },
+        )]);
         let latest = DashMap::new();
         let mut expected = HashMap::new();
         expected.insert("fresh".to_string(), Some(0..1));
@@ -1286,7 +1491,7 @@ mod tests {
         let (snapshot, unjoined, stale, missing) = fresh_fpm_snapshot(
             &latest,
             &expected,
-            &removed_workers,
+            &worker_lifecycles,
             now,
             Duration::from_secs(1),
         );
@@ -1309,7 +1514,7 @@ mod tests {
         let (snapshot, unjoined, stale, missing) = fresh_fpm_snapshot(
             &latest,
             &expected,
-            &removed_workers,
+            &worker_lifecycles,
             now,
             Duration::from_secs(1),
         );
@@ -1321,7 +1526,7 @@ mod tests {
 
     #[test]
     fn snapshot_reports_workers_and_offset_ranks_that_never_published() {
-        let removed_workers = DashMap::new();
+        let worker_lifecycles = DashMap::new();
         let now = Instant::now();
         let latest = DashMap::new();
         let expected = HashMap::from([
@@ -1338,7 +1543,7 @@ mod tests {
         let (_, unjoined, stale, missing) = fresh_fpm_snapshot(
             &latest,
             &expected,
-            &removed_workers,
+            &worker_lifecycles,
             now,
             Duration::from_secs(1),
         );
@@ -1357,7 +1562,7 @@ mod tests {
             fresh_fpm_snapshot(
                 &latest,
                 &expected,
-                &removed_workers,
+                &worker_lifecycles,
                 now,
                 Duration::from_secs(1)
             )
@@ -1375,7 +1580,7 @@ mod tests {
             fresh_fpm_snapshot(
                 &latest,
                 &expected,
-                &removed_workers,
+                &worker_lifecycles,
                 now,
                 Duration::from_secs(1)
             )
@@ -1450,7 +1655,7 @@ mod tests {
     #[test]
     fn removing_cards_keeps_worker_live_until_last_card() {
         let cards = DashMap::new();
-        let removed_workers = DashMap::new();
+        let worker_lifecycles = DashMap::new();
         let base = card_id(42, None);
         let lora_a = card_id(42, Some("adapter-a"));
         let lora_b = card_id(42, Some("adapter-b"));
@@ -1470,7 +1675,7 @@ mod tests {
 
         assert!(remove_worker_model_card(
             &cards,
-            &removed_workers,
+            &worker_lifecycles,
             "42",
             &base
         ));
@@ -1478,21 +1683,21 @@ mod tests {
 
         assert!(remove_worker_model_card(
             &cards,
-            &removed_workers,
+            &worker_lifecycles,
             "42",
             &lora_b
         ));
         assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-a"));
-        assert!(!removed_workers.contains_key("42"));
+        assert!(!worker_lifecycles.contains_key("42"));
 
         assert!(!remove_worker_model_card(
             &cards,
-            &removed_workers,
+            &worker_lifecycles,
             "42",
             &lora_a
         ));
         assert!(!cards.contains_key("42"));
-        assert!(removed_workers.contains_key("42"));
+        assert!(worker_lifecycles.contains_key("42"));
     }
 
     #[test]

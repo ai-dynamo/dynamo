@@ -307,6 +307,7 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
             assert remaining.unavailable_reasons == {}
             assert set(remaining.decode) == {(worker_id, 0)}
 
+        complete.shutdown()
         await register_model(
             ModelInput.Tensor,
             ModelType.TensorBased,
@@ -315,6 +316,13 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
             worker_type=WorkerType.Aggregated,
             runtime_config=runtime_config,
         )
+        for _ in range(100):
+            if missing_worker_id in provider._decode_fpm_sub.get_model_cards():
+                break
+            await asyncio.sleep(0.01)
+        assert missing_worker_id in provider._decode_fpm_sub.get_model_cards()
+        complete = FpmDirectPublisher(missing_endpoint, missing_worker_id, dp_size=2)
+        stack.callback(complete.shutdown)
         for _ in range(100):
             for rank in (0, 1):
                 _publish_idle_fpm(complete, rank)

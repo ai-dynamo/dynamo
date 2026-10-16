@@ -325,7 +325,7 @@ class PrometheusAPIClient:
                             # A completed-only series can hide requests still in flight.
                             completed_only = self.prom.custom_query(
                                 query=(
-                                    f"increase({router_requests_total}{{{ns_filter}}}[{interval}]) "
+                                    f"{router_requests_total}{{{ns_filter}}} "
                                     "unless ignoring(__name__) "
                                     f"increase({router_requests_started}{{{ns_filter}}}[{interval}])"
                                 )
