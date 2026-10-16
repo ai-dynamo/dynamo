@@ -917,6 +917,43 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 		},
 		{
+			name:     "pending explicit snapshot under wait policy keeps compatibility hash and gates replicas",
+			replicas: 3,
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     false,
+				CheckpointName:            "snapshot-name",
+				StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
+			},
+			wantReplicas:          0,
+			wantStartupPolicy:     nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			wantCompatibilityHash: true,
+		},
+		{
+			name:     "ready explicit snapshot under wait policy stamps candidate and compatibility hash",
+			replicas: 2,
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     true,
+				CheckpointName:            "snapshot-name",
+				StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
+				NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
+					UID:                  types.UID("snapshot-uid"),
+					BoundContentName:     "content-a",
+					CompatibilityVersion: commonconsts.SnapshotCompatibilityVersion,
+					GMSMode:              commonconsts.SnapshotGMSModeDisabled,
+				},
+			},
+			wantReplicas:          2,
+			wantStartupPolicy:     nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			wantCandidate:         true,
+			wantCompatibilityHash: true,
+		},
+		{
 			name:     "pending explicit snapshot carries compatibility without becoming a restore candidate",
 			replicas: 2,
 			checkpointInfo: checkpoint.CheckpointInfo{
@@ -984,10 +1021,13 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 				assert.Equal(t, "compatibility-v1", dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation])
 			}
 			if !tt.wantCandidate {
+				if dcd.Spec.PodTemplate != nil {
+					assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+				}
 				return
 			}
 
-			t.Log("Verify immediate startup publishes stable restore-candidate metadata")
+			t.Log("Verify a Ready snapshot publishes stable restore-candidate metadata under every startup policy")
 			assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 			assert.Equal(t, tt.checkpointInfo.CheckpointName, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
 			assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])

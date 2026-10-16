@@ -3,9 +3,10 @@
 
 //! Edge and coverage state of one node, kept behind the node's state lock.
 
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::edge_index::EdgeIndex;
+use super::worker_set::WorkerSet;
 use crate::protocols::*;
 
 pub(super) struct RemoveOutcome {
@@ -25,7 +26,11 @@ pub(super) struct CrtcNodeState {
     /// has cached `edge[0..k]`, where `0 < k < edge.len()`.
     pub(super) worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
     /// Workers with full edge coverage.
-    pub(super) full_edge_workers: FxHashSet<WorkerWithDpRank>,
+    pub(super) full_edge_workers: WorkerSet,
+    /// Hash of the block just before `edge[0]`, or 0 for root children. The
+    /// head never moves, so however often the tree splits, the parent is the node whose
+    /// edge ends with this block.
+    pub(super) parent_tail: ExternalSequenceBlockHash,
 }
 
 impl CrtcNodeState {
@@ -35,7 +40,8 @@ impl CrtcNodeState {
             edge_index: EdgeIndex::build(&edge),
             edge,
             worker_cutoffs: FxHashMap::default(),
-            full_edge_workers: FxHashSet::default(),
+            full_edge_workers: WorkerSet::default(),
+            parent_tail: ExternalSequenceBlockHash(0),
         }
     }
 
@@ -261,6 +267,8 @@ impl CrtcNodeState {
             edge: suffix_edge,
             worker_cutoffs: suffix_cutoffs,
             full_edge_workers: suffix_full,
+            // The prefix now ends with the block before the suffix's head.
+            parent_tail: self.edge[pos - 1].1,
         }
     }
 
@@ -306,6 +314,8 @@ impl CrtcNodeState {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use rustc_hash::FxHashSet;
 
     use super::super::edge_index::SCAN_MAX_LEN;
     use super::*;
@@ -445,7 +455,7 @@ mod tests {
 
         assert_eq!(state.edge.len(), 3);
         assert_eq!(
-            state.full_edge_workers,
+            *state.full_edge_workers,
             FxHashSet::from_iter([full, at_split, past_split])
         );
         assert_eq!(state.worker_cutoffs, FxHashMap::from_iter([(short, 1)]));
@@ -453,7 +463,7 @@ mod tests {
         assert_eq!(state.position(ExternalSequenceBlockHash(4)), None);
 
         assert_eq!(suffix.edge.len(), 3);
-        assert_eq!(suffix.full_edge_workers, FxHashSet::from_iter([full]));
+        assert_eq!(*suffix.full_edge_workers, FxHashSet::from_iter([full]));
         assert_eq!(
             suffix.worker_cutoffs,
             FxHashMap::from_iter([(past_split, 2)])
