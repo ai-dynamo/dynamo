@@ -402,6 +402,19 @@ def _preprocess_worker(
     )
 
 
+def _requested_completion_logprobs(request: dict[str, Any]) -> int | None:
+    """Return the completion logprob count a chat request asks for, or None."""
+    logprobs = request.get("logprobs")
+    top_logprobs = request.get("top_logprobs")
+    if logprobs is True:
+        return top_logprobs if top_logprobs is not None else 1
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        return logprobs
+    if top_logprobs not in (None, 0):
+        return top_logprobs
+    return None
+
+
 def _build_dynamo_preproc(
     request: dict[str, Any],
     prompt_token_ids: list[int],
@@ -431,16 +444,7 @@ def _build_dynamo_preproc(
     elif stop is None:
         stop = []
 
-    # Handle logprobs
-    logprobs_val = None
-    logprobs = request.get("logprobs")
-    top_logprobs = request.get("top_logprobs")
-    if logprobs is True:
-        logprobs_val = top_logprobs if top_logprobs is not None else 1
-    elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-        logprobs_val = logprobs
-    elif top_logprobs not in (None, 0):
-        logprobs_val = top_logprobs
+    logprobs_val = _requested_completion_logprobs(request)
 
     nvext = request.get("nvext") or {}
     routing = request.get("routing")
@@ -800,6 +804,7 @@ class SglangProcessor:
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             pending_usage: dict[str, Any] | None = None
             prompt_logprobs: list[Any] | None = None
+            completion_logprobs = _requested_completion_logprobs(request)
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -953,6 +958,15 @@ class SglangProcessor:
                 new_ids = engine_response["token_ids"]
                 log_probs = engine_response.get("log_probs")
                 top_logprobs = engine_response.get("top_logprobs")
+                # SGLang shares one logprob switch and top-k count between
+                # prompt and completion, so prompt_logprobs can return
+                # completion logprobs the request did not ask for.
+                if completion_logprobs is None:
+                    log_probs = top_logprobs = None
+                elif top_logprobs is not None:
+                    top_logprobs = [
+                        position[:completion_logprobs] for position in top_logprobs
+                    ]
 
                 if new_ids and pending_token_ids:
                     pending_logprob_shape = (

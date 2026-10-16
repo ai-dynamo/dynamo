@@ -4504,7 +4504,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-logprobs", {"model": "test-model"}, {}, [], post
+                    "req-logprobs",
+                    {"model": "test-model", "logprobs": True},
+                    {},
+                    [],
+                    post,
                 )
                 if "data" in item
             ]
@@ -4725,6 +4729,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     {
                         "model": "test-model",
                         "stream_options": {"include_usage": True},
+                        "logprobs": True,
                     },
                     {},
                     [1, 2],
@@ -4799,6 +4804,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     {
                         "model": "test-model",
                         "stream_options": {"include_usage": True},
+                        "logprobs": True,
                     },
                     {},
                     [1, 2],
@@ -5059,6 +5065,69 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert final.get("nvext", {}).get("prompt_logprobs") == (
             payload if expect_nvext else None
         )
+
+    @pytest.mark.parametrize(
+        ("request_fields", "expected_top_count"),
+        [
+            ({"prompt_logprobs": 0}, None),
+            ({"prompt_logprobs": 3, "logprobs": True, "top_logprobs": 1}, 1),
+            ({"logprobs": True, "top_logprobs": 2}, 2),
+            ({"logprobs": True}, 1),
+        ],
+    )
+    def test_completion_logprobs_follow_request_not_prompt_logprobs(
+        self, tokenizer, request_fields, expected_top_count
+    ):
+        """prompt_logprobs makes SGLang return completion logprobs at
+        max(completion, prompt) top-k; clients see only what they requested."""
+        token_ids = tokenizer.encode("Hi")
+        candidates = [
+            {"rank": rank, "token_id": token_ids[0], "logprob": -float(rank)}
+            for rank in (1, 2, 3)
+        ]
+
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {
+                            "token_ids": token_ids,
+                            "log_probs": [-0.5] * len(token_ids),
+                            "top_logprobs": [candidates] * len(token_ids),
+                        },
+                        {"token_ids": [], "finish_reason": "stop"},
+                    ]
+                ),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            request = {"model": "test-model", **request_fields}
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-completion-logprobs", request, {}, [], post
+                )
+            ]
+
+        content = [
+            entry
+            for item in asyncio.run(collect())
+            for choice in item["data"]["choices"]
+            for entry in (choice.get("logprobs") or {}).get("content") or []
+        ]
+
+        if expected_top_count is None:
+            assert content == []
+        else:
+            assert len(content) == len(token_ids)
+            assert all(
+                len(entry["top_logprobs"]) == expected_top_count for entry in content
+            )
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(
@@ -5386,7 +5455,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-length", {"model": "test-model"}, {}, [], post
+                    "req-length",
+                    {"model": "test-model", "logprobs": True},
+                    {},
+                    [],
+                    post,
                 )
                 if "data" in item
             ]
