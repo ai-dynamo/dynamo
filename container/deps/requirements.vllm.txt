@@ -25,6 +25,8 @@ imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # libcudart.so.12, so the floor has to name the CUDA 13 distribution. CUDA
 # only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
 mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
+# The Dynamo wheel is installed with --no-deps, so list artifact dependencies here.
+opendal==0.47.10
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
@@ -42,3 +44,4 @@ PyNvVideoCodec==2.2.3
 # Dynamo installs with --no-deps, so declare the shared image-cache client
 # explicitly instead of relying on LMCache's unbounded transitive dependency.
 redis>=6.2.0,<9.0.0
+zstandard==0.25.0
