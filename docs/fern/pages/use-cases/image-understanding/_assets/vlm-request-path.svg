@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="600" viewBox="0 0 1440 600" role="img" aria-labelledby="title description">
+  <title id="title">End-to-end path of a vision language model request and where each performance feature helps</title>
+  <desc id="description">A request with text and an image enters the Dynamo frontend, and the router picks a worker. The worker loads the image, runs the vision encoder to produce embeddings, prefills the text and image tokens, and decodes the answer. Multimodal KV routing helps when picking a worker and skips repeated prefill. Frontend media decoding and the shared image cache help when loading the image. The embedding cache and encoder disaggregation help when encoding the image.</desc>
+  <style>
+    text { font-family: Arial, Helvetica, sans-serif; fill: #111827; }
+    .muted { fill: #4b5563; }
+    .accent { fill: #5a8f00; }
+    .line { stroke: #64748b; }
+    .line-green { stroke: #76b900; }
+    .arrow-head { fill: #64748b; }
+    .arrow-head-green { fill: #76b900; }
+    .panel { fill: #ffffff; }
+    .band-fe { fill: #f3fae8; stroke: #76b900; }
+    .band-wk { fill: #eff6ff; stroke: #3b82f6; }
+    .stage { fill: #ffffff; stroke: #94a3b8; }
+    .chip { fill: #f3fae8; stroke: #76b900; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #f8fafc; }
+      .muted { fill: #cbd5e1; }
+      .accent { fill: #8ed100; }
+      .line { stroke: #94a3b8; }
+      .line-green { stroke: #8ed100; }
+      .arrow-head { fill: #94a3b8; }
+      .arrow-head-green { fill: #8ed100; }
+      .panel { fill: #0f172a; }
+      .band-fe { fill: #17220d; stroke: #8ed100; }
+      .band-wk { fill: #0f1d33; stroke: #60a5fa; }
+      .stage { fill: #111827; stroke: #64748b; }
+      .chip { fill: #17220d; stroke: #8ed100; }
+    }
+    .eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 1.6px; }
+    .title { font-size: 22px; font-weight: 700; }
+    .band-label { font-size: 12px; font-weight: 700; letter-spacing: 1.2px; }
+    .st-title { font-size: 15px; font-weight: 700; }
+    .st-sub { font-size: 13px; }
+    .chip-title { font-size: 13px; font-weight: 700; }
+    .chip-text { font-size: 13px; }
+    .note { font-size: 13px; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head-green"/></marker>
+  </defs>
+  <rect class="panel" x="0" y="0" width="1440" height="600"/>
+  <text class="eyebrow accent" x="50" y="40">END-TO-END VLM REQUEST PATH</text>
+  <text class="title" x="50" y="68">Where each performance feature helps</text>
+  <rect class="band-fe" x="38" y="96" width="452" height="156" rx="12" stroke-width="1.5"/>
+  <rect class="band-wk" x="494" y="96" width="906" height="156" rx="12" stroke-width="1.5"/>
+  <text class="band-label muted" x="54" y="118">DYNAMO FRONTEND</text>
+  <text class="band-label muted" x="510" y="118">WORKERS (vLLM, SGLang, TensorRT-LLM)</text>
+  <rect class="stage" x="50" y="132" width="200" height="100" rx="10" stroke-width="1.5"/>
+  <text class="st-title" x="64" y="162">1. Request arrives</text>
+  <text class="st-sub muted" x="64" y="188">Text plus image_url</text>
+  <line class="line" x1="252" y1="182" x2="276" y2="182" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect class="stage" x="278" y="132" width="200" height="100" rx="10" stroke-width="1.5"/>
+  <text class="st-title" x="292" y="162">2. Pick a worker</text>
+  <text class="st-sub muted" x="292" y="188">Router picks where it runs</text>
+  <line class="line" x1="480" y1="182" x2="504" y2="182" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect class="stage" x="506" y="132" width="200" height="100" rx="10" stroke-width="1.5"/>
+  <text class="st-title" x="520" y="162">3. Load the image</text>
+  <text class="st-sub muted" x="520" y="188">Download and decode pixels</text>
+  <line class="line" x1="708" y1="182" x2="732" y2="182" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect class="stage" x="734" y="132" width="200" height="100" rx="10" stroke-width="1.5"/>
+  <text class="st-title" x="748" y="162">4. Encode the image</text>
+  <text class="st-sub muted" x="748" y="188">Vision encoder → embeddings</text>
+  <line class="line" x1="936" y1="182" x2="960" y2="182" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect class="stage" x="962" y="132" width="200" height="100" rx="10" stroke-width="1.5"/>
+  <text class="st-title" x="976" y="162">5. Prefill</text>
+  <text class="st-sub muted" x="976" y="188">Read text + image tokens</text>
+  <line class="line" x1="1164" y1="182" x2="1188" y2="182" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect class="stage" x="1190" y="132" width="200" height="100" rx="10" stroke-width="1.5"/>
+  <text class="st-title" x="1204" y="162">6. Decode</text>
+  <text class="st-sub muted" x="1204" y="188">Generate the answer</text>
+  <line class="line-green" x1="378" y1="236" x2="378" y2="288" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect class="chip" x="278" y="290" width="200" height="112" rx="10" stroke-width="1.5"/>
+  <text class="chip-title" x="292" y="316">Multimodal KV routing</text>
+  <text class="chip-text muted" x="292" y="338">Send a repeated image to</text>
+  <text class="chip-text muted" x="292" y="356">the worker that already</text>
+  <text class="chip-text muted" x="292" y="374">holds its KV cache, so</text>
+  <text class="chip-text muted" x="292" y="392">prefill is skipped.</text>
+  <line class="line-green" x1="606" y1="236" x2="606" y2="288" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect class="chip" x="506" y="290" width="200" height="112" rx="10" stroke-width="1.5"/>
+  <text class="chip-title" x="520" y="316">Frontend media decoding</text>
+  <text class="chip-text muted" x="520" y="338">Decode images in the Rust</text>
+  <text class="chip-text muted" x="520" y="356">frontend, off the worker's</text>
+  <text class="chip-text muted" x="520" y="374">critical path.</text>
+  <rect class="chip" x="506" y="416" width="200" height="112" rx="10" stroke-width="1.5"/>
+  <text class="chip-title" x="520" y="442">Shared image cache</text>
+  <text class="chip-text muted" x="520" y="464">Reuse downloaded image</text>
+  <text class="chip-text muted" x="520" y="482">bytes across workers.</text>
+  <line class="line-green" x1="834" y1="236" x2="834" y2="288" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect class="chip" x="734" y="290" width="200" height="112" rx="10" stroke-width="1.5"/>
+  <text class="chip-title" x="748" y="316">Embedding cache</text>
+  <text class="chip-text muted" x="748" y="338">Skip the vision encoder</text>
+  <text class="chip-text muted" x="748" y="356">for images it has seen</text>
+  <text class="chip-text muted" x="748" y="374">before.</text>
+  <rect class="chip" x="734" y="416" width="200" height="112" rx="10" stroke-width="1.5"/>
+  <text class="chip-title" x="748" y="442">Encoder disaggregation</text>
+  <text class="chip-text muted" x="748" y="464">Run the vision encoder on</text>
+  <text class="chip-text muted" x="748" y="482">its own workers so it</text>
+  <text class="chip-text muted" x="748" y="500">scales separately.</text>
+  <text class="note muted" x="50" y="572">The boxes below the path are optional features. Each arrow points to the step that feature speeds up.</text>
+</svg>

@@ -741,43 +741,52 @@ navigation:
           - page: Priority Scheduling
             path: pages/use-cases/agents/priority-scheduling.md
 
-      # ==================== Image ====================
-      - section: Image
+      # ==================== Image Understanding ====================
+      - section: Image Understanding
         collapsed: true
-        icon: image
-        slug: image
+        icon: eye
+        slug: image-understanding
         contents:
-          - page: Image Understanding
-            path: pages/use-cases/image/image-understanding.md
-          - page: Image Generation
-            path: pages/use-cases/image/image-generation.md
+          - page: Overview
+            path: pages/use-cases/image-understanding/overview.md
+          - page: VLM Performance Optimization
+            path: pages/use-cases/image-understanding/vlm-performance-optimization.md
           - page: Custom Vision Encoders
-            path: pages/use-cases/image/custom-vision-encoders.md
-          - page: Shared Image Download Cache
-            path: pages/use-cases/image/shared-image-download-cache.md
+            path: pages/use-cases/image-understanding/custom-vision-encoders.md
 
-      # ==================== Video ====================
-      - section: Video
+      # ==================== Video Understanding ====================
+      - section: Video Understanding
         collapsed: true
         icon: film
-        slug: video
+        slug: video-understanding
         contents:
-          - page: Video Understanding
-            path: pages/use-cases/video/video-understanding.md
-          - page: Text to Video (T2V)
-            slug: text-to-video
-            path: pages/use-cases/video/text-to-video.md
-          - page: Image to Video (I2V)
-            slug: image-to-video
-            path: pages/use-cases/video/image-to-video.md
-          - page: FastVideo
-            slug: fastvideo
-            path: pages/use-cases/video/fastvideo.md
+          - page: Overview
+            path: pages/use-cases/video-understanding/overview.md
           - page: Exact Video KV Routing
-            path: pages/use-cases/video/exact-video-kv-routing.md
+            path: pages/use-cases/video-understanding/exact-video-kv-routing.md
           - page: Video Decoding and GPU Requirements
             slug: video-decoding
-            path: pages/use-cases/video/video-decoding.md
+            path: pages/use-cases/video-understanding/video-decoding.md
+
+      # ==================== Diffusion ====================
+      - section: Diffusion
+        collapsed: true
+        icon: wand-magic-sparkles
+        slug: diffusion
+        contents:
+          - page: Overview
+            path: pages/use-cases/diffusion/overview.md
+          - page: Image Generation
+            path: pages/use-cases/diffusion/image-generation.md
+          - page: Text to Video (T2V)
+            slug: text-to-video
+            path: pages/use-cases/diffusion/text-to-video.md
+          - page: Image to Video (I2V)
+            slug: image-to-video
+            path: pages/use-cases/diffusion/image-to-video.md
+          - page: FastVideo
+            slug: fastvideo
+            path: pages/use-cases/diffusion/fastvideo.md
 
       # ==================== Speech & Audio ====================
       - section: Speech & Audio
@@ -796,24 +805,6 @@ navigation:
           - page: Speech to Speech
             slug: speech-to-speech
             path: pages/use-cases/speech/speech-to-speech.md
-
-      # ==================== Multimodal Performance ====================
-      - section: Multimodal Performance
-        collapsed: true
-        icon: gauge-high
-        slug: multimodal-performance
-        contents:
-          - page: Overview
-            path: pages/use-cases/multimodal-performance/overview.md
-          - page: Frontend Media Decoding
-            path: pages/use-cases/multimodal-performance/frontend-media-decoding.md
-          - page: Embedding Cache
-            path: pages/use-cases/multimodal-performance/embedding-cache.md
-          - page: Multimodal KV Routing
-            slug: multimodal-kv-routing
-            path: pages/use-cases/multimodal-performance/multimodal-kv-routing.md
-          - page: Encoder Disaggregation
-            path: pages/use-cases/multimodal-performance/encoder-disaggregation.md
 
       # ==================== Many-Model Serving ====================
       - section: Many-Model Serving

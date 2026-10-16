@@ -8,7 +8,7 @@ subtitle: Generate images from text prompts with vLLM-Omni, SGLang, or TensorRT-
 Dynamo serves text-to-image models through the OpenAI-compatible
 `/v1/images/generations` endpoint. Generation uses the same frontend, routing,
 and observability as LLM serving. To answer questions *about* images instead,
-see [Image Understanding](image-understanding.md).
+see [Image Understanding](../image-understanding/overview.md).
 
 > [!IMPORTANT]
 > Image generation backends run from Dynamo CLI launch scripts and
@@ -284,7 +284,7 @@ For the full flag surface (quantization, TeaCache, torch.compile, attention back
 
 - [Text-to-Image with vLLM-Omni](image-generation.md#vllm-omni)
 - [Text-to-Image with SGLang](image-generation.md#sglang)
-- [Text-to-Video with TensorRT-LLM](../video/text-to-video.md#tensorrt-llm)
+- [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm)
 
 </Tab>
 </Tabs>

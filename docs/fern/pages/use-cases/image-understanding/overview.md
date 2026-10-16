@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Image Understanding
 subtitle: Serve vision language models that answer questions about images
+sidebar-title: Overview
 ---
 
 Dynamo serves vision language models (VLMs) through the OpenAI-compatible
@@ -11,8 +12,8 @@ content parts next to its text, and the worker runs the model's vision encoder
 before prefill.
 
 This page gets one image request working on each backend. To generate images
-instead, see [Image Generation](image-generation.md). To speed up image
-workloads, see [Multimodal Performance](../multimodal-performance/overview.md).
+instead, see [Image Generation](../diffusion/image-generation.md). To speed up
+image workloads, see [VLM Performance Optimization](vlm-performance-optimization.md).
 
 ## Support Matrix
 
@@ -115,5 +116,15 @@ Workers fetch media URLs under a default-deny policy:
 ## Next Steps
 
 - [Custom Vision Encoders](custom-vision-encoders.md): run your own vision tower in a vLLM worker.
-- [Shared Image Download Cache](shared-image-download-cache.md): reuse downloaded image bytes across workers.
-- [Multimodal Performance](../multimodal-performance/overview.md): frontend decoding, embedding cache, multimodal KV routing, and encoder disaggregation.
+
+## Performance Optimizations
+
+Once requests work, you can cut latency and raise throughput for image
+workloads. [VLM Performance Optimization](vlm-performance-optimization.md) shows
+where a request spends its time and when each feature helps:
+
+- [Multimodal KV routing](vlm-performance-optimization.md#multimodal-kv-routing): send repeated images to the worker that already holds their KV cache.
+- [Frontend media decoding](vlm-performance-optimization.md#frontend-media-decoding): decode images in the Rust frontend.
+- [Shared image cache](vlm-performance-optimization.md#shared-image-cache): reuse downloaded image bytes across workers.
+- [Embedding cache](vlm-performance-optimization.md#embedding-cache): skip the vision encoder for images it has seen.
+- [Encoder disaggregation](vlm-performance-optimization.md#encoder-disaggregation): scale vision encoders separately from LLM workers.

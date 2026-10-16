@@ -134,7 +134,7 @@ pip install -e .
 | [**KV-Aware Routing**](../../router/overview.md) | ✅ | |
 | [**SLA-Based Planner**](../../planner/planner-guide.md) | ✅ | |
 | [**Multimodal Support**](multimodal.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
-| [**Diffusion Models**](../../../../../use-cases/image/image-generation.md) | ✅ | LLM diffusion, image, and video generation |
+| [**Diffusion Models**](../../../../../use-cases/diffusion/image-generation.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../../concepts/fault-tolerance/request-cancellation-architecture.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**LoRA**](../../../../../cli/operations/lora-adapters.md) | 🚧 | **Experimental.** Dynamic loading and aggregated serving are validated; unloading is implemented but not end-to-end tested; disaggregated serving is not end-to-end validated |
 | [**Graceful Shutdown**](../../../../../kubernetes/fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
@@ -160,7 +160,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | 🚧 | — | 🚧 | ✅ | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap. The worker probes `engine.async_generate` once at startup and stops forwarding `mm_hashes` when the build does not accept it; the frontend keeps deriving image-aware routing keys regardless, so the worker's internally computed hashes never line up with them and only the text prefix overlaps. Expect image-blind cache hits on such a build rather than an error. ([Source](../../../../../use-cases/multimodal-performance/multimodal-kv-routing.md))
+> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap. The worker probes `engine.async_generate` once at startup and stops forwarding `mm_hashes` when the build does not accept it; the frontend keeps deriving image-aware routing keys regardless, so the worker's internally computed hashes never line up with them and only the text prefix overlaps. Expect image-blind cache hits on such a build rather than an error. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing))
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](multimodal.md))
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../../concepts/fault-tolerance/request-cancellation-architecture.md))
 > 4. **LoRA**: Dynamic adapter loading, discovery, and aggregated inference have pre-merge end-to-end coverage. Unloading is implemented but not exercised by an end-to-end test. Prefill/decode registration has unit coverage, but disaggregated LoRA and feature pairings such as KV-aware routing have not been validated end to end. ([Source](../../../../../cli/operations/lora-adapters.md))
@@ -229,6 +229,6 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 - **[Reference Guide](reference-guide.md)**: Worker types, architecture, and configuration
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer details
-- **Diffusion**: [image](../../../../../use-cases/image/image-generation.md), [video](../../../../../use-cases/video/text-to-video.md), and [language](diffusion-language-models.md) diffusion models
+- **Diffusion**: [image](../../../../../use-cases/diffusion/image-generation.md), [video](../../../../../use-cases/diffusion/text-to-video.md), and [language](diffusion-language-models.md) diffusion models
 - **[Observability](observability.md)**: Metrics, tracing, and Grafana dashboards
 - **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide

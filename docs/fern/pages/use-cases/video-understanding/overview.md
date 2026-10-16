@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Video Understanding
 subtitle: Serve vision language models that answer questions about video clips
+sidebar-title: Overview
 ---
 
 Dynamo serves video-capable vision language models through the OpenAI-compatible
@@ -11,7 +12,7 @@ next to its text. Dynamo decodes the clip, samples frames, and the worker runs
 the model's vision encoder on them.
 
 This page gets one video request working on each backend. To generate video
-instead, see [Text to Video (T2V)](text-to-video.md). To route repeated clips to the
+instead, see [Text to Video (T2V)](../diffusion/text-to-video.md). To route repeated clips to the
 worker that already holds their KV cache, see
 [Exact Video KV Routing](exact-video-kv-routing.md).
 
@@ -109,10 +110,20 @@ sampled from each clip. Keep it the same on the frontend and every worker.
 Video URLs are fetched under the same default-deny policy as images: `https://`
 and `data:` sources pass, and internal or plain `http://` hosts need
 `DYN_MM_ALLOW_INTERNAL=1`. See
-[Image Understanding › Media URL Policy](../image/image-understanding.md#media-url-policy).
+[Image Understanding › Media URL Policy](../image-understanding/overview.md#media-url-policy).
 
 ## Next Steps
 
 - [Exact Video KV Routing](exact-video-kv-routing.md): reuse KV cache for repeated clips across workers.
 - [Video Decoding and GPU Requirements](video-decoding.md): NVDEC, container capabilities, and extra decoders.
-- [Multimodal Performance](../multimodal-performance/overview.md): frontend decoding, embedding cache, and encoder disaggregation.
+
+## Performance Optimizations
+
+Video requests share most of their performance features with image requests.
+[VLM Performance Optimization](../image-understanding/vlm-performance-optimization.md)
+shows where a request spends its time and when each feature helps. The ones that
+apply to video:
+
+- [Frontend media decoding](../image-understanding/vlm-performance-optimization.md#frontend-media-decoding): decode VP8/VP9 video in the Rust frontend.
+- [Embedding cache](../image-understanding/vlm-performance-optimization.md#embedding-cache): skip the vision encoder for clips it has seen.
+- [Multimodal KV routing](../image-understanding/vlm-performance-optimization.md#multimodal-kv-routing) and [Exact Video KV Routing](exact-video-kv-routing.md): send repeated clips to the worker that already holds their KV cache.

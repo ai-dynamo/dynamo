@@ -36,7 +36,7 @@ You can provide multimodal inputs in the following ways:
 
 ## Deployment Patterns
 
-TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](../../../../../use-cases/multimodal-performance/overview.md) for detailed explanations.
+TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](../../../../../use-cases/image-understanding/vlm-performance-optimization.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -93,7 +93,7 @@ Current limitations:
 - Requests that mix image URLs and precomputed `.safetensors` embeddings skip multimodal-aware routing.
 - The worker and frontend must use matching block sizes.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-performance/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing).
 
 ## Aggregated Serving
 
@@ -444,7 +444,7 @@ await register_model(
 - **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
   runtime image ships no software video decoder. This needs a GPU with a video
   decode engine and a container granted the `video` driver capability — see
-  [Video Decode GPU Requirements](../../../../../use-cases/video/video-decoding.md).
+  [Video Decode GPU Requirements](../../../../../use-cases/video-understanding/video-decoding.md).
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
 - **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibility with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.

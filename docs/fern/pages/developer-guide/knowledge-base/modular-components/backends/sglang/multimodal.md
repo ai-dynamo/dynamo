@@ -33,7 +33,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 >
 > NVDEC requires a GPU with a video decode engine and a container granted the
 > `video` driver capability — see
-> [Video Decode GPU Requirements](../../../../../use-cases/video/video-decoding.md).
+> [Video Decode GPU Requirements](../../../../../use-cases/video-understanding/video-decoding.md).
 > `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
@@ -51,7 +51,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 ## Deployment Patterns
 
-SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](../../../../../use-cases/multimodal-performance/overview.md) for detailed explanations.
+SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](../../../../../use-cases/image-understanding/vlm-performance-optimization.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -139,7 +139,7 @@ Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
 Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-performance/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing).
 
 ## Use the Latest Release
 

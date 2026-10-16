@@ -93,7 +93,7 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 | **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | ✅ | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../../../../use-cases/multimodal-performance/multimodal-kv-routing.md))
+> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing))
 > 2. **KV-Aware LoRA Routing**: vLLM supports routing requests based on LoRA adapter affinity.
 > 3. **Audio Support**: vLLM supports audio models like Qwen2-Audio (experimental). ([Source](multimodal.md))
 > 4. **Video Support**: vLLM supports video input with frame sampling. ([Source](multimodal.md))
@@ -128,6 +128,6 @@ bash launch/agg.sh
 - **[Examples](../../../../../recipes/cli-templates/vllm.mdx)**: Local deployment launch scripts
 - **[KV Cache Offloading](kv-cache-offloading.md)**: LMCache and FlexKV integrations
 - **[Observability](observability.md)**: Metrics and monitoring
-- **[vLLM-Omni](../../../../../use-cases/image/image-generation.md#set-up-the-backend)**: Image, video, and speech generation
+- **[vLLM-Omni](../../../../../use-cases/diffusion/image-generation.md#set-up-the-backend)**: Image, video, and speech generation
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
 - **[vLLM Documentation](https://docs.vllm.ai/en/stable/)**: Upstream vLLM serve arguments

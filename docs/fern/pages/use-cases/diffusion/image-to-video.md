@@ -119,7 +119,7 @@ your installed version.
 ### Generate a Video from an Image
 
 Pass the source image URL in `input_reference`. The worker fetches it under
-the same [media URL policy](../image/image-understanding.md#media-url-policy) as
+the same [media URL policy](../image-understanding/overview.md#media-url-policy) as
 image inputs.
 
 ```bash
