@@ -12,7 +12,7 @@ content parts next to its text, and the worker runs the model's vision encoder
 before prefill.
 
 This page gets one image request working on each backend. To generate images
-instead, see [Image Generation](../diffusion/image-generation.md). To speed up
+instead, see [Text to Image](../diffusion/text-to-image.md). To speed up
 image workloads, see [VLM Performance Optimization](vlm-performance-optimization.md).
 
 ## Support Matrix

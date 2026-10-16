@@ -5,11 +5,11 @@ title: VLM Performance Optimization
 subtitle: Speed up image and video requests with routing, decoding, caching, and encoder disaggregation
 ---
 
-Once a first request works (see [Image Understanding](overview.md) or
-[Video Understanding](../video-understanding/overview.md)), these features cut
-the time a vision language model (VLM) spends on the steps around the model
-itself: fetching media, finding the right worker, running the vision encoder,
-and prefill. They work together or on their own. None of them apply to audio yet.
+Once you can serve a VLM in Dynamo (see [Image Understanding](overview.md)),
+these features cut the time a vision language model (VLM) spends on multiple
+stages in the pipeline: fetching media, finding the right worker, running the
+vision encoder, and prefill. Depending on your workload characteristics, you may
+benefit from using all of these features or only some of them.
 
 ## Where the Time Goes
 

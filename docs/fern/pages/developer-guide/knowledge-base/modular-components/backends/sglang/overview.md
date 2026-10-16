@@ -134,7 +134,7 @@ pip install -e .
 | [**KV-Aware Routing**](../../router/overview.md) | ✅ | |
 | [**SLA-Based Planner**](../../planner/planner-guide.md) | ✅ | |
 | [**Multimodal Support**](multimodal.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
-| [**Diffusion Models**](../../../../../use-cases/diffusion/image-generation.md) | ✅ | LLM diffusion, image, and video generation |
+| [**Diffusion Models**](../../../../../use-cases/diffusion/text-to-image.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../../concepts/fault-tolerance/request-cancellation-architecture.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**LoRA**](../../../../../cli/operations/lora-adapters.md) | 🚧 | **Experimental.** Dynamic loading and aggregated serving are validated; unloading is implemented but not end-to-end tested; disaggregated serving is not end-to-end validated |
 | [**Graceful Shutdown**](../../../../../kubernetes/fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
@@ -229,6 +229,6 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 - **[Reference Guide](reference-guide.md)**: Worker types, architecture, and configuration
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer details
-- **Diffusion**: [image](../../../../../use-cases/diffusion/image-generation.md), [video](../../../../../use-cases/diffusion/text-to-video.md), and [language](diffusion-language-models.md) diffusion models
+- **Diffusion**: [image](../../../../../use-cases/diffusion/text-to-image.md), [video](../../../../../use-cases/diffusion/text-to-video.md), and [language](diffusion-language-models.md) diffusion models
 - **[Observability](observability.md)**: Metrics, tracing, and Grafana dashboards
 - **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide

@@ -5,6 +5,10 @@ title: Text to Video (T2V)
 subtitle: Generate video from text prompts, with or without a synchronized audio track
 ---
 
+> [!TIP]
+> To serve FastVideo models, see [FastVideo](fastvideo.md). It runs a custom
+> worker behind the same `/v1/videos` endpoint and has its own Kubernetes deployment path.
+
 Dynamo serves text-to-video models through the `/v1/videos` endpoint. To
 animate a source image, see [Image to Video (I2V)](image-to-video.md). To answer
 questions *about* a video instead, see [Video Understanding](../video-understanding/overview.md).
@@ -394,7 +398,7 @@ For the full flag surface (quantization, TeaCache, torch.compile, attention back
 - [Text-to-Video with vLLM-Omni](text-to-video.md#vllm-omni)
 - [Text-to-Video with SGLang](text-to-video.md#sglang)
 - [FastVideo](fastvideo.md)
-- [Text-to-Image with TensorRT-LLM](image-generation.md#tensorrt-llm)
+- [Text-to-Image with TensorRT-LLM](text-to-image.md#tensorrt-llm)
 
 </Tab>
 </Tabs>

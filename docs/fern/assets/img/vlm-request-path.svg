@@ -2,78 +2,78 @@
   <title id="title">End-to-end path of a vision language model request and where each performance feature helps</title>
   <desc id="desc">A request with text and an image enters the Dynamo frontend, and the router picks a worker. The worker loads the image, runs the vision encoder to produce embeddings, prefills the text and image tokens, and decodes the answer. Multimodal KV routing helps when picking a worker and skips repeated prefill. Frontend media decoding and the shared image cache help when loading the image. The embedding cache and encoder disaggregation help when encoding the image.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker>
-    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker>
   </defs>
   <rect width="1440" height="590" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">END-TO-END VLM REQUEST PATH</text>
   <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Where each performance feature helps</text>
-  <rect x="38" y="96" width="452" height="156" rx="12" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <rect x="494" y="96" width="906" height="156" rx="12" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="38" y="96" width="452" height="156" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <rect x="510" y="96" width="908" height="156" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
   <text x="54" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">DYNAMO FRONTEND</text>
-  <text x="510" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">WORKERS (vLLM, SGLang, TensorRT-LLM)</text>
-  <rect x="50" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="76" cy="160" r="13" fill="#76B900"/>
+  <text x="526" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">WORKERS (vLLM, SGLang, TensorRT-LLM)</text>
+  <rect x="50" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="76" cy="160" r="13" fill="#234CDA"/>
   <text x="76" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">1</text>
   <text x="98" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Request arrives</text>
   <text x="64" y="198" font-size="13" fill="#4B5563">Text plus image_url</text>
-  <line x1="252" y1="182" x2="276" y2="182" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="278" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="304" cy="160" r="13" fill="#76B900"/>
+  <line x1="252" y1="182" x2="274" y2="182" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="278" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="304" cy="160" r="13" fill="#234CDA"/>
   <text x="304" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">2</text>
   <text x="326" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Pick a worker</text>
   <text x="292" y="198" font-size="13" fill="#4B5563">Router picks where it runs</text>
-  <line x1="480" y1="182" x2="504" y2="182" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="506" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="532" cy="160" r="13" fill="#76B900"/>
-  <text x="532" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">3</text>
-  <text x="554" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Load the image</text>
-  <text x="520" y="198" font-size="13" fill="#4B5563">Download and decode pixels</text>
-  <line x1="708" y1="182" x2="732" y2="182" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="734" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="760" cy="160" r="13" fill="#76B900"/>
-  <text x="760" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">4</text>
-  <text x="782" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Encode the image</text>
-  <text x="748" y="198" font-size="13" fill="#4B5563">Vision encoder → embeddings</text>
-  <line x1="936" y1="182" x2="960" y2="182" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="962" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="988" cy="160" r="13" fill="#76B900"/>
-  <text x="988" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">5</text>
-  <text x="1010" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Prefill</text>
-  <text x="976" y="198" font-size="13" fill="#4B5563">Read text + image tokens</text>
-  <line x1="1164" y1="182" x2="1188" y2="182" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="1190" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="1216" cy="160" r="13" fill="#76B900"/>
-  <text x="1216" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">6</text>
-  <text x="1238" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Decode</text>
-  <text x="1204" y="198" font-size="13" fill="#4B5563">Generate the answer</text>
-  <line x1="378" y1="236" x2="378" y2="288" stroke="#234CDA" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <rect x="278" y="290" width="200" height="112" rx="10" fill="#E7ECFF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="292" y="316" font-size="13" font-weight="700" fill="#234CDA">Multimodal KV routing</text>
+  <line x1="480" y1="182" x2="518" y2="182" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="522" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="548" cy="160" r="13" fill="#234CDA"/>
+  <text x="548" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">3</text>
+  <text x="570" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Load the image</text>
+  <text x="536" y="198" font-size="13" fill="#4B5563">Download and decode pixels</text>
+  <line x1="724" y1="182" x2="746" y2="182" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="750" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="776" cy="160" r="13" fill="#234CDA"/>
+  <text x="776" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">4</text>
+  <text x="798" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Encode the image</text>
+  <text x="764" y="198" font-size="13" fill="#4B5563">Vision encoder → embeddings</text>
+  <line x1="952" y1="182" x2="974" y2="182" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="978" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="1004" cy="160" r="13" fill="#234CDA"/>
+  <text x="1004" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">5</text>
+  <text x="1026" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Prefill</text>
+  <text x="992" y="198" font-size="13" fill="#4B5563">Read text + image tokens</text>
+  <line x1="1180" y1="182" x2="1202" y2="182" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="1206" y="132" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="1232" cy="160" r="13" fill="#234CDA"/>
+  <text x="1232" y="165" font-size="14" font-weight="700" text-anchor="middle" fill="#FFFFFF">6</text>
+  <text x="1254" y="165" font-size="15" font-weight="700" fill="#1A1A1A">Decode</text>
+  <text x="1220" y="198" font-size="13" fill="#4B5563">Generate the answer</text>
+  <line x1="378" y1="238" x2="378" y2="286" stroke="#76B900" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="1 7" marker-end="url(#arrow-green)"/>
+  <rect x="278" y="290" width="200" height="112" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="292" y="316" font-size="13" font-weight="700" fill="#4C7A00">Multimodal KV routing</text>
   <text x="292" y="338" font-size="13" fill="#1A1A1A">Send a repeated image to</text>
   <text x="292" y="356" font-size="13" fill="#1A1A1A">the worker that already</text>
   <text x="292" y="374" font-size="13" fill="#1A1A1A">holds its KV cache, so</text>
   <text x="292" y="392" font-size="13" fill="#1A1A1A">prefill is skipped.</text>
-  <line x1="606" y1="236" x2="606" y2="288" stroke="#234CDA" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <rect x="506" y="290" width="200" height="112" rx="10" fill="#E7ECFF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="520" y="316" font-size="13" font-weight="700" fill="#234CDA">Frontend media decoding</text>
-  <text x="520" y="338" font-size="13" fill="#1A1A1A">Decode images in the Rust</text>
-  <text x="520" y="356" font-size="13" fill="#1A1A1A">frontend, off the worker's</text>
-  <text x="520" y="374" font-size="13" fill="#1A1A1A">critical path.</text>
-  <rect x="506" y="416" width="200" height="112" rx="10" fill="#E7ECFF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="520" y="442" font-size="13" font-weight="700" fill="#234CDA">Shared image cache</text>
-  <text x="520" y="464" font-size="13" fill="#1A1A1A">Reuse downloaded image</text>
-  <text x="520" y="482" font-size="13" fill="#1A1A1A">bytes across workers.</text>
-  <line x1="834" y1="236" x2="834" y2="288" stroke="#234CDA" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <rect x="734" y="290" width="200" height="112" rx="10" fill="#E7ECFF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="748" y="316" font-size="13" font-weight="700" fill="#234CDA">Embedding cache</text>
-  <text x="748" y="338" font-size="13" fill="#1A1A1A">Skip the vision encoder</text>
-  <text x="748" y="356" font-size="13" fill="#1A1A1A">for images it has seen</text>
-  <text x="748" y="374" font-size="13" fill="#1A1A1A">before.</text>
-  <rect x="734" y="416" width="200" height="112" rx="10" fill="#E7ECFF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="748" y="442" font-size="13" font-weight="700" fill="#234CDA">Encoder disaggregation</text>
-  <text x="748" y="464" font-size="13" fill="#1A1A1A">Run the vision encoder on</text>
-  <text x="748" y="482" font-size="13" fill="#1A1A1A">its own workers so it</text>
-  <text x="748" y="500" font-size="13" fill="#1A1A1A">scales separately.</text>
-  <text x="50" y="572" font-size="13" fill="#4B5563">The blue boxes below the path are optional features. Each arrow points to the step that feature speeds up.</text>
+  <line x1="622" y1="238" x2="622" y2="286" stroke="#76B900" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="1 7" marker-end="url(#arrow-green)"/>
+  <rect x="522" y="290" width="200" height="112" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="536" y="316" font-size="13" font-weight="700" fill="#4C7A00">Frontend media decoding</text>
+  <text x="536" y="338" font-size="13" fill="#1A1A1A">Decode images in the Rust</text>
+  <text x="536" y="356" font-size="13" fill="#1A1A1A">frontend, off the worker's</text>
+  <text x="536" y="374" font-size="13" fill="#1A1A1A">critical path.</text>
+  <rect x="522" y="416" width="200" height="112" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="536" y="442" font-size="13" font-weight="700" fill="#4C7A00">Shared image cache</text>
+  <text x="536" y="464" font-size="13" fill="#1A1A1A">Reuse downloaded image</text>
+  <text x="536" y="482" font-size="13" fill="#1A1A1A">bytes across workers.</text>
+  <line x1="850" y1="238" x2="850" y2="286" stroke="#76B900" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="1 7" marker-end="url(#arrow-green)"/>
+  <rect x="750" y="290" width="200" height="112" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="764" y="316" font-size="13" font-weight="700" fill="#4C7A00">Embedding cache</text>
+  <text x="764" y="338" font-size="13" fill="#1A1A1A">Skip the vision encoder</text>
+  <text x="764" y="356" font-size="13" fill="#1A1A1A">for images it has seen</text>
+  <text x="764" y="374" font-size="13" fill="#1A1A1A">before.</text>
+  <rect x="750" y="416" width="200" height="112" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="764" y="442" font-size="13" font-weight="700" fill="#4C7A00">Encoder disaggregation</text>
+  <text x="764" y="464" font-size="13" fill="#1A1A1A">Run the vision encoder on</text>
+  <text x="764" y="482" font-size="13" fill="#1A1A1A">its own workers so it</text>
+  <text x="764" y="500" font-size="13" fill="#1A1A1A">scales separately.</text>
+  <text x="50" y="572" font-size="13" fill="#4B5563">The green boxes below the path are optional features. Each dotted arrow points to the step that feature speeds up.</text>
 </svg>

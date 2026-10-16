@@ -776,20 +776,20 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/diffusion/overview.md
-          - page: Image Generation
-            path: pages/use-cases/diffusion/image-generation.md
+          - page: FastVideo
+            slug: fastvideo
+            path: pages/use-cases/diffusion/fastvideo.md
+          - page: Text to Image
+            path: pages/use-cases/diffusion/text-to-image.md
           - page: Text to Video (T2V)
             slug: text-to-video
             path: pages/use-cases/diffusion/text-to-video.md
           - page: Image to Video (I2V)
             slug: image-to-video
             path: pages/use-cases/diffusion/image-to-video.md
-          - page: FastVideo
-            slug: fastvideo
-            path: pages/use-cases/diffusion/fastvideo.md
 
-      # ==================== Speech & Audio ====================
-      - section: Speech & Audio
+      # ==================== Speech ====================
+      - section: Speech
         collapsed: true
         icon: microphone
         slug: speech

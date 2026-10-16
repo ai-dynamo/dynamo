@@ -1021,11 +1021,11 @@ redirects:
   - source: "/dynamo/dev/additional-resources/kv-router-a-b-testing"
     destination: "/dynamo/dev/recipes/benchmarks/kv-router-ab-testing"
   - source: "/dynamo/dev/use-cases/diffusion/text-to-image/v-llm-omni"
-    destination: "/dynamo/dev/diffusion/image-generation"
+    destination: "/dynamo/dev/diffusion/text-to-image"
   - source: "/dynamo/dev/use-cases/diffusion/text-to-image/sg-lang"
-    destination: "/dynamo/dev/diffusion/image-generation"
+    destination: "/dynamo/dev/diffusion/text-to-image"
   - source: "/dynamo/dev/use-cases/diffusion/text-to-image/tensor-rt-llm"
-    destination: "/dynamo/dev/diffusion/image-generation"
+    destination: "/dynamo/dev/diffusion/text-to-image"
   - source: "/dynamo/dev/use-cases/diffusion/text-to-video/v-llm-omni"
     destination: "/dynamo/dev/diffusion/text-to-video"
   - source: "/dynamo/dev/use-cases/diffusion/text-to-video/sg-lang"
@@ -1043,11 +1043,11 @@ redirects:
   - source: "/dynamo/dev/use-cases/diffusion/text-to-text-llm-diffusion/sg-lang"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-diffusion-language-models"
   - source: "/dynamo/dev/user-guides/diffusion/text-to-image/v-llm-omni"
-    destination: "/dynamo/dev/diffusion/image-generation"
+    destination: "/dynamo/dev/diffusion/text-to-image"
   - source: "/dynamo/dev/user-guides/diffusion/text-to-image/sg-lang"
-    destination: "/dynamo/dev/diffusion/image-generation"
+    destination: "/dynamo/dev/diffusion/text-to-image"
   - source: "/dynamo/dev/user-guides/diffusion/text-to-image/tensor-rt-llm"
-    destination: "/dynamo/dev/diffusion/image-generation"
+    destination: "/dynamo/dev/diffusion/text-to-image"
   - source: "/dynamo/dev/user-guides/diffusion/text-to-video/v-llm-omni"
     destination: "/dynamo/dev/diffusion/text-to-video"
   - source: "/dynamo/dev/user-guides/diffusion/text-to-video/sg-lang"
@@ -1140,7 +1140,7 @@ redirects:
     destination: "/dynamo/dev/diffusion/:slug"
   # ------------------------------------------------------------
   # Use Cases restructure: multimodal and diffusion split into Image
-  # Understanding, Video Understanding, Diffusion, and Speech & Audio, with the
+  # Understanding, Video Understanding, Diffusion, and Speech, with the
   # shared multimodal performance features on VLM Performance Optimization;
   # Tool Calling & Reasoning moved to Developer Guide > Frontend.
   # ------------------------------------------------------------
@@ -1162,8 +1162,6 @@ redirects:
     destination: "/dynamo/dev/video-understanding/video-decoding"
   - source: "/dynamo/dev/multimodal/additional-media-decoders"
     destination: "/dynamo/dev/video-understanding/video-decoding"
-  - source: "/dynamo/dev/diffusion/text-to-image"
-    destination: "/dynamo/dev/diffusion/image-generation"
   - source: "/dynamo/dev/diffusion/text-to-audio"
     destination: "/dynamo/dev/speech/text-to-speech"
   - source: "/dynamo/dev/diffusion/text-to-text"

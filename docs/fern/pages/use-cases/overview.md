@@ -19,7 +19,7 @@ setup and a first working request.
 | Answer questions about images | [Image Understanding](image-understanding/overview.md) |
 | Answer questions about video | [Video Understanding](video-understanding/overview.md) |
 | Generate images or video from a prompt | [Diffusion](diffusion/overview.md) |
-| Transcribe speech, synthesize speech, or build a voice agent | [Speech and Audio](speech/voice-pipelines.md) |
+| Transcribe speech, synthesize speech, or build a voice agent | [Speech](speech/voice-pipelines.md) |
 | Speed up image and video workloads | [VLM Performance Optimization](image-understanding/vlm-performance-optimization.md) |
 | Pack many small models onto shared GPUs | [Many-Model Serving](gpu-sharing/overview.md) |
 
@@ -31,6 +31,6 @@ are documented with the frontend in the Developer Guide:
 
 | Modality | Understand (input) | Generate (output) |
 | --- | --- | --- |
-| Image | `image_url` in `/v1/chat/completions` on vLLM, SGLang, and TensorRT-LLM. See [Image Understanding](image-understanding/overview.md). | `/v1/images/generations` on vLLM-Omni, SGLang, and TensorRT-LLM (experimental). See [Image Generation](diffusion/image-generation.md). |
+| Image | `image_url` in `/v1/chat/completions` on vLLM, SGLang, and TensorRT-LLM. See [Image Understanding](image-understanding/overview.md). | `/v1/images/generations` on vLLM-Omni, SGLang, and TensorRT-LLM (experimental). See [Text to Image](diffusion/text-to-image.md). |
 | Video | `video_url` in `/v1/chat/completions` on vLLM, SGLang, and TensorRT-LLM. See [Video Understanding](video-understanding/overview.md). | `/v1/videos` on vLLM-Omni, SGLang, TensorRT-LLM (experimental), and FastVideo. See [Text to Video (T2V)](diffusion/text-to-video.md) and [Image to Video (I2V)](diffusion/image-to-video.md). |
 | Speech and audio | `/v1/realtime` transcription on vLLM and Nemotron Speech NIMs. See [Speech to Text](speech/speech-to-text.md). | `/v1/audio/speech` and `/v1/realtime` on vLLM-Omni. See [Text-to-Speech](speech/text-to-speech.md) and [Speech-to-Speech](speech/speech-to-speech.md). |

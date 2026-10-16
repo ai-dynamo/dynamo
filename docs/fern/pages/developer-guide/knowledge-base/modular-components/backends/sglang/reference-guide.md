@@ -44,7 +44,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](multimodal.md) inputs on this worker |
 | `--dedicated-mm-encoder` | `DYN_SGL_DEDICATED_MM_ENCODER` | `false` | Select the internal encode-worker topology for multimodal PD/P/D workers |
 | `--frontend-decoding` | `DYN_SGL_FRONTEND_DECODING` | `false` | Decode images and supported videos in the Rust frontend and transfer pixels through NIXL. Use it on aggregated/native workers or the frontend-facing encode worker, not internal multimodal workers. |
-| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../../../../use-cases/diffusion/image-generation.md#sglang) worker |
+| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../../../../use-cases/diffusion/text-to-image.md#sglang) worker |
 | `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../../../../use-cases/diffusion/text-to-video.md#sglang) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
 | `--disagg-config-key` | `DYN_SGL_DISAGG_CONFIG_KEY` | `None` | Key to select from disaggregation config (e.g., `prefill`, `decode`) |
@@ -178,5 +178,5 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
-- **Diffusion**: [image](../../../../../use-cases/diffusion/image-generation.md), [video](../../../../../use-cases/diffusion/text-to-video.md), and [language](diffusion-language-models.md) diffusion models
+- **Diffusion**: [image](../../../../../use-cases/diffusion/text-to-image.md), [video](../../../../../use-cases/diffusion/text-to-video.md), and [language](diffusion-language-models.md) diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration

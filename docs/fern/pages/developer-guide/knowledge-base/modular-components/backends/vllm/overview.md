@@ -128,6 +128,6 @@ bash launch/agg.sh
 - **[Examples](../../../../../recipes/cli-templates/vllm.mdx)**: Local deployment launch scripts
 - **[KV Cache Offloading](kv-cache-offloading.md)**: LMCache and FlexKV integrations
 - **[Observability](observability.md)**: Metrics and monitoring
-- **[vLLM-Omni](../../../../../use-cases/diffusion/image-generation.md#set-up-the-backend)**: Image, video, and speech generation
+- **[vLLM-Omni](../../../../../use-cases/diffusion/text-to-image.md#set-up-the-backend)**: Image, video, and speech generation
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
 - **[vLLM Documentation](https://docs.vllm.ai/en/stable/)**: Upstream vLLM serve arguments

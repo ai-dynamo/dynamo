@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Image Generation
+title: Text to Image
 subtitle: Generate images from text prompts with vLLM-Omni, SGLang, or TensorRT-LLM
 ---
 
@@ -186,8 +186,8 @@ Dynamo frontend; this endpoint currently requires the JSON `input_reference` con
 
 ## See Also
 
-- [Text-to-Image with SGLang](image-generation.md#sglang)
-- [Text-to-Image with TensorRT-LLM](image-generation.md#tensorrt-llm)
+- [Text-to-Image with SGLang](text-to-image.md#sglang)
+- [Text-to-Image with TensorRT-LLM](text-to-image.md#tensorrt-llm)
 - [Disaggregated Serving](../../developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md) — GLM-Image (2-stage text-to-image)
 - [vLLM-Omni Configuration reference](../../reference/backends/vllm-omni-configuration.mdx)
 
@@ -228,8 +228,8 @@ curl http://localhost:8000/v1/images/generations \
 
 ### See Also
 
-- [Text-to-Image with vLLM-Omni](image-generation.md#vllm-omni)
-- [Text-to-Image with TensorRT-LLM](image-generation.md#tensorrt-llm)
+- [Text-to-Image with vLLM-Omni](text-to-image.md#vllm-omni)
+- [Text-to-Image with TensorRT-LLM](text-to-image.md#tensorrt-llm)
 - [SGLang Examples](../../recipes/cli-templates/sglang.mdx)
 - [SGLang Configuration reference](../../reference/backends/sglang-configuration.mdx)
 
@@ -282,8 +282,8 @@ For the full flag surface (quantization, TeaCache, torch.compile, attention back
 
 ### See Also
 
-- [Text-to-Image with vLLM-Omni](image-generation.md#vllm-omni)
-- [Text-to-Image with SGLang](image-generation.md#sglang)
+- [Text-to-Image with vLLM-Omni](text-to-image.md#vllm-omni)
+- [Text-to-Image with SGLang](text-to-image.md#sglang)
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm)
 
 </Tab>
