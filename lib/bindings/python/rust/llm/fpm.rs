@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +38,7 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RuntimeConfig;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
+const DEFAULT_REMOVAL_GRACE_SECS: u64 = 15;
 
 struct TrackedFpm {
     payload: Vec<u8>,
@@ -46,18 +47,62 @@ struct TrackedFpm {
 
 type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
 
+fn record_fpm(
+    latest: &DashMap<(String, i64), TrackedFpm>,
+    removed_workers: &DashMap<String, Instant>,
+    key: (String, i64),
+    payload: Vec<u8>,
+    received_at: Instant,
+) {
+    if let Some(mut last_activity) = removed_workers.get_mut(&key.0) {
+        *last_activity = (*last_activity).max(received_at);
+    }
+    latest.insert(
+        key,
+        TrackedFpm {
+            payload,
+            received_at,
+        },
+    );
+}
+
+fn prune_removed_workers(
+    latest: &DashMap<(String, i64), TrackedFpm>,
+    removed_workers: &DashMap<String, Instant>,
+    now: Instant,
+    max_age: Duration,
+) {
+    let mut expired = HashSet::new();
+    removed_workers.retain(|worker, last_activity| {
+        if now.saturating_duration_since(*last_activity) > max_age {
+            expired.insert(worker.clone());
+            false
+        } else {
+            true
+        }
+    });
+    // Drop tombstone locks before touching samples; snapshot readers lock samples first.
+    if !expired.is_empty() {
+        latest.retain(|(worker, _), sample| {
+            !expired.contains(worker)
+                || now.saturating_duration_since(sample.received_at) <= max_age
+        });
+    }
+}
+
 fn fresh_fpm_snapshot(
     latest: &DashMap<(String, i64), TrackedFpm>,
     expected: &HashMap<String, Option<Range<u32>>>,
-    removed_workers: &DashSet<String>,
+    removed_workers: &DashMap<String, Instant>,
     now: Instant,
     max_age: Duration,
 ) -> (FpmSnapshot, Vec<String>, usize, usize) {
+    prune_removed_workers(latest, removed_workers, now, max_age);
     let mut snapshot = HashMap::new();
     let mut unjoined = HashSet::new();
     let mut stale = 0;
     for entry in latest {
-        if removed_workers.contains(&entry.key().0) {
+        if removed_workers.contains_key(&entry.key().0) {
             continue;
         }
         let expired = now.saturating_duration_since(entry.value().received_at) > max_age;
@@ -85,7 +130,7 @@ fn fresh_fpm_snapshot(
     }
     let missing = expected
         .iter()
-        .filter(|(worker, _)| !removed_workers.contains(worker.as_str()))
+        .filter(|(worker, _)| !removed_workers.contains_key(worker.as_str()))
         .map(|(worker, ranks)| {
             ranks.as_ref().map_or(1, |ranks| {
                 ranks
@@ -494,9 +539,10 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
-    // Retain removal history until re-add: late events from retired publishers
-    // must not be confused with publishers that never joined discovery.
-    removed_workers: Arc<DashSet<String>>,
+    // Keep retired publishers distinct from unknown publishers until they have
+    // been quiet for a freshness window. Late FPMs refresh this timestamp.
+    removed_workers: Arc<DashMap<String, Instant>>,
+    removal_grace_secs: Arc<AtomicU64>,
     // Serialized ModelDeploymentCards grouped by worker. Each worker retains
     // complete card identities for exact removal and one selected base/fallback
     // card for snapshots.
@@ -659,12 +705,12 @@ fn update_worker_model_card_taints(
 
 fn remove_worker_model_card(
     cards: &DashMap<String, WorkerModelCards>,
-    removed_workers: &DashSet<String>,
+    removed_workers: &DashMap<String, Instant>,
     worker_id: &str,
     card_id: &ModelCardInstanceId,
 ) -> bool {
     let Some(mut worker_cards) = cards.get_mut(worker_id) else {
-        removed_workers.insert(worker_id.to_string());
+        removed_workers.insert(worker_id.to_string(), Instant::now());
         return false;
     };
     worker_cards.remove(card_id);
@@ -672,7 +718,7 @@ fn remove_worker_model_card(
         return true;
     }
 
-    removed_workers.insert(worker_id.to_string());
+    removed_workers.insert(worker_id.to_string(), Instant::now());
     drop(worker_cards);
     cards.remove(worker_id);
     false
@@ -697,7 +743,8 @@ impl FpmEventSubscriber {
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
-            removed_workers: Arc::new(DashSet::new()),
+            removed_workers: Arc::new(DashMap::new()),
+            removal_grace_secs: Arc::new(AtomicU64::new(DEFAULT_REMOVAL_GRACE_SECS)),
             worker_model_cards: Arc::new(DashMap::new()),
         })
     }
@@ -812,10 +859,12 @@ impl FpmEventSubscriber {
         let cancel = self.cancel.clone();
         let stats = self.latest_stats.clone();
         let known = self.known_workers.clone();
+        let removed_workers = self.removed_workers.clone();
 
         // Task 1: event consumption.
         //
         // Inserts every FPM into latest_stats without checking known_workers.
+        // Late FPMs also refresh the removed-worker grace period.
         // Ghost entries (from workers that have already been removed) are
         // filtered out by get_recent_stats() at read time.  DashMap's
         // per-shard locking keeps contention low but does not eliminate it
@@ -825,6 +874,7 @@ impl FpmEventSubscriber {
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
             let stats = stats.clone();
+            let removed_workers = removed_workers.clone();
             async move {
                 let mut subscriber =
                     match EventSubscriber::for_endpoint(&endpoint, FPM_TOPIC).await {
@@ -849,10 +899,13 @@ impl FpmEventSubscriber {
                                 Some(Ok(envelope)) => {
                                     let payload = envelope.payload.to_vec();
                                     if let Some(key) = extract_fpm_key(&payload) {
-                                        stats.insert(key, TrackedFpm {
+                                        record_fpm(
+                                            &stats,
+                                            &removed_workers,
+                                            key,
                                             payload,
-                                            received_at: Instant::now(),
-                                        });
+                                            Instant::now(),
+                                        );
                                     } else {
                                         tracing::warn!(
                                             "FPM tracker: failed to extract key from payload ({} bytes)",
@@ -882,7 +935,7 @@ impl FpmEventSubscriber {
         // condition (FPM arriving *after* the Removed event) are caught by the
         // known_workers filter in get_recent_stats().
         let cards = self.worker_model_cards.clone();
-        let removed_workers = self.removed_workers.clone();
+        let removal_grace_secs = self.removal_grace_secs.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
@@ -993,6 +1046,13 @@ impl FpmEventSubscriber {
                                              worker_id={removed_id} (MDC removed)"
                                         );
                                     }
+                                    // Bound retirement history even for legacy snapshot consumers.
+                                    prune_removed_workers(
+                                        &stats,
+                                        &removed_workers,
+                                        Instant::now(),
+                                        Duration::from_secs(removal_grace_secs.load(Ordering::Relaxed)),
+                                    );
                                 }
                                 Some(Ok(DiscoveryEvent::Resync(_))) => {}
                                 Some(Err(e)) => {
@@ -1055,6 +1115,13 @@ impl FpmEventSubscriber {
             .ok()
             .filter(|age| !age.is_zero())
             .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))?;
+        // Discovery-side cleanup rounds up; health reads use the exact duration below.
+        self.removal_grace_secs.store(
+            max_age
+                .as_secs()
+                .saturating_add(u64::from(max_age.subsec_nanos() != 0)),
+            Ordering::Relaxed,
+        );
         let expected = self
             .known_workers
             .iter()
@@ -1124,9 +1191,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_separates_missing_identity_and_stale_samples() {
-        let removed_workers = DashSet::from_iter(["removed".to_string()]);
+    fn quiet_removed_workers_release_tombstones_and_cached_samples() {
         let now = Instant::now();
+        let removed_at = now + Duration::from_millis(500);
+        let removed_workers = DashMap::from_iter([("retired".to_string(), removed_at)]);
+        let latest = DashMap::new();
+        // An event captured before removal must not shorten its grace period.
+        record_fpm(
+            &latest,
+            &removed_workers,
+            ("retired".to_string(), 0),
+            vec![0],
+            now,
+        );
+        assert_eq!(*removed_workers.get("retired").unwrap(), removed_at);
+        record_fpm(
+            &latest,
+            &removed_workers,
+            ("retired".to_string(), 0),
+            vec![1],
+            now + Duration::from_millis(750),
+        );
+        fresh_fpm_snapshot(
+            &latest,
+            &HashMap::new(),
+            &removed_workers,
+            now + Duration::from_millis(1500),
+            Duration::from_secs(1),
+        );
+        assert!(removed_workers.contains_key("retired"));
+        assert_eq!(latest.len(), 1);
+        fresh_fpm_snapshot(
+            &latest,
+            &HashMap::new(),
+            &removed_workers,
+            now + Duration::from_secs(2),
+            Duration::from_secs(1),
+        );
+        assert!(removed_workers.is_empty());
+        assert!(latest.is_empty());
+    }
+
+    #[test]
+    fn retirement_cleanup_preserves_a_sample_inserted_after_expiry() {
+        let removed_at = Instant::now();
+        let now = removed_at + Duration::from_secs(2);
+        let removed_workers = DashMap::from_iter([("retired".to_string(), removed_at)]);
+        let latest = DashMap::new();
+        // Model an insert racing cleanup after the retired identity was forgotten.
+        latest.insert(
+            ("retired".to_string(), 0),
+            TrackedFpm {
+                payload: vec![1],
+                received_at: now,
+            },
+        );
+        let (_, unjoined, _, _) = fresh_fpm_snapshot(
+            &latest,
+            &HashMap::new(),
+            &removed_workers,
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(removed_workers.is_empty());
+        assert_eq!(latest.len(), 1);
+        assert_eq!(unjoined, ["retired"]);
+    }
+
+    #[test]
+    fn snapshot_separates_missing_identity_and_stale_samples() {
+        let now = Instant::now();
+        let removed_workers = DashMap::from_iter([("removed".to_string(), now)]);
         let latest = DashMap::new();
         let mut expected = HashMap::new();
         expected.insert("fresh".to_string(), Some(0..1));
@@ -1186,7 +1321,7 @@ mod tests {
 
     #[test]
     fn snapshot_reports_workers_and_offset_ranks_that_never_published() {
-        let removed_workers = DashSet::new();
+        let removed_workers = DashMap::new();
         let now = Instant::now();
         let latest = DashMap::new();
         let expected = HashMap::from([
@@ -1315,7 +1450,7 @@ mod tests {
     #[test]
     fn removing_cards_keeps_worker_live_until_last_card() {
         let cards = DashMap::new();
-        let removed_workers = DashSet::new();
+        let removed_workers = DashMap::new();
         let base = card_id(42, None);
         let lora_a = card_id(42, Some("adapter-a"));
         let lora_b = card_id(42, Some("adapter-b"));
@@ -1348,7 +1483,7 @@ mod tests {
             &lora_b
         ));
         assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-a"));
-        assert!(!removed_workers.contains("42"));
+        assert!(!removed_workers.contains_key("42"));
 
         assert!(!remove_worker_model_card(
             &cards,
@@ -1357,7 +1492,7 @@ mod tests {
             &lora_a
         ));
         assert!(!cards.contains_key("42"));
-        assert!(removed_workers.contains("42"));
+        assert!(removed_workers.contains_key("42"));
     }
 
     #[test]
