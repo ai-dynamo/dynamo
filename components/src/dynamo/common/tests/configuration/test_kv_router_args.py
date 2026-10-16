@@ -693,6 +693,10 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
     assert f"{flag}={expected}" in caplog.text
+    deprecated = field == "active_prefill_tokens_threshold"
+    assert (
+        "--active-prefill-tokens-threshold is deprecated" in caplog.text
+    ) == deprecated
 
 
 @pytest.mark.parametrize(
