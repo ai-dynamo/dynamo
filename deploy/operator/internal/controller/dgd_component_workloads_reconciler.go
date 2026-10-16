@@ -203,26 +203,16 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
-	// Artifact identity is independent of startup policy. Preserve the automatic
-	// SnapshotJob handoff even while WaitForCheckpoint keeps replicas gated.
-	if checkpointInfo.AutomaticSnapshotJob != nil {
-		if err := applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo); err != nil {
-			return err
-		}
+	// Artifact identity is independent of startup policy: stamp the compatibility
+	// hash and any Ready candidate pin even while WaitForCheckpoint gates replicas.
+	if err := applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo); err != nil {
+		return err
 	}
 
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
 		dcd.Spec.Replicas = ptr.To(int32(0))
-		return nil
 	}
-	if checkpointInfo.StartupPolicy != "" &&
-		checkpointInfo.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
-		return nil
-	}
-	if checkpointInfo.AutomaticSnapshotJob != nil {
-		return nil
-	}
-	return applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo)
+	return nil
 }
 
 func applyRestoreCandidateMetadataToDCD(
