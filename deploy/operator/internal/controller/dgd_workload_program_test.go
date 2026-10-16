@@ -484,6 +484,97 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	assert.Equal(t, previous, dgd.Status)
 }
 
+// TestGroveProgramPersistsCompatibilityWarningOnError covers warning retries across status writes and generations.
+func TestGroveProgramPersistsCompatibilityWarningOnError(t *testing.T) {
+	t.Log("Create a namespace-restricted multinode DGD with unreadable Grove and failing resource writes")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "graph",
+			Namespace:   "default",
+			Generation:  7,
+			Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
+		},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+				Replicas:      ptr.To(int32(1)),
+				Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+			}},
+		},
+		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{ObservedGeneration: 6},
+	}
+	resourceErr := errors.New("service account creation failed")
+	statusErr := errors.New("status update failed")
+	failStatusWrite := true
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(dgd).WithObjects(dgd).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+				return resourceErr
+			},
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if failStatusWrite {
+					return statusErr
+				}
+				return c.SubResource(subresource).Update(ctx, obj, opts...)
+			},
+		}).Build()
+	recorder := events.NewFakeRecorder(10)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: kubeClient, Recorder: recorder,
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: dgd.Namespace},
+		},
+		RuntimeConfig: &commonController.RuntimeConfig{
+			Gate: features.Gates{Grove: true}, GroveCompatibility: features.NewGroveCompatibilityProbe(kubeClient),
+		},
+	}
+	reconciler.Config.Discovery.Backend = "kubernetes"
+	steps := []struct {
+		generation      int64
+		failStatusWrite bool
+		wantEvents      int
+	}{
+		{generation: 7, failStatusWrite: true},
+		{generation: 7, wantEvents: 1},
+		{generation: 7},
+		{generation: 8, wantEvents: 1},
+		{generation: 8},
+	}
+	for _, step := range steps {
+		t.Logf("Reconcile generation %d with failed status write %t", step.generation, step.failStatusWrite)
+		require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
+		if dgd.Generation != step.generation {
+			dgd.Generation = step.generation
+			require.NoError(t, kubeClient.Update(t.Context(), dgd))
+		}
+		previous := dgd.Status.DeepCopy()
+		result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+		require.ErrorIs(t, err, resourceErr)
+		assert.Equal(t, *previous, dgd.Status, "the program must not mutate the input status")
+		assert.Equal(t, int64(6), result.Status.ObservedGeneration, "failed workloads remain unobserved")
+		warning := meta.FindStatusCondition(result.Status.Conditions, groveCompatibilityWarningCondition)
+		require.NotNil(t, warning)
+		assert.Equal(t, step.generation, warning.ObservedGeneration)
+
+		t.Log("Persist through the outer controller and verify warning publication")
+		failStatusWrite = step.failStatusWrite
+		err = reconciler.persistWorkloadProgramResult(t.Context(), dgd, result)
+		if step.failStatusWrite {
+			require.ErrorIs(t, err, statusErr)
+		} else {
+			require.NoError(t, err)
+		}
+		require.Len(t, recorder.Events, step.wantEvents)
+		for range step.wantEvents {
+			assert.Contains(t, <-recorder.Events, string(reasonUnverifiableGroveVersion))
+		}
+	}
+}
+
 func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 	t.Log("Build a two-node DRA worker and its initially resolvable claim template")
 	claimTemplate := &resourcev1.ResourceClaimTemplate{

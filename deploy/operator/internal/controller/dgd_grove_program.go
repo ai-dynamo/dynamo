@@ -269,6 +269,10 @@ func (p *groveProgram) Reconcile(
 // upgraded without an operator restart or a DGD edit.
 const groveCompatibilityRecheckInterval = time.Minute
 
+// groveCompatibilityWarningCondition records the last generation warned, independently
+// of whether later workload reconciliation succeeded.
+const groveCompatibilityWarningCondition = "GroveCompatibilityWarning"
+
 // checkGroveCompatibility fails the DGD and reports true when multinode workers would need
 // GROVE_PCSG_POD_INDEX that Grove does not set; a transient probe error leaves status alone.
 func (p *groveProgram) checkGroveCompatibility(
@@ -290,7 +294,15 @@ func (p *groveProgram) checkGroveCompatibility(
 	// The chart gives a namespace-restricted operator no CRD read; warn once per generation.
 	if result.State == features.GroveUnverifiable && p.namespaceRestricted {
 		log.FromContext(ctx).Info("Grove compatibility unverifiable; continuing", "message", result.Message)
-		if dgd.Status.ObservedGeneration != dgd.Generation {
+		previous := meta.FindStatusCondition(programResult.Status.Conditions, groveCompatibilityWarningCondition)
+		if previous == nil || previous.ObservedGeneration != dgd.Generation {
+			meta.SetStatusCondition(&programResult.Status.Conditions, metav1.Condition{
+				Type:               groveCompatibilityWarningCondition,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: dgd.Generation,
+				Reason:             string(reasonUnverifiableGroveVersion),
+				Message:            result.Message,
+			})
 			programResult.Eventf(corev1.EventTypeWarning, string(reasonUnverifiableGroveVersion), "%s", result.Message)
 		}
 		return false, nil
