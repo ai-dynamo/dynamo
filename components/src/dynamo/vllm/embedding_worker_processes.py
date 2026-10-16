@@ -33,7 +33,10 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor import Executor
 
-from dynamo.common.utils.worker_shutdown import child_shutdown_environment
+from dynamo.common.utils.worker_shutdown import (
+    child_shutdown_environment,
+    child_shutdown_fds,
+)
 
 # Resolved on first use, not at import: vLLM renamed get_engine_zmq_addresses in
 # vllm-project/vllm#54113, and this module is imported by every dynamo.vllm worker
@@ -573,6 +576,7 @@ def create_shared_embedding_engine_client(
                         # The parent forwards shutdown once. Terminal/group
                         # signals must not also reach children and escalate it.
                         start_new_session=True,
+                        pass_fds=child_shutdown_fds(),
                         env=_child_environment(
                             process_count=process_count,
                             process_index=process_index,

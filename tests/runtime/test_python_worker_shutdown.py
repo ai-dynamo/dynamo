@@ -20,6 +20,28 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
+async def test_shutdown_rejects_late_endpoint_registration(monkeypatch):
+    # Regression: startup completing after withdrawal must not republish a worker.
+    monkeypatch.setenv("DYN_SYSTEM_PORT", "0")
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
+    )
+    endpoint = runtime.endpoint(f"shutdown{uuid.uuid4().hex}.worker.generate")
+
+    async def handler(request, context=None):
+        yield request
+
+    try:
+        await runtime.shutdown_engine_routes()
+        with pytest.raises(Exception, match="runtime is shutting down"):
+            await endpoint.serve_endpoint(handler)
+        with pytest.raises(Exception, match="runtime is shutting down"):
+            await endpoint.register_endpoint_instance()
+    finally:
+        await runtime.shutdown_and_wait(timeout_secs=1)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("push", [False, True], ids=["pull", "push"])
 @pytest.mark.parametrize("request_plane", ["tcp", "nats"])
 @pytest.mark.parametrize("discovery_backend", ["mem"])

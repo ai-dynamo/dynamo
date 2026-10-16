@@ -90,6 +90,7 @@ class _SnapshotRuntimeProxy:
         self._snapshot_config = snapshot_config
         self._argv = list(argv) if argv is not None else None
         self._runtime: Any | None = None
+        self._shutting_down = False
         self._failover_lock: Any | None = None
 
     async def snapshot_before_endpoint(self, engine: Any, config: Any) -> None:
@@ -125,6 +126,8 @@ class _SnapshotRuntimeProxy:
             config,
             self._argv,
         )
+        if self._shutting_down:
+            raise RuntimeError("worker shut down before snapshot restore completed")
         self._runtime, _ = _create_runtime(
             discovery_backend=config.discovery_backend,
             request_plane=config.request_plane,
@@ -153,6 +156,7 @@ class _SnapshotRuntimeProxy:
             await self._runtime.shutdown_and_wait(timeout_secs=timeout_secs)
 
     async def shutdown_engine_routes(self) -> None:
+        self._shutting_down = True
         if self._runtime is not None:
             await self._runtime.shutdown_engine_routes()
 

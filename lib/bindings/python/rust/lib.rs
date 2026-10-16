@@ -1512,11 +1512,14 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
-    /// Stop engine-control admission and join already-admitted callbacks.
+    /// Fence endpoint registration, stop controls, and join admitted callbacks.
     fn shutdown_engine_routes<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let runtime = self.inner.runtime().clone();
+        runtime.mark_shutting_down();
         let routes = self.inner.engine_routes().clone();
         routes.close();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            runtime.close_endpoint_registration().await;
             routes.wait_for_idle().await;
             Ok(())
         })

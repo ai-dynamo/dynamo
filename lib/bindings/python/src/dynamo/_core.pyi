@@ -149,7 +149,7 @@ class DistributedRuntime:
         ...
 
     async def shutdown_engine_routes(self) -> None:
-        """Close terminal engine-control admission and join admitted callbacks."""
+        """Fence endpoint registration and join admitted engine-control callbacks."""
         ...
 
     def engine_routes_closed(self) -> bool:

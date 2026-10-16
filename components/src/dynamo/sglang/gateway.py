@@ -25,6 +25,7 @@ import sglang as sgl
 
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
+from dynamo.common.utils.worker_shutdown import child_shutdown_fds
 
 if TYPE_CHECKING:
     from dynamo.common.utils.worker_shutdown import WorkerShutdown
@@ -379,6 +380,7 @@ async def serve_via_gateway_children(
                     # The parent forwards signals; group delivery must not
                     # reach children again and trigger forced termination.
                     start_new_session=True,
+                    pass_fds=child_shutdown_fds(),
                     env=child_environment(index, load_time),
                 )
             )

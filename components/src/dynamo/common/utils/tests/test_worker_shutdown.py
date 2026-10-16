@@ -89,6 +89,13 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
         assert await anext(stream) == 1
         shutdown.request_shutdown()
         await unregistered.wait()
+        late_endpoint = Mock()
+        late_startup = asyncio.create_task(
+            ws.serve_endpoint(late_endpoint, generate, shutdown=shutdown)
+        )
+        await asyncio.sleep(0)
+        assert not late_startup.done()
+        late_endpoint.serve_endpoint.assert_not_called()
         while shutdown.accepting:
             await asyncio.sleep(0)
         with pytest.raises(ws.WorkerDraining):
@@ -97,8 +104,63 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
         release.set()
         assert [item async for item in stream] == [2]
         await owner
+        await late_startup
         assert events == ["request", "unregister", "response_done", "engine", "runtime"]
         shutdown_env.finish.assert_called_once()
+
+    asyncio.run(run())
+
+
+def test_delayed_child_signal_keeps_parent_deadline(shutdown_env, monkeypatch):
+    # Regression: time spent joining parent controls must not restart the child
+    # budget; exercise the actual inherited descriptor across a process boundary.
+    monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "30")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "5")
+
+    async def run():
+        runtime = Mock()
+
+        async def done(*args, **kwargs):
+            pass
+
+        runtime.shutdown_engine_routes = done
+        runtime.shutdown_and_wait = done
+        parent = ws.WorkerShutdown(runtime, [], asyncio.Event())
+
+        async def worker():
+            env = ws.child_shutdown_environment()
+            fds = ws.child_shutdown_fds()
+            parent.request_shutdown()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    """
+import asyncio, sys
+from unittest.mock import Mock, patch
+from dynamo.common.utils import worker_shutdown as ws
+async def main():
+    child = ws.WorkerShutdown(None, [], asyncio.Event())
+    deadline = float(sys.argv[1])
+    with patch.object(ws, 'ShutdownWatchdog', Mock()), \
+         patch.object(ws.time, 'monotonic', return_value=deadline - 15), \
+         patch.object(child, '_start_sequence'):
+        child.request_shutdown()
+        assert child._deadline == deadline, (child._deadline, deadline)
+asyncio.run(main())
+""",
+                    str(parent._drain_deadline),
+                ],
+                env=env,
+                pass_fds=fds,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            await asyncio.Event().wait()
+
+        await parent.run(worker(), install_signals=False)
 
     asyncio.run(run())
 

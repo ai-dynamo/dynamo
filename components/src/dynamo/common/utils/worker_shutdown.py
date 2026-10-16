@@ -8,6 +8,8 @@ import logging
 import math
 import os
 import signal
+import struct
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import aclosing
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CLEANUP_SECONDS = 5.0
 _MAX_SECONDS = 315_360_000.0
 _CHILD_TOTAL_ENV = "_DYN_WORKER_SHUTDOWN_CHILD_TOTAL_SECS"
+_CHILD_DEADLINE_FD_ENV = "_DYN_WORKER_SHUTDOWN_CHILD_DEADLINE_FD"
+_PARENT_DEADLINE_FD_ENV = "_DYN_WORKER_SHUTDOWN_PARENT_DEADLINE_FD"
 
 
 def _seconds(
@@ -51,7 +55,18 @@ def child_shutdown_environment() -> dict[str, str]:
         _DEFAULT_CLEANUP_SECONDS,
         positive=True,
     )
-    return {**os.environ, _CHILD_TOTAL_ENV: str(max(0.0, total - cleanup))}
+    env = {**os.environ, _CHILD_TOTAL_ENV: str(max(0.0, total - cleanup))}
+    parent_fd = env.pop(_CHILD_DEADLINE_FD_ENV, None)
+    env.pop(_PARENT_DEADLINE_FD_ENV, None)
+    if parent_fd is not None:
+        env[_PARENT_DEADLINE_FD_ENV] = parent_fd
+    return env
+
+
+def child_shutdown_fds() -> tuple[int, ...]:
+    """Keep the parent's deadline descriptor open across child exec."""
+    raw = os.environ.get(_CHILD_DEADLINE_FD_ENV)
+    return (int(raw),) if raw is not None else ()
 
 
 class WorkerShutdown:
@@ -93,6 +108,7 @@ class WorkerShutdown:
         self._requested = asyncio.Event()
         self._caps: dict[str, float] = {}
         self._metrics = None
+        self._child_deadline_fd: int | None = None
 
     def wrap(self, handler: Callable) -> Callable:
         """Keep admission and tracking outside the backend generator's body."""
@@ -132,6 +148,14 @@ class WorkerShutdown:
         timeout = float(worker_shutdown_timeout_secs())
         total = min(timeout, _MAX_SECONDS)
         total = min(total, _seconds(_CHILD_TOTAL_ENV, total))
+        parent_fd = os.environ.get(_PARENT_DEADLINE_FD_ENV)
+        if parent_fd is not None:
+            try:
+                deadline = struct.unpack("d", os.pread(int(parent_fd), 8, 0))[0]
+            except (OSError, ValueError, struct.error):
+                logger.exception("Cannot read parent shutdown deadline")
+                deadline = origin
+            total = min(total, max(0.0, deadline - origin))
         self._caps = {
             "router_grace": grace,
             "inflight": _seconds("DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS", math.inf),
@@ -152,6 +176,12 @@ class WorkerShutdown:
         self._watchdog = ShutdownWatchdog(
             max(0.0, self._hard_deadline - time.monotonic())
         )
+        if self._child_deadline_fd is not None:
+            # Publish before any child is signalled. pread/pwrite do not share
+            # file offsets, and the inherited anonymous file needs no pathname.
+            os.pwrite(
+                self._child_deadline_fd, struct.pack("d", self._drain_deadline), 0
+            )
         logger.info("Received signal %s; starting worker shutdown", signum)
         self._requested.set()
         # A synchronous signal handler can interrupt an idle selector, which
@@ -350,6 +380,21 @@ class WorkerShutdown:
 
     async def run(self, worker: Coroutine, *, install_signals: bool = True) -> None:
         """Run the engine owner and join the complete sequence before returning."""
+        previous_fd = os.environ.get(_CHILD_DEADLINE_FD_ENV)
+        with tempfile.TemporaryFile(buffering=0) as deadline_file:
+            self._child_deadline_fd = deadline_file.fileno()
+            os.pwrite(self._child_deadline_fd, struct.pack("d", math.inf), 0)
+            os.environ[_CHILD_DEADLINE_FD_ENV] = str(self._child_deadline_fd)
+            try:
+                await self._run(worker, install_signals=install_signals)
+            finally:
+                self._child_deadline_fd = None
+                if previous_fd is None:
+                    os.environ.pop(_CHILD_DEADLINE_FD_ENV, None)
+                else:
+                    os.environ[_CHILD_DEADLINE_FD_ENV] = previous_fd
+
+    async def _run(self, worker: Coroutine, *, install_signals: bool) -> None:
         previous = {}
         if install_signals:
             for sig in (signal.SIGTERM, signal.SIGINT):
@@ -382,7 +427,7 @@ class WorkerShutdown:
                 signal.signal(sig, handler)
 
 
-def serve_endpoint(
+async def serve_endpoint(
     endpoint,
     handler,
     *,
@@ -392,9 +437,20 @@ def serve_endpoint(
 ):
     """Register a handler with the worker's admission gate, retaining push egress."""
     if shutdown is not None:
+        if shutdown.started:
+            await shutdown.shutdown_event.wait()
+            return
         if shutdown._metrics is None:
             shutdown._metrics = endpoint.metrics.shutdown_metrics()
         handler = shutdown.wrap(handler)
-    if bidirectional:
-        return endpoint.serve_bidirectional_endpoint(handler, **kwargs)
-    return endpoint.serve_endpoint(handler, **kwargs)
+    try:
+        if bidirectional:
+            await endpoint.serve_bidirectional_endpoint(handler, **kwargs)
+        else:
+            await endpoint.serve_endpoint(handler, **kwargs)
+    except Exception:
+        if shutdown is not None and shutdown.started:
+            # Registration can lose the race with the runtime fence. Do not
+            # unwind the engine owner while other admitted requests still drain.
+            await shutdown.shutdown_event.wait()
+        raise
