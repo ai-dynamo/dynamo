@@ -13,7 +13,7 @@
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
  * - Route docs-artifact tests to recipe-check without core E2E checks
- * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
+ * - Route sidecar files to sidecar/Rust checks and framework-native E2E where needed
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -175,7 +175,7 @@ const testCases = [
     desc: 'AISimulate Dynamo adapter triggers planner validation'
   },
 
-  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
+  // Sidecar Rust and proto files trigger Rust checks and their native E2E only.
   {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
@@ -183,8 +183,8 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: true },
+    desc: 'trtllm sidecar contracts trigger Rust checks and trtllm E2E'
   },
   {
     file: 'lib/sidecar/sglang/src/lib.rs',
@@ -193,8 +193,8 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/trtllm/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: true },
+    desc: 'trtllm sidecar source triggers Rust checks and trtllm E2E'
   },
   {
     file: 'lib/sidecar/vllm/deploy/agg.yaml',
