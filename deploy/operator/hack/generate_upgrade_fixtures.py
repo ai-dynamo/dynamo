@@ -20,7 +20,6 @@ TEMPLATE = OPERATOR / "hack/upgrade_capture_test.go.tmpl"
 
 
 def sha256(data):
-    """Hash exact file bytes for the snapshot provenance lock."""
     return hashlib.sha256(data).hexdigest()
 
 

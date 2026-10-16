@@ -5,11 +5,9 @@ package controller
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,12 +20,10 @@ import (
 	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grove "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,7 +61,6 @@ func readUpgradeReplayJSON(t *testing.T, path string, target any) []byte {
 	return data
 }
 
-// loadUpgradeReplayCatalog verifies source provenance and complete snapshot inventory before replay.
 func loadUpgradeReplayCatalog(t *testing.T) upgradeReplayCatalog {
 	t.Helper()
 	var lock struct {
@@ -116,13 +111,13 @@ func loadUpgradeReplaySnapshot(t *testing.T, catalog upgradeReplayCatalog, profi
 	return snapshot, &pcs
 }
 
-// newUpgradeReplayReconciler seeds the production Grove reconciler with non-nil historical objects.
-// Its fake client exercises resource writes, not real Grove controllers or Pod lifecycles.
-func newUpgradeReplayReconciler(t *testing.T, dgd *api.DynamoGraphDeployment, pcs *grove.PodCliqueSet, hooks interceptor.Funcs) (*groveWorkloadsReconciler, client.Client) {
+// The fake client exercises resource writes, not real Grove controllers or Pod lifecycles.
+// dgd and pcs must be non-nil.
+func newUpgradeReplayReconciler(t *testing.T, dgd *api.DynamoGraphDeployment, pcs *grove.PodCliqueSet) (*groveWorkloadsReconciler, client.Client) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(upgradeScheme).WithObjects(dgd, pcs).
 		WithRESTMapper(groveScaleRESTMapper()).
-		WithStatusSubresource(&api.DynamoGraphDeployment{}).WithInterceptorFuncs(groveScaleInterceptor(hooks, nil)).Build()
+		WithStatusSubresource(&api.DynamoGraphDeployment{}).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).Build()
 	recorder := events.NewFakeRecorder(100)
 	rollout := newDGDWorkerRolloutReconciler(c, recorder)
 	secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
@@ -151,7 +146,6 @@ func upgradeReplayTemplates(t *testing.T, data []byte) map[string]any {
 	return templates
 }
 
-// writeUpgradeReplayArtifact retains per-test evidence in the configured CI directory or a temporary one.
 func writeUpgradeReplayArtifact(t *testing.T, name string, value any) []byte {
 	t.Helper()
 	data, err := json.MarshalIndent(value, "", "  ")
@@ -178,7 +172,7 @@ func TestOperatorUpgradeReplay(t *testing.T) {
 			snapshot, pcs := loadUpgradeReplaySnapshot(t, catalog, profile)
 			originalSpec := snapshot.DGD.Spec.DeepCopy()
 			before := upgradeReplayTemplates(t, snapshot.PCS)
-			r, c := newUpgradeReplayReconciler(t, &snapshot.DGD, pcs, interceptor.Funcs{})
+			r, c := newUpgradeReplayReconciler(t, &snapshot.DGD, pcs)
 			desiredHash, err := dynamo.ComputeDGDWorkersSpecHash(&snapshot.DGD)
 			require.NoError(t, err)
 			writeUpgradeReplayArtifact(t, "baseline", snapshot)
@@ -206,9 +200,8 @@ func TestOperatorUpgradeReplay(t *testing.T) {
 	}
 }
 
-// TestOperatorUpgradeReplayIntentionalChangeAndRetry checks hash convergence after a real worker edit,
-// including a failed PCS write and one stale observation.
-func TestOperatorUpgradeReplayIntentionalChangeAndRetry(t *testing.T) {
+// A real worker edit must still advance the generation after historical state is adopted.
+func TestOperatorUpgradeReplayIntentionalChange(t *testing.T) {
 	t.Log("Load a released suffixed generation for a real worker edit")
 	catalog := loadUpgradeReplayCatalog(t)
 	var profile upgradeReplayProfile
@@ -224,53 +217,20 @@ func TestOperatorUpgradeReplayIntentionalChangeAndRetry(t *testing.T) {
 	newHash, err := dynamo.ComputeDGDWorkersSpecHash(&snapshot.DGD)
 	require.NoError(t, err)
 	require.NotEqual(t, oldHash, newHash)
-	failWrite := true
-	staleNextRead := false
-	var stalePCS grove.PodCliqueSet
-	injected := errors.New("injected PCS write failure")
-	r, c := newUpgradeReplayReconciler(t, &snapshot.DGD, pcs, interceptor.Funcs{
-		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if target, ok := obj.(*grove.PodCliqueSet); ok && staleNextRead {
-				staleNextRead = false
-				*target = *stalePCS.DeepCopy()
-				return nil
-			}
-			return delegate.Get(ctx, key, obj, opts...)
-		},
-		Update: func(ctx context.Context, delegate client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if failWrite && obj.GetObjectKind().GroupVersionKind().Kind == groveconstants.KindPodCliqueSet {
-				failWrite = false
-				return injected
-			}
-			return delegate.Update(ctx, obj, opts...)
-		},
-	})
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), &stalePCS))
+	r, c := newUpgradeReplayReconciler(t, &snapshot.DGD, pcs)
 
-	t.Log("A failed PCS write must not advance the DGD hash")
-	_, err = r.Reconcile(t.Context(), groveReconcileRequest{DGD: &snapshot.DGD}, nil, nil)
-	require.ErrorIs(t, err, injected)
+	t.Log("Reconcile the intentional edit repeatedly and verify convergence with the runtime image unchanged")
 	var current api.DynamoGraphDeployment
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&snapshot.DGD), &current))
-	require.Equal(t, oldHash, current.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	var retained grove.PodCliqueSet
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), &retained))
-	require.Equal(t, pcs.Spec, retained.Spec)
-
-	t.Log("Retry the write, replay one stale PCS observation, then verify convergence")
 	var stable map[string]any
-	for round := 0; round < 4; round++ {
-		staleNextRead = round == 1
+	for round := 0; round < 3; round++ {
 		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&snapshot.DGD), &current))
 		_, err = r.Reconcile(t.Context(), groveReconcileRequest{DGD: &current}, nil, nil)
-		if apierrors.IsConflict(err) {
-			continue
-		}
 		require.NoError(t, err)
 		var after grove.PodCliqueSet
 		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), &after))
 		for _, clique := range after.Spec.Template.Cliques {
 			require.Equal(t, newHash, clique.Labels[consts.KubeLabelDynamoWorkerHash])
+			require.Equal(t, profile.Image, clique.Spec.PodSpec.Containers[0].Image)
 			if clique.Labels[consts.KubeLabelDynamoComponent] == "SglangPrefill" {
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
 			}

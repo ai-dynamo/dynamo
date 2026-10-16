@@ -79,10 +79,11 @@ and templates remain unchanged.
 
 The separate intentional-change test is a control case: after loading the
 operator 1.5 baseline, it explicitly changes a worker environment variable while
-keeping the runtime image fixed. It injects a failed PCS write, retries
-reconciliation and checks that the new worker generation converges without
-advancing the DGD hash before the failed write is retried. This distinguishes
-an intentional DGD edit from the unchanged-workload upgrade profiles above.
+keeping the runtime image fixed. Repeated reconciliation must apply the edit,
+converge on the new worker generation and leave subsequent templates stable.
+This distinguishes an intentional DGD edit from the unchanged-workload upgrade
+profiles above. Failed writes, stale observations and retry recovery remain
+covered by the existing Grove workload reconciler tests.
 
 The standalone pull-request workflow executes these CPU checks independently of
 the GPU deploy-test switch. Aggregate N-2 inventory/merge enforcement, live
