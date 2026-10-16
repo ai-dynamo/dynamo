@@ -42,6 +42,7 @@ from dynamo.profiling import (
     inspection,
     native,
     nsys,
+    nvtxt,
 )
 from dynamo.profiling.artifacts import SharedFilesystemValidator
 from dynamo.profiling.clock import estimate_offset
@@ -181,6 +182,11 @@ def provider_controller(tmp_path, collector):
 
 def plan(request_id="request-1", duration_ms=50):
     return Plan(request_id, [Target("frontend", "frontend-epoch")], duration_ms)
+
+
+def nsys_plan(request_id, *target_ids, duration_ms=5000):
+    targets = [Target(t, "epoch") for t in target_ids or ["frontend"]]
+    return Plan(request_id, targets, duration_ms, mode="nsys")
 
 
 @pytest.mark.asyncio
@@ -445,21 +451,10 @@ async def test_backend_http200_error_is_failure_and_options_forwarded(
 async def test_perf_attach_ack_and_signal_only_recorder(tmp_path, monkeypatch):
     commands = []
     read_ends = []
-
-    class Recorder:
-        returncode = None
-
-        def __init__(self):
-            self.signals = []
-
-        def send_signal(self, signum):
-            self.signals.append(signum)
-
-        async def wait(self):
-            self.returncode = 0
-            return 0
-
-    recorder = Recorder()
+    signals = []
+    recorder = SimpleNamespace(
+        returncode=None, send_signal=signals.append, wait=AsyncMock(return_value=0)
+    )
     monkeypatch.setattr(collectors, "process_epoch", lambda pid: "epoch")
 
     async def spawn(*args, **kwargs):
@@ -482,7 +477,7 @@ async def test_perf_attach_ack_and_signal_only_recorder(tmp_path, monkeypatch):
             os.close(descriptor)
     assert commands[0][commands[0].index("--pid") + 1] == "123"
     assert "--delay=-1" in commands[0]
-    assert recorder.signals == [collectors.signal.SIGINT]
+    assert signals == [collectors.signal.SIGINT]
     assert adapter.evidence["coverage"] == "captured_unverified"
 
 
@@ -552,6 +547,22 @@ def trace(path):
     path.write_bytes(gzip.compress(json.dumps(payload).encode()))
 
 
+def torch_evidence(location, ranks=RANKS[:1]):
+    return {
+        "collector": "torch_profiler",
+        "artifact_location": str(location),
+        "artifact_prefix": "capture",
+        "expected_rank_ids": list(ranks),
+    }
+
+
+async def validate_torch(location, ranks=RANKS[:1]):
+    config = Config("unused", str(location))
+    return await SharedFilesystemValidator().validate(
+        torch_evidence(location, ranks), config
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case", ["complete", "missing", "stale_epoch", "unknown_membership"]
@@ -612,22 +623,11 @@ async def test_worker_capture_identity_clock_and_rank_validation(
             frontend_perf_enabled=False,
             lifecycle_evidence_location="otel-backend://existing",
         )
+        unselected = Worker(
+            "unselected", "other-epoch", "vllm", str(server.make_url("/unselected"))
+        )
         controller = Coordinator(
-            config,
-            RuntimeSnapshot(
-                123,
-                "frontend-epoch",
-                "frontend-host",
-                [
-                    worker,
-                    Worker(
-                        "unselected",
-                        "other-epoch",
-                        "vllm",
-                        str(server.make_url("/unselected")),
-                    ),
-                ],
-            ),
+            config, RuntimeSnapshot(123, "epoch", "host", [worker, unselected])
         )
         session = controller.submit(
             Plan(
@@ -712,14 +712,7 @@ def test_clock_offset_bound_and_clock_step_rejection():
 
 @pytest.mark.asyncio
 async def test_unmounted_store_remains_unverified(tmp_path):
-    result = await SharedFilesystemValidator().validate(
-        {
-            "collector": "torch_profiler",
-            "artifact_prefix": "capture",
-            "artifact_location": str(tmp_path / "unmounted"),
-        },
-        Config("socket", str(tmp_path)),
-    )
+    result = await validate_torch(tmp_path / "unmounted")
     assert result["status"] == "unverified"
     assert result["reason"] == "artifact_store_not_mounted"
 
@@ -728,14 +721,7 @@ async def test_unmounted_store_remains_unverified(tmp_path):
 async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
     for suffix in ("1", "2"):
         trace(tmp_path / f"capture_{RANKS[0]}.{suffix}.pt.trace.json.gz")
-    evidence = {
-        "collector": "torch_profiler",
-        "artifact_location": str(tmp_path),
-        "artifact_prefix": "capture",
-        "expected_rank_ids": [RANKS[0]],
-    }
-    validator = SharedFilesystemValidator()
-    result = await validator.validate(evidence, Config("socket", str(tmp_path)))
+    result = await validate_torch(tmp_path)
     assert result["status"] == "invalid"
     assert result["duplicate_rank_files"] is True
     inspected = inspection.inspect_kineto(
@@ -753,15 +739,8 @@ async def test_uncompressed_rank_traces_are_present_and_inspected(tmp_path):
         path = tmp_path / f"capture_{rank}.1.pt.trace.json"
         path.write_text(json.dumps(payload))
     path.write_text(json.dumps(payload)[:-5])
-    evidence = {
-        "collector": "torch_profiler",
-        "artifact_location": str(tmp_path),
-        "artifact_prefix": "capture",
-        "expected_rank_ids": RANKS,
-    }
-    result = await SharedFilesystemValidator().validate(
-        evidence, Config("socket", str(tmp_path))
-    )
+    result = await validate_torch(tmp_path, RANKS)
+    evidence = torch_evidence(tmp_path, RANKS)
     # Presence does not parse, so the truncated rank is only caught offline.
     assert result["status"] == "present"
     inspected = inspection.inspect_target(result, evidence)
@@ -789,12 +768,7 @@ async def test_embedded_host_uses_pluggable_coordinator_and_drains(
     sessions = "http://localhost/admin/profiling/v1/sessions"
 
     def body(request_id):
-        return {
-            "client_request_id": request_id,
-            "mode": "nsys",
-            "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
-            "duration_ms": 5000,
-        }
+        return msgspec.to_builtins(nsys_plan(request_id))
 
     async with host(controller) as embedded:
         assert embedded is controller
@@ -822,7 +796,7 @@ async def test_embedded_host_uses_pluggable_coordinator_and_drains(
     ]
     assert not Path(config.socket_path).exists()
     with pytest.raises(Unavailable):
-        controller.submit(Plan("new", [Target("frontend", "epoch")], 50, mode="nsys"))
+        controller.submit(nsys_plan("new"))
 
 
 @pytest.mark.asyncio
@@ -861,9 +835,7 @@ async def test_close_stops_collectors_without_waiting_for_artifacts(
     controller = provider_controller
     validate = AsyncMock(side_effect=hang)  # an export that never arrives
     controller.artifact_validator = SimpleNamespace(validate=validate)
-    session = controller.submit(
-        Plan("close", [Target("frontend", "epoch")], 5000, mode="nsys")
-    )
+    session = controller.submit(nsys_plan("close"))
     await asyncio.wait_for(collector.started.wait(), 1)
     await asyncio.wait_for(controller.close(), 1)
     collector.stop.assert_awaited_once()
@@ -884,15 +856,14 @@ async def test_unstarted_nsight_capture_does_not_block_the_next(tmp_path, monkey
         ),
         RuntimeSnapshot(os.getpid(), "epoch", "host"),
     )
-    targets = [Target("frontend", "epoch")]
-    session = controller.submit(Plan("first", targets, 5000, mode="nsys"))
+    session = controller.submit(nsys_plan("first"))
     await asyncio.wait_for(session.task, 5)
     assert session.state == "failed"
     assert "ai-dynamo[profiling]" in session.errors[0]
     assert session.artifact_validation[0]["status"] == "invalid"
     # Nothing was recorded, so no export can be misassociated with a later window.
     assert controller.cleanup_uncertain is False
-    controller.submit(Plan("second", targets, 5000, mode="nsys"))
+    controller.submit(nsys_plan("second"))
     await controller.close()
 
 
@@ -911,15 +882,7 @@ async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, c
     (tmp_path / f"capture_{RANKS[0]}.1.pt.trace.json").write_text(
         "{" + base + '"traceEvents":[' + ",".join(events) + "]}"
     )
-    result = await SharedFilesystemValidator().validate(
-        {
-            "collector": "torch_profiler",
-            "artifact_prefix": "capture",
-            "artifact_location": str(tmp_path),
-            "expected_rank_ids": [RANKS[0]],
-        },
-        Config("unused", str(tmp_path)),
-    )
+    result = await validate_torch(tmp_path)
     assert result["status"] == "present"
     inspected = inspection.inspect_kineto(result, Config("unused", str(tmp_path)))
     assert inspected["status"] == "verified"
@@ -936,27 +899,21 @@ async def test_native_recording_bounds_preserve_nanosecond_precision(tmp_path, c
         assert bounds["status"] == "unknown"
 
 
-def nsys_report(path, activity="cpu", processes=1):
-    path.write_bytes(b"native-report-fixture")
-    with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
-        conn.execute("CREATE TABLE META_DATA_EXPORT (name TEXT, value TEXT)")
-        conn.executemany(
-            "INSERT INTO META_DATA_EXPORT VALUES (?, ?)",
-            [("EXPORT_TIME", "0.01 sec"), ("EXPORT_PARAM_INPUT_FILE", path.name)],
-        )
-        if activity == "cpu":
-            conn.execute(
-                "CREATE TABLE COMPOSITE_EVENTS (start INTEGER, cpuCycles INTEGER, globalTid INTEGER)"
-            )
-            conn.execute(
-                "INSERT INTO COMPOSITE_EVENTS VALUES (1, 1, ?)", (os.getpid() << 24,)
-            )
-        else:
-            conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (globalPid INTEGER)")
-            conn.executemany(
-                "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?)",
-                [(pid,) for pid in range(processes)],
-            )
+def nsys_report(path, **tables):
+    """A report and its finished sqlite export; tables: name=(columns, rows)."""
+    path.write_bytes(b"report")
+    exported = [("EXPORT_TIME", "0.01 sec"), ("EXPORT_PARAM_INPUT_FILE", path.name)]
+    tables = {"META_DATA_EXPORT": ("name, value", exported), **tables}
+    with sqlite3.connect(path.with_suffix(".sqlite")) as db:
+        for name, (columns, rows) in tables.items():
+            db.execute(f"CREATE TABLE {name} ({columns})")
+            marks = ",".join("?" * (columns.count(",") + 1))
+            db.executemany(f"INSERT INTO {name} VALUES ({marks})", rows)
+    return path.with_suffix(".sqlite")
+
+
+CPU = {"COMPOSITE_EVENTS": ("start, cpuCycles, globalTid", [(1, 1, os.getpid() << 24)])}
+GPU = {"CUPTI_ACTIVITY_KIND_KERNEL": ("globalPid", [(0,)])}
 
 
 @pytest.mark.asyncio
@@ -1004,15 +961,8 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
     )
     async with TestClient(TestServer(application(coordinator))) as client:
         for window in range(3):
-            response = await client.post(
-                "/admin/profiling/v1/sessions",
-                json={
-                    "client_request_id": str(window),
-                    "mode": "nsys",
-                    "duration_ms": 5000,
-                    "targets": [{"target_id": "frontend", "process_epoch": "epoch"}],
-                },
-            )
+            body = msgspec.to_builtins(nsys_plan(str(window)))
+            response = await client.post("/admin/profiling/v1/sessions", json=body)
             assert response.status == 202
             session = coordinator.lookup((await response.json())["session_id"])
             await until(lambda: session.state == "recording")
@@ -1026,31 +976,35 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
             assert result["artifacts"][0]["location"].endswith(
                 f"frontend.{window+1}.nsys-rep"
             )
-            assert result["artifacts"][0]["bytes"] == len(b"native-report-fixture")
+            assert result["artifacts"][0]["bytes"] == len(b"report")
     await asyncio.gather(*pending)
     assert len(handles) == 3
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_nsys_worker_uses_backend_controls(tmp_path, backend):
-    worker = Worker(
-        "decode",
-        "epoch",
-        backend,
-        "http://worker",
-        nsys_output_prefix=str(tmp_path / "worker"),
-    )
+    prefix = str(tmp_path / "worker")
+    worker = Worker("decode", "epoch", backend, "http://w", nsys_output_prefix=prefix)
+    config = Config("unused", str(tmp_path), frontend_perf_enabled=True)
+    runtime = RuntimeSnapshot(123, "frontend", "host", [worker])
     # No implicit frontend/perf capture in Nsight mode, even with perf enabled.
     (selected,) = nsys.nsys_collectors(
-        Config("unused", str(tmp_path), frontend_perf_enabled=True),
-        RuntimeSnapshot(123, "frontend", "host", [worker]),
-        Plan("id", [Target("decode", "epoch")], 50, mode="nsys"),
-        tmp_path,
+        config, runtime, nsys_plan("id", "decode"), tmp_path
     )
     assert isinstance(selected, nsys.NsysWorkerCollector)
+    sglang = backend == "sglang"
     assert selected.worker.start_options == (
-        {"activities": ["CUDA_PROFILER"]} if backend == "sglang" else {}
+        {"activities": ["CUDA_PROFILER"]} if sglang else {}
     )
+    # vLLM's CUDA-profiler launch cannot also serve Torch profiling.
+    coordinator = Coordinator(config, runtime)
+    assert coordinator.targets()[1]["collectors"] == (
+        ["torch_profiler", "nsys"] if sglang else ["nsys"]
+    )
+    if not sglang:
+        with pytest.raises(errors.Unsupported, match="separate launch"):
+            coordinator.submit(Plan("id", [Target("decode", "epoch")], 50))
+        assert not coordinator.sessions
 
 
 @pytest.mark.asyncio
@@ -1067,9 +1021,9 @@ def test_nsys_worker_uses_backend_controls(tmp_path, backend):
 )
 async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
     path = tmp_path / "worker.1.nsys-rep"
-    nsys_report(path, "cpu" if defect == "missing_gpu" else "gpu")
+    nsys_report(path, **(CPU if defect == "missing_gpu" else GPU))
     if defect == "ambiguous":
-        nsys_report(tmp_path / "worker.2.nsys-rep", "gpu")
+        nsys_report(tmp_path / "worker.2.nsys-rep", **GPU)
     if defect == "incomplete":
         with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
             conn.execute("DELETE FROM META_DATA_EXPORT WHERE name = 'EXPORT_TIME'")
@@ -1078,9 +1032,7 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
     evidence = {
         "collector": "nsys",
         "output_prefix": str(tmp_path / "worker"),
-        "required_activity": (
-            "cpu_events" if defect == "missing_cpu" else "cuda_events"
-        ),
+        "required_activity": "cpu_events" if defect == "missing_cpu" else "cuda_events",
         "expected_gpu_processes": 2 if defect == "missing_rank" else 1,
         "previous_reports": [],
     }
@@ -1101,34 +1053,13 @@ async def test_nsys_rejects_incomplete_or_ambiguous_exports(tmp_path, defect):
     assert result["error"]
 
 
-def test_vllm_nsight_launch_rejects_torch_plan(tmp_path):
-    worker = Worker(
-        "decode",
-        "epoch",
-        "vllm",
-        "http://worker",
-        nsys_output_prefix=str(tmp_path / "worker"),
-    )
-    coordinator = Coordinator(
-        Config("unused", str(tmp_path)),
-        RuntimeSnapshot(123, "frontend", "host", [worker]),
-    )
-    assert coordinator.targets()[1]["collectors"] == ["nsys"]
-    with pytest.raises(errors.Unsupported, match="separate launch"):
-        coordinator.submit(Plan("id", [Target("decode", "epoch")], 50))
-    assert not coordinator.sessions
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("with_kernels", [False, True])
-async def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
+def test_nsys_accepts_cuda_memory_activity(tmp_path, with_kernels):
     # A decoder waiting for KV transfer can perform copies without launching
     # kernels. A process appearing in both tables must still count as one rank.
     path = tmp_path / "worker.1.nsys-rep"
-    nsys_report(path, "gpu" if with_kernels else "cpu")
-    with sqlite3.connect(path.with_suffix(".sqlite")) as conn:
-        conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY(globalPid INTEGER)")
-        conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (0)")
+    tables = GPU if with_kernels else CPU
+    nsys_report(path, **tables, CUPTI_ACTIVITY_KIND_MEMCPY=("globalPid", [(0,)]))
     result = inspection.inspect_nsys(
         {"artifacts": [{"location": str(path)}]},
         {"required_activity": "cuda_events", "expected_gpu_processes": 1},
@@ -1201,12 +1132,8 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         check=True,
         capture_output=True,
     )
-    assert (
-        json.loads((tmp_path / "cli/bundle.json").read_text())["artifact_verification"][
-            "decode-0"
-        ]["status"]
-        == "verified"
-    )
+    cli = json.loads((tmp_path / "cli/bundle.json").read_text())
+    assert cli["artifact_verification"]["decode-0"]["status"] == "verified"
     index = json.loads((tmp_path / "out/lifecycle/trace-index.json").read_text())
     assert index["router_targets"] == {"W1": "decode-0"}
     assert [entry["trace_id"] for entry in index["requests"]] == ["captured"]
@@ -1244,13 +1171,10 @@ def test_bundle_writes_per_request_deployment_timelines(tmp_path):
         "inside_operation",
     ]
     assert lane_order(window)[:3] == lane_order(events)[:3]
-    assert [e["name"] for e in events if e.get("cat") == "kernel"] == [
-        "inside_operation"
-    ]
-    kernel = next(e for e in events if e.get("cat") == "kernel")
     # Raw base+2.5005 ms on the worker clock, minus its 1 us offset, from the
     # earliest control event at base+0.9 ms.
-    assert kernel["ts"] == 1599.5
+    kernels = [(e["name"], e["ts"]) for e in events if e.get("cat") == "kernel"]
+    assert kernels == [("inside_operation", 1599.5)]
     assert all(isinstance(e.get("tid", 0), int) for e in events)
 
 
@@ -1308,8 +1232,7 @@ def test_bundle_without_observed_bounds_or_requests(tmp_path):
     session = write_session(
         tmp_path, {"decode-0": torch_target(trace)}, accepted_at_ns=5
     )
-    otel = tmp_path / "otel.jsonl"
-    otel.write_text("")
+    otel = write_otel(tmp_path / "otel.jsonl", [])
     out = tmp_path / "out"
     bundle.build(session, [otel], out, per_request=True)
     (out / "reports").mkdir(exist_ok=True)
@@ -1396,8 +1319,7 @@ def test_bundle_fails_only_the_target_with_a_malformed_trace(tmp_path):
         {"good": torch_target(good), "bad": torch_target(bad)},
         accepted_at_ns=base,
     )
-    otel = tmp_path / "otel.jsonl"
-    otel.write_text("")
+    otel = write_otel(tmp_path / "otel.jsonl", [])
     summary = bundle.build(session, [otel], tmp_path / "out")
     native_timeline = summary["coverage"]["native_timeline"]
     assert native_timeline["good"]["status"] == "included"
@@ -1410,73 +1332,35 @@ def test_bundle_fails_only_the_target_with_a_malformed_trace(tmp_path):
 
 
 def nsight_session(tmp_path):
-    clock = 5_000_000_000
     # Nsight event timestamps are relative to the session start (utcEpochNs).
-
-    def export(name, rows):
-        path = tmp_path / f"{name}.sqlite"
-        with sqlite3.connect(path) as db:
-            db.execute(
-                "CREATE TABLE TARGET_INFO_SESSION_START_TIME (utcEpochNs, systemClockNs)"
-            )
-            db.execute(
-                "INSERT INTO TARGET_INFO_SESSION_START_TIME VALUES (?, ?)",
-                (BASE, clock),
-            )
-            db.execute("CREATE TABLE StringIds (id, value)")
-            db.executemany(
-                "INSERT INTO StringIds VALUES (?, ?)", [(1, "epoll_wait"), (2, "gemm")]
-            )
-            db.execute("CREATE TABLE META_DATA_EXPORT (name, value)")
-            db.executemany(
-                "INSERT INTO META_DATA_EXPORT VALUES (?, ?)",
-                [
-                    ("EXPORT_TIME", "0.01 sec"),
-                    ("EXPORT_PARAM_INPUT_FILE", f"{name}.nsys-rep"),
-                ],
-            )
-            db.execute("CREATE TABLE PROCESSES (globalPid, pid, name)")
-            db.execute("INSERT INTO PROCESSES VALUES (0, 42, 'VLLM::EngineCore')")
-            for table, columns, values in rows:
-                db.execute(f"CREATE TABLE {table} ({columns})")
-                db.executemany(
-                    f"INSERT INTO {table} VALUES ({','.join('?' * len(values[0]))})",
-                    values,
-                )
-        (tmp_path / f"{name}.nsys-rep").write_bytes(b"report")
-        return path
-
+    common = {
+        "TARGET_INFO_SESSION_START_TIME": (
+            "utcEpochNs, systemClockNs",
+            [(BASE, 5_000_000_000)],
+        ),
+        "StringIds": ("id, value", [(1, "epoll_wait"), (2, "gemm")]),
+        "PROCESSES": ("globalPid, pid, name", [(0, 42, "VLLM::EngineCore")]),
+    }
     tid = (42 << 24) | 7
-    frontend = export(
-        "frontend",
-        [
-            (
-                "OSRT_API",
-                "start, end, nameId, globalTid",
-                [(2_500_000, 2_600_000, 1, tid)],
-            )
-        ],
+    frontend = nsys_report(
+        tmp_path / "frontend.nsys-rep",
+        **common,
+        OSRT_API=("start, end, nameId, globalTid", [(2_500_000, 2_600_000, 1, tid)]),
     )
-    worker = export(
-        "worker",
-        [
-            (
-                "NVTX_EVENTS",
-                "start, end, eventType, text, textId, globalTid, domainId",
-                [
-                    (2_400_000, 2_700_000, 59, "forward", None, tid, 1),
-                    (0, None, 75, "PyTorch", None, 0, 1),
-                ],
-            ),
-            (
-                "CUPTI_ACTIVITY_KIND_KERNEL",
-                "start, end, demangledName, deviceId, streamId, globalPid",
-                [
-                    (1_000_000, 1_100_000, 2, 0, 7, 99),
-                    (2_500_000, 2_600_000, 2, 0, 7, 99),
-                ],
-            ),
-        ],
+    worker = nsys_report(
+        tmp_path / "worker.nsys-rep",
+        **common,
+        NVTX_EVENTS=(
+            "start, end, eventType, text, textId, globalTid, domainId",
+            [
+                (2_400_000, 2_700_000, 59, "forward", None, tid, 1),
+                (0, None, 75, "PyTorch", None, 0, 1),
+            ],
+        ),
+        CUPTI_ACTIVITY_KIND_KERNEL=(
+            "start, end, demangledName, deviceId, streamId, globalPid",
+            [(1_000_000, 1_100_000, 2, 0, 7, 99), (2_500_000, 2_600_000, 2, 0, 7, 99)],
+        ),
     )
     bounds = {
         "status": "observed",
@@ -1513,8 +1397,6 @@ def nsight_session(tmp_path):
 
 
 def test_nvtx_request_ranges_follow_the_span_tree():
-    from dynamo.profiling import nvtxt
-
     ms = 1_000_000  # realistic times: the jitter tolerance is 1 ms
     spans = {
         # Listed child-first with equal starts: order must come from the tree.
@@ -1596,9 +1478,12 @@ def test_bundle_reads_nsight_worker_exports(tmp_path):
     archived, digest = bundle.archive(tmp_path / "out", summary)
     with tarfile.open(archived) as tar:
         names = set(tar.getnames())
-    assert {"out/bundle.json", "out/" + index["requests"][0]["timeline"]} <= names
-    assert "out/profiles/decode-0/worker.sqlite" in names
-    assert "out/profiles/decode-0/worker.nsys-rep" in names
+    assert {
+        "out/bundle.json",
+        "out/" + index["requests"][0]["timeline"],
+        "out/profiles/decode-0/worker.sqlite",
+        "out/profiles/decode-0/worker.nsys-rep",
+    } <= names
     assert digest == hashlib.sha256(archived.read_bytes()).hexdigest()
     assert (tmp_path / "out.tar.gz.sha256").read_text() == f"{digest}  out.tar.gz\n"
 
@@ -1637,31 +1522,24 @@ def test_nsight_bundle_imports_request_spans_as_nvtx(tmp_path, monkeypatch):
     assert 'NameOsThread, 0, 4, "req t · decode-0"' in text
     # The span tree nests on its request thread; base+2..3 ms is 5.002..5.003 s
     # on this report's clock (session start 5 s).
-    pushes = [
-        line
-        for line in text.splitlines()
-        if line.startswith("RangePush, 500200000") and line.split(", ")[2] == "4"
-    ]
-    assert [line.split('"')[1].split(" · ")[0] for line in pushes] == [
-        "http-request",
-        "kv_router.route_request",
-        "handle_payload",
-        "worker.operation.decode",
-    ]
-    assert [p.split(", ")[1] for p in pushes] == [
-        "5002000000",
-        "5002000001",
-        "5002000002",
-        "5002000003",
-    ]
+    # Each range is coloured by span kind.
     lines = text.splitlines()
+    pushes = [
+        (fields[1], fields[3], line.split('"')[1].split(" · ")[0])
+        for line in lines
+        if line.startswith("RangePush, 500200000")
+        and (fields := line.split(", "))[2] == "4"
+    ]
+    assert pushes == [
+        ("5002000000", "0xFF4E79A7", "http-request"),
+        ("5002000001", "0xFFF28E2B", "kv_router.route_request"),
+        ("5002000002", "0xFFBAB0AC", "handle_payload"),
+        ("5002000003", "0xFFB07AA1", "worker.operation.decode"),
+    ]
     assert reports["frontend"]["method"] == "ImportNvtxt"
     assert reports["frontend"]["events_imported"] == sum(
         line.startswith(("RangePush,", "Marker,")) for line in lines
     )
-    # Coloured by span kind: decode operations purple, the request blue.
-    assert 'RangePush, 5002000003, 4, 0xFFB07AA1, "worker.operation.decode' in text
-    assert 'RangePush, 5002000000, 4, 0xFF4E79A7, "http-request' in text
     assert (tmp_path / "out/reports/frontend.nsys-rep").read_bytes() == b"report"
     assert (tmp_path / "out/reports/decode-0.nsys-rep").read_bytes() == b"report"
     archived, _ = bundle.archive(tmp_path / "out", summary)
@@ -1717,12 +1595,7 @@ async def test_slow_frontend_range_end_does_not_delay_worker_stop(
         ),
     )
     session = controller.submit(
-        Plan(
-            "slow-end",
-            [Target("frontend", "epoch"), Target("decode-0", "epoch")],
-            50,
-            mode="nsys",
-        )
+        nsys_plan("slow-end", "frontend", "decode-0", duration_ms=50)
     )
     await asyncio.wait_for(session.task, 5)
     assert session.state == "completed", session.errors
