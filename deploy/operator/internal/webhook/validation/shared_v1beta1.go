@@ -136,6 +136,7 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 }
 
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
+	backendFramework                  string
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
@@ -320,7 +321,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath)...)
+	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath, options.backendFramework)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
@@ -679,13 +680,13 @@ func (v *sharedValidation) validateComponentRoleSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// Role templates must not bypass the sidecar restrictions on multinode and LPX layouts.
-	if role.PodTemplate != nil {
+	// LPX does not implement the native-engine sidecar contract.
+	if options.component != nil && options.component.IsLPX() && role.PodTemplate != nil {
 		for i, container := range role.PodTemplate.Spec.InitContainers {
 			if container.Name == consts.RuntimeContainerName {
 				allErrs = append(allErrs, field.Forbidden(
 					fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"),
-					"Dynamo sidecar mode is not supported in multinode or LPX role pod templates",
+					"Dynamo sidecar mode is not supported in LPX role pod templates",
 				))
 			}
 		}
@@ -1243,11 +1244,11 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
 
 	oldImages := make(map[string]string, len(oldComponent.Roles))
 	for i := range oldComponent.Roles {
-		oldImages[oldComponent.Roles[i].Name] = rolePodTemplateMainImage(&oldComponent.Roles[i])
+		oldImages[oldComponent.Roles[i].Name] = rolePodTemplateRuntimeImage(&oldComponent.Roles[i], dynamo.GetComponentDynamoSidecar(oldComponent) != nil)
 	}
 	for i := range newComponent.Roles {
 		role := &newComponent.Roles[i]
-		newImage := rolePodTemplateMainImage(role)
+		newImage := rolePodTemplateRuntimeImage(role, dynamo.GetComponentDynamoSidecar(newComponent) != nil)
 		if newImage != "" && runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
 			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
 			return field.ErrorList{field.Required(
@@ -1259,8 +1260,16 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
 	return nil
 }
 
-func rolePodTemplateMainImage(role *nvidiacomv1beta1.ComponentRoleSpec) string {
+func rolePodTemplateRuntimeImage(role *nvidiacomv1beta1.ComponentRoleSpec, sidecarMode bool) string {
 	if role == nil || role.PodTemplate == nil {
+		return ""
+	}
+	if sidecarMode {
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				return container.Image
+			}
+		}
 		return ""
 	}
 	index := mainContainerIndex(role.PodTemplate.Spec.Containers)
@@ -1278,7 +1287,7 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersion(
 		return nil
 	}
 	for i := range component.Roles {
-		image := rolePodTemplateMainImage(&component.Roles[i])
+		image := rolePodTemplateRuntimeImage(&component.Roles[i], dynamo.GetComponentDynamoSidecar(component) != nil)
 		if image != "" && runtimeVersionOverrideRequired(image, component.RuntimeVersionOverride) {
 			return field.ErrorList{field.Required(
 				fldPath.Child("runtimeVersionOverride"),

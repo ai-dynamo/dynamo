@@ -404,3 +404,18 @@ func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymen
 	}
 	return fldPath.Child("providerOverride", "value", "spec", "minAvailable")
 }
+
+// hasRoleSidecarV1Alpha1 resolves component-wide mode from the authored leader.
+// spec must not be nil.
+func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	for _, role := range spec.Roles {
+		if role.Name == "leader" && role.PodTemplate != nil {
+			for _, container := range role.PodTemplate.Spec.InitContainers {
+				if container.Name == "runtime" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}

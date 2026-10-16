@@ -164,7 +164,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    An init container named `runtime` is rejected in role templates because Dynamo sidecar mode does not yet support multinode or LPX components.
+    For SGLang multinode sidecar mode, declare `runtime` in the leader template. This selects native-engine defaults for the whole component, including workers without a sidecar. Declare `runtime` in the worker template for DP-attention; omit it for TP. LPX and other multinode backends do not yet support sidecar mode.
 
     For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
@@ -282,7 +282,7 @@ The operator leaves native sidecar `servedModelName` and `runtimeComponentName` 
 Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
 </Warning>
 
-This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+This mode supports `worker`, `prefill`, and `decode` components. SGLang multinode is supported as described below. Other multinode backends, enabled checkpoint, GPU memory service, and failover remain unsupported. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 
@@ -297,6 +297,15 @@ podTemplate:
         image: <dynamo-sidecar-image>
         restartPolicy: Always
 ```
+
+For SGLang multinode deployments, set `backendFramework: sglang` and choose one template form:
+
+- **Component `podTemplate`:** use an explicit `python3 -m sglang.launch_server` command. The operator adds `--nnodes`, `--node-rank`, and `--dist-init-addr`. It keeps `runtime` on the leader for TP and on every Pod when `--enable-dp-attention` is present. Config files and other launchers require role templates because they can hide the engine topology.
+- **Complete role templates:** define both launches and sidecar placement yourself. The operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions.
+
+Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group.
+
+See the [TP component-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and [DP-attention role-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
 
