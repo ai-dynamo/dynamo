@@ -785,7 +785,7 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
-                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+                "Supported with '--dyn-chat-processor sglang' only; ignored by other processors."
             ),
         )
 
