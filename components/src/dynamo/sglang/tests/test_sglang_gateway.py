@@ -342,7 +342,7 @@ def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(
 ):
     spawned = []
 
-    def fake_popen(cmd, env, start_new_session):
+    def fake_popen(cmd, env, start_new_session, pass_fds):
         p = FakeProc(4000 + len(spawned))
         p.cmd, p.env = cmd, env
         spawned.append(p)
@@ -380,7 +380,7 @@ def test_serve_via_gateway_children_tolerates_child_exit_during_shutdown(
     spawned = []
     stop = asyncio.Event()
 
-    def fake_popen(cmd, env, start_new_session):
+    def fake_popen(cmd, env, start_new_session, pass_fds):
         p = FakeProc(4100 + len(spawned))
         spawned.append(p)
         return p
@@ -405,7 +405,7 @@ def test_serve_via_gateway_children_cleans_up_when_spawn_fails(
 ):
     spawned = []
 
-    def fake_popen(cmd, env, start_new_session):
+    def fake_popen(cmd, env, start_new_session, pass_fds):
         if len(spawned) == 1:
             raise OSError("no more pids")
         p = FakeProc(5000 + len(spawned))
@@ -435,7 +435,9 @@ def test_serve_via_gateway_children_reuses_engine_published_shm(
         lambda *a: calls.append(a),
     )
     monkeypatch.setattr(
-        gateway.subprocess, "Popen", lambda cmd, env, start_new_session: FakeProc(1)
+        gateway.subprocess,
+        "Popen",
+        lambda cmd, env, start_new_session, pass_fds: FakeProc(1),
     )
 
     class OwnedShm:
