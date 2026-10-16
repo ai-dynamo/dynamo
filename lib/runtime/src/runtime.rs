@@ -32,6 +32,13 @@ pub use tokio_util::sync::CancellationToken;
 
 const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
 
+/// Bound on joining post-cancellation teardown tasks. A lease revoke is one
+/// round trip; anything longer means etcd is unreachable, in which case the
+/// lease expires on its own TTL and waiting further only delays the exit.
+const TEARDOWN_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+type ShutdownCompletion = Option<Result<(), String>>;
+
 pub(crate) fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
         config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
@@ -59,7 +66,18 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     shutdown_started: CancellationToken,
+    endpoint_registration: Arc<tokio::sync::RwLock<()>>,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    /// Earliest drain deadline requested by any caller. Later callers may
+    /// shorten it, but can never extend a shutdown already in progress.
+    drain_deadline: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    /// Background tasks that do their cleanup *after* the primary token is
+    /// cancelled — today the etcd lease keep-alive, whose `lease.revoke()` runs
+    /// on cancellation. Phase 3 only cancels; without joining these the process
+    /// could exit with the lease still held, which is the stale-registration
+    /// symptom this teardown exists to remove.
+    teardown_tasks: Arc<std::sync::Mutex<Option<Vec<JoinHandle<()>>>>>,
+    shutdown_completion: Arc<std::sync::OnceLock<tokio::sync::watch::Receiver<ShutdownCompletion>>>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -102,7 +120,11 @@ impl Runtime {
             cancellation_token,
             endpoint_shutdown_token,
             shutdown_started,
+            endpoint_registration: Arc::new(tokio::sync::RwLock::new(())),
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
+            drain_deadline: tokio::sync::watch::channel(None).0,
+            teardown_tasks: Arc::new(std::sync::Mutex::new(Some(Vec::new()))),
+            shutdown_completion: Arc::new(std::sync::OnceLock::new()),
             compute_pool,
             block_in_place_permits,
         })
@@ -326,7 +348,32 @@ impl Runtime {
         self.endpoint_shutdown_token.child_token()
     }
 
-    /// Get access to the graceful shutdown tracker
+    /// Enroll cleanup before acquiring a resource. Dropping the returned guard
+    /// completes enrollment; Phase 3 closes enrollment and awaits existing guards.
+    pub(crate) fn teardown_guard(&self) -> anyhow::Result<tokio::sync::oneshot::Sender<()>> {
+        let mut tasks = self
+            .teardown_tasks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("teardown registry poisoned"))?;
+        let tasks = tasks
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("runtime teardown has started"))?;
+        let (guard, completed) = tokio::sync::oneshot::channel();
+        tasks.push(tokio::spawn(async move {
+            let _ = completed.await;
+        }));
+        Ok(guard)
+    }
+
+    /// Use the active shutdown bound, or the runtime default outside shutdown.
+    pub(crate) fn endpoint_drain_timeout(&self) -> Duration {
+        self.drain_deadline
+            .borrow()
+            .map_or_else(graceful_shutdown_timeout, |deadline| {
+                deadline.saturating_duration_since(tokio::time::Instant::now())
+            })
+    }
+
     pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
         self.graceful_shutdown_tracker.clone()
     }
@@ -351,24 +398,130 @@ impl Runtime {
         self.shutdown_started.is_cancelled()
     }
 
+    pub(crate) async fn endpoint_registration_guard(
+        &self,
+    ) -> anyhow::Result<tokio::sync::RwLockReadGuard<'_, ()>> {
+        let guard = self.endpoint_registration.read().await;
+        anyhow::ensure!(!self.is_shutting_down(), "runtime is shutting down");
+        Ok(guard)
+    }
+
+    /// Fence startup and resume registrations before discovery withdrawal.
+    /// Existing request handlers and transports remain available for draining.
+    pub async fn close_endpoint_registration(&self) {
+        self.mark_shutting_down();
+        let _guard = self.endpoint_registration.write().await;
+    }
+
     /// Observe shutdown from its start, rather than waiting for transport teardown.
     pub fn shutdown_started_token(&self) -> CancellationToken {
         self.shutdown_started.child_token()
     }
 
-    /// Shuts down the [`Runtime`] instance
+    /// Shuts down the [`Runtime`] instance.
+    ///
+    /// Fire-and-forget: the three-phase sequence is spawned and this returns
+    /// immediately. A caller that exits the process straight after (as a
+    /// `main` typically does) will terminate before the phases complete, so
+    /// the endpoint inflight drain and the etcd lease revoke in Phase 2/3 are
+    /// not guaranteed to run. Use [`shutdown_and_wait`](Self::shutdown_and_wait)
+    /// when the teardown must actually finish.
     pub fn shutdown(&self) {
+        self.start_shutdown(None);
+    }
+
+    /// [`shutdown`](Self::shutdown) that resolves once the three-phase
+    /// sequence has finished, so Phase 3 has run and the endpoint inflight
+    /// drain is complete before the caller proceeds.
+    ///
+    /// `drain_timeout` bounds Phase 2 (the wait for outstanding graceful
+    /// tasks); `None` uses `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`.
+    /// Bounding is expressed here rather than by wrapping this call in a
+    /// `timeout`, because `tokio::time::timeout` cancels by *dropping* the
+    /// future — which would skip Phase 3 and leave the transports connected,
+    /// the exact failure this method exists to prevent. Phase 3 always runs.
+    ///
+    /// Phase 3 cancels the primary token, which *signals* transport teardown.
+    /// The tasks whose cleanup is that signal — notably the etcd keep-alive
+    /// task and its `lease.revoke()` — are joined afterwards, separately
+    /// bounded by [`TEARDOWN_TASK_JOIN_TIMEOUT`], so an unreachable etcd delays
+    /// the exit by seconds rather than indefinitely.
+    pub async fn shutdown_and_wait(&self, drain_timeout: Option<Duration>) -> anyhow::Result<()> {
+        let mut completion = self.start_shutdown(drain_timeout);
+        match completion.wait_for(Option::is_some).await {
+            Ok(outcome) => outcome
+                .as_ref()
+                .unwrap()
+                .clone()
+                .map_err(anyhow::Error::msg),
+            Err(_) => {
+                self.cancellation_token.cancel();
+                anyhow::bail!("Runtime shutdown task terminated before completing teardown")
+            }
+        }
+    }
+
+    /// Bound the complete teardown, reserving up to five seconds (at most half
+    /// the remaining budget) for transport cleanup after endpoint draining.
+    pub async fn shutdown_with_budget(&self, remaining: Duration) -> anyhow::Result<()> {
+        let reserve = TEARDOWN_TASK_JOIN_TIMEOUT.min(remaining / 2);
+        tokio::time::timeout(remaining, self.shutdown_and_wait(Some(remaining - reserve)))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("runtime teardown exceeded the worker shutdown deadline")
+            })?
+    }
+
+    // All callers join the same task and may tighten its drain deadline;
+    // cancelling a waiter must not cancel teardown or lose its lease handles.
+    fn start_shutdown(
+        &self,
+        drain_timeout: Option<Duration>,
+    ) -> tokio::sync::watch::Receiver<ShutdownCompletion> {
         self.mark_shutting_down();
+        let deadline =
+            tokio::time::Instant::now() + drain_timeout.unwrap_or_else(graceful_shutdown_timeout);
+        self.drain_deadline.send_if_modified(|current| {
+            if current.is_none_or(|previous| deadline < previous) {
+                *current = Some(deadline);
+                true
+            } else {
+                false
+            }
+        });
+        self.shutdown_completion
+            .get_or_init(|| {
+                let (complete, receiver) = tokio::sync::watch::channel(None);
+                let sequence = self.shutdown_sequence();
+                self.primary().spawn(async move {
+                    let outcome = sequence.await.map_err(|error| error.to_string());
+                    if let Err(error) = &outcome {
+                        tracing::error!(%error, "Runtime teardown incomplete");
+                    }
+                    complete.send_replace(Some(outcome));
+                });
+                receiver
+            })
+            .clone()
+    }
+
+    /// The three-phase teardown shared by [`shutdown`](Self::shutdown) and
+    /// [`shutdown_and_wait`](Self::shutdown_and_wait). Returns an owned future
+    /// so the fire-and-forget path can spawn it.
+    fn shutdown_sequence(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static {
         tracing::info!("Runtime shutdown initiated");
 
-        // Spawn the shutdown coordination task BEFORE cancelling tokens
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
+        let drain_deadline = self.drain_deadline.clone();
+        let teardown_tasks = self.teardown_tasks.clone();
 
-        // Use the runtime handle to spawn the task
-        let handle = self.primary();
-        handle.spawn(async move {
+        async move {
+            let mut deadlines = drain_deadline.subscribe();
+
             // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
             tracing::info!("Phase 1: Cancelling endpoint shutdown token");
             endpoint_token.cancel();
@@ -379,25 +532,60 @@ impl Runtime {
             let count = tracker.get_count();
             tracing::info!("Active graceful endpoints: {count}");
 
-            if count != 0 {
-                let timeout = graceful_shutdown_timeout();
-                if tokio::time::timeout(timeout, tracker.wait_for_completion())
-                    .await
-                    .is_err()
-                {
-                    let remaining = tracker.get_count();
-                    tracing::error!(
-                        timeout_secs = timeout.as_secs(),
-                        remaining_endpoints = remaining,
-                        "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
-                    );
+            let drained = tracker.wait_for_completion();
+            tokio::pin!(drained);
+            while tracker.get_count() != 0 {
+                let deadline = deadlines
+                    .borrow_and_update()
+                    .expect("shutdown deadline set before spawn");
+                tokio::select! {
+                    _ = &mut drained => break,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(
+                            remaining_endpoints = tracker.get_count(),
+                            "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
+                        );
+                        break;
+                    }
+                    _ = deadlines.changed() => {}
                 }
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
             main_token.cancel();
-        });
+
+            // Phase 3 only *signals* teardown. Join the tasks whose cleanup is
+            // that signal — the etcd lease keep-alive issues `lease.revoke()`
+            // here — or the process can exit with the lease still held and the
+            // instance advertised until the TTL expires.
+            //
+            // Bounded, and the bound is what makes a self-await safe: the
+            // lease-loss path calls `Runtime::shutdown` from inside the
+            // keep-alive task itself. That call only spawns this sequence, so
+            // the task does finish — but a future caller who awaited from such
+            // a task would otherwise hang here forever.
+            let pending: Vec<JoinHandle<()>> = teardown_tasks
+                .lock()
+                .ok()
+                .and_then(|mut tasks| tasks.take())
+                .unwrap_or_default();
+            if !pending.is_empty() {
+                tracing::debug!(count = pending.len(), "Joining teardown tasks");
+                let joined = futures::future::join_all(pending);
+                let results = tokio::time::timeout(TEARDOWN_TASK_JOIN_TIMEOUT, joined)
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "Timed out joining runtime teardown tasks; cleanup remains incomplete"
+                        )
+                    })?;
+                for result in results {
+                    result?;
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -456,6 +644,22 @@ mod tests {
     use super::*;
     use crate::config::environment_names::runtime as env_runtime;
 
+    #[tokio::test]
+    async fn shutdown_fences_registration_before_withdrawal() {
+        let runtime = Runtime::from_current().unwrap();
+        let registration = runtime.endpoint_registration_guard().await.unwrap();
+        let close = runtime.close_endpoint_registration();
+        tokio::pin!(close);
+        // An admitted registration must finish before withdrawal can start.
+        assert!(futures::poll!(&mut close).is_pending());
+        assert!(runtime.is_shutting_down());
+        drop(registration);
+        close.await;
+        assert!(runtime.endpoint_registration_guard().await.is_err());
+        // Fencing discovery must not interrupt admitted inference.
+        assert!(!runtime.child_token().is_cancelled());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn shutdown_cancels_main_token_after_graceful_timeout() {
         temp_env::async_with_vars(
@@ -487,6 +691,182 @@ mod tests {
 
                 assert!(main_token.is_cancelled());
                 assert_eq!(tracker.get_count(), 1);
+            },
+        )
+        .await;
+    }
+
+    /// `shutdown()` is fire-and-forget: it only spawns the sequence, so a
+    /// caller that exits straight after can terminate before Phase 3 runs.
+    /// Asserted *after* yielding — before a yield the spawned task provably
+    /// has not run, so an immediate assert would hold no matter what
+    /// `shutdown()` did.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_leaves_the_sequence_outstanding_after_yielding() {
+        let runtime = Runtime::from_current().unwrap();
+        let main_token = runtime.primary_token();
+        let endpoint_token = runtime.child_token();
+
+        // No graceful task registered: Phase 2 has nothing to wait for, so
+        // the only thing keeping Phase 3 from completing is that the caller
+        // never awaited the sequence.
+        runtime.shutdown();
+        assert!(!main_token.is_cancelled());
+
+        tokio::task::yield_now().await;
+        // The spawned sequence did get scheduled...
+        assert!(endpoint_token.is_cancelled(), "Phase 1 must have run");
+        // ...but nothing tied its completion to the caller. Contrast
+        // `shutdown_and_wait`, which resolves only once Phase 3 is done.
+        assert!(
+            main_token.is_cancelled(),
+            "sanity: with no graceful tasks the spawned sequence runs to \
+             completion once scheduled — the hazard is that the caller may \
+             exit before this point, which shutdown_and_wait fixes"
+        );
+    }
+
+    /// Phase 3 only *cancels* the primary token; the etcd keep-alive task does
+    /// its `lease.revoke()` in response. Returning without joining that task let
+    /// the process exit with the lease still held, leaving the instance
+    /// advertised until its TTL expired.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_and_wait_joins_post_cancellation_teardown_tasks() {
+        let runtime = Runtime::from_current().unwrap();
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (revoking, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+
+        // Stands in for the lease keep-alive: cleanup runs only once the
+        // primary token is cancelled, and takes a moment to finish.
+        let token = runtime.primary_token();
+        let flag = revoked.clone();
+        let guard = runtime.teardown_guard().unwrap();
+        tokio::spawn(async move {
+            let _guard = guard;
+            token.cancelled().await;
+            revoking.send(()).unwrap();
+            released.await.unwrap();
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        runtime.shutdown();
+        started.await.unwrap();
+        assert!(runtime.teardown_guard().is_err());
+        // The detached sequence already owns the handles. A second caller must
+        // still wait, and abandoning that caller must not abandon revocation.
+        let waiter = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.shutdown_and_wait(Some(Duration::ZERO)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        waiter.abort();
+        let _ = waiter.await;
+        release.send(()).unwrap();
+        runtime
+            .shutdown_and_wait(Some(Duration::ZERO))
+            .await
+            .unwrap();
+
+        assert!(
+            revoked.load(Ordering::SeqCst),
+            "shutdown_and_wait returned before the post-cancellation cleanup finished"
+        );
+    }
+
+    /// The bound must be applied *inside* Phase 2, not wrapped around the
+    /// call. `tokio::time::timeout` cancels by dropping the future, so a
+    /// wrapping timeout would skip Phase 3 and leave the transports up —
+    /// reintroducing the bug this method exists to fix.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_reports_incomplete_teardown_to_every_waiter() {
+        let runtime = Runtime::from_current().unwrap();
+        let guard = runtime.teardown_guard().unwrap();
+        let first = runtime
+            .shutdown_and_wait(Some(Duration::ZERO))
+            .await
+            .unwrap_err();
+        assert!(first.to_string().contains("cleanup remains incomplete"));
+        assert!(!guard.is_closed(), "cleanup must still be pending");
+        drop(guard);
+        let subsequent = runtime.shutdown_and_wait(None).await.unwrap_err();
+        assert_eq!(first.to_string(), subsequent.to_string());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_and_wait_runs_phase_three_even_when_the_drain_times_out() {
+        let runtime = Runtime::from_current().unwrap();
+        let tracker = runtime.graceful_shutdown_tracker();
+        // Never released: Phase 2 will hit its bound.
+        let _guard = tracker.register_task();
+        let main_token = runtime.primary_token();
+
+        runtime
+            .shutdown_and_wait(Some(Duration::from_secs(5)))
+            .await
+            .unwrap();
+
+        assert!(
+            main_token.is_cancelled(),
+            "Phase 3 must run even though the Phase 2 drain timed out"
+        );
+        assert_eq!(tracker.get_count(), 1, "the stuck task is still counted");
+    }
+
+    /// `shutdown_and_wait()` is the contract `run.rs` depends on: it must not
+    /// resolve until Phase 3 has cancelled the main token, so transport
+    /// teardown is complete before the process exits.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_and_wait_resolves_only_after_phase_three() {
+        let runtime = Runtime::from_current().unwrap();
+        let tracker = runtime.graceful_shutdown_tracker();
+        let guard = tracker.register_task();
+        let main_token = runtime.primary_token();
+        let endpoint_token = runtime.child_token();
+
+        let waiter = {
+            let runtime = runtime.clone();
+            tokio::spawn(async move { runtime.shutdown_and_wait(None).await })
+        };
+
+        tokio::task::yield_now().await;
+        assert!(endpoint_token.is_cancelled(), "Phase 1 must have run");
+        assert!(
+            !waiter.is_finished(),
+            "must still be waiting on the outstanding graceful task"
+        );
+        assert!(!main_token.is_cancelled());
+
+        // Releasing the last registration lets Phase 2 complete.
+        drop(guard);
+        waiter.await.unwrap().unwrap();
+
+        assert!(main_token.is_cancelled(), "Phase 3 must have run");
+    }
+
+    /// A stuck graceful task must not hang teardown forever — Phase 2 is
+    /// bounded, and `shutdown_and_wait` inherits that bound.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_and_wait_is_bounded_by_the_phase_two_timeout() {
+        temp_env::async_with_vars(
+            [(
+                env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                Some("5"),
+            )],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let tracker = runtime.graceful_shutdown_tracker();
+                // Never released: stands in for an endpoint that never drains.
+                let _guard = tracker.register_task();
+                let main_token = runtime.primary_token();
+
+                tokio::time::timeout(Duration::from_secs(3600), runtime.shutdown_and_wait(None))
+                    .await
+                    .expect("shutdown_and_wait must be bounded; it hung past the outer guard")
+                    .unwrap();
+
+                assert!(main_token.is_cancelled());
             },
         )
         .await;

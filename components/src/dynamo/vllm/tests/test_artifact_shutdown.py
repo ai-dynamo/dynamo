@@ -70,7 +70,7 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
     )
     lifecycle = SimpleNamespace(close=AsyncMock())
     factory = SimpleNamespace(create=AsyncMock(side_effect=factory_create))
-    signal_handlers = Mock()
+    signal_handlers = Mock(return_value=AsyncMock())
 
     monkeypatch.setattr(
         vllm_main, "parse_args_with_model_fetch", AsyncMock(return_value=config)
