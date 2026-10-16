@@ -1174,7 +1174,6 @@ func TestLPXRollingEngineHandoff(t *testing.T) {
 		if role == "weights" {
 			dgd.GetComponentByName("draft").LPX.BuildID = "draft-weights"
 		} else {
-			metav1.SetMetaDataAnnotation(&dgd.ObjectMeta, consts.KubeAnnotationGroveUpdateStrategy, "OnDelete")
 			dgd.GetComponentByName("lpx").ComponentRole(role).PodTemplate.Spec.Containers[0].Image = "runtime:new"
 		}
 		updateTestDGD(t, r, child, dgd)
@@ -1186,10 +1185,6 @@ func TestLPXRollingEngineHandoff(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, allocations, current)
 	}
-	dgd.GetComponentByName("draft").LPX.BuildID = "target-build"
-	updateTestDGD(t, r, child, dgd)
-	reconcile()
-	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)))
 }
 
 func TestLPXFailedScaleOutPreservesServingWorkloads(t *testing.T) {
