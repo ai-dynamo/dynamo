@@ -1458,7 +1458,7 @@ func TestDGD_FromV1alpha1_EnvFromSecretWithMainContainerEnvFrom(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing main container: %#v", hub.Spec.Components[0].PodTemplate)
 	}
-	var gotSecrets []string
+	gotSecrets := make([]string, 0, len(main.EnvFrom))
 	for _, envFrom := range main.EnvFrom {
 		gotSecrets = append(gotSecrets, envFrom.SecretRef.Name)
 	}
