@@ -126,6 +126,8 @@ spec:
                   value: reflection/Beam-1.0-501B-A23B-DFlash2
                 - name: SERVED_MODEL_NAME
                   value: Beam-1.0-501B-A23B
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: '3600'
                 - name: HF_HOME
                   value: /shared-model-cache
                 - name: HF_HUB_OFFLINE
@@ -231,6 +233,8 @@ spec:
                   value: reflection/Beam-1.0-501B-A23B-DFlash2
                 - name: SERVED_MODEL_NAME
                   value: Beam-1.0-501B-A23B
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: '3600'
                 - name: HF_HOME
                   value: /shared-model-cache
                 - name: HF_HUB_OFFLINE
