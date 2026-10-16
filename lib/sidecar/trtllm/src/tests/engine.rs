@@ -106,6 +106,34 @@ async fn advertised_video_media_reaches_openengine() {
 }
 
 #[tokio::test]
+async fn advertised_audio_media_reaches_openengine() {
+    let service = FakeTrtllm::default();
+    service.supports_multimodal.store(true, Ordering::SeqCst);
+    service.advertises_audio.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:audio/wav;base64,YXVkaW8=".to_string(),
+        )],
+    )]));
+    collect(&engine, req).await;
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(sent.media.len(), 1);
+    assert_eq!(sent.media[0].modality, pb::Modality::Audio as i32);
+    assert!(matches!(
+        sent.media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:audio/wav")
+    ));
+}
+
+#[tokio::test]
 async fn both_multimodal_capability_signals_are_required() {
     for (coarse, image) in [(true, false), (false, true)] {
         let service = FakeTrtllm::default();

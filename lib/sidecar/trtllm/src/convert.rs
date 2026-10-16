@@ -4,7 +4,7 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
 //! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Supports aggregated and disaggregated image and video generation. Audio,
+//! Supports aggregated and disaggregated image, video, and audio generation.
 //! LoRA, beam search, and `n > 1` are rejected before dispatch.
 //!
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
@@ -176,6 +176,7 @@ fn max_tokens(
 
 const IMAGE_KEY: &str = "image_url";
 const VIDEO_KEY: &str = "video_url";
+const AUDIO_KEY: &str = "audio_url";
 
 #[derive(Clone, Copy)]
 struct MediaKind {
@@ -184,7 +185,7 @@ struct MediaKind {
     modality: pb::Modality,
 }
 
-const MEDIA_KINDS: [MediaKind; 2] = [
+const MEDIA_KINDS: [MediaKind; 3] = [
     MediaKind {
         key: IMAGE_KEY,
         name: "image",
@@ -194,6 +195,11 @@ const MEDIA_KINDS: [MediaKind; 2] = [
         key: VIDEO_KEY,
         name: "video",
         modality: pb::Modality::Video,
+    },
+    MediaKind {
+        key: AUDIO_KEY,
+        name: "audio",
+        modality: pb::Modality::Audio,
     },
 ];
 

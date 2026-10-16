@@ -66,6 +66,7 @@ struct FakeTrtllm {
     /// TensorRT-LLM's finer-grained modality advertisement.
     advertises_image: Arc<AtomicBool>,
     advertises_video: Arc<AtomicBool>,
+    advertises_audio: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -262,6 +263,7 @@ impl pb::control_server::Control for FakeTrtllm {
         let modalities = [
             (self.advertises_image.load(Ordering::SeqCst), "image"),
             (self.advertises_video.load(Ordering::SeqCst), "video"),
+            (self.advertises_audio.load(Ordering::SeqCst), "audio"),
         ]
         .into_iter()
         .filter(|(advertised, _)| *advertised)
@@ -496,6 +498,19 @@ fn image_video_limits(context_length: u32) -> Option<ModelMetadata> {
         supported_media: SupportedMedia {
             image: true,
             video: true,
+            ..Default::default()
+        },
+    })
+}
+
+fn all_media_limits(context_length: u32) -> Option<ModelMetadata> {
+    Some(ModelMetadata {
+        context_length: Some(context_length),
+        max_output_tokens: None,
+        supported_media: SupportedMedia {
+            image: true,
+            video: true,
+            audio: true,
         },
     })
 }
