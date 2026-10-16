@@ -22,6 +22,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	consts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -242,12 +243,12 @@ func (r *graphReconciler) renderDesiredPodCliqueSet(
 	return pcs, resources, r.stampClientIdentity(ctx, dgd, pcs)
 }
 
-// stampClientIdentity gives every LPX Pod its DGD's UID label, and gives agent Pods the DGD's client
-// key and certificate from Secret lpx-id-<DGD UID> plus the optional lpx-server-ca bundle. The
-// Secret is created once, never rewritten and never adopted. Agent Pods also publish the
-// certificate in an annotation, so node-side software can authenticate them. Secret references to
-// the cluster-wide MPI SSH Secret in LPX Pods get the DGD's own SSH key pair instead, under the same
-// key names, so one DGD's key no longer opens another DGD's Pods.
+// stampClientIdentity gives every LPX Pod its DGD's UID label, and mounts into each agent Pod's main
+// container the DGD's client key and certificate from Secret lpx-id-<DGD UID> plus the optional
+// lpx-server-ca bundle. The Secret is created once, never rewritten and never adopted. Agent Pods
+// also publish the certificate in an annotation, so node-side software can authenticate them.
+// Secret references to the cluster-wide MPI SSH Secret in LPX Pods get the DGD's own SSH key pair
+// instead, under the same key names, so one DGD's key no longer opens another DGD's Pods.
 func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, pcs *grovev1alpha1.PodCliqueSet) error {
 	name := "lpx-id-" + string(dgd.UID)
 	key := client.ObjectKey{Namespace: dgd.Namespace, Name: name}
@@ -333,17 +334,16 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 				}},
 			}},
 		}})
-		for i := range spec.Containers {
-			container := &spec.Containers[i]
-			if container.Name != v1beta1.ComponentRoleLPXAgent {
-				continue
-			}
-			if slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool { return path.Clean(m.MountPath) == identityMountPath }) {
-				return fmt.Errorf("LPX agent template %s already mounts %s, which the operator owns", clique.Name, identityMountPath)
-			}
-			container.VolumeMounts = append(container.VolumeMounts,
-				corev1.VolumeMount{Name: identityVolume, MountPath: identityMountPath, ReadOnly: true})
+		// Only the agent's main runtime authenticates to LPUD; a missing main must fail, never mount nowhere.
+		container := common.FindContainerByName(spec.Containers, consts.MainContainerName)
+		if container == nil {
+			return fmt.Errorf("LPX agent template %s has no %q container", clique.Name, consts.MainContainerName)
 		}
+		if slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool { return path.Clean(m.MountPath) == identityMountPath }) {
+			return fmt.Errorf("LPX agent template %s already mounts %s, which the operator owns", clique.Name, identityMountPath)
+		}
+		container.VolumeMounts = append(container.VolumeMounts,
+			corev1.VolumeMount{Name: identityVolume, MountPath: identityMountPath, ReadOnly: true})
 	}
 	return checkPodCliqueSetSize(pcs)
 }

@@ -1284,6 +1284,44 @@ func TestClientIdentityRejectsAuthoredVolumeOrMount(t *testing.T) {
 	}
 }
 
+func TestClientIdentityMountsOnlyAgentMainContainer(t *testing.T) {
+	for name, sidecars := range map[string][]corev1.Container{
+		"main only": nil,
+		// A sidecar named after the role must not take main's identity.
+		"sidecar named agent": {{Name: v1beta1.ComponentRoleLPXAgent, Image: "sidecar"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			spec := &dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
+			spec.Containers = append(spec.Containers, sidecars...)
+			r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+
+			t.Log("Render the PodCliqueSet and stamp the DGD's client identity")
+			pcs := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
+
+			t.Log("Every agent mounts the identity into its main container and nowhere else")
+			mount := corev1.VolumeMount{Name: identityVolume, MountPath: identityMountPath, ReadOnly: true}
+			agents := 0
+			for _, clique := range pcs.Spec.Template.Cliques {
+				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleAgent {
+					continue
+				}
+				agents++
+				require.Len(t, clique.Spec.PodSpec.Containers, 1+len(sidecars), clique.Name)
+				var mounted []string
+				for _, container := range clique.Spec.PodSpec.Containers {
+					if slices.Contains(container.VolumeMounts, mount) {
+						mounted = append(mounted, container.Name)
+					}
+				}
+				require.Equal(t, []string{consts.MainContainerName}, mounted, clique.Name)
+			}
+			require.Positive(t, agents)
+		})
+	}
+}
+
 func TestOnlyLPXAgentsHoldLPUsOrPublishACertificate(t *testing.T) {
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)

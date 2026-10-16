@@ -276,9 +276,9 @@ For every LPX DynamoGraphDeployment (DGD), the operator creates Secret
 rewrites it or adopts a Secret the DGD does not control. It holds:
 
 - `client.key` and `client.pem`: an Ed25519 key and a self-signed client certificate
-  (client authentication only, not a CA, valid for 10 years). Only agent Pods mount
-  them, read-only at `/etc/lpx/identity`, together with the optional platform CA from
-  Secret `lpx-server-ca`. Agent Pods also publish the certificate in the annotation
+  (client authentication only, not a CA, valid for 10 years). Only the `main`
+  container of agent Pods mounts them, read-only at `/etc/lpx/identity`, together with
+  the optional platform CA from Secret `lpx-server-ca`. Agent Pods also publish the certificate in the annotation
   `lpx.nvidia.com/client-cert`, so software on the LPU node can authenticate them.
 - `private.key` and `private.key.pub`: the DGD's own SSH key pair. It replaces the
   cluster-wide MPI SSH Secret in the DGD's LPX Pods, so one DGD's key does not open
