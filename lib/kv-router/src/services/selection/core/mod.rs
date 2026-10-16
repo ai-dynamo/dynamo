@@ -26,8 +26,8 @@ use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, SelectionTraceSpec, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
@@ -221,8 +221,6 @@ pub struct HostTelemetry {
     /// Receives each partition's scheduler-owned load snapshots (active decode
     /// blocks and prefill tokens per worker) for metrics and overload detection.
     pub scheduler_load: Option<Arc<dyn SchedulerLoadSink>>,
-    /// Capture per-candidate costs on every admitted selection's scheduling response.
-    pub selection_trace: Option<SelectionTraceSpec>,
 }
 
 /// Replica-sync transport the host carries for partitions this core does not

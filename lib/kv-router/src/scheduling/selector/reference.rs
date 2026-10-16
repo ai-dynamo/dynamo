@@ -601,7 +601,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             request,
             eligibility,
             block_size,
+            None,
         )
+        .map(|(result, _)| result)
     }
 }
 
@@ -777,7 +779,6 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: None,
         };
         let mut selected = [false; 3];
@@ -1185,7 +1186,6 @@ mod tests {
                 preferred_taints: HashMap::new(),
             },
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: None,
         };
 
@@ -1245,7 +1245,6 @@ mod tests {
                 preferred_taints: HashMap::new(),
             },
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: None,
         };
 
@@ -1323,7 +1322,6 @@ mod tests {
                     preferred_taints: HashMap::new(),
                 },
                 shared_cache_hits: None,
-                selection_trace: None,
                 resp_tx: None,
             };
 
@@ -1399,7 +1397,6 @@ mod tests {
                 preferred_taints: HashMap::from([("mdc-a".to_string(), 0.85)]),
             },
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: None,
         };
 
@@ -1471,7 +1468,6 @@ mod tests {
                 preferred_taints: HashMap::from([("mdc-a".to_string(), -0.25)]),
             },
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: None,
         };
 
@@ -1556,7 +1552,6 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: Some(shared_hits),
-            selection_trace: None,
             resp_tx: Some(tx),
         };
 
@@ -1635,7 +1630,6 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: Some(tx),
         };
 
@@ -1938,7 +1932,6 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: Some(tx),
         };
 
@@ -2043,7 +2036,6 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: Some(tx),
         };
 

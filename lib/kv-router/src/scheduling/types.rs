@@ -15,8 +15,8 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::KvTransferCandidates;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SelectionTrace, SelectionTraceSpec, SharedCacheHits,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -161,8 +161,8 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
-    /// Per-candidate costs, present only when the request carried a
-    /// [`SelectionTraceSpec`].
+    /// Per-candidate costs, present only when the scheduler has a selection
+    /// trace spec installed and this selection was admitted.
     pub selection_trace: Option<SelectionTrace>,
 }
 
@@ -420,8 +420,6 @@ pub struct ScheduleRequest {
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
-    /// Capture per-candidate costs for this selection.
-    pub selection_trace: Option<SelectionTraceSpec>,
 }
 
 /// Actor-owned admission request.
@@ -456,8 +454,6 @@ pub struct SchedulingRequest {
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
-    /// Capture per-candidate costs for this selection.
-    pub selection_trace: Option<SelectionTraceSpec>,
 
     // Load state computed during admission.
     pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
@@ -665,7 +661,6 @@ mod tests {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
-            selection_trace: None,
             worker_loads,
             resp_tx: None,
         }

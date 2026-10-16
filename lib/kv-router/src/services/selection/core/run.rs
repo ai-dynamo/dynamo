@@ -436,11 +436,6 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
             shared_cache_hits,
-            // Advisory probes never reach a trace publisher; do not pay to capture them.
-            selection_trace: match admission {
-                SelectionAdmission::Advisory { .. } => None,
-                _ => self.host.telemetry.selection_trace,
-            },
         };
         // `booking` guards the booking until it is installed below: any early
         // return or drop before then frees it.

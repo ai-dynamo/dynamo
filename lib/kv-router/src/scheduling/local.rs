@@ -31,7 +31,9 @@ use super::types::{
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
@@ -105,7 +107,6 @@ where
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             shared_cache_hits,
-            selection_trace,
         } = request;
         let request = SchedulingRequest {
             mode,
@@ -127,7 +128,6 @@ where
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             shared_cache_hits,
-            selection_trace,
             worker_loads: FxHashMap::default(),
             resp_tx,
         };
@@ -477,6 +477,13 @@ where
         self.queue.set_non_max_overlap_selection_observer(observer)
     }
 
+    /// Install per-candidate cost capture for admitted selections.
+    ///
+    /// Returns `false` when a spec is already installed.
+    pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
+        self.queue.set_selection_trace(spec)
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -614,7 +621,6 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
-            selection_trace: None,
         })
         .await
     }
@@ -1173,7 +1179,6 @@ mod tests {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
-            selection_trace: None,
         }
     }
 

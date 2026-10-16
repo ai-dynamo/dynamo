@@ -46,7 +46,6 @@ pub fn fixture(
         kv_transfer_candidates: None,
         retain_kv_transfer_chain: false,
         shared_cache_hits: None,
-        selection_trace: None,
         worker_loads: Default::default(),
         resp_tx: None,
     };

@@ -51,6 +51,18 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    /// Select a worker and, when `trace` is set, also return the per-candidate costs
+    /// the policy scored. The default ignores `trace`; policies that can report their
+    /// candidates override it. Hosts call this instead of [`Self::select_worker`]
+    /// when a selection trace is installed.
+    fn select_worker_traced(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        _trace: Option<SelectionTraceSpec>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker(input).map(|result| (result, None))
+    }
 }
 
 /// Inputs supplied by the selector's host.
@@ -278,7 +290,6 @@ fn selection_result(
     worker: WorkerWithDpRank,
     block_size: u32,
     max_raw_cached_tokens: Option<usize>,
-    selection_trace: Option<SelectionTrace>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
@@ -290,7 +301,6 @@ fn selection_result(
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
-        selection_trace,
     }
 }
 
@@ -446,7 +456,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
-) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    trace: Option<SelectionTraceSpec>,
+) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
@@ -520,7 +531,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     .into());
                 };
                 log_scored_candidates(request, worker_type, candidates, row);
-                let trace = request.selection_trace.map(|spec| {
+                let trace = trace.map(|spec| {
                     build_selection_trace(
                         candidates,
                         row,
@@ -542,13 +553,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(
-        request,
-        worker,
-        block_size,
-        input.max_raw_cached_tokens(),
-        selection_trace,
-    );
+    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
     log_selection(
         workers,
         request,
@@ -557,7 +562,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         cost,
         result.effective_overlap_blocks,
     );
-    Ok(result)
+    Ok((result, selection_trace))
 }
 
 #[cfg(test)]
@@ -685,7 +690,6 @@ mod test_support {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
-            selection_trace: None,
             resp_tx: None,
         }
     }
@@ -738,7 +742,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
-        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens(), None);
+        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
         assert_eq!(result.max_raw_cached_tokens, Some(96));
         assert_eq!(result.selected_raw_cached_tokens, Some(48));
         assert_eq!(result.cached_tokens, 120);
@@ -755,7 +759,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
-        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens(), None);
+        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
         assert_eq!(result.max_raw_cached_tokens, None);
         assert_eq!(result.selected_raw_cached_tokens, None);
     }
@@ -784,7 +788,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(selected, 3);
         assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
         assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
-        let result = selection_result(&request, selected, 16, Some(112), None);
+        let result = selection_result(&request, selected, 16, Some(112));
         assert_eq!(result.selected_raw_cached_tokens, Some(64));
     }
 

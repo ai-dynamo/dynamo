@@ -10,7 +10,9 @@ use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult};
+use crate::protocols::{
+    SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerSelectionResult,
+};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
@@ -354,6 +356,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        self.select_worker_traced(input, None)
+            .map(|(result, _)| result)
+    }
+
+    fn select_worker_traced(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        trace: Option<SelectionTraceSpec>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
             #[cfg(any(test, feature = "bench"))]
@@ -371,6 +382,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             request,
             eligibility,
             block_size,
+            trace,
         )
     }
 }
@@ -554,27 +566,20 @@ mod tests {
             Box::new(HighestCostPicker),
         );
 
-        let untraced = policy
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
-            .unwrap();
+        let input =
+            || WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16);
+        let (untraced, no_trace) = policy.select_worker_traced(input(), None).unwrap();
         assert_eq!(untraced.worker.worker_id, 7);
-        assert!(untraced.selection_trace.is_none());
+        assert!(no_trace.is_none());
 
-        request.selection_trace = Some(crate::protocols::SelectionTraceSpec { top_k: 3 });
-        let traced = policy
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
+        let (traced, trace) = policy
+            .select_worker_traced(
+                input(),
+                Some(crate::protocols::SelectionTraceSpec { top_k: 3 }),
+            )
             .unwrap();
-        let trace = traced.selection_trace.expect("trace requested");
+        assert_eq!(traced.worker.worker_id, 7);
+        let trace = trace.expect("trace requested");
         assert_eq!(trace.candidate_count, 8);
         assert!(!trace.pinned);
         let mut rows = trace.rows.clone();

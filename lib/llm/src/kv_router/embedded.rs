@@ -280,7 +280,6 @@ impl EmbeddedSelection {
                     sender: args.scheduler_load,
                     worker_type: args.metric_worker_type,
                 })),
-                selection_trace: crate::request_trace::router_selection_spec(),
             },
             replication: HostReplication {
                 channels: replica_sync,
@@ -296,6 +295,11 @@ impl EmbeddedSelection {
             .core()
             .ensure_partition(key.clone(), args.block_size, args.is_eagle)
             .context("failed to create embedded selection partition")?;
+        if let Some(spec) = crate::request_trace::router_selection_spec()
+            && !partition.scheduler().set_selection_trace(spec)
+        {
+            anyhow::bail!("selection trace spec is already installed");
+        }
 
         // Same profile the partition scheduler resolved, so class indices align.
         let profile = args

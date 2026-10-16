@@ -118,8 +118,7 @@ fn bench(c: &mut Criterion) {
             ("top16", Some(SelectionTraceSpec { top_k: 16 })),
             ("all", Some(SelectionTraceSpec { top_k: 0 })),
         ] {
-            let (workers, mut request) = support::fixture(count, 2048);
-            request.selection_trace = spec;
+            let (workers, request) = support::fixture(count, 2048);
             let plugin = default_policy(
                 KvRouterConfig {
                     router_temperature: 0.0,
@@ -130,7 +129,10 @@ fn bench(c: &mut Criterion) {
             let allocs = allocations(|| {
                 black_box(
                     plugin
-                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .select_worker_traced(
+                            support::selection_input(&workers, &request, 16),
+                            spec,
+                        )
                         .unwrap(),
                 );
             });
@@ -141,7 +143,10 @@ fn bench(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         plugin
-                            .select_worker(support::selection_input(&workers, &request, 16))
+                            .select_worker_traced(
+                                support::selection_input(&workers, &request, 16),
+                                spec,
+                            )
                             .unwrap(),
                     )
                 })
