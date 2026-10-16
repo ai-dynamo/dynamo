@@ -2935,6 +2935,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-realtime-ws-sidecar"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-renderer"
 version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
