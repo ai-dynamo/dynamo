@@ -269,12 +269,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     bash /tmp/install_vllm_omni.sh
 
 {% if device == "cuda" %}
-# Apply source hotfixes from container/deps/vllm/patches to the installed vLLM,
-# in name order. Each patch is regenerated against the pinned vLLM and applied
-# without fuzz, so a vLLM bump that moves the patched code fails the build
-# instead of silently shipping an unpatched image. A `for` loop returns only the
-# status of its last command, so every failure exits explicitly; an empty patch
-# directory is an error too.
+# Apply container/deps/vllm/patches to the installed vLLM in name order, without
+# fuzz, so a vLLM bump that moves the patched code fails the build.
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
     set -eu; \
     SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')"; \
