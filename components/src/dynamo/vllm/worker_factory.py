@@ -1693,8 +1693,8 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 
 @dataclass
-class _DecodeWorkerLifecycle:
-    """Owns the engine and handler of a decode or prefill worker.
+class _WorkerLifecycle:
+    """Owns the engine and handler of a prefill, decode, or aggregated worker.
 
     On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
     non-daemon child, so leaving it to interpreter exit can block the main
@@ -1706,7 +1706,7 @@ class _DecodeWorkerLifecycle:
     handler: Optional[BaseWorkerHandler] = None
     shutdown_event: asyncio.Event | None = None
 
-    def __enter__(self) -> "_DecodeWorkerLifecycle":
+    def __enter__(self) -> "_WorkerLifecycle":
         return self
 
     def __exit__(
@@ -1720,13 +1720,11 @@ class _DecodeWorkerLifecycle:
         except Exception:
             if original_error is None:
                 raise
-            logger.exception(
-                "Failed to clean up decode worker after an earlier failure"
-            )
+            logger.exception("Failed to clean up worker after an earlier failure")
 
     def cleanup(self) -> None:
         """Release resources in reverse construction order."""
-        logger.debug("Cleaning up decode worker")
+        logger.debug("Cleaning up worker")
         if self.shutdown_event is not None:
             self.shutdown_event.set()
         try:
@@ -2277,7 +2275,7 @@ class WorkerFactory:
         """
         Instantiate and serve
         """
-        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+        with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
             try:
                 await self._run_decode_worker(
                     runtime,
@@ -2297,7 +2295,7 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult],
-        lifecycle: _DecodeWorkerLifecycle,
+        lifecycle: _WorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
 
@@ -2602,7 +2600,7 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+        with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
             try:
                 await self._run_prefill_worker(
                     runtime,
@@ -2622,7 +2620,7 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult],
-        lifecycle: _DecodeWorkerLifecycle,
+        lifecycle: _WorkerLifecycle,
     ) -> None:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"

@@ -34,7 +34,6 @@ from dynamo.vllm.worker_factory import (
     _await_benchmark_then_restore_workers,
     _benchmark_engine_identity,
     _benchmark_worker_probe_path,
-    _DecodeWorkerLifecycle,
     _merge_benchmark_rank_results,
     _register_request_cache_metrics,
     _restore_benchmark_workers,
@@ -42,6 +41,7 @@ from dynamo.vllm.worker_factory import (
     _sync_fpm_worker_id,
     _sync_fpm_worker_id_or_shutdown,
     _wait_and_load_benchmark,
+    _WorkerLifecycle,
 )
 
 pytestmark = [
@@ -127,14 +127,14 @@ def test_register_request_cache_metrics_includes_multimodal_image_loader():
     )
 
 
-def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
+def test_worker_lifecycle_cleanup_in_reverse_construction_order():
     calls = []
     shutdown_event = asyncio.Event()
     handler = Mock()
     handler.cleanup.side_effect = lambda: calls.append("handler")
     engine_client = Mock()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
-    resources = _DecodeWorkerLifecycle(
+    resources = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=7.0),
         handler=handler,
@@ -148,11 +148,11 @@ def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
     engine_client.shutdown.assert_called_once_with(timeout=7.0)
 
 
-def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
+def test_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     engine_client = Mock()
-    resources = _DecodeWorkerLifecycle(
+    resources = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=5.0),
         handler=handler,
@@ -164,14 +164,14 @@ def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
-def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
+def test_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
     handler_error = RuntimeError("handler cleanup failed")
     engine_error = RuntimeError("engine shutdown failed")
     handler = Mock()
     handler.cleanup.side_effect = handler_error
     engine_client = Mock()
     engine_client.shutdown.side_effect = engine_error
-    lifecycle = _DecodeWorkerLifecycle(
+    lifecycle = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=5.0),
         handler=handler,
@@ -208,7 +208,7 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
 
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
-    assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+    assert "Failed to clean up worker after an earlier failure" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1307,7 +1307,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
 def _snapshot_config(scheduler_cls=InstrumentedScheduler) -> SimpleNamespace:
     """A restored ``VllmConfig`` whose snapshot captured ``scheduler_cls``.
 
-    ``shutdown_timeout`` is read by ``_DecodeWorkerLifecycle.cleanup()`` when a
+    ``shutdown_timeout`` is read by ``_WorkerLifecycle.cleanup()`` when a
     restore fails, so it has to be present on the decode path.
     """
     return SimpleNamespace(
