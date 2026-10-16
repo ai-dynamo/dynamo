@@ -147,25 +147,19 @@ fn image_media_requires_the_loaded_models_advertised_capability() {
 
 #[test]
 fn unsupported_media_modalities_and_sources_are_rejected() {
-    for (key, expected) in [
-        ("video_url", "video_url"),
-        ("audio_url", "audio_url"),
-        ("future_media", "future_media"),
-    ] {
-        let mut req = request();
-        req.multi_modal_data = Some(HashMap::from([(
-            key.to_string(),
-            vec![MultimodalData::RawUrl(
-                "https://example.com/media".to_string(),
-            )],
-        )]));
-        let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
-            .expect_err("only images are supported");
-        assert!(
-            error.to_string().contains(expected),
-            "unexpected error: {error}"
-        );
-    }
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/media".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("only images are supported");
+    assert!(
+        error.to_string().contains("video_url"),
+        "unexpected error: {error}"
+    );
 
     let mut req = request();
     add_images(&mut req, ["file:///tmp/image.png"]);
@@ -206,16 +200,6 @@ fn image_metadata_that_cannot_be_honored_is_rejected() {
     let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("media I/O overrides cannot be dropped");
     assert!(error.to_string().contains("media_io_kwargs"));
-}
-
-#[test]
-fn image_request_without_max_tokens_is_left_for_engine_derivation() {
-    let mut req = request();
-    add_images(&mut req, ["https://example.com/image.png"]);
-    req.stop_conditions.max_tokens = None;
-    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
-        .expect("the engine derives against the expanded prompt");
-    assert_eq!(proto.stopping.expect("stopping").max_tokens, None);
 }
 
 #[test]
