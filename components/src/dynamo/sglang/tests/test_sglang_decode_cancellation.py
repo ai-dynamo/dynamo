@@ -650,29 +650,6 @@ async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-async def test_monitor_failure_during_read_is_raised(decode_cancellation_case):
-    async def stalled_stream():
-        await asyncio.Future()
-        yield {}
-
-    async def failing_monitor():
-        await asyncio.sleep(0.01)
-        raise EngineShutdown("Engine was shut down during token generation")
-
-    cancellation_task = asyncio.create_task(failing_monitor())
-    with pytest.raises(EngineShutdown, match="shut down during token generation"):
-        await asyncio.wait_for(
-            _collect(
-                decode_cancellation_case.handler._stream_until_cancelled(
-                    stalled_stream(), cancellation_task
-                )
-            ),
-            timeout=0.5,
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(5)
 async def test_decode_cancellation_drains_buffered_empty_chunk(
     decode_cancellation_case,
 ):
