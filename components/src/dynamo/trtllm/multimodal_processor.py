@@ -593,8 +593,8 @@ class MultimodalRequestProcessor:
                                 policy=self._url_policy,
                                 max_bytes=self.max_file_size_bytes,
                             )
-                        # Dual decode path: H.264/H.265 via NVDEC (hardware); other
-                        # codecs via the vendor cv2 loader. NVDEC failure falls back.
+                        # H.264/H.265 use NVDEC when enabled; otherwise video
+                        # reaches the vendor cv2 loader. NVDEC failure also falls back.
                         nvdec_video = None
                         codec = probe_video_codec(content)
                         if should_use_nvdec(codec):

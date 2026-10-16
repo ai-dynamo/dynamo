@@ -40,6 +40,7 @@ from dynamo.common.multimodal.media_source import (
 )
 from dynamo.common.multimodal.nvdec_decoder import (
     decode_video_nvdec,
+    is_nvdec_disabled,
     probe_video_codec,
     should_use_nvdec,
 )
@@ -158,6 +159,16 @@ class VideoLoader:
         video_io_kwargs = VideoMediaIO.merge_kwargs(
             {"num_frames": self._num_frames}, media_io_kwargs or {}
         )
+        if is_nvdec_disabled():
+            # vLLM has its own PyNvVideoCodec backend, selected independently
+            # of Dynamo's NVDEC route through these options or its environment.
+            if (
+                video_io_kwargs.get("video_backend")
+                or os.environ.get("VLLM_VIDEO_LOADER_BACKEND")
+            ) == "pynvvideocodec":
+                video_io_kwargs["video_backend"] = "opencv"
+            if video_io_kwargs.get("backend") == "pynvvideocodec":
+                video_io_kwargs["backend"] = "opencv"
         return VideoMediaIO(
             ImageMediaIO(image_mode="RGB"),
             **video_io_kwargs,
@@ -199,7 +210,7 @@ class VideoLoader:
     async def _decode_video_bytes(
         self, content: bytes, media_io: Any
     ) -> tuple[np.ndarray, Dict[str, Any]]:
-        """Decode video bytes: H.264/H.265 on NVDEC, all else software.
+        """Decode video bytes: H.264/H.265 on NVDEC when enabled, otherwise software.
 
         vLLM ships OpenCV for still images without video backends. Translate
         its decode failures into install guidance; preserve other backends.
@@ -210,7 +221,7 @@ class VideoLoader:
         ``seek_mode``, ...) name decoders NVDEC is not and are ignored for
         H.264/H.265. Only vLLM's video backend owns the full
         ``media_io_kwargs`` contract, so it is reached for royalty-free codecs,
-        or for every clip when ``DYN_DISABLE_NVDEC=1``.
+        or for every clip unless NVDEC is enabled via ``DYN_DISABLE_NVDEC=0``.
         """
         codec = probe_video_codec(content)
         if should_use_nvdec(codec):

@@ -9,7 +9,8 @@ vLLM CPU and XPU runtimes can use the frontend software path:
 
 - H.264 and H.265 (HEVC) decode on the GPU using NVDEC, NVIDIA's dedicated
   hardware video decoder, through
-  [PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/).
+  [PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/) when explicitly
+  enabled with `DYN_DISABLE_NVDEC=0`. See [Configuration](#configuration).
 - VP8 and VP9 decode on the CPU through Dynamo's codec-limited, in-tree FFmpeg
   when frontend decoding is enabled on vLLM, or SGLang on CUDA.
 
@@ -21,6 +22,13 @@ is built without a video backend for still-image work only.
 
 This page covers which GPUs provide NVDEC, what the container must expose, and how
 Dynamo behaves when hardware decode is unavailable.
+
+## Enabling NVDEC
+
+NVDEC video decoding is disabled by default on the SGLang, vLLM, and TensorRT-LLM
+workers. Set `DYN_DISABLE_NVDEC=0` before starting a worker to enable it for
+trusted H.264/H.265 inputs. The shipped images do not include a software decoder
+for these codecs, so requests using them fail while NVDEC is disabled.
 
 ## GPU support
 
@@ -40,10 +48,10 @@ A common misconception is that datacenter GPUs have no video engines. That appli
 | L40, L40S | Ada Lovelace | 3 engines | 3 | Yes | Yes |
 | RTX 6000 Ada | Ada Lovelace | 3 engines | 3 | Yes (8/10-bit) | Yes (8/10/12-bit, up to 4:4:4) |
 
-Every GPU above decodes both codecs Dynamo routes to hardware, so H.264 and H.265 video
-input works across the datacenter lineup. Hopper's NVDEC matches Turing's feature set and
-does **not** decode AV1; Blackwell adds AV1 decode. The Ada parts (L4, L40S, RTX 6000 Ada)
-decode AV1 as well, and unlike the datacenter accelerators they also carry NVENC.
+Every GPU above decodes both codecs Dynamo routes to hardware when NVDEC is enabled.
+Hopper's NVDEC matches Turing's feature set and does **not** decode AV1; Blackwell adds
+AV1 decode. The Ada parts (L4, L40S, RTX 6000 Ada) decode AV1 as well, and unlike the
+datacenter accelerators they also carry NVENC.
 
 Because no datacenter GPU ships NVENC, Dynamo's video *generation* path encodes with a
 CPU VP9 encoder rather than a hardware H.264 encoder.
@@ -100,9 +108,9 @@ the video libraries, since in that mode capabilities come from the spec rather t
 environment variable.
 
 > [!WARNING]
-> Missing the `video` capability is the most common cause of hardware decode being
-> silently unavailable. The GPU itself is fine; the container simply cannot see the
-> decoder.
+> Missing the `video` capability also makes hardware decode unavailable after
+> `DYN_DISABLE_NVDEC=0` is set. The GPU itself is fine; the container simply
+> cannot see the decoder.
 
 ## Verifying hardware decode
 
@@ -113,9 +121,9 @@ print('NVDEC available:', nvdec_available())
 "
 ```
 
-`False` means Dynamo will not use hardware decode in that container. Check, in order: the
-`video` driver capability, that `PyNvVideoCodec` is installed, and that
-`DYN_DISABLE_NVDEC` is unset.
+`False` means Dynamo will not use hardware decode in that container. Check, in order:
+`DYN_DISABLE_NVDEC=0`, the `video` driver capability, and that
+`PyNvVideoCodec` is installed. Set the flag before starting the worker.
 
 To distinguish "capability missing" from every other cause, look for the decode library
 itself. It is mounted by the container runtime, not installed by the image, so its absence
@@ -129,7 +137,7 @@ Expect `libnvcuvid.so.1`. Nothing means the `video` capability did not reach thi
 container. If it is present on the node but not inside, the capability is being dropped
 between the two.
 
-## Behavior when NVDEC is unavailable
+## Behavior when NVDEC is disabled or unavailable
 
 Hardware decode is additive and never blocks a request on its own: routing falls through
 to a software decode path where one exists. VP8 and VP9 frontend decoding on vLLM, or
@@ -137,20 +145,22 @@ SGLang on CUDA, does not depend on NVDEC.
 
 > [!IMPORTANT]
 > The shipped images do not include a software H.264, H.265, or AV1 decoder.
-> Therefore, if NVDEC is unavailable, H.264 and H.265 fail with an
-> unsupported-codec error unless the backend's wider Python decode carrier is
+> Therefore, if NVDEC is disabled or unavailable, H.264 and H.265 fail with a
+> missing-decoder error unless the backend's wider Python decode carrier is
 > installed. AV1 also requires an additional carrier because Dynamo does not
 > route it through NVDEC and the in-tree FFmpeg excludes it.
 >
-> Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
+> To use NVDEC for H.264 and H.265, set `DYN_DISABLE_NVDEC=0` and grant the
+> container the `video` driver capability. See [Configuration](#configuration).
 > For VP8 and VP9, use frontend decoding on vLLM, or SGLang on CUDA. For
 > other software-decoded cases, install a decode carrier alongside or transcode
 > the input before sending it.
 
 ### Installing a software decoder
 
-To decode a format NVDEC does not cover — or H.264/H.265 on a host with no NVDEC —
-explicitly install the backend's decode package at the validated version bounds:
+To decode a format NVDEC does not cover — or H.264/H.265 when NVDEC is disabled
+or unavailable — explicitly install the backend's decode package at the
+validated version bounds:
 
 ```bash
 # vLLM: audio input
@@ -206,7 +216,7 @@ NVDEC as above needs no additional change. Encode performance does not depend on
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DYN_DISABLE_NVDEC` | unset | Set to `1` to skip hardware decode. In a shipped image that leaves H.264 and H.265 input with no decoder, so it is a debugging switch rather than a fallback for those codecs. VP8 and VP9 frontend decoding is unaffected. Read as a boolean: `1`/`true`/`yes` disable, anything else does not. |
+| `DYN_DISABLE_NVDEC` | unset (NVDEC disabled) | Set to `0` to enable NVDEC for H.264/H.265 input. `false` and `no` also enable it; any other value leaves it disabled. Without a software decoder, H.264/H.265 requests fail while NVDEC is disabled. VP8/VP9 are unaffected. |
 | `DYN_NVDEC_GPU_ID` | `0` | GPU ordinal used for decode. |
 | `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Frames sampled uniformly from each clip. |
 | `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum size in MiB for each remote image, audio, or video download. TensorRT-LLM uses its backend-specific `--max-file-size-mb` option (`DYN_TRTLLM_MAX_FILE_SIZE_MB`) instead. |

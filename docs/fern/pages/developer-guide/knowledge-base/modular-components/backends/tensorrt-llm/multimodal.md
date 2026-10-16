@@ -441,9 +441,9 @@ await register_model(
 ## Known Limitations
 
 - **No audio support** - No audio encoder implementation
-- **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
-  runtime image ships no software video decoder. This needs a GPU with a video
-  decode engine and a container granted the `video` driver capability — see
+- **Video decode requires NVDEC** - The runtime image ships no software video
+  decoder. H.264/H.265 input requires `DYN_DISABLE_NVDEC=0`, a GPU with a video
+  decode engine, and a container granted the `video` driver capability — see
   [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)

@@ -70,6 +70,17 @@ def test_probe_video_codec(data, expected):
     assert nd.probe_video_codec(data) == expected
 
 
+@pytest.mark.parametrize("disable_value", [None, "invalid"])
+def test_nvdec_available_false_by_default(monkeypatch, disable_value):
+    if disable_value is None:
+        monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(nd.DISABLE_ENV, disable_value)
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv())
+    assert nd.nvdec_available() is False
+    assert nd.should_use_nvdec("hevc") is False
+
+
 def test_nvdec_available_false_when_disabled(monkeypatch):
     monkeypatch.setenv(nd.DISABLE_ENV, "1")
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv())
@@ -77,13 +88,13 @@ def test_nvdec_available_false_when_disabled(monkeypatch):
 
 
 def test_nvdec_available_false_when_not_importable(monkeypatch):
-    monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    monkeypatch.setenv(nd.DISABLE_ENV, "0")
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", None)  # -> ImportError
     assert nd.nvdec_available() is False
 
 
 def test_nvdec_available_true_when_importable(monkeypatch):
-    monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    monkeypatch.setenv(nd.DISABLE_ENV, "0")
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv())
     assert nd.nvdec_available() is True
 
@@ -91,7 +102,7 @@ def test_nvdec_available_true_when_importable(monkeypatch):
 def test_nvdec_available_false_when_import_raises_runtime(monkeypatch):
     # PyNvVideoCodec raises RuntimeError (not ImportError) at import when the
     # NVDEC/NVENC driver libs aren't exposed (no NVIDIA_DRIVER_CAPABILITIES=video).
-    monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    monkeypatch.setenv(nd.DISABLE_ENV, "0")
     monkeypatch.delitem(sys.modules, "PyNvVideoCodec", raising=False)
     import builtins
 
@@ -107,7 +118,7 @@ def test_nvdec_available_false_when_import_raises_runtime(monkeypatch):
 
 
 def _force_import_failure(monkeypatch, exc):
-    monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    monkeypatch.setenv(nd.DISABLE_ENV, "0")
     monkeypatch.delitem(sys.modules, "PyNvVideoCodec", raising=False)
     import builtins
 
@@ -149,7 +160,7 @@ def test_absent_wheel_stays_quiet(monkeypatch, caplog):
 
 
 def test_should_use_nvdec_routes_only_h264_hevc(monkeypatch):
-    monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    monkeypatch.setenv(nd.DISABLE_ENV, "0")
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv())
     assert nd.should_use_nvdec("h264") is True
     assert nd.should_use_nvdec("hevc") is True

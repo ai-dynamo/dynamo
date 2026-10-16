@@ -54,8 +54,8 @@ trtllm_test_engine_config_dir = os.path.join(
     SERVE_TEST_DIR, "trtllm/engine_configs/qwen3"
 )
 
-# Evaluated once at collection: NVDEC needs the container's driver "video"
-# capability, which CI runners do not grant.
+# Evaluated once at collection: NVDEC needs DYN_DISABLE_NVDEC=0 and the
+# container's driver "video" capability, which CI runners do not grant.
 _NVDEC_UNAVAILABLE = not nvdec_available()
 
 qwen3_vl_engine_config_dir = os.path.join(
@@ -377,8 +377,9 @@ trtllm_configs = {
             pytest.mark.skipif(
                 _NVDEC_UNAVAILABLE,
                 reason=(
-                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
-                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                    "NVDEC is disabled or unavailable. Enable it with DYN_DISABLE_NVDEC=0 "
+                    "and grant the driver 'video' capability "
+                    "(NVIDIA_DRIVER_CAPABILITIES)"
                 ),
             ),
             pytest.mark.post_merge,
