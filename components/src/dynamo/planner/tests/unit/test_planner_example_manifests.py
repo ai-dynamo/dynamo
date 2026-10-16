@@ -53,6 +53,9 @@ def test_disagg_planner_example_uses_inline_config_and_runtime_observations(back
 
     for component in components.values():
         pod_spec = component["podTemplate"]["spec"]
-        assert all("configMap" not in volume for volume in pod_spec.get("volumes", []))
+        for volume in pod_spec.get("volumes", []):
+            assert "configMap" not in volume
+            for source in volume.get("projected", {}).get("sources", []):
+                assert "configMap" not in source
         for container in pod_spec["containers"]:
             assert "--planner-profile-data" not in container.get("args", [])
