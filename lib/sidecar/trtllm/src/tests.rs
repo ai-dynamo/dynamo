@@ -469,7 +469,7 @@ fn limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supports_image: false,
+        supports_image: Some(false),
     })
 }
 
@@ -477,7 +477,7 @@ fn image_limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supports_image: true,
+        supports_image: Some(true),
     })
 }
 
@@ -542,7 +542,7 @@ async fn collect(
 fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {
     let mut req = request();
     mutate(&mut req);
-    let error = build_generate_request(&req, "req", "model", None, AGG)
+    let error = build_generate_request(req, "req", "model", None, AGG)
         .expect_err("request must be rejected");
     assert!(
         error.to_string().contains(expect),

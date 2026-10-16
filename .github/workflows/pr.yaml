@@ -546,7 +546,7 @@ jobs:
       extra_build_args: |
         RUNTIME_IMAGE_TAG=1.4.0rc1.dev202610140007@sha256:7a728cd307bfa1651b4ad0787e71e69f7506fb1a698a0f4f04aef719ad43525f
         TRTLLM_SOURCE_REPOSITORY=https://github.com/krishung5/TensorRT-LLM
-        TRTLLM_SOURCE_COMMIT=ab07b1649f638924908aed565722f4dd0f8547f8
+        TRTLLM_SOURCE_COMMIT=5d2e3b2c758b4ccc0fa0a3eb0e01cdef934e8089
     # actions: read lets the build download a prior run's baseline compliance
     # artifact to diff against (a reusable workflow's token can't exceed the
     # caller's). Missing -> the diff soft-degrades, build stays green.

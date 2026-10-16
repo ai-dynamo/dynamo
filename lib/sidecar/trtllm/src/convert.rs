@@ -13,6 +13,7 @@
 //! See [`crate::disagg`] for the codec.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
@@ -28,14 +29,15 @@ use crate::proto as pb;
 type MappedTokens = (Vec<u32>, Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
 pub(crate) fn build_generate_request(
-    request: &PreprocessedRequest,
+    mut request: PreprocessedRequest,
     request_id: &str,
     model: &str,
     limits: Option<ModelMetadata>,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    validate_request(request, mode)?;
-    let media = image_media(request, limits)?;
+    validate_request(&request, mode)?;
+    let request_has_media = has_media(&request);
+    let media = image_media(&mut request, limits)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -52,7 +54,7 @@ pub(crate) fn build_generate_request(
     let max_tokens = if mode.is_prefill() {
         Some(1)
     } else {
-        max_tokens(request, limits)?
+        max_tokens(&request, limits, request_has_media)?
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
@@ -71,6 +73,15 @@ pub(crate) fn build_generate_request(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
+    let conditions = stop_conditions(&request);
+    let guided = guided_decoding(&request)?;
+    let session_id = request
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.trim())
+        .filter(|session_id| !session_id.is_empty())
+        .map(str::to_string);
+    let token_ids = Arc::unwrap_or_clone(request.token_ids);
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
@@ -78,7 +89,7 @@ pub(crate) fn build_generate_request(
         // served by the loaded model (single-model server).
         model: model.to_string(),
         input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-            ids: request.token_ids.as_ref().clone(),
+            ids: token_ids,
         })),
         sampling: Some(pb::SamplingParams {
             temperature: sampling.temperature.map(f64::from),
@@ -100,7 +111,7 @@ pub(crate) fn build_generate_request(
             // `Stop` instead of `PrefillReady`, and leave the frontend treating
             // a request that never met its minimum as complete.
             min_tokens: stop.min_tokens,
-            conditions: stop_conditions(request),
+            conditions,
             ignore_eos: stop.ignore_eos,
             // `include_stop_in_output` retains matched stop *strings*; the
             // request-level flag is rejected in `validate_request`, so leave it
@@ -122,17 +133,13 @@ pub(crate) fn build_generate_request(
             prompt_candidates: None,
             prompt_logprob_start: None,
         }),
-        guided: guided_decoding(request)?,
+        guided,
         media,
         lora_name: String::new(),
         kv,
         extra: Some(disagg::request_extra(
             mode.is_prefill(),
-            request
-                .agent_context
-                .as_ref()
-                .map(|context| context.session_id.trim())
-                .filter(|session_id| !session_id.is_empty()),
+            session_id.as_deref(),
         )),
     })
 }
@@ -144,11 +151,12 @@ pub(crate) fn build_generate_request(
 fn max_tokens(
     request: &PreprocessedRequest,
     limits: Option<ModelMetadata>,
+    has_media: bool,
 ) -> Result<Option<u32>, DynamoError> {
     if let Some(max_tokens) = request.stop_conditions.max_tokens {
         return Ok(Some(max_tokens));
     }
-    if has_media(request) {
+    if has_media {
         return Ok(None);
     }
     let context_length = limits
@@ -176,18 +184,17 @@ fn max_tokens(
 
 const IMAGE_KEY: &str = "image_url";
 
-/// Map Dynamo's image payload to OpenEngine media, rejecting other modalities.
 /// Per-modality vectors do not preserve cross-modality order.
 fn image_media(
-    request: &PreprocessedRequest,
+    request: &mut PreprocessedRequest,
     limits: Option<ModelMetadata>,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
 
     // mm_routing_info stays router-side; multi_modal_data is engine input.
-    let media_map = request.multi_modal_data.as_ref();
-    if let Some(media_map) = media_map {
+    let mut media_map = request.multi_modal_data.take();
+    if let Some(media_map) = media_map.as_ref() {
         for (modality, items) in media_map {
             if modality != IMAGE_KEY && !items.is_empty() {
                 return Err(client::invalid_argument(format!(
@@ -198,24 +205,25 @@ fn image_media(
     }
 
     let images = media_map
-        .and_then(|media| media.get(IMAGE_KEY))
-        .map(Vec::as_slice)
+        .as_mut()
+        .and_then(|media| media.remove(IMAGE_KEY))
         .unwrap_or_default();
 
-    let user_image_uuids = if let Some(uuid_map) = request.multi_modal_uuids.as_ref() {
-        for (modality, uuids) in uuid_map {
+    let mut uuid_map = request.multi_modal_uuids.take();
+    let user_image_uuids = if let Some(uuid_map) = uuid_map.as_mut() {
+        for (modality, uuids) in uuid_map.iter() {
             if modality != IMAGE_KEY && !uuids.is_empty() {
                 return Err(client::invalid_argument(format!(
                     "multimodal UUIDs for `{modality}` cannot be forwarded by the image-only TensorRT-LLM sidecar"
                 )));
             }
         }
-        uuid_map.get(IMAGE_KEY).map(Vec::as_slice)
+        uuid_map.remove(IMAGE_KEY)
     } else {
         None
     };
 
-    if let Some(uuids) = user_image_uuids
+    if let Some(uuids) = user_image_uuids.as_ref()
         && uuids.len() != images.len()
     {
         return Err(client::invalid_argument(format!(
@@ -228,18 +236,20 @@ fn image_media(
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    if !limits.is_some_and(|limits| limits.supports_image) {
+    if limits.is_none_or(|limits| limits.supports_image != Some(true)) {
         return Err(client::invalid_argument(
             "the loaded TensorRT-LLM model does not advertise image support through Control.GetModelInfo",
         ));
     }
 
+    let uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
     images
-        .iter()
+        .into_iter()
+        .zip(uuids)
         .enumerate()
-        .map(|(index, image)| {
+        .map(|(index, (image, uuid))| {
             let source = match image {
-                MultimodalData::Url(url) => media_source(url.as_str(), index)?,
+                MultimodalData::Url(url) => media_source(url.to_string(), index)?,
                 MultimodalData::RawUrl(url) => media_source(url, index)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(format!(
@@ -258,22 +268,19 @@ fn image_media(
                 // MIME metadata belongs to raw_bytes, which this client does not send.
                 mime_type: String::new(),
                 // Do not substitute router-owned mm_hashes for caller cache identities.
-                uuid: user_image_uuids
-                    .and_then(|uuids| uuids[index].as_deref())
-                    .unwrap_or_default()
-                    .to_string(),
+                uuid: uuid.unwrap_or_default(),
             })
         })
         .collect()
 }
 
-fn media_source(value: &str, index: usize) -> Result<pb::media_item::Source, DynamoError> {
+fn media_source(value: String, index: usize) -> Result<pb::media_item::Source, DynamoError> {
     let scheme = value
         .split_once(':')
         .map(|(scheme, _)| scheme.to_ascii_lowercase());
     match scheme.as_deref() {
-        Some("http") | Some("https") => Ok(pb::media_item::Source::Url(value.to_string())),
-        Some("data") => Ok(pb::media_item::Source::DataUri(value.to_string())),
+        Some("http") | Some("https") => Ok(pb::media_item::Source::Url(value)),
+        Some("data") => Ok(pb::media_item::Source::DataUri(value)),
         _ => Err(client::invalid_argument(format!(
             "`{IMAGE_KEY}` item {index} must use an http, https, or data URI"
         ))),

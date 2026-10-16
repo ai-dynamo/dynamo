@@ -17,7 +17,7 @@ fn prefill_request_is_marked_context_only() {
     req.stop_conditions.max_tokens = Some(128);
     req.stop_conditions.min_tokens = Some(8);
     req.output_options.logprobs = Some(1);
-    let proto = build_generate_request(&req, "req", "model", None, DisaggregationMode::Prefill)
+    let proto = build_generate_request(req, "req", "model", None, DisaggregationMode::Prefill)
         .expect("build prefill request");
 
     assert!(
@@ -81,7 +81,7 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
     )]));
 
     let prefill = build_generate_request(
-        &req,
+        req.clone(),
         "req",
         "model",
         image_limits(4096),
@@ -100,7 +100,7 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
         prompt_tokens_details: None,
     });
     let decode = build_generate_request(
-        &req,
+        req,
         "req",
         "model",
         image_limits(4096),
@@ -220,7 +220,7 @@ async fn decode_request_replays_the_prefill_session() {
 #[test]
 fn decode_without_a_prefill_result_runs_the_whole_request() {
     let proto = build_generate_request(
-        &request(),
+        request(),
         "req",
         "model",
         limits(4096),
@@ -251,7 +251,7 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
         prompt_tokens_details: None,
     });
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
-        let error = build_generate_request(&req, "req", "model", None, mode)
+        let error = build_generate_request(req.clone(), "req", "model", None, mode)
             .expect_err("handoff must be rejected");
         assert!(
             error
