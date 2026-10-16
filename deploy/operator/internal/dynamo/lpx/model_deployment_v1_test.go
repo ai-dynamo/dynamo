@@ -77,19 +77,45 @@ func TestDeploymentContractSelectsOneFormat(t *testing.T) {
 }
 
 func TestDeploymentContractPreservesNormalizedBuild(t *testing.T) {
-	t.Log("Create equivalent legacy and deployment-only scheduler contracts")
-	legacy, err := buildFromGbuildManifestV2("gs://models/build", newManifestV2ContractFixture(t))
-	require.NoError(t, err)
-	deployment := newDeploymentV1ContractFixture(t)
-	data, err := deployment.Message().Marshal()
-	require.NoError(t, err)
+	for _, test := range []struct {
+		name           string
+		devicesPerNode uint32
+		wantNodes      int
+	}{
+		{name: "one node", devicesPerNode: 8, wantNodes: 1},
+		{name: "manifest device density", devicesPerNode: 4, wantNodes: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Create equivalent legacy and deployment-only contracts with the manifest device density")
+			manifest := newManifestV2ContractFixture(t)
+			artifacts, err := manifest.Artifacts()
+			require.NoError(t, err)
+			legacyPartitions, err := artifacts.Partitions()
+			require.NoError(t, err)
+			legacyDetail, err := legacyPartitions.At(0).Detail().Lpu()
+			require.NoError(t, err)
+			legacyDetail.SetDevicesPerNode(test.devicesPerNode)
+			legacy, err := buildFromGbuildManifestV2("gs://models/build", manifest)
+			require.NoError(t, err)
+			deployment := newDeploymentV1ContractFixture(t)
+			partitions, err := deployment.Partitions()
+			require.NoError(t, err)
+			detail, err := partitions.At(0).Detail().Lpu()
+			require.NoError(t, err)
+			detail.SetDevicesPerNode(test.devicesPerNode)
+			data, err := deployment.Message().Marshal()
+			require.NoError(t, err)
 
-	t.Log("Decode the deployment without importing execution or report types")
-	decoded, err := decodeGbuildDeploymentV1(data)
-	require.NoError(t, err)
-	build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
-	require.NoError(t, err)
-	require.Equal(t, legacy, build)
+			t.Log("Derive the same node count from partition geometry in both formats")
+			decoded, err := decodeGbuildDeploymentV1(data)
+			require.NoError(t, err)
+			build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
+			require.NoError(t, err)
+			require.Equal(t, legacy, build)
+			require.EqualValues(t, test.devicesPerNode, build.Partitions[0].DevicesPerNode)
+			require.Equal(t, test.wantNodes, build.Partitions[0].effectiveNodeCount())
+		})
+	}
 }
 
 func TestDeploymentContractIgnoresRuntimeProtocol(t *testing.T) {

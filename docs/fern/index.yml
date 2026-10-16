@@ -940,7 +940,7 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
-              - page: Muse-Spark-open-816B-A42B
+              - page: Muse-Spark-Open-816B-A42B
                 path: pages/recipes/model-recipes/Muse-Spark-Open.mdx
                 slug: Muse-Spark-Open
           - section: MiniMax
@@ -957,6 +957,13 @@ navigation:
               - page: Motif-3 NVFP4
                 path: pages/recipes/model-recipes/motif-3.mdx
                 slug: motif-3
+          - section: Reflection
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Beam-1.0-501B-A23B
+                path: pages/recipes/model-recipes/beam-1-0-501b.mdx
+                slug: beam-1-0-501b
           # recipe-nav:end
 
       # ==================== Kubernetes Templates ====================
