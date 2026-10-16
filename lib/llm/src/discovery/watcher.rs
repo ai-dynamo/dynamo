@@ -827,26 +827,12 @@ impl ModelWatcher {
             .await?;
             let client = load_context.client().clone();
 
-            // KV routing needs frontend tokenization and `PushRouter` refuses
-            // `RouterMode::KV`, so text-input cards fall back to round-robin.
-            let text_router_mode = if router_config.router_mode.is_kv_routing() {
-                tracing::warn!(
-                    model_name = card.name(),
-                    "--router-mode kv cannot route text-input (ModelInput::Text, e.g. vLLM \
-                     --use-vllm-tokenizer) workers because the frontend does not tokenize \
-                     their requests; routing this model round-robin instead"
-                );
-                RouterMode::RoundRobin
-            } else {
-                router_config.router_mode
-            };
-
             if card.model_type.supports_embedding() {
                 let push_router = PushRouter::<
                     NvCreateEmbeddingRequest,
                     Annotated<NvCreateEmbeddingResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -857,7 +843,7 @@ impl ModelWatcher {
                     NvCreateClassifyRequest,
                     Annotated<NvCreateClassifyResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.classify_engine = Some(Arc::new(push_router));
@@ -868,7 +854,7 @@ impl ModelWatcher {
                     NvCreatePoolingRequest,
                     Annotated<NvCreatePoolingResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.pooling_engine = Some(Arc::new(push_router));
@@ -879,7 +865,7 @@ impl ModelWatcher {
                     NvCreateRerankRequest,
                     Annotated<NvCreateRerankResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.rerank_engine = Some(Arc::new(push_router));
@@ -890,7 +876,7 @@ impl ModelWatcher {
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -901,7 +887,7 @@ impl ModelWatcher {
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.completions_engine = Some(Arc::new(completions_router));
@@ -911,7 +897,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(client.clone(), text_router_mode, None)
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -920,7 +906,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(client.clone(), text_router_mode, None)
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -930,7 +916,7 @@ impl ModelWatcher {
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
@@ -942,7 +928,7 @@ impl ModelWatcher {
                     DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
                 >::from_client_with_monitor(
-                    client.clone(), text_router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.realtime_engine = Some(Arc::new(realtime_router));
@@ -1060,6 +1046,15 @@ impl ControllerHost for ModelWatcher {
         card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
+        let router_mode =
+            effective_router_config(card.router_config.as_ref(), &self.router_config).router_mode;
+        anyhow::ensure!(
+            card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
+            "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
+             --use-vllm-tokenizer) because it requires frontend tokenization; enable frontend \
+             tokenization or explicitly configure a non-KV router mode",
+            card.name()
+        );
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
             "LoRA discovery identity and card metadata disagree"
@@ -2548,101 +2543,139 @@ request_classifier:
     }
 
     #[tokio::test]
-    async fn text_routes_under_kv_router_mode_fall_back_to_push_routing() {
-        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
-
+    async fn discovery_rejects_text_input_with_effective_kv_routing() {
         let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        let router_config = RouterConfig {
-            router_mode: RouterMode::KV,
-            kv_router_config: dynamo_kv_router::config::KvRouterConfig {
-                skip_initial_worker_wait: true,
-                use_kv_events: false,
+        for frontend_mode in [RouterMode::RoundRobin, RouterMode::KV] {
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig {
+                    router_mode: frontend_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            );
+            for worker_mode in [None, Some(RouterMode::RoundRobin), Some(RouterMode::KV)] {
+                for model_input in [ModelInput::Text, ModelInput::Tokens] {
+                    let mut card = ModelDeploymentCard::with_name_only("kv-text-model");
+                    card.model_input = model_input;
+                    card.model_type = ModelType::Chat;
+                    card.worker_type = Some(WorkerType::Aggregated);
+                    card.router_config = worker_mode.map(|router_mode| RouterConfig {
+                        router_mode,
+                        ..Default::default()
+                    });
+                    let DiscoveryEvent::Added(instance) = discovered_card("kv-text-ns", 1, &card)
+                    else {
+                        unreachable!();
+                    };
+                    let result = watcher.normalize(instance, &NamespaceFilter::Global);
+                    if model_input == ModelInput::Text
+                        && worker_mode.unwrap_or(frontend_mode).is_kv_routing()
+                    {
+                        let error = result.expect_err("text-input KV card must be rejected");
+                        let message = error.to_string();
+                        assert!(message.contains("kv-text-model"), "{message}");
+                        assert!(message.contains("KV routing is incompatible"), "{message}");
+                        assert!(message.contains("frontend tokenization"), "{message}");
+                    } else {
+                        let desired = result.unwrap().expect("valid card must be admitted");
+                        assert_eq!(
+                            desired
+                                .card
+                                .router_config
+                                .as_ref()
+                                .map(|config| config.router_mode),
+                            worker_mode
+                        );
+                        assert_eq!(desired.card.model_input, model_input);
+                    }
+                }
+            }
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn rejected_kv_text_workers_preserve_valid_models() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("kv-text-preserve")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) = watch_test_cards(
+            drt,
+            manager.clone(),
+            RouterConfig {
+                router_mode: RouterMode::KV,
                 ..Default::default()
             },
-            ..Default::default()
-        };
-        let watcher = Arc::new(ModelWatcher::new(
-            drt,
-            Arc::new(ModelManager::new()),
-            router_config,
-            0,
-            None,
-            None,
-            None,
-            Arc::new(Metrics::new_with_prefix(Some(
-                "watcher_kv_text_test".to_string(),
-            ))),
-        ));
-        let mcid = ModelCardInstanceId {
-            namespace: "kv-text-ns".to_string(),
-            component: "workers".to_string(),
-            endpoint: "generate".to_string(),
-            instance_id: 1,
-            model_suffix: None,
-        };
-        let mut card = ModelDeploymentCard::with_name_only("kv-text-model");
-        card.model_input = ModelInput::Text;
-        card.model_type = ModelType::Chat;
-        card.worker_type = Some(WorkerType::Aggregated);
-
-        let endpoint_id = model_card_endpoint_id(&mcid);
-        let key = GroupKey {
-            model_name: card.name().to_string(),
-            worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
-        };
-        let desired = DesiredInstance {
-            key: mcid.to_path(),
-            mcid,
-            endpoint_id,
-            mdc_checksum: card.mdcsum().to_string(),
-            projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
-            video_contract: qwen_video_contract_digest(&card),
-            card,
-            group_key: key.clone(),
-        };
-        let spec = GroupSpec {
-            key,
-            mdc_checksum: desired.mdc_checksum.clone(),
-            fingerprint: desired.mdc_checksum.clone(),
-            generation: 1,
-            representative: desired.clone(),
-            video_contract: desired.video_contract.clone(),
-        };
-        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
-        let prepared = watcher
-            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
-            .await
-            .unwrap();
-        let engine = prepared
-            .worker_set
-            .as_ref()
-            .unwrap()
-            .chat_engine
-            .clone()
-            .expect("text chat card must build a chat engine");
-        let request = serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
-            "model": "kv-text-model",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 5,
-        }))
-        .unwrap();
-        // No worker is serving, so dispatch fails; it must fail in worker
-        // selection, not in PushRouter's refusal of RouterMode::KV.
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            engine.generate(SingleIn::new(request)),
-        )
-        .await
-        .expect("text chat request stalled")
-        .expect_err("no worker is serving the text model");
-        let message = format!("{error:#}");
-        assert!(
-            !message.contains("KV routing should not call generate on PushRouter"),
-            "text-input chat must not use KV mode on PushRouter: {message}"
         );
+        let mut valid = ModelDeploymentCard::with_name_only("valid-text-model");
+        valid.model_input = ModelInput::Text;
+        valid.model_type = ModelType::Chat;
+        valid.worker_type = Some(WorkerType::Aggregated);
+        valid.router_config = Some(RouterConfig {
+            router_mode: RouterMode::RoundRobin,
+            ..Default::default()
+        });
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &valid),
+        )
+        .await;
+        let original = wait_for_model(&manager, valid.name(), Model::is_ready_to_serve).await;
+
+        let mut invalid = valid.clone();
+        invalid.router_config = None;
+        // A rejected update must not remove the existing worker or replace its pipeline.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &invalid),
+        )
+        .await;
+        // An incompatible newcomer must not join the serving set either.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 1, &invalid),
+        )
+        .await;
+        let mut other = ModelDeploymentCard::with_name_only("invalid-text-model");
+        other.model_input = ModelInput::Text;
+        other.model_type = ModelType::Chat;
+        other.worker_type = Some(WorkerType::Aggregated);
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 2, &other),
+        )
+        .await;
+
+        let model = manager.get_committed_model(valid.name()).unwrap();
+        assert!(Arc::ptr_eq(&original, &model));
+        assert!(model.is_ready_to_serve());
+        assert_eq!(model.total_workers(), 1);
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert_eq!(manager.get_model_cards()[0].mdcsum(), valid.mdcsum());
+        assert!(manager.get_committed_model(other.name()).is_none());
+        assert!(!task.is_finished());
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[tokio::test]
