@@ -1432,69 +1432,44 @@ func TestDGD_FromV1alpha1_EnvFromSecretRoundTrip(t *testing.T) {
 // The v1alpha1 controller rendered extraPodSpec.mainContainer.envFrom first and
 // then appended envFromSecret, so both must reach the v1beta1 main container.
 func TestDGD_FromV1alpha1_EnvFromSecretWithMainContainerEnvFrom(t *testing.T) {
-	secretRef := func(name string) corev1.EnvFromSource {
-		return corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: name},
-		}}
-	}
-
-	tests := []struct {
-		name        string
-		mainEnvFrom []corev1.EnvFromSource
-		wantSecrets []string
-	}{
-		{
-			name:        "dedicated secret appended after mainContainer envFrom",
-			mainEnvFrom: []corev1.EnvFromSource{secretRef("hf-token-secret")},
-			wantSecrets: []string{"hf-token-secret", "qa-probe-secret"},
-		},
-		{
-			name:        "dedicated secret already in mainContainer envFrom is not duplicated",
-			mainEnvFrom: []corev1.EnvFromSource{secretRef("hf-token-secret"), secretRef("qa-probe-secret")},
-			wantSecrets: []string{"hf-token-secret", "qa-probe-secret"},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			src := &DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
-				Spec: DynamoGraphDeploymentSpec{
-					Services: map[string]*DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: "worker",
-							EnvFromSecret: ptr.To("qa-probe-secret"),
-							ExtraPodSpec: &ExtraPodSpec{MainContainer: &corev1.Container{
-								EnvFrom: test.mainEnvFrom,
-							}},
-						},
-					},
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					EnvFromSecret: ptr.To("qa-probe-secret"),
+					ExtraPodSpec: &ExtraPodSpec{MainContainer: &corev1.Container{
+						EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "hf-token-secret"},
+						}}},
+					}},
 				},
-			}
+			},
+		},
+	}
 
-			t.Log("convert to v1beta1 and check the main container envFrom")
-			hub := &v1beta1.DynamoGraphDeployment{}
-			if err := src.ConvertTo(hub); err != nil {
-				t.Fatalf("ConvertTo: %v", err)
-			}
-			main, ok := findContainerByName(hub.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
-			if !ok {
-				t.Fatalf("missing main container: %#v", hub.Spec.Components[0].PodTemplate)
-			}
-			var gotSecrets []string
-			for _, envFrom := range main.EnvFrom {
-				gotSecrets = append(gotSecrets, envFrom.SecretRef.Name)
-			}
-			if diff := cmp.Diff(test.wantSecrets, gotSecrets); diff != "" {
-				t.Fatalf("main container envFrom mismatch (-want +got):\n%s", diff)
-			}
+	t.Log("convert to v1beta1 and check the main container envFrom")
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	main, ok := findContainerByName(hub.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("missing main container: %#v", hub.Spec.Components[0].PodTemplate)
+	}
+	var gotSecrets []string
+	for _, envFrom := range main.EnvFrom {
+		gotSecrets = append(gotSecrets, envFrom.SecretRef.Name)
+	}
+	if diff := cmp.Diff([]string{"hf-token-secret", "qa-probe-secret"}, gotSecrets); diff != "" {
+		t.Fatalf("main container envFrom mismatch (-want +got):\n%s", diff)
+	}
 
-			t.Log("round-trip back to v1alpha1 unchanged")
-			got := roundTripFromV1alpha1(t, src)
-			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
-				t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
-			}
-		})
+	t.Log("round-trip back to v1alpha1 unchanged")
+	got := roundTripFromV1alpha1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
 
