@@ -70,9 +70,12 @@ const (
 	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
-	KubeLabelDynamoGraphDeploymentUID  = "nvidia.com/dynamo-graph-deployment-uid"
-	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
-	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
+	// KubeLabelDynamoGraphDeploymentUID fences Pods across same-name DGD
+	// replacement. Its initial adoption intentionally rolls existing workloads
+	// once.
+	KubeLabelDynamoGraphDeploymentUID = "nvidia.com/dynamo-graph-deployment-uid"
+	KubeLabelDynamoComponent          = "nvidia.com/dynamo-component"
+	KubeLabelDynamoNamespace          = "nvidia.com/dynamo-namespace"
 	// KubeLabelDynamoComponentType is the workload selector contract stamped on
 	// DCDs and rendered onto pods/services. Native v1beta1 prefill/decode worker
 	// DCDs use "prefill" or "decode". A DCD generation that is already serving

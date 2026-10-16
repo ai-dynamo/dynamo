@@ -333,6 +333,343 @@ class KubernetesCapacityManager(CapacityManager):
     # Observe                                                            #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _named_inventory(objects: list[dict], resource: str) -> dict[str, dict]:
+        """Index one Kubernetes LIST response by object name."""
+        by_name: dict[str, dict] = {}
+        for index, obj in enumerate(objects):
+            metadata = obj.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise ValueError(f"{resource} list item {index} has malformed metadata")
+            name = metadata.get("name")
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{resource} list item {index} has no usable name")
+            if name in by_name:
+                raise ValueError(f"duplicate {resource} {name!r} in list response")
+            by_name[name] = obj
+        return by_name
+
+    @staticmethod
+    def _require_inventory_unchanged(
+        before: Mapping[str, dict],
+        after: Mapping[str, dict],
+        names: set[str],
+        resource: str,
+    ) -> None:
+        """Require identical object identities and versions around a Pod LIST."""
+        for name in sorted(names):
+            old = before.get(name)
+            current = after.get(name)
+            if old is None and current is None:
+                continue
+            if old is None or current is None:
+                raise RuntimeError(
+                    f"{resource} {name!r} appeared or disappeared during Pod inventory"
+                )
+            old_metadata = old.get("metadata") or {}
+            current_metadata = current.get("metadata") or {}
+            if not isinstance(old_metadata, Mapping) or not isinstance(
+                current_metadata, Mapping
+            ):
+                raise ValueError(f"{resource} {name!r} metadata is malformed")
+            old_uid = old_metadata.get("uid")
+            current_uid = current_metadata.get("uid")
+            if not isinstance(old_uid, str) or not old_uid:
+                raise ValueError(f"{resource} {name!r} metadata.uid is unavailable")
+            if not isinstance(current_uid, str) or not current_uid:
+                raise ValueError(f"{resource} {name!r} metadata.uid is unavailable")
+            if old_uid != current_uid:
+                raise RuntimeError(
+                    f"{resource} {name!r} identity changed during Pod inventory"
+                )
+            old_version = old_metadata.get("resourceVersion")
+            current_version = current_metadata.get("resourceVersion")
+            if not isinstance(old_version, str) or not old_version:
+                raise ValueError(
+                    f"{resource} {name!r} metadata.resourceVersion is unavailable"
+                )
+            if not isinstance(current_version, str) or not current_version:
+                raise ValueError(
+                    f"{resource} {name!r} metadata.resourceVersion is unavailable"
+                )
+            if old_version != current_version:
+                raise RuntimeError(f"{resource} {name!r} changed during Pod inventory")
+
+    @staticmethod
+    def _scaling_adapter_names(
+        api: KubernetesAPI,
+        deployments: Mapping[str, dict],
+        deployment_names: set[str],
+    ) -> set[str]:
+        names: set[str] = set()
+        for deployment_name in deployment_names:
+            deployment = deployments.get(deployment_name)
+            if deployment is None:
+                continue
+            for component_name, component in get_components_by_name(deployment).items():
+                if "scalingAdapter" in component:
+                    names.add(api.scaling_adapter_name(deployment_name, component_name))
+        return names
+
+    @staticmethod
+    def _read_scaling_adapters(
+        api: KubernetesAPI,
+        deployment: dict,
+    ) -> dict[str, dict]:
+        """Read the DGDSAs declared by one DGD, indexed by adapter name."""
+        metadata = deployment.get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            raise ValueError("DGD metadata is malformed")
+        deployment_name = metadata.get("name")
+        if not isinstance(deployment_name, str) or not deployment_name:
+            raise ValueError("DGD metadata.name is unavailable")
+
+        adapters: dict[str, dict] = {}
+        for component_name, component in get_components_by_name(deployment).items():
+            if "scalingAdapter" not in component:
+                continue
+            adapter_name = api.scaling_adapter_name(deployment_name, component_name)
+            adapters[adapter_name] = api.get_service_scaling_adapter(
+                deployment_name,
+                component_name,
+            )
+        return adapters
+
+    def _complete_namespace_inventory(
+        self,
+        api: KubernetesAPI,
+    ) -> tuple[dict[str, dict], dict[str, dict], dict[str, list]]:
+        """Collect a stable controller/Pod snapshot for one namespace."""
+        deployments_before = self._named_inventory(api.list_graph_deployments(), "DGD")
+        dgd_names = set(deployments_before)
+        adapter_names_before = self._scaling_adapter_names(
+            api, deployments_before, dgd_names
+        )
+        adapters_before = (
+            self._named_inventory(api.list_scaling_adapters(), "DGDSA")
+            if adapter_names_before
+            else {}
+        )
+
+        pods_by_graph = api.partition_pods_by_graph(api.list_graph_pods())
+
+        deployments_after = self._named_inventory(api.list_graph_deployments(), "DGD")
+        stable_dgd_names = set(deployments_before) | set(deployments_after)
+        self._require_inventory_unchanged(
+            deployments_before,
+            deployments_after,
+            stable_dgd_names,
+            "DGD",
+        )
+        adapter_names_after = self._scaling_adapter_names(
+            api, deployments_after, stable_dgd_names
+        )
+        if adapter_names_before != adapter_names_after:
+            raise RuntimeError("DGD replica authorities changed during Pod inventory")
+        adapters_after = (
+            self._named_inventory(api.list_scaling_adapters(), "DGDSA")
+            if adapter_names_after
+            else {}
+        )
+        self._require_inventory_unchanged(
+            adapters_before,
+            adapters_after,
+            adapter_names_after,
+            "DGDSA",
+        )
+
+        unknown_graphs = set(pods_by_graph) - set(deployments_after)
+        if unknown_graphs:
+            raise RuntimeError(
+                "nonterminal Pods reference DGDs absent from the namespace "
+                f"inventory: {sorted(unknown_graphs)}"
+            )
+        return deployments_after, adapters_after, pods_by_graph
+
+    def _observe_explicit_complete(
+        self,
+        connectors_snapshot: list[tuple[str, KubernetesConnector]],
+    ) -> PoolSnapshot:
+        """Bracket one namespace Pod LIST with scoped reads of configured DGDs."""
+        all_pools: PoolSnapshot = {}
+        local_connectors = {
+            key: connector
+            for key, connector in connectors_snapshot
+            if connector.kube_api.current_namespace == self.namespace
+        }
+
+        if not local_connectors:
+            for key, connector in connectors_snapshot:
+                try:
+                    all_pools[key] = self._read_targeted_complete(
+                        key,
+                        connector,
+                        self._component_roles.get(key),
+                    )
+                except Exception as error:
+                    self._record_observation_failure(all_pools, key, error, True)
+            return all_pools
+
+        before: dict[str, tuple[dict, dict[str, dict], dict] | None] = {}
+        for key, connector in local_connectors.items():
+            try:
+                deployment = connector.kube_api.get_graph_deployment(
+                    connector.parent_dgd_name
+                )
+                adapters = self._read_scaling_adapters(
+                    connector.kube_api,
+                    deployment,
+                )
+                before[key] = (
+                    deployment,
+                    adapters,
+                    connector.kube_api.fetch_authoritative_replica_targets(
+                        deployment,
+                        scaling_adapters=adapters,
+                    ),
+                )
+            except DynamoGraphDeploymentNotFoundError:
+                before[key] = None
+            except Exception as error:
+                self._record_observation_failure(all_pools, key, error, True)
+
+        try:
+            inventory_api = next(iter(local_connectors.values())).kube_api
+            pods_by_graph = inventory_api.partition_pods_by_graph(
+                inventory_api.list_graph_pods()
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"Failed to list Pods in {self.namespace}: {error}"
+            ) from error
+
+        for key, connector in connectors_snapshot:
+            if key not in local_connectors:
+                try:
+                    all_pools[key] = self._read_targeted_complete(
+                        key,
+                        connector,
+                        self._component_roles.get(key),
+                    )
+                except Exception as error:
+                    self._record_observation_failure(all_pools, key, error, True)
+                continue
+
+            initial = before[key]
+            if initial is None:
+                try:
+                    connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+                except DynamoGraphDeploymentNotFoundError:
+                    if not self._mark_missing_deployment(key, connector):
+                        self._record_observation_failure(
+                            all_pools,
+                            key,
+                            RuntimeError(
+                                "observed DGD disappeared; capacity drain cannot "
+                                "be proven"
+                            ),
+                            True,
+                        )
+                    self._require_missing_deployment_drained(
+                        connector,
+                        pods_by_graph.get(connector.parent_dgd_name, []),
+                    )
+                    all_pools[key] = {}
+                    continue
+                except Exception as error:
+                    self._record_observation_failure(all_pools, key, error, True)
+                self._record_observation_failure(
+                    all_pools,
+                    key,
+                    RuntimeError("DGD appeared during Pod inventory"),
+                    True,
+                )
+
+            try:
+                deployment_before, adapters_before, authoritative_before = initial
+                deployment = connector.kube_api.get_graph_deployment(
+                    connector.parent_dgd_name
+                )
+                self._require_inventory_unchanged(
+                    {connector.parent_dgd_name: deployment_before},
+                    {connector.parent_dgd_name: deployment},
+                    {connector.parent_dgd_name},
+                    "DGD",
+                )
+                adapters = self._read_scaling_adapters(
+                    connector.kube_api,
+                    deployment,
+                )
+                adapter_names = set(adapters_before) | set(adapters)
+                self._require_inventory_unchanged(
+                    adapters_before,
+                    adapters,
+                    adapter_names,
+                    "DGDSA",
+                )
+                authoritative = connector.kube_api.fetch_authoritative_replica_targets(
+                    deployment,
+                    scaling_adapters=adapters,
+                )
+                before_targets = self._authoritative_replica_targets(
+                    authoritative_before
+                )
+                current_targets = self._authoritative_replica_targets(authoritative)
+                if before_targets != current_targets:
+                    raise RuntimeError(
+                        "replica authorities changed during Pod inventory: "
+                        f"before={before_targets}, after={current_targets}"
+                    )
+                self._record_observed_identity(key, deployment)
+                pools = self._pools_from_deployment(
+                    connector,
+                    deployment,
+                    self._component_roles.get(key),
+                    require_settled=True,
+                    pods=pods_by_graph.get(connector.parent_dgd_name, []),
+                    authoritative_deployment=authoritative,
+                )
+                all_pools[key] = self._record_observed_pools(key, pools)
+                if self.connectors.get(key) is connector:
+                    self._missing_participants.discard(key)
+            except Exception as error:
+                self._record_observation_failure(all_pools, key, error, True)
+        return all_pools
+
+    def _read_targeted_complete(
+        self,
+        participant_id: str,
+        connector: KubernetesConnector,
+        role_hints: Optional[dict[str, str]],
+    ) -> dict[str, PoolSpec]:
+        """Read one stable DGD/Pod snapshot, including the missing-DGD case."""
+        try:
+            pools = self._read_pools(
+                participant_id,
+                connector,
+                role_hints,
+                require_settled=True,
+            )
+        except DynamoGraphDeploymentNotFoundError as error:
+            pods = connector.kube_api.list_nonterminal_pods_for_graph(
+                connector.parent_dgd_name
+            )
+            try:
+                connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+            except DynamoGraphDeploymentNotFoundError:
+                if not self._mark_missing_deployment(participant_id, connector):
+                    raise RuntimeError(
+                        f"observed DGD disappeared: {error}; capacity drain "
+                        "cannot be proven"
+                    ) from error
+                self._require_missing_deployment_drained(connector, pods)
+                return {}
+            raise RuntimeError("DGD appeared during Pod inventory") from error
+
+        if self.connectors.get(participant_id) is connector:
+            self._missing_participants.discard(participant_id)
+        return pools
+
     def observe(self, require_complete: bool = False) -> PoolSnapshot:
         """Read current pool state for every known deployment.
 
@@ -354,20 +691,19 @@ class KubernetesCapacityManager(CapacityManager):
         all_pools: PoolSnapshot = {}
         connectors_snapshot = list(self.connectors.items())
         if not self._observe_all_deployments:
+            if require_complete:
+                return self._observe_explicit_complete(connectors_snapshot)
             for key, connector in connectors_snapshot:
                 try:
                     all_pools[key] = self._read_pools(
                         key,
                         connector,
                         self._component_roles.get(key),
-                        require_settled=require_complete,
                     )
                     if self.connectors.get(key) is connector:
                         self._missing_participants.discard(key)
                 except DynamoGraphDeploymentNotFoundError as error:
                     if self._mark_missing_deployment(key, connector):
-                        if require_complete:
-                            self._require_missing_deployment_drained(connector)
                         all_pools[key] = {}
                         continue
                     self._record_observation_failure(
@@ -389,51 +725,33 @@ class KubernetesCapacityManager(CapacityManager):
         # namespace LIST is both the intended scope and cheaper than per-DGD GETs.
         try:
             inventory_api = self._get_inventory_api()
-            deployments = inventory_api.list_graph_deployments()
-            deployments_by_key: dict[str, dict] = {}
-            for index, deployment in enumerate(deployments):
-                metadata = deployment.get("metadata")
-                if not isinstance(metadata, Mapping):
-                    raise ValueError(f"DGD list item {index} has malformed metadata")
-                name = metadata.get("name")
-                if not isinstance(name, str) or not name:
-                    raise ValueError(f"DGD list item {index} has no usable name")
-                key = f"{self.namespace}/{name}"
-                if key in deployments_by_key:
-                    raise ValueError(f"duplicate DGD {name!r} in list response")
-                deployments_by_key[key] = deployment
-
-            scaling_adapters_by_name: dict[str, dict] = {}
-            if any(
-                "scalingAdapter" in component
-                for deployment in deployments_by_key.values()
-                for component in get_components_by_name(deployment).values()
-            ):
-                for index, adapter in enumerate(inventory_api.list_scaling_adapters()):
-                    metadata = adapter.get("metadata")
-                    if not isinstance(metadata, Mapping):
-                        raise ValueError(
-                            f"DGDSA list item {index} has malformed metadata"
-                        )
-                    name = metadata.get("name")
-                    if not isinstance(name, str) or not name:
-                        raise ValueError(f"DGDSA list item {index} has no usable name")
-                    if name in scaling_adapters_by_name:
-                        raise ValueError(f"duplicate DGDSA {name!r} in list response")
-                    scaling_adapters_by_name[name] = adapter
-
-            pods_by_graph: dict[str, list] = {}
             if require_complete:
-                pods_by_graph = inventory_api.partition_pods_by_graph(
-                    inventory_api.list_graph_pods()
+                (
+                    deployments_by_name,
+                    scaling_adapters_by_name,
+                    pods_by_graph,
+                ) = self._complete_namespace_inventory(inventory_api)
+            else:
+                deployments_by_name = self._named_inventory(
+                    inventory_api.list_graph_deployments(), "DGD"
                 )
-                deployment_names = {key.split("/", 1)[1] for key in deployments_by_key}
-                unknown_graphs = set(pods_by_graph) - deployment_names
-                if unknown_graphs:
-                    raise RuntimeError(
-                        "nonterminal Pods reference DGDs absent from the namespace "
-                        f"inventory: {sorted(unknown_graphs)}"
+                adapter_names = self._scaling_adapter_names(
+                    inventory_api,
+                    deployments_by_name,
+                    set(deployments_by_name),
+                )
+                scaling_adapters_by_name = (
+                    self._named_inventory(
+                        inventory_api.list_scaling_adapters(), "DGDSA"
                     )
+                    if adapter_names
+                    else {}
+                )
+                pods_by_graph = {}
+            deployments_by_key = {
+                f"{self.namespace}/{name}": deployment
+                for name, deployment in deployments_by_name.items()
+            }
 
         except Exception as error:
             if require_complete:
@@ -539,11 +857,13 @@ class KubernetesCapacityManager(CapacityManager):
     @staticmethod
     def _require_missing_deployment_drained(
         connector: KubernetesConnector,
+        pods: list | None = None,
     ) -> None:
         """Reject a missing DGD while any of its nonterminal Pods remain."""
-        pods = connector.kube_api.list_nonterminal_pods_for_graph(
-            connector.parent_dgd_name
-        )
+        if pods is None:
+            pods = connector.kube_api.list_nonterminal_pods_for_graph(
+                connector.parent_dgd_name
+            )
         if pods:
             raise RuntimeError(
                 f"DGD {connector.parent_dgd_name!r} is absent but still has "
@@ -602,14 +922,77 @@ class KubernetesCapacityManager(CapacityManager):
     ) -> dict[str, PoolSpec]:
         """Read and parse the current pool state for one deployment."""
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+        authoritative_deployment = None
+        pods = None
+        if require_settled:
+            adapters_before = self._read_scaling_adapters(
+                connector.kube_api,
+                deployment,
+            )
+            authoritative_before = (
+                connector.kube_api.fetch_authoritative_replica_targets(
+                    deployment,
+                    scaling_adapters=adapters_before,
+                )
+            )
+            pods = connector.kube_api.list_nonterminal_pods_for_graph(
+                connector.parent_dgd_name
+            )
+            current = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
+            self._require_inventory_unchanged(
+                {connector.parent_dgd_name: deployment},
+                {connector.parent_dgd_name: current},
+                {connector.parent_dgd_name},
+                "DGD",
+            )
+            adapters = self._read_scaling_adapters(
+                connector.kube_api,
+                current,
+            )
+            adapter_names = set(adapters_before) | set(adapters)
+            self._require_inventory_unchanged(
+                adapters_before,
+                adapters,
+                adapter_names,
+                "DGDSA",
+            )
+            authoritative_deployment = (
+                connector.kube_api.fetch_authoritative_replica_targets(
+                    current,
+                    scaling_adapters=adapters,
+                )
+            )
+            before_targets = self._authoritative_replica_targets(authoritative_before)
+            current_targets = self._authoritative_replica_targets(
+                authoritative_deployment
+            )
+            if before_targets != current_targets:
+                raise RuntimeError(
+                    "replica authorities changed during Pod inventory: "
+                    f"before={before_targets}, after={current_targets}"
+                )
+            deployment = current
         self._record_observed_identity(participant_id, deployment)
         pools = self._pools_from_deployment(
             connector,
             deployment,
             role_hints,
             require_settled=require_settled,
+            pods=pods,
+            authoritative_deployment=authoritative_deployment,
         )
         return self._record_observed_pools(participant_id, pools)
+
+    @staticmethod
+    def _authoritative_replica_targets(deployment: dict) -> dict[str, int]:
+        """Return the replica state whose stability brackets a Pod LIST."""
+        return {
+            component_name: Service(
+                name=component_name,
+                service=component,
+            ).number_replicas()
+            for component_name, component in get_components_by_name(deployment).items()
+        }
 
     def _pools_from_deployment(
         self,
@@ -620,10 +1003,13 @@ class KubernetesCapacityManager(CapacityManager):
         scaling_adapters: Mapping[str, dict] | None = None,
         require_settled: bool = False,
         pods: list | None = None,
+        authoritative_deployment: dict | None = None,
     ) -> dict[str, PoolSpec]:
         """Build pools from a DGD after resolving live replica authorities."""
         declared_deployment = deployment
-        if scaling_adapters is None:
+        if authoritative_deployment is not None:
+            deployment = authoritative_deployment
+        elif scaling_adapters is None:
             deployment = connector.kube_api.fetch_authoritative_replica_targets(
                 deployment
             )

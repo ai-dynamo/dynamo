@@ -1511,7 +1511,70 @@ class KubernetesAPI:
                         identity_mismatches,
                     )
                     continue
-                return graph_deployment
+
+                current_deployment = await asyncio.to_thread(
+                    self.get_graph_deployment, graph_deployment_name
+                )
+                current_metadata = current_deployment.get("metadata", {}) or {}
+                if current_metadata.get("uid") != expected_dgd_uid:
+                    raise RuntimeError("DGD identity changed during replica settlement")
+                observed_version = (graph_deployment.get("metadata", {}) or {}).get(
+                    "resourceVersion"
+                )
+                current_version = current_metadata.get("resourceVersion")
+                if not isinstance(observed_version, str) or not observed_version:
+                    raise ValueError(
+                        "DGD resourceVersion is required for replica settlement"
+                    )
+                if not isinstance(current_version, str) or not current_version:
+                    raise ValueError(
+                        "DGD resourceVersion is required for replica settlement"
+                    )
+                if observed_version != current_version:
+                    logger.info(
+                        "[Attempt %d/%d] DGD changed during Pod inventory",
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    continue
+
+                current_settlement = await asyncio.to_thread(
+                    self.fetch_authoritative_replica_targets,
+                    current_deployment,
+                    expected_replica_authorities,
+                )
+                current_targets_stable, _ = self.replica_targets_stable(
+                    current_settlement, expected_replica_targets
+                )
+                current_targets_projected, _ = self.adapter_targets_projected(
+                    current_deployment,
+                    expected_replica_targets,
+                    expected_replica_authorities,
+                )
+                current_generation_observed = self.is_spec_generation_observed(
+                    current_deployment
+                )
+                current_deployment_ready = (
+                    not include_planner or self.is_deployment_ready(current_deployment)
+                )
+                (
+                    current_rollout_blocking,
+                    _,
+                ) = self.is_rolling_update_blocking_settlement(current_deployment)
+                if (
+                    not current_targets_stable
+                    or not current_targets_projected
+                    or not current_generation_observed
+                    or not current_deployment_ready
+                    or current_rollout_blocking
+                ):
+                    logger.info(
+                        "[Attempt %d/%d] DGD settlement changed after Pod inventory",
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    continue
+                return current_deployment
 
             # Failed is a terminal rollout state; retrying until timeout (up to
             # 30 min) serves no purpose. Raise immediately so the operator can

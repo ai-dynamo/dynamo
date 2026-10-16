@@ -35,14 +35,17 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -882,13 +885,63 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 
 			t.Log("Apply checkpoint gating, then preserve immutable state from an existing DCD")
 			require.NoError(t, workloads.applyCheckpointStartupPolicy(desired, tt.checkpointInfo))
-			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), desired))
+			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), nil, desired))
 
 			t.Log("Verify stored immutable state is preserved without overriding checkpoint policy")
 			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
 			assert.Equal(t, tt.wantReplicas, desired.Spec.Replicas)
 		})
 	}
+}
+
+func TestPreserveExistingDCDStateBackfillsGraphUID(t *testing.T) {
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "graph",
+			Namespace: "jsm",
+			UID:       "dgd-uid",
+		},
+	}
+	existing := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(dgd, existing, scheme))
+	patchCalls := 0
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls++
+				if patchCalls == 1 {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamocomponentdeployments"},
+						object.GetName(),
+						errors.New("stale DynamoComponentDeployment"),
+					)
+				}
+				return delegated.Patch(ctx, object, patch, opts...)
+			},
+		}).
+		Build()
+	workloads := &componentWorkloadsReconciler{
+		syncer: newDGDResourceSyncer(kubeClient, nil),
+	}
+	desired := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "jsm"},
+	}
+
+	require.NoError(t, workloads.preserveExistingDCDState(context.Background(), dgd, desired))
+
+	updated := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{Name: "worker", Namespace: "jsm"}, updated))
+	assert.Equal(t, 2, patchCalls)
+	assert.Equal(t, "dgd-uid", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentUID])
+	assert.Equal(t, "vllm", desired.Spec.BackendFramework)
 }
 
 func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T) {

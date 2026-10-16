@@ -59,8 +59,8 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 		if _, selected := selection.componentToRole[componentName]; selected {
 			continue
 		}
-		if err := preserveExistingBackendFramework(ctx, r.client, dcd); err != nil {
-			return nil, false, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
+		if err := preserveExistingDCDState(ctx, r.client, dgd, dcd); err != nil {
+			return nil, false, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
 		wasModified, syncedDCD, err := commoncontroller.SyncResource(ctx, &syncer, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 			return dcd, false, nil

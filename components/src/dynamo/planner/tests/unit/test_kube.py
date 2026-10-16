@@ -1246,6 +1246,7 @@ def _stable_worker_dgd(
             "name": dgd_name,
             "uid": "dgd-uid",
             "generation": generation,
+            "resourceVersion": "dgd-rv-1",
         },
         "spec": {
             "components": [
@@ -1518,7 +1519,7 @@ async def test_wait_for_replica_targets_ignores_stale_ready_condition(
     _mock_pod_list(mock_core_api, [_make_pod("decode-0")])
 
     with patch.object(
-        k8s_api, "get_graph_deployment", side_effect=[stale, settled]
+        k8s_api, "get_graph_deployment", side_effect=[stale, settled, settled]
     ) as get_dgd:
         got = await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment",
@@ -1530,7 +1531,7 @@ async def test_wait_for_replica_targets_ignores_stale_ready_condition(
         )
 
     assert got is settled
-    assert get_dgd.call_count == 2
+    assert get_dgd.call_count == 3
     mock_core_api.list_namespaced_pod.assert_called_once()
 
 
@@ -1548,7 +1549,9 @@ async def test_wait_for_replica_targets_requires_current_workload_ready(
     )
 
     with patch.object(
-        k8s_api, "get_graph_deployment", side_effect=[projected, settled]
+        k8s_api,
+        "get_graph_deployment",
+        side_effect=[projected, settled, settled],
     ) as get_dgd:
         got = await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment",
@@ -1560,7 +1563,7 @@ async def test_wait_for_replica_targets_requires_current_workload_ready(
         )
 
     assert got is settled
-    assert get_dgd.call_count == 2
+    assert get_dgd.call_count == 3
     mock_core_api.list_namespaced_pod.assert_called_once()
 
 
@@ -1615,7 +1618,9 @@ async def test_wait_for_replica_targets_waits_for_adapter_projection(
 
     with (
         patch.object(
-            k8s_api, "get_graph_deployment", side_effect=[stale, settled]
+            k8s_api,
+            "get_graph_deployment",
+            side_effect=[stale, settled, settled],
         ) as get_dgd,
         patch.object(
             k8s_api, "get_service_scaling_adapter", return_value=adapter
@@ -1631,8 +1636,8 @@ async def test_wait_for_replica_targets_waits_for_adapter_projection(
         )
 
     assert got is settled
-    assert get_dgd.call_count == 2
-    assert get_adapter.call_count == 2
+    assert get_dgd.call_count == 3
+    assert get_adapter.call_count == 3
     mock_core_api.list_namespaced_pod.assert_called_once()
 
 
@@ -1665,6 +1670,34 @@ async def test_wait_for_replica_targets_rejects_pods_from_replaced_dgd(
     stale_pod.metadata.labels["nvidia.com/dynamo-graph-deployment-uid"] = "old-dgd-uid"
 
     with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                expected_dgd_uid="dgd-uid",
+                expected_replica_targets={"decode": 2},
+                expected_replica_authorities={"decode": (False, None)},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_replica_targets_retries_dgd_change_during_pod_inventory(
+    k8s_api, mock_core_api
+):
+    deployment = _stable_worker_dgd(generation=2, observed_generation=2)
+    changed = deepcopy(deployment)
+    changed["metadata"]["resourceVersion"] = "dgd-rv-2"
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("decode-0"), _make_pod("decode-1")],
+    )
+
+    with patch.object(
+        k8s_api,
+        "get_graph_deployment",
+        side_effect=[deployment, changed],
+    ):
         with pytest.raises(TimeoutError):
             await k8s_api.wait_for_graph_deployment_ready(
                 "test-deployment",

@@ -3240,6 +3240,7 @@ func generatePodMetadata(
 	// Apply system labels after user merge to prevent override
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentUID] = string(dynamoDeployment.UID)
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)

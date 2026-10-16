@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -30,6 +31,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -94,7 +96,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
-		if err := r.preserveExistingDCDState(ctx, dcd); err != nil {
+		if err := r.preserveExistingDCDState(ctx, dgd, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment state", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
@@ -259,34 +261,73 @@ func applyRestoreCandidateMetadataToComponent(
 // be overwritten by a generated DCD.
 func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
-	return preserveExistingBackendFramework(ctx, r.syncer, desired)
+	return preserveExistingDCDState(ctx, r.syncer, dgd, desired)
 }
 
-func preserveExistingBackendFramework(
+func preserveExistingDCDState(
 	ctx context.Context,
-	reader client.Reader,
+	kubeClient client.Client,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
-	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	err := reader.Get(
-		ctx,
-		types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace},
-		existing,
-	)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+	var backendFramework string
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
+		err := kubeClient.Get(
+			ctx,
+			types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace},
+			existing,
+		)
+		if apierrors.IsNotFound(err) {
+			backendFramework = desired.Spec.BackendFramework
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		backendFramework = existing.Spec.BackendFramework
+		if dgd == nil || dgd.UID == "" {
+			return nil
+		}
+		if existing.Labels[consts.KubeLabelDynamoGraphDeploymentUID] == string(dgd.UID) {
+			return nil
+		}
+		if err := commoncontroller.CheckControllerOwnership(
+			existing,
+			dgd,
+			kubeClient.Scheme(),
+		); err != nil {
+			return err
+		}
+
+		before := existing.DeepCopy()
+		existing.Labels = maps.Clone(existing.Labels)
+		if existing.Labels == nil {
+			existing.Labels = make(map[string]string)
+		}
+		existing.Labels[consts.KubeLabelDynamoGraphDeploymentUID] = string(dgd.UID)
+		return kubeClient.Patch(
+			ctx,
+			existing,
+			client.MergeFromWithOptions(
+				before,
+				client.MergeFromWithOptimisticLock{},
+			),
+		)
+	})
 	if err != nil {
 		return fmt.Errorf(
-			"failed to get existing DynamoComponentDeployment %s/%s: %w",
+			"failed to preserve existing DynamoComponentDeployment %s/%s: %w",
 			desired.Namespace,
 			desired.Name,
 			err,
 		)
 	}
 
-	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+	desired.Spec.BackendFramework = backendFramework
 	return nil
 }

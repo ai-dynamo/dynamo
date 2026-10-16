@@ -68,7 +68,11 @@ def _with_operator_gpu_status(components):
             status.update({"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu})
         statuses[component["name"]] = status
     return {
-        "metadata": {"generation": 1, "uid": "dgd-uid"},
+        "metadata": {
+            "generation": 1,
+            "uid": "dgd-uid",
+            "resourceVersion": "dgd-rv-1",
+        },
         "spec": {"components": components},
         "status": {"observedGeneration": 1, "components": statuses},
     }
@@ -971,7 +975,13 @@ def test_complete_implicit_observation_batches_authorities_and_fails_closed():
     cm._inventory_api = connector.kube_api
     connector.kube_api.list_graph_deployments.return_value = [deployment]
     connector.kube_api.list_scaling_adapters.return_value = [
-        {"metadata": {"name": "model-prefill-svc"}}
+        {
+            "metadata": {
+                "name": "model-prefill-svc",
+                "uid": "adapter-uid",
+                "resourceVersion": "adapter-rv-1",
+            }
+        }
     ]
     terminating = MagicMock()
     terminating.metadata.labels = {
@@ -1002,8 +1012,8 @@ def test_complete_implicit_observation_batches_authorities_and_fails_closed():
     snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
-    assert connector.kube_api.list_graph_deployments.call_count == 3
-    assert connector.kube_api.list_scaling_adapters.call_count == 3
+    assert connector.kube_api.list_graph_deployments.call_count == 6
+    assert connector.kube_api.list_scaling_adapters.call_count == 6
     assert connector.kube_api.list_graph_pods.call_count == 3
     connector.kube_api.get_graph_deployment.assert_not_called()
 
@@ -1061,6 +1071,30 @@ def test_complete_implicit_observation_rejects_pods_from_replaced_dgd():
     snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
+
+
+def test_complete_implicit_observation_rejects_dgd_change_during_pod_inventory():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    deployment = _listed_dgd(_dgd_spec(0, 0), "model")
+    replacement = _listed_dgd(_dgd_spec(8, 0), "model")
+    replacement["metadata"].update(
+        {"uid": "replacement-uid", "resourceVersion": "dgd-rv-2"}
+    )
+    connector = _install_connector(
+        cm,
+        "default/model",
+        deployment,
+        parent_dgd_name="model",
+    )
+    cm._inventory_api = connector.kube_api
+    connector.kube_api.list_graph_deployments.side_effect = [
+        [deployment],
+        [replacement],
+    ]
+
+    with pytest.raises(RuntimeError, match="identity changed during Pod inventory"):
+        cm.observe(require_complete=True)
 
 
 def test_observe_multinode_scales_gpu_count():
@@ -1249,7 +1283,8 @@ def test_observe_never_seen_managed_deployment_is_zero_capacity_probe():
 
     assert cm.observe(require_complete=True) == {"default/missing": {}}
     assert not cm.participant_exists("default/missing")
-    missing.kube_api.list_nonterminal_pods_for_graph.assert_called_once_with("missing")
+    missing.kube_api.list_graph_pods.assert_called_once_with()
+    missing.kube_api.list_nonterminal_pods_for_graph.assert_not_called()
 
     missing = _install_connector(
         cm,
@@ -1278,7 +1313,15 @@ def test_observe_never_seen_missing_deployment_rejects_residual_pods():
     missing.kube_api.get_graph_deployment.side_effect = (
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
-    missing.kube_api.list_nonterminal_pods_for_graph.return_value = [object()]
+    missing.kube_api.list_graph_pods.return_value = [
+        {
+            "metadata": {
+                "labels": {
+                    "nvidia.com/dynamo-graph-deployment-name": "missing",
+                }
+            }
+        }
+    ]
 
     with pytest.raises(RuntimeError, match="still has 1 nonterminal Pods"):
         cm.observe(require_complete=True)
@@ -1294,6 +1337,8 @@ def test_observe_deleted_deployment_fails_closed_after_identity_was_observed():
     )
     connector.kube_api.get_graph_deployment.side_effect = [
         deployment,
+        deployment,
+        DynamoGraphDeploymentNotFoundError("model", "default"),
         DynamoGraphDeploymentNotFoundError("model", "default"),
     ]
 
@@ -1315,18 +1360,21 @@ def test_observe_same_name_replacement_fails_closed_and_preserves_uid_bound_stat
     connector = _install_connector(
         cm, "default/model", deployment, parent_dgd_name="model"
     )
-    connector.kube_api.get_graph_deployment.side_effect = [deployment, replacement]
+    connector.kube_api.get_graph_deployment.side_effect = [
+        deployment,
+        deployment,
+        replacement,
+        replacement,
+    ]
 
     cm.observe(require_complete=True)
     cm._replica_uids["default/model"] = "dgd-uid"
-    cm._replica_settlements["default/model"] = MagicMock()
 
     with pytest.raises(RuntimeError, match="DGD identity changed"):
         cm.observe(require_complete=True)
 
     assert cm._observed_uids["default/model"] == "dgd-uid"
     assert cm._replica_uids["default/model"] == "dgd-uid"
-    assert cm._replica_settlements["default/model"] is not None
     assert cm.participant_exists("default/model")
 
 
@@ -1337,6 +1385,8 @@ def test_observe_explicit_mode_discovers_previously_missing_deployment():
     old = _install_connector(cm, "default/model", deployment, parent_dgd_name="model")
     old.kube_api.get_graph_deployment.side_effect = [
         DynamoGraphDeploymentNotFoundError("model", "default"),
+        DynamoGraphDeploymentNotFoundError("model", "default"),
+        deployment,
         deployment,
     ]
     cm._observed_uids.pop("default/model")
@@ -1387,8 +1437,8 @@ def test_observe_explicit_mode_rechecks_missing_names_with_scoped_gets():
         "default/second": {},
     }
 
-    assert first.kube_api.get_graph_deployment.call_count == 2
-    assert second.kube_api.get_graph_deployment.call_count == 2
+    assert first.kube_api.get_graph_deployment.call_count == 4
+    assert second.kube_api.get_graph_deployment.call_count == 4
     first.kube_api.list_graph_deployments.assert_not_called()
 
 
@@ -1404,8 +1454,70 @@ def test_observe_explicit_mode_does_not_require_list_permission():
     snapshot = cm.observe(require_complete=True)
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
-    connector.kube_api.get_graph_deployment.assert_called_once_with("model")
+    assert connector.kube_api.get_graph_deployment.call_count == 2
     connector.kube_api.list_graph_deployments.assert_not_called()
+
+
+def test_observe_explicit_mode_batches_pod_inventory():
+    cm = KubernetesCapacityManager("default")
+    first = _install_connector(
+        cm, "default/first", _dgd_spec(1, 1), parent_dgd_name="first"
+    )
+    second = _install_connector(
+        cm, "default/second", _dgd_spec(2, 1), parent_dgd_name="second"
+    )
+
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["default/first"]["prefill"].current_replicas == 1
+    assert snapshot["default/second"]["prefill"].current_replicas == 2
+    first.kube_api.list_graph_pods.assert_called_once_with()
+    second.kube_api.list_graph_pods.assert_not_called()
+    first.kube_api.list_nonterminal_pods_for_graph.assert_not_called()
+    second.kube_api.list_nonterminal_pods_for_graph.assert_not_called()
+    assert first.kube_api.get_graph_deployment.call_count == 2
+    assert second.kube_api.get_graph_deployment.call_count == 2
+
+
+def test_observe_explicit_mode_rejects_adapter_change_during_pod_inventory():
+    cm = KubernetesCapacityManager("default")
+    deployment = _dgd_spec(1, 1)
+    deployment["spec"]["components"][0]["scalingAdapter"] = {}
+    connector = _install_connector(
+        cm, "default/model", deployment, parent_dgd_name="model"
+    )
+    adapter = {
+        "metadata": {
+            "name": "model-prefill-svc",
+            "uid": "adapter-uid",
+            "resourceVersion": "adapter-rv-1",
+        }
+    }
+    replacement = deepcopy(adapter)
+    replacement["metadata"].update(
+        {"uid": "replacement-uid", "resourceVersion": "adapter-rv-2"}
+    )
+    connector.kube_api.get_service_scaling_adapter.side_effect = [
+        adapter,
+        replacement,
+    ]
+
+    with pytest.raises(RuntimeError, match="DGDSA.*identity changed"):
+        cm.observe(require_complete=True)
+
+
+def test_observe_explicit_mode_with_only_remote_deployments_uses_targeted_reads():
+    cm = KubernetesCapacityManager("default")
+    remote = _install_connector(
+        cm, "tenant/model", _dgd_spec(1, 1), parent_dgd_name="model"
+    )
+
+    snapshot = cm.observe(require_complete=True)
+
+    assert snapshot["tenant/model"]["prefill"].current_replicas == 1
+    assert remote.kube_api.get_graph_deployment.call_count == 2
+    remote.kube_api.list_nonterminal_pods_for_graph.assert_called_once_with("model")
+    remote.kube_api.list_graph_pods.assert_not_called()
 
 
 def test_observe_implicit_mode_refreshes_complete_inventory():
@@ -1419,15 +1531,19 @@ def test_observe_implicit_mode_refreshes_complete_inventory():
     )
     cm._inventory_api = first.kube_api
     first_scaled = _dgd_spec(3, 1)
+    initial_inventory = [
+        _listed_dgd(_dgd_spec(1, 1), "first"),
+        _listed_dgd(_dgd_spec(2, 2), "second"),
+    ]
+    scaled_inventory = [
+        _listed_dgd(first_scaled, "first"),
+        _listed_dgd(_dgd_spec(2, 2), "second"),
+    ]
     first.kube_api.list_graph_deployments.side_effect = [
-        [
-            _listed_dgd(_dgd_spec(1, 1), "first"),
-            _listed_dgd(_dgd_spec(2, 2), "second"),
-        ],
-        [
-            _listed_dgd(first_scaled, "first"),
-            _listed_dgd(_dgd_spec(2, 2), "second"),
-        ],
+        initial_inventory,
+        deepcopy(initial_inventory),
+        scaled_inventory,
+        deepcopy(scaled_inventory),
     ]
 
     snapshot = cm.observe(require_complete=True)
@@ -1436,7 +1552,7 @@ def test_observe_implicit_mode_refreshes_complete_inventory():
     assert snapshot["default/first"]["prefill"].current_replicas == 1
     assert snapshot["default/second"]["prefill"].current_replicas == 2
     assert refreshed_snapshot["default/first"]["prefill"].current_replicas == 3
-    assert first.kube_api.list_graph_deployments.call_count == 2
+    assert first.kube_api.list_graph_deployments.call_count == 4
     second.kube_api.list_graph_deployments.assert_not_called()
     first.kube_api.get_graph_deployment.assert_not_called()
     second.kube_api.get_graph_deployment.assert_not_called()
@@ -1457,9 +1573,9 @@ def test_observe_implicit_mode_preserves_cross_namespace_identity():
 
     assert snapshot["default/model"]["prefill"].current_replicas == 1
     assert snapshot["tenant/model"]["prefill"].current_replicas == 3
-    local.kube_api.list_graph_deployments.assert_called_once_with()
+    assert local.kube_api.list_graph_deployments.call_count == 2
     local.kube_api.get_graph_deployment.assert_not_called()
-    remote.kube_api.get_graph_deployment.assert_called_once_with("model")
+    assert remote.kube_api.get_graph_deployment.call_count == 2
 
 
 def test_observe_implicit_mode_discards_missing_never_observed_local():
@@ -1573,8 +1689,10 @@ def test_observe_implicit_mode_marks_missing_never_observed_remote_deployments()
         "tenant/second": {},
     }
 
-    first.kube_api.get_graph_deployment.assert_called_once_with("first")
-    second.kube_api.get_graph_deployment.assert_called_once_with("second")
+    assert first.kube_api.get_graph_deployment.call_count == 2
+    assert second.kube_api.get_graph_deployment.call_count == 2
+    first.kube_api.list_nonterminal_pods_for_graph.assert_called_once_with("first")
+    second.kube_api.list_nonterminal_pods_for_graph.assert_called_once_with("second")
     assert not cm.participant_exists("tenant/first")
     assert not cm.participant_exists("tenant/second")
 
@@ -1595,6 +1713,7 @@ def test_observe_implicit_mode_discovers_previously_missing_deployment():
     old.kube_api.list_graph_deployments.side_effect = [
         [],
         [discovered],
+        [deepcopy(discovered)],
     ]
     cm._inventory_api = old.kube_api
 
