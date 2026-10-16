@@ -11,6 +11,10 @@
 # Private repos referenced in docs (404 to unauthenticated lychee)
 ^https://github\.com/ai-dynamo/pi-dynamo-provider
 
+# NVIDIA-internal GitLab (the EPD power controller's source, linked from
+# components/src/dynamo/power/README.md); unreachable from GitHub runners.
+^https://gitlab-master\.nvidia\.com/
+
 # Redirects to networking-docs.nvidia.com which refuses connections from
 # GitHub runners (network/firewall). The page loads from a normal browser.
 ^https://docs\.nvidia\.com/networking/display/cokan10/network\+operator

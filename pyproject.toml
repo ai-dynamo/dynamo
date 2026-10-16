@@ -501,6 +501,12 @@ module = ["dynamo.vllm.realtime.handler"]
 disable_error_code = ["var-annotated"]
 
 [[tool.mypy.overrides]]
+# dynamo.power: the NVML bindings (nvidia-ml-py) ship no type stubs, and EPD
+# (nvidia-epd, installed separately) is absent from the lint environment.
+module = ["pynvml", "epd", "epd.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Third-party libs without type stubs or optional internal deps
 # TODO: fix the ones that do have stub package
 module = [
