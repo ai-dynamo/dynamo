@@ -91,7 +91,15 @@ class PlannerSignalHealth:
                 or self._config.optimization_target == "sla"
             ):
                 if component == "decode":
-                    missing_capacity = caps is None or not caps.max_kv_tokens
+                    missing_capacity = (
+                        caps is None
+                        or not caps.max_kv_tokens
+                        or (
+                            self._config.mode == "agg"
+                            and self._config.optimization_target == "sla"
+                            and not caps.max_num_batched_tokens
+                        )
+                    )
                 elif self._config.optimization_target == "sla":
                     missing_capacity = caps is None or not caps.max_num_batched_tokens
                 else:

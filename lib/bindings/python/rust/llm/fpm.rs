@@ -49,6 +49,7 @@ type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
 fn fresh_fpm_snapshot(
     latest: &DashMap<(String, i64), TrackedFpm>,
     expected: &HashMap<String, Option<Range<u32>>>,
+    removed_workers: &DashSet<String>,
     now: Instant,
     max_age: Duration,
 ) -> (FpmSnapshot, Vec<String>, usize, usize) {
@@ -56,6 +57,9 @@ fn fresh_fpm_snapshot(
     let mut unjoined = HashSet::new();
     let mut stale = 0;
     for entry in latest {
+        if removed_workers.contains(&entry.key().0) {
+            continue;
+        }
         let expired = now.saturating_duration_since(entry.value().received_at) > max_age;
         let rank_is_expected = expected
             .get(&entry.key().0)
@@ -81,6 +85,7 @@ fn fresh_fpm_snapshot(
     }
     let missing = expected
         .iter()
+        .filter(|(worker, _)| !removed_workers.contains(worker.as_str()))
         .map(|(worker, ranks)| {
             ranks.as_ref().map_or(1, |ranks| {
                 ranks
@@ -489,6 +494,9 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
+    // Retain removal history until re-add: late events from retired publishers
+    // must not be confused with publishers that never joined discovery.
+    removed_workers: Arc<DashSet<String>>,
     // Serialized ModelDeploymentCards grouped by worker. Each worker retains
     // complete card identities for exact removal and one selected base/fallback
     // card for snapshots.
@@ -651,10 +659,12 @@ fn update_worker_model_card_taints(
 
 fn remove_worker_model_card(
     cards: &DashMap<String, WorkerModelCards>,
+    removed_workers: &DashSet<String>,
     worker_id: &str,
     card_id: &ModelCardInstanceId,
 ) -> bool {
     let Some(mut worker_cards) = cards.get_mut(worker_id) else {
+        removed_workers.insert(worker_id.to_string());
         return false;
     };
     worker_cards.remove(card_id);
@@ -662,6 +672,7 @@ fn remove_worker_model_card(
         return true;
     }
 
+    removed_workers.insert(worker_id.to_string());
     drop(worker_cards);
     cards.remove(worker_id);
     false
@@ -686,6 +697,7 @@ impl FpmEventSubscriber {
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
+            removed_workers: Arc::new(DashSet::new()),
             worker_model_cards: Arc::new(DashMap::new()),
         })
     }
@@ -870,6 +882,7 @@ impl FpmEventSubscriber {
         // condition (FPM arriving *after* the Removed event) are caught by the
         // known_workers filter in get_recent_stats().
         let cards = self.worker_model_cards.clone();
+        let removed_workers = self.removed_workers.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
@@ -931,6 +944,7 @@ impl FpmEventSubscriber {
                                         }
                                     }
                                     known.insert(wid.clone());
+                                    removed_workers.remove(&wid);
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::ModelTaintsUpdated(update))) => {
@@ -958,7 +972,7 @@ impl FpmEventSubscriber {
                                         continue;
                                     };
                                     let removed_id = card_id.instance_id.to_string();
-                                    if remove_worker_model_card(&cards, &removed_id, &card_id) {
+                                    if remove_worker_model_card(&cards, &removed_workers, &removed_id, &card_id) {
                                         tracing::debug!(
                                             "FPM tracker: model card removed for worker {removed_id}; \
                                              other cards remain"
@@ -1056,6 +1070,7 @@ impl FpmEventSubscriber {
         Ok(fresh_fpm_snapshot(
             &self.latest_stats,
             &expected,
+            &self.removed_workers,
             Instant::now(),
             max_age,
         ))
@@ -1110,12 +1125,21 @@ mod tests {
 
     #[test]
     fn snapshot_separates_missing_identity_and_stale_samples() {
+        let removed_workers = DashSet::from_iter(["removed".to_string()]);
         let now = Instant::now();
         let latest = DashMap::new();
         let mut expected = HashMap::new();
         expected.insert("fresh".to_string(), Some(0..1));
         expected.insert("stale".to_string(), Some(0..1));
-        for (worker, age) in [("fresh", 0), ("stale", 2), ("orphan", 0), ("removed", 2)] {
+        // Removal may arrive after the expected-worker snapshot was collected.
+        expected.insert("removed".to_string(), Some(0..1));
+        for (worker, age) in [
+            ("fresh", 0),
+            ("stale", 2),
+            ("orphan", 0),
+            ("removed", 0),
+            ("expired-orphan", 2),
+        ] {
             latest.insert(
                 (worker.to_string(), 0),
                 TrackedFpm {
@@ -1124,8 +1148,13 @@ mod tests {
                 },
             );
         }
-        let (snapshot, unjoined, stale, missing) =
-            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1));
+        let (snapshot, unjoined, stale, missing) = fresh_fpm_snapshot(
+            &latest,
+            &expected,
+            &removed_workers,
+            now,
+            Duration::from_secs(1),
+        );
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains_key(&("fresh".to_string(), 0)));
         assert_eq!(unjoined, ["orphan"]);
@@ -1141,8 +1170,14 @@ mod tests {
             },
         );
         expected.insert("orphan".to_string(), Some(0..1));
-        let (snapshot, unjoined, stale, missing) =
-            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1));
+        expected.remove("removed");
+        let (snapshot, unjoined, stale, missing) = fresh_fpm_snapshot(
+            &latest,
+            &expected,
+            &removed_workers,
+            now,
+            Duration::from_secs(1),
+        );
         assert_eq!(snapshot.len(), 3);
         assert!(unjoined.is_empty());
         assert_eq!(stale, 0);
@@ -1151,6 +1186,7 @@ mod tests {
 
     #[test]
     fn snapshot_reports_workers_and_offset_ranks_that_never_published() {
+        let removed_workers = DashSet::new();
         let now = Instant::now();
         let latest = DashMap::new();
         let expected = HashMap::from([
@@ -1164,8 +1200,13 @@ mod tests {
                 received_at: now,
             },
         );
-        let (_, unjoined, stale, missing) =
-            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1));
+        let (_, unjoined, stale, missing) = fresh_fpm_snapshot(
+            &latest,
+            &expected,
+            &removed_workers,
+            now,
+            Duration::from_secs(1),
+        );
         assert!(unjoined.is_empty());
         assert_eq!(stale, 0);
         assert_eq!(missing, 2);
@@ -1178,7 +1219,14 @@ mod tests {
             },
         );
         assert_eq!(
-            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1)).3,
+            fresh_fpm_snapshot(
+                &latest,
+                &expected,
+                &removed_workers,
+                now,
+                Duration::from_secs(1)
+            )
+            .3,
             1
         );
         latest.insert(
@@ -1189,7 +1237,14 @@ mod tests {
             },
         );
         assert_eq!(
-            fresh_fpm_snapshot(&latest, &expected, now, Duration::from_secs(1)).3,
+            fresh_fpm_snapshot(
+                &latest,
+                &expected,
+                &removed_workers,
+                now,
+                Duration::from_secs(1)
+            )
+            .3,
             0
         );
     }
@@ -1260,6 +1315,7 @@ mod tests {
     #[test]
     fn removing_cards_keeps_worker_live_until_last_card() {
         let cards = DashMap::new();
+        let removed_workers = DashSet::new();
         let base = card_id(42, None);
         let lora_a = card_id(42, Some("adapter-a"));
         let lora_b = card_id(42, Some("adapter-b"));
@@ -1277,14 +1333,31 @@ mod tests {
             "lora-b".to_string(),
         );
 
-        assert!(remove_worker_model_card(&cards, "42", &base));
+        assert!(remove_worker_model_card(
+            &cards,
+            &removed_workers,
+            "42",
+            &base
+        ));
         assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-b"));
 
-        assert!(remove_worker_model_card(&cards, "42", &lora_b));
+        assert!(remove_worker_model_card(
+            &cards,
+            &removed_workers,
+            "42",
+            &lora_b
+        ));
         assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-a"));
+        assert!(!removed_workers.contains("42"));
 
-        assert!(!remove_worker_model_card(&cards, "42", &lora_a));
+        assert!(!remove_worker_model_card(
+            &cards,
+            &removed_workers,
+            "42",
+            &lora_a
+        ));
         assert!(!cards.contains_key("42"));
+        assert!(removed_workers.contains("42"));
     }
 
     #[test]

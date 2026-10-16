@@ -204,9 +204,53 @@ def test_missing_engine_metadata_is_visible_even_with_fpm():
             )._value.get()
             == 1
         )
+
         assert (
             metrics.degraded_signals_total.labels(
                 component="decode", signal=signal
             )._value.get()
             == 1
         )
+
+
+@pytest.mark.parametrize(
+    ("mode", "target", "unavailable"),
+    [("agg", "sla", True), ("decode", "sla", False), ("agg", "load", False)],
+)
+def test_aggregate_sla_requires_batching_capacity_and_recovers(
+    mode, target, unavailable
+):
+    metrics = PluginFrameworkMetrics(registry=CollectorRegistry())
+    health = PlannerSignalHealth(
+        PlannerConfig(
+            mode=mode,
+            optimization_target=target,
+            enable_load_scaling=True,
+            enable_throughput_scaling=False,
+            decode_scale_up_kv_rate=90,
+            decode_scale_down_kv_rate=10,
+        ),
+        metrics,
+    )
+    inputs = TickInput(
+        now_s=0,
+        worker_counts=WorkerCounts(ready_num_decode=1),
+        fpm_observations=FpmObservations(
+            decode={("w", 0): ForwardPassMetrics(worker_id="w")}
+        ),
+    )
+    scheduled = ScheduledTick(at_s=0, need_worker_fpm=True)
+    capabilities = WorkerCapabilities(decode=EngineCapabilities(max_kv_tokens=1024))
+    gauge = metrics.signal_unavailable.labels(
+        component="decode", signal="engine_capacity"
+    )
+    counter = metrics.degraded_signals_total.labels(
+        component="decode", signal="engine_capacity"
+    )
+    for _ in range(3):
+        health.observe(scheduled, inputs, capabilities)
+    assert gauge._value.get() == int(unavailable)
+    assert counter._value.get() == int(unavailable)
+    capabilities.decode.max_num_batched_tokens = 256
+    health.observe(scheduled, inputs, capabilities)
+    assert gauge._value.get() == 0

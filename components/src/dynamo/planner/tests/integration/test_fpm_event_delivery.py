@@ -17,6 +17,7 @@ from dynamo.llm import (
     ModelType,
     WorkerType,
     register_model,
+    unregister_model,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import NativePlannerBase
@@ -290,6 +291,43 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
             (missing_worker_id, 1),
         }
         assert recovered.unavailable_reasons == {}
+
+        await unregister_model(missing_endpoint)
+        for _ in range(100):
+            if missing_worker_id not in provider._decode_fpm_sub.get_model_cards():
+                break
+            await asyncio.sleep(0.01)
+        assert missing_worker_id not in provider._decode_fpm_sub.get_model_cards()
+        # Keep publishing after discovery removal to exercise the late-event race.
+        for _ in range(20):
+            for rank in (0, 1):
+                _publish_idle_fpm(complete, rank)
+            await asyncio.sleep(0.02)
+            remaining = provider.collect_fpm()
+            assert remaining.unavailable_reasons == {}
+            assert set(remaining.decode) == {(worker_id, 0)}
+
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            missing_endpoint,
+            "test-model",
+            worker_type=WorkerType.Aggregated,
+            runtime_config=runtime_config,
+        )
+        for _ in range(100):
+            for rank in (0, 1):
+                _publish_idle_fpm(complete, rank)
+            await asyncio.sleep(0.01)
+            rejoined = provider.collect_fpm()
+            if rejoined.decode and len(rejoined.decode) == 3:
+                break
+        assert set(rejoined.decode) == {
+            (worker_id, 0),
+            (missing_worker_id, 0),
+            (missing_worker_id, 1),
+        }
+        assert rejoined.unavailable_reasons == {}
 
         metrics = PluginFrameworkMetrics(registry=CollectorRegistry())
         health = PlannerSignalHealth(config, metrics)

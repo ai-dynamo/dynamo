@@ -844,6 +844,8 @@ class LoadScalingMixin:
     def _consolidation_safe_easy_target(
         self, desired: int, ready: int, values: list[float], up_threshold: float
     ) -> int:
+        # Cancel startup without removing the last ready FPM publisher.
+        desired = max(desired, min(ready, 1))
         # Do not drain a serving worker if redistributing its load would
         # immediately trigger scale-up. Keep this guard after startup settles
         # too; otherwise cancelling pending capacity only delays oscillation.
