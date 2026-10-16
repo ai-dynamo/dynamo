@@ -366,6 +366,8 @@ class KubernetesCapacityManager(CapacityManager):
                         self._missing_participants.discard(key)
                 except DynamoGraphDeploymentNotFoundError as error:
                     if self._mark_missing_deployment(key, connector):
+                        if require_complete:
+                            self._require_missing_deployment_drained(connector)
                         all_pools[key] = {}
                         continue
                     self._record_observation_failure(
@@ -421,7 +423,7 @@ class KubernetesCapacityManager(CapacityManager):
                     scaling_adapters_by_name[name] = adapter
 
             pods_by_graph: dict[str, list] = {}
-            if require_complete and deployments_by_key:
+            if require_complete:
                 pods_by_graph = inventory_api.partition_pods_by_graph(
                     inventory_api.list_graph_pods()
                 )
@@ -479,6 +481,8 @@ class KubernetesCapacityManager(CapacityManager):
                     self._missing_participants.discard(key)
             except DynamoGraphDeploymentNotFoundError as error:
                 if self._mark_missing_deployment(key, connector):
+                    if require_complete:
+                        self._require_missing_deployment_drained(connector)
                     all_pools[key] = {}
                     continue
                 self._record_observation_failure(
@@ -531,6 +535,20 @@ class KubernetesCapacityManager(CapacityManager):
             ) from error
         logger.warning(f"Failed to read deployment for {participant_id}: {error}")
         all_pools[participant_id] = {}
+
+    @staticmethod
+    def _require_missing_deployment_drained(
+        connector: KubernetesConnector,
+    ) -> None:
+        """Reject a missing DGD while any of its nonterminal Pods remain."""
+        pods = connector.kube_api.list_nonterminal_pods_for_graph(
+            connector.parent_dgd_name
+        )
+        if pods:
+            raise RuntimeError(
+                f"DGD {connector.parent_dgd_name!r} is absent but still has "
+                f"{len(pods)} nonterminal Pods"
+            )
 
     def _component_role(
         self,
@@ -750,15 +768,11 @@ class KubernetesCapacityManager(CapacityManager):
         blocking: bool,
     ) -> None:
         """Apply desired targets while preserving the CapacityManager contract."""
-
-        async def operation() -> None:
+        try:
             await self.reconcile_pending_settlements(participant_id)
             result = await self.scale_with_result(participant_id, targets, blocking)
             if result.accepted and (blocking or result.requires_settlement):
                 await self.wait_for_ready(participant_id)
-
-        try:
-            await run_async_to_completion(operation())
         except asyncio.CancelledError:
             self._protect_replica_settlement(participant_id)
             raise
@@ -775,9 +789,21 @@ class KubernetesCapacityManager(CapacityManager):
         in a state that can accept scaling; the orchestrator maps that to a soft
         rejection.
         """
+        write_admitted = False
+
+        def admit_write() -> None:
+            nonlocal write_admitted
+            write_admitted = True
+
         try:
             return await run_async_to_completion(
-                self._scale_with_result(participant_id, targets, blocking)
+                self._scale_with_result(
+                    participant_id,
+                    targets,
+                    blocking,
+                    admit_write,
+                ),
+                complete_on_cancel=lambda: write_admitted,
             )
         except asyncio.CancelledError:
             self._protect_replica_settlement(participant_id)
@@ -788,6 +814,7 @@ class KubernetesCapacityManager(CapacityManager):
         participant_id: str,
         targets: list[TargetReplica],
         blocking: bool,
+        admit_write: Callable[[], None],
     ) -> ReplicaUpdateResult:
         connector = self.connectors[participant_id]
         previous_settlement = self._replica_settlements.get(participant_id)
@@ -803,6 +830,7 @@ class KubernetesCapacityManager(CapacityManager):
             retry_state = retry_states.setdefault(
                 participant_id, ReplicaUpdateRetryState(dgd_uid=observed_uid)
             )
+        admit_write()
         try:
             result = await connector.set_component_replicas_with_result(
                 targets,

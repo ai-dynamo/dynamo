@@ -537,6 +537,51 @@ async def test_compatibility_scale_joins_committed_write_after_cancellation():
 
 
 @pytest.mark.asyncio
+async def test_compatibility_scale_cancellation_during_reconciliation_stops_new_write():
+    cm = KubernetesCapacityManager("default")
+    connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
+
+    async def accept(_targets, *, blocking, retry_state):
+        retry_state.dgd_uid = "dgd-uid"
+        retry_state.authorities[("prefill", None)] = (
+            "prefill-svc",
+            False,
+            None,
+        )
+        return ReplicaUpdateResult(accepted=True, applied=True)
+
+    connector.set_component_replicas_with_result.side_effect = accept
+    first_target = TargetReplica(
+        sub_component_type=SubComponentType.PREFILL,
+        desired_replicas=2,
+    )
+    await cm.scale_with_result("default/my-dgd", [first_target], blocking=False)
+
+    settling = asyncio.Event()
+    release = asyncio.Event()
+
+    async def wait_for_first_target(**_kwargs):
+        settling.set()
+        await release.wait()
+
+    connector.wait_for_replica_targets.side_effect = wait_for_first_target
+    second_target = first_target.model_copy(update={"desired_replicas": 3})
+    task = asyncio.create_task(
+        cm.scale("default/my-dgd", [second_target], blocking=False)
+    )
+    await settling.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert connector.set_component_replicas_with_result.await_count == 1
+    assert cm._replica_settlements["default/my-dgd"].protected
+
+
+@pytest.mark.asyncio
 async def test_cancelled_scale_with_result_protects_recorded_settlement():
     cm = KubernetesCapacityManager("default")
     connector = _install_connector(cm, "default/my-dgd", _dgd_spec(1, 1))
@@ -1167,6 +1212,7 @@ def test_observe_never_seen_managed_deployment_is_zero_capacity_probe():
 
     assert cm.observe(require_complete=True) == {"default/missing": {}}
     assert not cm.participant_exists("default/missing")
+    missing.kube_api.list_nonterminal_pods_for_graph.assert_called_once_with("missing")
 
     missing = _install_connector(
         cm,
@@ -1179,6 +1225,27 @@ def test_observe_never_seen_managed_deployment_is_zero_capacity_probe():
         DynamoGraphDeploymentNotFoundError("missing", "default")
     )
     assert cm.observe() == {"default/missing": {}}
+    assert not cm.participant_exists("default/missing")
+    missing.kube_api.list_nonterminal_pods_for_graph.assert_not_called()
+
+
+def test_observe_never_seen_missing_deployment_rejects_residual_pods():
+    cm = KubernetesCapacityManager("default")
+    missing = _install_connector(
+        cm,
+        "default/missing",
+        _dgd_spec(1, 1),
+        parent_dgd_name="missing",
+        seed_identity=False,
+    )
+    missing.kube_api.get_graph_deployment.side_effect = (
+        DynamoGraphDeploymentNotFoundError("missing", "default")
+    )
+    missing.kube_api.list_nonterminal_pods_for_graph.return_value = [object()]
+
+    with pytest.raises(RuntimeError, match="still has 1 nonterminal Pods"):
+        cm.observe(require_complete=True)
+
     assert not cm.participant_exists("default/missing")
 
 
@@ -1375,6 +1442,34 @@ def test_observe_implicit_mode_discards_missing_never_observed_local():
 
     assert not cm.participant_exists("default/model")
     assert "default/model" not in cm.connectors
+
+
+def test_observe_implicit_mode_rejects_residual_pods_without_dgds():
+    cm = KubernetesCapacityManager("default")
+    cm._observe_all_deployments = True
+    connector = _install_connector(
+        cm,
+        "default/model",
+        _dgd_spec(1, 1),
+        parent_dgd_name="model",
+        seed_identity=False,
+    )
+    connector.kube_api.list_graph_deployments.return_value = []
+    connector.kube_api.list_graph_pods.return_value = [
+        {
+            "metadata": {
+                "labels": {
+                    "nvidia.com/dynamo-graph-deployment-name": "model",
+                }
+            }
+        }
+    ]
+    cm._inventory_api = connector.kube_api
+
+    with pytest.raises(RuntimeError, match="Pods reference DGDs absent"):
+        cm.observe(require_complete=True)
+
+    assert cm.connectors["default/model"] is connector
 
 
 def test_observe_implicit_mode_fails_closed_for_missing_observed_local():
