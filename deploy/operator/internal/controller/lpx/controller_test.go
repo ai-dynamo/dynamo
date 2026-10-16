@@ -3587,6 +3587,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	require.Equal(t, plans, reorderedPlans)
 
 	t.Log("Observe two explicit replicas and three externally managed replicas in Grove")
+	require.NoError(t, r.stampClientIdentity(t.Context(), dgd, pcs))
 	firstPlan, secondPlan := plans["lpx"], plans["second-engine"]
 	secondPlan.Replicas = 3
 	objects := materializeLPXTestPCS(t, child, pcs, firstPlan, secondPlan)
