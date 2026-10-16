@@ -656,6 +656,9 @@ fn take_engine_reasoning_gate(
 /// vLLM's defaults for `VLLM_MAX_NUM_BAD_WORDS` and
 /// `VLLM_MAX_BAD_WORDS_TOTAL_TOKENS`. Its model runner enforces them inside the
 /// engine worker, where an oversized request can fail the engine.
+/// TODO: Remove these caps once vllm-rs rejects oversized bad-words lists
+/// during request lowering (vllm-project/vllm#61933) and Dynamo's minimum vLLM
+/// includes that check.
 const MAX_BAD_WORDS: usize = 128;
 const MAX_BAD_WORDS_TOKENS: usize = 1024;
 

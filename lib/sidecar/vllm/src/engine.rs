@@ -193,19 +193,17 @@ impl VllmSidecarEngine {
             "" => "unreported",
             version => version,
         };
-        if dynamo_parsers && let Some(parser) = model.reasoning_parser() {
-            // vLLM's reasoning parser decides when structured output starts,
-            // and needs Dynamo's per-request reasoning gate to decide correctly.
-            if !model.reports_proto_0_6() {
-                return Err(client::invalid_argument(format!(
-                    "vLLM runs reasoning parser `{parser}`, but its gRPC server (vllm-proto {proto_version}) predates 0.6.0 and cannot receive Dynamo's reasoning gate; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
-                )));
-            }
-            if !dynamo_reasoning_parser {
-                return Err(client::invalid_argument(format!(
-                    "vLLM runs reasoning parser `{parser}`, which needs Dynamo's reasoning gate; set `--dyn-reasoning-parser` to this model's Dynamo reasoning parser. If the model does not reason, start vllm-rs with `--reasoning-parser none` instead"
-                )));
-            }
+        // vLLM's reasoning parser decides when structured output starts, and
+        // needs Dynamo's per-request reasoning gate to decide correctly. Older
+        // servers can't receive the gate, and they would reject every request
+        // that carries it.
+        if dynamo_parsers
+            && let Some(parser) = model.reasoning_parser()
+            && !model.reports_proto_0_6()
+        {
+            return Err(client::invalid_argument(format!(
+                "vLLM runs reasoning parser `{parser}`, but its gRPC server (vllm-proto {proto_version}) predates 0.6.0 and cannot receive Dynamo's reasoning gate; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
+            )));
         }
         match model.reasoning_parser() {
             None if dynamo_parsers => {
@@ -219,9 +217,10 @@ impl VllmSidecarEngine {
                     "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. {advice} to let the engine gate grammars on reasoning"
                 );
             }
-            Some(parser) if !dynamo_parsers => tracing::warn!(
+            // The frontend sends the gate only from its own reasoning parser.
+            Some(parser) if !dynamo_reasoning_parser => tracing::warn!(
                 parser,
-                "vLLM runs a reasoning parser, but Dynamo has none, so per-request thinking settings never reach vLLM. It infers from the prompt alone whether reasoning has ended before applying structured output and required or named tool_choice grammars, which can leave them unenforced or suppress reasoning. Set `--dyn-reasoning-parser`, or start vllm-rs with `--reasoning-parser none`"
+                "vLLM runs a reasoning parser, but Dynamo has none, so per-request thinking settings never reach vLLM. vLLM then guesses from the prompt alone when reasoning ends before it applies tool-call and structured-output grammars, and the guess can be wrong. For models that don't emit think tags, such as Qwen3-Coder, the grammar may never apply and tool calls come back unconstrained. For models whose thinking mode depends on chat-template settings, the grammar can start too early and cut reasoning short. Set `--dyn-reasoning-parser` to this model's Dynamo reasoning parser, or, if the model doesn't reason, start vllm-rs with `--reasoning-parser none`"
             ),
             _ => {}
         }
@@ -1613,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_reasoning_parser_requires_gate_and_dynamo_reasoning_parser() {
+    fn engine_reasoning_parser_with_dynamo_parsers_requires_proto_0_6() {
         let mut old_server = server_info();
         old_server.proto_version.clear();
         // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
@@ -1628,17 +1627,17 @@ mod tests {
                 old_server.clone(),
                 Err("predates 0.6.0"),
             ),
+            // Without a Dynamo reasoning parser, startup only warns.
             (
                 &["--dyn-tool-call-parser", "qwen3_coder"][..],
                 server_info(),
-                Err("set `--dyn-reasoning-parser`"),
+                Ok(true),
             ),
             (
                 &["--dyn-reasoning-parser", "qwen3"][..],
                 server_info(),
                 Ok(true),
             ),
-            // Without Dynamo parsers, startup only warns.
             (&[][..], server_info(), Ok(true)),
             (&[][..], old_server, Ok(false)),
         ] {
