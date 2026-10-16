@@ -27,7 +27,11 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, plugins::RouterPluginBuilder, routing_host::settle_failed_lifecycle},
+    kv_router::{
+        RoutingHost,
+        plugins::RouterPluginBuilder,
+        routing_host::{settle_failed_lifecycle, settle_terminal_lifecycle},
+    },
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -650,7 +654,7 @@ impl
         let outcome = match outcome {
             PrefillOutcome::Terminal { output } => {
                 if let Some(mut lifecycle) = take_handed_off_lifecycle(&req) {
-                    lifecycle.complete();
+                    settle_terminal_lifecycle(&mut lifecycle, &output);
                 }
                 let output = strip_terminal_disaggregated_params(*output);
                 return Ok(dynamo_runtime::pipeline::ResponseStream::new(

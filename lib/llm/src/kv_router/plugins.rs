@@ -49,6 +49,11 @@ impl RouterPluginBuilder {
                 "request_classifier is configured but not installed; supply a resolved RouterPlugins bundle"
             );
         }
+        // A bypassed turn skips the prefill hop where the classifier admits it.
+        // Checked on every worker set's effective config, not just the frontend's.
+        if self.has_request_classifier() && config.conditional_disagg_enabled {
+            anyhow::bail!("request classifiers are not supported with conditional disaggregation");
+        }
         Ok(())
     }
 

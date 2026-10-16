@@ -104,16 +104,6 @@ impl HttpFrontend {
         {
             anyhow::bail!("request classifiers require --router-mode kv");
         }
-        // A bypassed turn skips the prefill hop where the classifier admits it.
-        if self.plugins.request_classifier().is_some()
-            && engine_config
-                .local_model()
-                .router_config()
-                .kv_router_config
-                .conditional_disagg_enabled
-        {
-            anyhow::bail!("request classifiers are not supported with conditional disaggregation");
-        }
         if self.plugins.has_custom_plugins()
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
         {

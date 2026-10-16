@@ -89,6 +89,22 @@ fn classifier_abort_error(error: &KvSchedulerError) -> Arc<AbortCause> {
     }
 }
 
+/// The classifier lifecycle an attempt continues rather than begins: the one
+/// its prefill hop handed off to this decode leg, or the one a failed attempt
+/// parked for a retry.
+fn claim_request_lifecycle(request: &PreprocessedRequest) -> Option<Box<RequestLifecycle>> {
+    request
+        .lifecycle_handoff
+        .as_ref()
+        .and_then(LifecycleHandoff::take)
+        .or_else(|| {
+            request
+                .migration_state
+                .as_ref()
+                .and_then(|state| state.take_request_lifecycle())
+        })
+}
+
 /// Park a failed attempt's classifier lifecycle for a migration retry, or end
 /// it with the cause when the request will not be retried.
 pub(crate) fn settle_failed_lifecycle(
@@ -103,6 +119,21 @@ pub(crate) fn settle_failed_lifecycle(
         state.store_request_lifecycle(lifecycle);
     } else {
         lifecycle.abort(Some(owned_abort_error(error.as_ref())));
+    }
+}
+
+/// End a lifecycle with the request's terminal response: completed when it
+/// finished cleanly, aborted when it carries an error or an `Error`/`Cancelled`
+/// finish reason.
+pub(crate) fn settle_terminal_lifecycle(
+    lifecycle: &mut RequestLifecycle,
+    output: &Annotated<LLMEngineOutput>,
+) {
+    match classify_response_item(output) {
+        ResponseItemOutcome::Healthy => lifecycle.complete(),
+        ResponseItemOutcome::DrainableTerminal | ResponseItemOutcome::Failed => {
+            lifecycle.abort(output.error.as_ref().map(|error| owned_abort_error(error)));
+        }
     }
 }
 
