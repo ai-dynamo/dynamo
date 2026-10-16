@@ -2106,6 +2106,7 @@ mod tests {
         let metadata = RouterHintSourceMetadata {
             source_control_endpoint: "tcp://owner:23280".to_string(),
             worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
         };
         let snapshot = ResidencyRoutingSnapshot::new(
             ResidencyProjection::default(),
