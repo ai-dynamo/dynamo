@@ -24,7 +24,6 @@ conventions.
 | `inference-gateway/` | Gateway API Inference Extension integration: `ext-proc/` (Rust external processor), `sidecar/` (EPP decode sidecar), and `scripts/` (CRD installation). |
 | `observability/` | Grafana dashboards and setup for Kubernetes deployments. |
 | `power-agent/` | Privileged DaemonSet for GPU power-cap enforcement. |
-| `checkpoint-placeholder/` | Dockerfile for a runtime-compatible restore target; checkpoint/restore tooling is supplied by the snapshot agent. |
 | `pre-deployment/` | Scripts that check a cluster meets Dynamo's requirements before you deploy. |
 | `utils/` | Utilities and manifests for benchmarking and profiling workflows. |
 
@@ -36,7 +35,7 @@ The CRD sources are the Go types under
 
 `DynamoGraphDeployment` and `DynamoGraphDeploymentRequest`,
 `DynamoComponentDeployment`, `DynamoGraphDeploymentScalingAdapter`,
-`DynamoModel`, and `DynamoWorkerMetadata`.
+`DynamoModel`, `DynamoWorkerMetadata`, and `LPXGraphDeployment`.
 
 > [!NOTE]
 > The generated artifacts are not editable by hand. Change the Go types or the
