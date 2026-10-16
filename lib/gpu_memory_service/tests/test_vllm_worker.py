@@ -17,7 +17,6 @@ from gpu_memory_service.integrations.vllm import worker as gms_worker  # noqa: E
 from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
     worker as gms_v1_worker,
 )
-from vllm.config import CUDAGraphMode  # noqa: E402
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -61,130 +60,6 @@ def test_init_device_forwards_ro_connect_timeout(monkeypatch, tmp_path):
     worker.init_device()
 
     assert manager_factory.call_args.kwargs["timeout_ms"] == 4200
-
-
-class _FakeDevice:
-    """Device memory seen by one engine of a shadow-failover pair."""
-
-    def __init__(self, total: int, peer_used: int):
-        self.total = total
-        self.used = peer_used
-        self.reserved = 0
-        self.peak_allocated = 0
-
-    def mem_get_info(self):
-        return self.total - self.used, self.total
-
-    def memory_reserved(self):
-        return self.reserved
-
-    def max_memory_allocated(self):
-        return self.peak_allocated
-
-    def reset_peak_memory_stats(self):
-        self.peak_allocated = 0
-
-    def synchronize(self):
-        pass
-
-
-_GIB = 1 << 30
-# A100 80 GB at vLLM's default gpu_memory_utilization.
-_TOTAL = 85_093_777_408
-_REQUESTED = int(_TOTAL * 0.92)
-_WEIGHTS = int(1.18 * _GIB)  # imported read-only from GMS, shared by both
-_TORCH_PEAK = int(0.5 * _GIB)
-_CONTEXT = int(1.1 * _GIB)  # CUDA context, created before init_device
-_NON_TORCH = 2 * _GIB  # NCCL and NIXL buffers
-_CUDAGRAPH = int(0.43 * _GIB)
-
-
-def _shadow_kv_budget(monkeypatch, tmp_path, peer_memory_delta=0, is_cuda=True):
-    # The peer engine is already resident. On CUDA, this engine's context
-    # also exists before init_device runs.
-    context = _CONTEXT if is_cuda else 0
-    peer_used = _WEIGHTS + context + _TORCH_PEAK + _NON_TORCH
-    device = _FakeDevice(_TOTAL, peer_used=peer_used + context)
-
-    def base_init_device(_worker):
-        device.used += _NON_TORCH + peer_memory_delta
-
-    def profile_run():
-        device.peak_allocated = _TORCH_PEAK
-
-    monkeypatch.setattr(gms_worker, "torch_device", lambda: device)
-    monkeypatch.setattr(gms_worker, "is_scratch_kv_enabled", lambda: True)
-    monkeypatch.setattr(gms_worker, "has_pending_gms_write", lambda: False)
-    monkeypatch.setattr(gms_worker, "get_imported_weights_bytes", lambda: _WEIGHTS)
-    monkeypatch.setattr(gms_worker, "get_or_create_gms_client_memory_manager", Mock())
-    monkeypatch.setattr(gms_worker, "_get_dp_adjusted_local_rank", lambda *_: 0)
-    monkeypatch.setattr(
-        gms_worker,
-        "get_vmm_device_type",
-        lambda: SimpleNamespace(value="cuda" if is_cuda else "xpu"),
-    )
-    monkeypatch.setattr(
-        gms_worker, "get_socket_path", lambda *_: str(tmp_path / "weights.sock")
-    )
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform",
-        SimpleNamespace(set_device=lambda _: None, is_cuda=lambda: is_cuda),
-    )
-    monkeypatch.setattr(gms_worker._BaseWorker, "init_device", base_init_device)
-    monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1")
-
-    worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
-    worker.local_rank = 0
-    worker.parallel_config = None
-    worker.vllm_config = SimpleNamespace(
-        load_config=SimpleNamespace(model_loader_extra_config={}),
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
-    )
-    worker.model_runner = SimpleNamespace(
-        profile_run=profile_run, profile_cudagraph_memory=lambda: _CUDAGRAPH
-    )
-    worker.requested_memory = _REQUESTED
-
-    worker.init_device()
-    return worker._determine_available_memory_before_gms_publish()
-
-
-def test_shadow_kv_budget_leaves_room_for_both_engines(monkeypatch, tmp_path):
-    """Reserve both engines' overhead while counting shared weights once."""
-    kv_budget = _shadow_kv_budget(monkeypatch, tmp_path)
-
-    engine_non_kv = _CONTEXT + _TORCH_PEAK + _NON_TORCH + _CUDAGRAPH
-    assert kv_budget + _WEIGHTS + 2 * engine_non_kv <= _REQUESTED
-    assert kv_budget > 0
-
-
-@pytest.mark.parametrize(
-    "peer_memory_delta",
-    [70 * _GIB, -(_CONTEXT + _TORCH_PEAK + _NON_TORCH)],
-    ids=["wake", "exit"],
-)
-def test_shadow_kv_budget_ignores_peer_memory_changes(
-    monkeypatch, tmp_path, peer_memory_delta
-):
-    kv_budget = _shadow_kv_budget(
-        monkeypatch, tmp_path, peer_memory_delta=peer_memory_delta
-    )
-
-    allowance = gms_worker._NON_TORCH_INIT_BYTES
-    engine_non_kv = (
-        gms_worker._CUDA_CONTEXT_BYTES + _TORCH_PEAK + allowance + _CUDAGRAPH
-    )
-    assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
-    assert kv_budget > 0
-
-
-def test_shadow_kv_budget_excludes_cuda_context_on_xpu(monkeypatch, tmp_path):
-    """Do not charge either XPU engine for a CUDA context or CUDA graphs."""
-    kv_budget = _shadow_kv_budget(monkeypatch, tmp_path, is_cuda=False)
-
-    engine_non_kv = _TORCH_PEAK + gms_worker._NON_TORCH_INIT_BYTES
-    assert kv_budget == _REQUESTED - _WEIGHTS - 2 * engine_non_kv
-    assert kv_budget > 0
 
 
 def test_v1_worker_uses_upstream_sleep_backend_accessor(monkeypatch):

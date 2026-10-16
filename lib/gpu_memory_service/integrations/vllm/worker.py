@@ -73,17 +73,10 @@ apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
-
-# Per-engine allowance for non-torch initialization memory (NCCL, workspaces).
-# Use the former 2 GiB cap as a fixed estimate: device-wide free-memory deltas
-# cannot isolate this worker when its peer allocates OR releases memory. This
-# remains an estimate, not a measured upper bound for every deployment.
-_NON_TORCH_INIT_BYTES = 2 << 30
-
-# Per-engine allowance for the CUDA context, which exists before init_device
-# and cannot be read per process from device-wide free memory. About
-# 1.1 GiB per engine process was observed on A100 80 GB.
-_CUDA_CONTEXT_BYTES = 5 << 28
+# Per-engine memory outside PyTorch's allocator: device context, NCCL and
+# workspaces. A fixed estimate, since device-wide free memory also moves with
+# the shadow peer. The CUDA context alone is about 1.1 GiB on A100.
+_NON_TORCH_MEMORY_BYTES = 13 << 28  # 3.25 GiB
 
 
 def kv_reuse_enabled() -> bool:
@@ -194,7 +187,6 @@ class GMSWorker(_BaseWorker):
             tag="weights",
             timeout_ms=self.gms_ro_connect_timeout_ms,
         )
-
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
@@ -204,9 +196,7 @@ class GMSWorker(_BaseWorker):
         Determine actual available memory for the engine.
 
         During a failover scenario, this function may be called while there is an active engine colocated on the same device.
-        We want our assessment to ignore the kv cache allocation of the active engine if there is one,
-        but not the rest of its footprint: in scratch-KV mode the budget also reserves room for the
-        co-located engine's non-KV memory.
+        We want our assessment to ignore the kv cache allocation of the active engine if there is one.
 
         A first writer defers its GMS commit until profiling completes here:
         waiting RO consumers (snapshot saver, peer engines) would otherwise
@@ -226,7 +216,6 @@ class GMSWorker(_BaseWorker):
         return available
 
     def _determine_available_memory_before_gms_publish(self) -> int:
-        """Size scratch KV with fixed non-torch allowances for both engines."""
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
@@ -260,18 +249,16 @@ class GMSWorker(_BaseWorker):
 
         weights_memory = get_imported_weights_bytes()
         invisible_weights_memory = 0 if has_pending_write else weights_memory
-        non_torch_memory = _NON_TORCH_INIT_BYTES
-        cuda_context_memory = _CUDA_CONTEXT_BYTES if current_platform.is_cuda() else 0
         non_kv_cache_memory = (
             torch_peak
             + invisible_weights_memory
-            + non_torch_memory
-            + cuda_context_memory
             + cudagraph_memory_estimate_applied
+            + _NON_TORCH_MEMORY_BYTES
         )
-        # KV is one cuMemCreate at wake beside the resident peer engine, which runs
-        # the same model: reserve our non-KV footprint again, minus shared weights.
-        peer_non_kv_cache_memory = max(0, non_kv_cache_memory - weights_memory)
+        # The shadow peer runs the same model and stays resident while this
+        # engine allocates its KV at wake, so reserve its non-KV memory too.
+        # Weights are shared and counted once.
+        peer_non_kv_cache_memory = non_kv_cache_memory - weights_memory
 
         projected_available = (
             self.requested_memory - non_kv_cache_memory - peer_non_kv_cache_memory
@@ -280,18 +267,15 @@ class GMSWorker(_BaseWorker):
 
         logger.info(
             "[GMS] projected available memory "
-            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "peer_non_kv=%.2f GiB, torch_peak=%.2f GiB, "
-            "invisible_weights=%.2f GiB, non_torch_allowance=%.2f GiB, "
-            "cuda_context=%.2f GiB, cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
+            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, peer_non_kv=%.2f GiB, "
+            "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
             projected_available / (1 << 30),
             self.requested_memory / (1 << 30),
             non_kv_cache_memory / (1 << 30),
             peer_non_kv_cache_memory / (1 << 30),
             torch_peak / (1 << 30),
             invisible_weights_memory / (1 << 30),
-            non_torch_memory / (1 << 30),
-            cuda_context_memory / (1 << 30),
             cudagraph_memory_estimate / (1 << 30),
             cudagraph_memory_estimate_applied / (1 << 30),
         )
