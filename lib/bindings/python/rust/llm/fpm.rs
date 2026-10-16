@@ -79,6 +79,21 @@ impl WorkerFpm {
         };
         self.ranks.clear();
     }
+
+    fn reconcile_ranks(&mut self, previous: Option<Range<u32>>) {
+        let expected = self.model_cards.selected_ranks();
+        if expected == previous.as_ref() {
+            return;
+        }
+        // Retain already-invalid ranks as evidence of a bad publisher.
+        self.ranks.retain(|rank, _| {
+            let Ok(rank) = u32::try_from(*rank) else {
+                return true;
+            };
+            !previous.as_ref().is_some_and(|ranks| ranks.contains(&rank))
+                || expected.is_some_and(|ranks| ranks.contains(&rank))
+        });
+    }
 }
 
 type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
@@ -142,10 +157,7 @@ fn fresh_fpm_snapshot(
         if matches!(worker.lifecycle, FpmWorkerLifecycle::Removed { .. }) {
             continue;
         }
-        let expected = worker
-            .model_cards
-            .selected_entry()
-            .and_then(|card| card.dp_ranks.as_ref());
+        let expected = worker.model_cards.selected_ranks();
         let mut fresh_count = 0;
         let mut unjoined = false;
         for (&rank, sample) in &worker.ranks {
@@ -632,6 +644,10 @@ impl WorkerModelCards {
         self.selected_entry().map(|entry| entry.card.as_str())
     }
 
+    fn selected_ranks(&self) -> Option<&Range<u32>> {
+        self.selected_entry()?.dp_ranks.as_ref()
+    }
+
     fn selected_entry(&self) -> Option<&IndexedModelCard> {
         let card_id = self
             .base_card_id
@@ -653,7 +669,9 @@ fn insert_worker_model_card(
 ) {
     let mut worker = workers.entry(worker_id).or_default();
     worker.activate(Instant::now());
+    let previous = worker.model_cards.selected_ranks().cloned();
     worker.model_cards.insert(card_id, card);
+    worker.reconcile_ranks(previous);
 }
 
 fn update_worker_model_card_taints(
@@ -694,8 +712,10 @@ fn remove_worker_model_card(
     card_id: &ModelCardInstanceId,
 ) -> bool {
     let mut worker = workers.entry(worker_id.to_string()).or_default();
+    let previous = worker.model_cards.selected_ranks().cloned();
     worker.model_cards.remove(card_id);
     if !worker.model_cards.is_empty() {
+        worker.reconcile_ranks(previous);
         return true;
     }
     worker.remove(Instant::now());
@@ -806,7 +826,7 @@ impl FpmEventSubscriber {
 
     /// Track samples and discovery state with a fixed freshness and cleanup window.
     /// Legacy snapshots retain samples until worker removal; health snapshots filter by age.
-    #[pyo3(signature = (max_age_seconds = 15.0))]
+    #[pyo3(signature = (max_age_seconds = DEFAULT_FPM_MAX_AGE.as_secs_f64()))]
     fn start_tracking(&mut self, max_age_seconds: f64) -> PyResult<()> {
         let max_age = Duration::try_from_secs_f64(max_age_seconds)
             .ok()
@@ -1210,22 +1230,69 @@ mod tests {
     }
 
     #[test]
-    fn selected_card_rank_range_follows_base_updates_and_removal() {
-        let mut cards = WorkerModelCards::default();
-        let base = card_id(42, None);
-        let card = |start, size| {
+    fn card_transitions_preserve_valid_samples_and_drop_obsolete_ranks() {
+        let card = |start| {
             serde_json::json!({
-                "runtime_config": {"data_parallel_start_rank": start, "data_parallel_size": size}
+                "runtime_config": {"data_parallel_start_rank": start, "data_parallel_size": 2}
             })
             .to_string()
         };
-        cards.insert(card_id(42, Some("adapter")), card(99, 2));
-        cards.insert(base.clone(), card(4, 2));
-        assert_eq!(cards.selected_entry().unwrap().dp_ranks, Some(4..6));
-        cards.insert(base.clone(), card(8, 2));
-        assert_eq!(cards.selected_entry().unwrap().dp_ranks, Some(8..10));
-        cards.remove(&base);
-        assert_eq!(cards.selected_entry().unwrap().dp_ranks, Some(99..101));
+        for (transition, invalid_rank) in [
+            ("add_base", None),
+            ("update_base", None),
+            ("fallback", None),
+            ("adapter_fallback", None),
+            ("update_base", Some(99)),
+        ] {
+            let workers = DashMap::new();
+            let base = card_id(42, None);
+            let adapter = card_id(42, Some("adapter"));
+            let initial = if matches!(transition, "add_base" | "adapter_fallback") {
+                adapter
+            } else {
+                base.clone()
+            };
+            let fallback = card_id(42, Some("fallback"));
+            insert_worker_model_card(&workers, "42".to_string(), initial.clone(), card(4));
+            let removing = matches!(transition, "fallback" | "adapter_fallback");
+            if removing {
+                insert_worker_model_card(&workers, "42".to_string(), fallback.clone(), card(5));
+            }
+            let now = Instant::now();
+            for rank in [4, 5].into_iter().chain(invalid_rank) {
+                record_fpm(&workers, ("42".to_string(), rank), vec![1], now);
+            }
+            let selected = if removing {
+                assert!(remove_worker_model_card(&workers, "42", &initial));
+                fallback
+            } else {
+                insert_worker_model_card(&workers, "42".to_string(), base.clone(), card(5));
+                base
+            };
+            let health = fresh_fpm_snapshot(&workers, now, Duration::from_secs(1));
+            assert_eq!(
+                health.snapshot,
+                HashMap::from([(("42".to_string(), 5), vec![1])])
+            );
+            assert_eq!(
+                health.unjoined_worker_ids,
+                if invalid_rank.is_some() {
+                    vec!["42"]
+                } else {
+                    vec![]
+                },
+                "{transition}"
+            );
+            assert_eq!(health.missing_rank_count, 1);
+
+            // A publisher that continues using the obsolete rank is still invalid.
+            record_fpm(&workers, ("42".to_string(), 4), vec![2], now);
+            insert_worker_model_card(&workers, "42".to_string(), selected, card(5));
+            assert_eq!(
+                fresh_fpm_snapshot(&workers, now, Duration::from_secs(1)).unjoined_worker_ids,
+                ["42"]
+            );
+        }
     }
 
     fn card_id(instance_id: u64, model_suffix: Option<&str>) -> ModelCardInstanceId {
