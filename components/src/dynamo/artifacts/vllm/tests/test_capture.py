@@ -476,7 +476,7 @@ async def test_route_compaction_runs_off_loop_and_finishes_before_cancellation(
     budget = CaptureBudget(1 << 20)
     capture = session(request(("moe_routes",)), budget=budget)
     routes = np.asarray([[[1, 2], [3, 4]], [[2, 3], [4, 5]]], dtype=np.int64)
-    output = SimpleNamespace(index=0, token_ids=[12], routed_experts=routes)
+    output = completion_output(token_ids=[12], routed_experts=routes)
     loop_thread = threading.get_ident()
 
     task = asyncio.create_task(capture.observe_async(output, [10, 11]))
