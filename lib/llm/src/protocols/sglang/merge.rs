@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! SGLang `/generate` join rules.
+//! SGLang `/generate` as a [`GenerateFormat`].
 //!
 //! With incremental streaming, each chunk holds only the new part of `text`,
-//! `output_ids` and the output-side lists; the rest is the current full value.
-//! In P/D, decode never runs the prompt: input logprobs come from prefill, and
-//! prefill's `routed_experts` rows replace decode's stale prompt rows
+//! `output_ids` and the output-side lists; prompt-side values repeat in full
+//! on every chunk, and routed experts arrive on the final one. In P/D decode
+//! never runs the prompt: input logprobs come from prefill, and prefill's
+//! `routed_experts` rows replace decode's stale prompt rows
 //! (sgl-project/sglang#44002).
 //!
 //! The rules live in `merge_rules.json` and mirror SGLang code. When bumping
@@ -14,16 +15,18 @@
 //!
 //! - `python/sglang/srt/managers/tokenizer_manager.py`:
 //!   `_INCREMENTAL_STREAMING_META_INFO_KEYS` and `_coalesce_streaming_chunks`
-//!   (`append`), `_handle_batch_output` and `add_logprob_to_meta_info` (every
+//!   (`delta`), `_handle_batch_output` and `add_logprob_to_meta_info` (every
 //!   `meta_info` key), `_build_flat_input_top_logprobs_fields*` (flat input
 //!   top-logprob keys).
 //! - `python/sglang/srt/managers/io_struct.py`: `GenerateReqInput` (the
 //!   `return_*` request flags).
 //! - `python/sglang/srt/managers/scheduler_components/output_streamer.py`:
-//!   decode servers send no input logprobs (`take_prefill`).
+//!   decode servers send no input logprobs (`prompt`).
 //! - `python/sglang/srt/managers/scheduler_components/batch_result_processor.py`
 //!   (`_maybe_collect_routed_experts`) and `disaggregation/prefill.py`: which
-//!   server reports which `routed_experts` rows (`overlay_base64_prefix`).
+//!   server reports which `routed_experts` rows (`sequence_final`).
+//! - `python/sglang/srt/sampling/sampling_params.py`: the `max_new_tokens`
+//!   default a migrated request continues from.
 //!
 //! `components/src/dynamo/sglang/tests/test_sglang_generate_merge_contract.py`
 //! checks the file against the installed SGLang and fails on unclassified
@@ -31,249 +34,442 @@
 
 use std::sync::{Arc, LazyLock};
 
-use serde::Deserialize;
+use dynamo_runtime::error::DynamoError;
+use serde_json::{Value, json};
 
-use crate::protocols::response_merge::{FieldRule, JoinOp, ResponseMerger, RuleSet};
+use super::generate::SglangGenerateRequest;
+use super::migrate::{Continuation, RequestRules};
+use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
+use crate::generate_format::{
+    ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase,
+};
+use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use crate::protocols::common::preprocessor::RoutingHints;
+use crate::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
+use crate::protocols::response_merge::{Assembler, RuleSet, prefill_annotations};
 
-/// Shared with the SGLang contract test, which also reads `take_last` and
-/// `other_request_flags`: fields that keep the last value and need no rule.
-const RULES_JSON: &str = include_str!("merge_rules.json");
+/// Shared with the SGLang contract test.
+pub(super) const RULES_JSON: &str = include_str!("merge_rules.json");
+const X_REQUEST_ID_HEADER: &str = "x-request-id";
+const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
 
-#[derive(Deserialize)]
-struct RulesFile {
-    append: Vec<String>,
-    take_prefill: Vec<String>,
-    overlay_base64_prefix: Vec<String>,
-    prefill_request_flags: PrefillRequestFlags,
-}
+static RULES: LazyLock<Arc<RuleSet>> =
+    LazyLock::new(|| Arc::new(RuleSet::from_json(RULES_JSON).expect("valid merge_rules.json")));
+pub(super) static REQUEST_RULES: LazyLock<RequestRules> =
+    LazyLock::new(|| serde_json::from_str(RULES_JSON).expect("valid merge_rules.json"));
 
-/// Groups of request fields; a request needs prefill's output when every
-/// field of one group is set.
-#[derive(Deserialize)]
-struct PrefillRequestFlags {
-    /// Every chunk carries the output: prompt logprobs, which SGLang computes
-    /// only from a non-negative `logprob_start_len`; decode returns output
-    /// logprobs.
-    before_first: Vec<Vec<String>>,
-    /// Only the final chunk carries routed experts and indexer top-k.
-    before_last: Vec<Vec<String>>,
-}
-
-static RULES: LazyLock<Arc<RuleSet>> = LazyLock::new(|| {
-    let file: RulesFile = serde_json::from_str(RULES_JSON).expect("valid merge_rules.json");
-    let rules = |paths: Vec<String>, op, drop_if_missing| {
-        paths.into_iter().map(move |path| FieldRule {
-            path,
-            op,
-            drop_if_missing,
-        })
-    };
-    let first = str_groups(&file.prefill_request_flags.before_first);
-    let last = str_groups(&file.prefill_request_flags.before_last);
-    let before_first: Vec<&[&str]> = first.iter().map(Vec::as_slice).collect();
-    let before_last: Vec<&[&str]> = last.iter().map(Vec::as_slice).collect();
-    Arc::new(RuleSet::new(
-        rules(file.append, JoinOp::Append, false)
-            .chain(rules(file.take_prefill, JoinOp::TakePrefill, false))
-            .chain(rules(
-                file.overlay_base64_prefix,
-                JoinOp::OverlayBase64Prefix,
-                true,
-            )),
-        &before_first,
-        &before_last,
-    ))
-});
-
-fn str_groups(groups: &[Vec<String>]) -> Vec<Vec<&str>> {
-    groups
-        .iter()
-        .map(|group| group.iter().map(String::as_str).collect())
-        .collect()
-}
-
-pub fn merger() -> Arc<dyn ResponseMerger> {
+/// The response join table.
+pub fn rules() -> Arc<RuleSet> {
     RULES.clone()
+}
+
+/// The client-facing half of the format; the default is SGLang's own body
+/// and response. Formats that only reshape what clients send and receive
+/// implement this and keep SGLang's joining, P/D, and migration.
+pub trait ClientCodec: Send + Sync + 'static {
+    /// The client's body as an SGLang `/generate` body; `None` when it is one.
+    fn decode_request(&self, _body: &[u8]) -> Result<Option<Value>, ClientError> {
+        Ok(None)
+    }
+
+    /// The client response for one joined SGLang response: a streamed chunk,
+    /// or the unary response.
+    fn encode_response(&self, _response: &Value) -> Encoded {
+        Encoded::Native
+    }
+
+    fn error_body(&self, message: &str) -> Value {
+        json!({"error": {"message": message}})
+    }
+}
+
+/// What a [`ClientCodec`] sends for one SGLang response.
+pub enum Encoded {
+    /// SGLang's response unchanged, without a copy.
+    Native,
+    Replace(Value),
+    /// Nothing, for a streamed chunk.
+    Skip,
+}
+
+/// SGLang's native client shape.
+pub struct Native;
+
+impl ClientCodec for Native {}
+
+pub struct SglangFormat<C: ClientCodec = Native> {
+    name: String,
+    codec: Arc<C>,
+}
+
+impl SglangFormat {
+    pub fn native() -> Self {
+        Self::with_codec(super::NAME, Native)
+    }
+}
+
+impl<C: ClientCodec> SglangFormat<C> {
+    pub fn with_codec(name: impl Into<String>, codec: C) -> Self {
+        Self {
+            name: name.into(),
+            codec: Arc::new(codec),
+        }
+    }
+}
+
+fn invalid_body(error: serde_json::Error) -> ClientError {
+    let message = format!("Failed to deserialize the JSON body: {error}");
+    ClientError {
+        body: Some(json!({
+            "object": "error", "message": message, "type": "Bad Request",
+            "param": null, "code": 400,
+        })),
+        message,
+    }
+}
+
+impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn capability(&self) -> &'static str {
+        CAPABILITY
+    }
+
+    fn open(&self, client: ClientRequest<'_>) -> Result<Opened, ClientError> {
+        let request: SglangGenerateRequest = match self.codec.decode_request(client.body)? {
+            None => serde_json::from_slice(client.body),
+            Some(body) => serde_json::from_value(body),
+        }
+        .map_err(invalid_body)?;
+        request.validate().map_err(ClientError::new)?;
+        let header = |name| client.headers.get(name).and_then(|v| v.to_str().ok());
+        let request_id = request
+            .rid
+            .clone()
+            .or_else(|| header(X_REQUEST_ID_HEADER).map(ToOwned::to_owned))
+            .unwrap_or_else(|| client.default_request_id.to_string());
+        let dp_rank = header(X_DATA_PARALLEL_RANK_HEADER).and_then(|v| v.trim().parse().ok());
+        let limits = (|| {
+            Ok::<_, String>(StopConditions {
+                max_tokens: request.max_new_tokens()?,
+                min_tokens: request.min_new_tokens()?,
+                ignore_eos: request.ignore_eos()?,
+                ..Default::default()
+            })
+        })()
+        .map_err(ClientError::new)?;
+        let priority = request.priority.unwrap_or_default();
+        let cache_namespace = request.cache_namespace().map(str::to_owned);
+        let stream = request.stream;
+        let (input_ids, body) = request.into_worker_envelope(&request_id);
+        let body = body.as_object().expect("the envelope is an object");
+        let continuation = Continuation::new(
+            &REQUEST_RULES,
+            body,
+            (limits.max_tokens, limits.min_tokens),
+            client.engine_info,
+        );
+        let prefill_need = RULES.prefill_need(body);
+        let prompt_tokens = input_ids.len();
+        let routed = PreprocessedRequest::builder()
+            .model(String::new())
+            .token_ids(input_ids)
+            .stop_conditions(limits)
+            .sampling_options(SamplingOptions {
+                n: Some(1),
+                ..Default::default()
+            })
+            .output_options(OutputOptions {
+                return_tokens_as_token_ids: Some(true),
+                ..Default::default()
+            })
+            .routing(Some(RoutingHints {
+                dp_rank,
+                priority_jump: Some(priority.max(0) as f64),
+                priority: Some(priority),
+                cache_namespace,
+                ..Default::default()
+            }))
+            .extra_args(Some(json!({ PAYLOAD_KEY: body })))
+            .annotations(prefill_annotations(prefill_need))
+            .build()
+            .map_err(|error| ClientError::new(error.to_string()))?;
+        let exchange = Box::new(Exchange {
+            assembler: Assembler::new(RULES.clone(), continuation.is_ok()),
+            continuation,
+            codec: self.codec.clone(),
+            delivered: 0,
+            request_id: request_id.clone(),
+            stream,
+            prompt_tokens,
+        });
+        Ok(Opened {
+            migration: exchange
+                .continuation
+                .as_ref()
+                .map(|_| ())
+                .map_err(Clone::clone),
+            request: routed,
+            request_id,
+            stream,
+            exchange,
+        })
+    }
+
+    fn inspect(&self, response: Value, phase: Phase) -> Result<Inspected, DynamoError> {
+        super::inspect::inspect(response, phase)
+    }
+
+    fn error_body(&self, message: &str) -> Value {
+        self.codec.error_body(message)
+    }
+}
+
+struct Exchange<C> {
+    codec: Arc<C>,
+    assembler: Assembler,
+    continuation: Result<Continuation, String>,
+    /// Generated tokens seen across attempts.
+    delivered: usize,
+    request_id: String,
+    stream: bool,
+    prompt_tokens: usize,
+}
+
+impl<C: ClientCodec> GenerateExchange for Exchange<C> {
+    fn chunk(
+        &mut self,
+        output: LLMEngineOutput,
+        prefill: bool,
+        emit: &mut dyn FnMut(&Value),
+    ) -> Result<(), DynamoError> {
+        let response = output
+            .engine_data
+            .and_then(|mut data| data.as_object_mut()?.remove(RESPONSE_KEY));
+        let mut response = match response {
+            Some(response) => response,
+            // An older prefill worker sends none; joining nothing drops stale fields.
+            None if prefill => Value::Object(Default::default()),
+            None => return Err(DynamoError::msg("missing opaque SGLang response")),
+        };
+        if prefill {
+            self.assembler.set_prefill(response);
+            return Ok(());
+        }
+        self.delivered += response
+            .get("output_ids")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        // Workers submit a private SGLang request ID; the client sees its own.
+        if let Some(meta) = response.get_mut("meta_info").and_then(Value::as_object_mut)
+            && meta.contains_key("id")
+        {
+            meta.insert("id".into(), Value::String(self.request_id.clone()));
+        }
+        if !self.stream {
+            self.assembler.push(response);
+            return Ok(());
+        }
+        let codec = &self.codec;
+        self.assembler
+            .render(response, |joined| match codec.encode_response(joined) {
+                Encoded::Native => emit(joined),
+                Encoded::Replace(value) => emit(&value),
+                Encoded::Skip => {}
+            });
+        Ok(())
+    }
+
+    fn migrate(
+        &mut self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<Option<LLMEngineOutput>, String> {
+        let continuation = self.continuation.as_ref().map_err(Clone::clone)?;
+        if delivered_tokens != self.delivered {
+            return Err(format!(
+                "Dynamo delivered {delivered_tokens} tokens but SGLang reported {}",
+                self.delivered
+            ));
+        }
+        let prompt_delivered = self.assembler.prompt_delivered();
+        self.assembler.migrate(delivered_tokens as u64);
+        let Some(body) = continuation.retry(&REQUEST_RULES, delivered_tokens, prompt_delivered)
+        else {
+            // The budget is spent: an attempt that generates nothing, whose
+            // counts the join rebases onto the delivered tokens.
+            let mut response = json!({
+                "output_ids": [],
+                "meta_info": {
+                    "id": self.request_id,
+                    "finish_reason": {"type": "length", "length": 0},
+                    "prompt_tokens": self.prompt_tokens,
+                    "completion_tokens": 0,
+                },
+            });
+            if continuation.returns_logprobs() {
+                response["meta_info"]["output_token_logprobs"] = json!([]);
+                response["meta_info"]["output_token_logprobs_length"] = json!(0);
+            }
+            return Ok(Some(LLMEngineOutput {
+                finish_reason: Some(FinishReason::Length),
+                engine_data: Some(json!({ RESPONSE_KEY: response })),
+                ..Default::default()
+            }));
+        };
+        request.extra_args = Some(json!({ PAYLOAD_KEY: body }));
+        Ok(None)
+    }
+
+    fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
+        if self.stream {
+            return Ok(None);
+        }
+        let response = self
+            .assembler
+            .finish()
+            .ok_or_else(|| DynamoError::msg("SGLang stream ended without a response"))?;
+        match self.codec.encode_response(&response) {
+            Encoded::Native => Ok(Some(response)),
+            Encoded::Replace(value) => Ok(Some(value)),
+            Encoded::Skip => Err(DynamoError::msg("the client codec skipped the response")),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use proptest::prelude::*;
-    use serde_json::{Value, json};
-
     use super::*;
-    use crate::protocols::response_merge::{PrefillNeed, ResponseAssembler};
+    use crate::generate_format::testkit::laws::Harness;
+    use crate::protocols::response_merge::FieldClass;
 
-    /// One SGLang response and how SGLang streams it, aggregated and in P/D.
-    #[derive(Debug)]
-    struct Case {
-        /// What SGLang returns for `stream=false`.
-        unary: Value,
-        /// Aggregated incremental chunks.
-        aggregated: Vec<Value>,
-        /// Decode's chunks: no input logprobs, stale routed-experts prompt rows.
-        decode: Vec<Value>,
-        /// Prefill's final response.
-        prefill: Value,
+    #[test]
+    fn sglang_native_format_passes_every_law() {
+        Harness::native(Arc::new(SglangFormat::native())).check_all();
     }
 
-    prop_compose! {
-        fn case()(
-            prompt in prop::collection::vec(any::<u32>(), 1..5),
-            output in prop::collection::vec((any::<u32>(), "\\PC{0,3}", -100i32..0), 1..8),
-            row_bytes in 1usize..5,
-        )(
-            experts in prop::collection::vec(any::<u8>(), (prompt.len() + output.len() - 1) * row_bytes),
-            stale in prop::collection::vec(any::<u8>(), prompt.len() * row_bytes),
-            cuts in prop::collection::vec(any::<bool>(), output.len() - 1),
-            prompt in Just(prompt),
-            output in Just(output),
-        ) -> Case {
-            let input_logprobs: Vec<Value> = prompt
-                .iter()
-                .enumerate()
-                .map(|(i, id)| json!([if i == 0 { Value::Null } else { json!(-(i as i64)) }, id, null]))
-                .collect();
-            // Prefill reports the prompt rows; decode's copy of them is stale.
-            let prompt_bytes = stale.len();
-            let mut decode_experts = stale.clone();
-            decode_experts.extend_from_slice(&experts[prompt_bytes..]);
+    /// Streams and unary responses recorded from SGLang v0.5.21 (Qwen3-0.6B,
+    /// greedy), one request shape per line.
+    fn fixtures() -> Vec<Value> {
+        include_str!("../../../tests/data/sglang/generate/qwen3-0.6b.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
 
-            // Chunk boundaries: after token i when cuts[i], and at the end.
-            let mut ends: Vec<usize> = (1..output.len()).filter(|&i| cuts[i - 1]).collect();
-            ends.push(output.len());
-            let mut aggregated = Vec::new();
-            let mut start = 0;
-            for &end in &ends {
-                let tokens = &output[start..end];
-                let last = end == output.len();
-                let mut meta = json!({
-                    "id": "rid",
-                    "prompt_tokens": prompt.len(),
-                    "completion_tokens": end,
-                    "finish_reason": if last { json!({"type": "length"}) } else { Value::Null },
-                    "input_token_logprobs": input_logprobs,
-                    "output_token_logprobs": tokens.iter().map(|(id, _, lp)| json!([lp, id, null])).collect::<Vec<_>>(),
-                });
-                if last {
-                    meta["routed_experts"] = json!(STANDARD.encode(&experts));
+    #[test]
+    fn recorded_fields_are_all_classified() {
+        let classified: Vec<&str> = RULES.fields().map(|(path, _)| path).collect();
+        for fixture in fixtures() {
+            let responses = fixture["stream"].as_array().unwrap().iter();
+            for response in responses.chain([&fixture["unary"]]) {
+                let meta = response["meta_info"].as_object().unwrap().keys();
+                let top = response
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|k| *k != "meta_info");
+                for path in meta
+                    .map(|k| format!("/meta_info/{k}"))
+                    .chain(top.map(|k| format!("/{k}")))
+                {
+                    assert!(
+                        classified.contains(&path.as_str()),
+                        "{path} is unclassified"
+                    );
                 }
-                aggregated.push(json!({
-                    "text": tokens.iter().map(|(_, text, _)| text.as_str()).collect::<String>(),
-                    "output_ids": tokens.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
-                    "meta_info": meta,
-                }));
-                start = end;
             }
-            let decode = aggregated
-                .iter()
-                .map(|chunk| {
-                    let mut chunk = chunk.clone();
-                    chunk["meta_info"]["input_token_logprobs"] = json!([]);
-                    if chunk["meta_info"].get("routed_experts").is_some() {
-                        chunk["meta_info"]["routed_experts"] = json!(STANDARD.encode(&decode_experts));
-                    }
-                    chunk
+        }
+    }
+
+    #[test]
+    fn recorded_streams_join_into_sglangs_unary_response() {
+        for fixture in fixtures() {
+            let body = Value::Object(fixture["request"].as_object().unwrap().clone());
+            let Opened { mut exchange, .. } = SglangFormat::native()
+                .open(ClientRequest {
+                    body: body.to_string().as_bytes(),
+                    headers: &Default::default(),
+                    engine_info: &Value::Null,
+                    default_request_id: "id",
                 })
-                .collect();
-            let mut unary = aggregated.last().unwrap().clone();
-            unary["text"] = json!(output.iter().map(|(_, text, _)| text.as_str()).collect::<String>());
-            unary["output_ids"] = json!(output.iter().map(|(id, ..)| *id).collect::<Vec<_>>());
-            unary["meta_info"]["output_token_logprobs"] =
-                json!(output.iter().map(|(id, _, lp)| json!([lp, id, null])).collect::<Vec<_>>());
-            let prefill = json!({
-                "text": "", "output_ids": [output[0].0],
-                "meta_info": {
-                    "id": "prefill-rid",
-                    "completion_tokens": 1,
-                    "finish_reason": {"type": "length"},
-                    "input_token_logprobs": input_logprobs,
-                    "routed_experts": STANDARD.encode(&experts[..prompt_bytes]),
-                },
-            });
-            Case { unary, aggregated, decode, prefill }
-        }
-    }
-
-    fn unary(prefill: Option<&Value>, chunks: &[Value]) -> Value {
-        let mut assembler = ResponseAssembler::new(merger());
-        if let Some(prefill) = prefill {
-            assembler.set_prefill(prefill.clone());
-        }
-        chunks
-            .iter()
-            .cloned()
-            .for_each(|chunk| assembler.push(chunk));
-        assembler.finish().unwrap()
-    }
-
-    proptest! {
-        /// Aggregated chunks join into SGLang's unary response.
-        #[test]
-        fn aggregated_chunks_join_into_the_unary_response(case in case()) {
-            prop_assert_eq!(unary(None, &case.aggregated), case.unary);
-        }
-
-        /// P/D returns what aggregated serving returns, unary and streamed:
-        /// prompt logprobs and routed-experts prompt rows come from prefill.
-        #[test]
-        fn disaggregated_responses_match_aggregated(case in case()) {
-            prop_assert_eq!(unary(Some(&case.prefill), &case.decode), case.unary);
-            let mut streamed = ResponseAssembler::new(merger());
-            streamed.set_prefill(case.prefill.clone());
-            for (decode, aggregated) in case.decode.into_iter().zip(&case.aggregated) {
-                prop_assert_eq!(&streamed.render_chunk(decode, Value::clone), aggregated);
+                .unwrap();
+            for chunk in fixture["stream"].as_array().unwrap() {
+                let output = LLMEngineOutput {
+                    engine_data: Some(json!({ RESPONSE_KEY: chunk })),
+                    ..Default::default()
+                };
+                exchange.chunk(output, false, &mut |_| {}).unwrap();
             }
-        }
-
-        /// Without prefill's rows, decode's stale routed experts are dropped
-        /// rather than returned; everything else still matches.
-        #[test]
-        fn missing_prefill_rows_drop_routed_experts(case in case()) {
-            let mut prefill = case.prefill;
-            prefill["meta_info"].as_object_mut().unwrap().remove("routed_experts");
-            let mut expected = case.unary;
-            expected["meta_info"].as_object_mut().unwrap().remove("routed_experts");
-            prop_assert_eq!(unary(Some(&prefill), &case.decode), expected);
+            let joined = exchange.finish().unwrap().unwrap();
+            // Timing, identity, and cache hits differ between the two requests.
+            for (path, class) in RULES.fields() {
+                if matches!(class, FieldClass::Attempt) || path.contains("cached_tokens") {
+                    continue;
+                }
+                let name = fixture["name"].as_str().unwrap();
+                assert_eq!(
+                    joined.pointer(path),
+                    fixture["unary"].pointer(path),
+                    "{name} {path}"
+                );
+            }
         }
     }
 
     #[test]
-    fn rules_file_classifies_each_field_once() {
-        let file: Value = serde_json::from_str(RULES_JSON).unwrap();
-        let mut seen = std::collections::HashSet::new();
-        for category in [
-            "append",
-            "take_prefill",
-            "overlay_base64_prefix",
-            "take_last",
-        ] {
-            for path in file[category].as_array().unwrap() {
-                let path = path.as_str().unwrap();
-                assert!(path.starts_with('/'), "{path} is not a JSON pointer");
-                assert!(seen.insert(path), "{path} is classified twice");
+    fn simulator_sends_each_field_the_way_sglang_does() {
+        use crate::generate_format::testkit::sim::{self, Role, Truth};
+        for fixture in fixtures() {
+            let (request, unary, recorded) =
+                (&fixture["request"], &fixture["unary"], &fixture["stream"]);
+            let ids: Vec<u32> = serde_json::from_value(unary["output_ids"].clone()).unwrap();
+            let lp = |entries: &Value, i: usize| entries[i][0].as_f64().unwrap_or(0.0);
+            let prompt: Vec<u32> = serde_json::from_value(request["input_ids"].clone()).unwrap();
+            let mut cuts = Vec::new();
+            for chunk in recorded.as_array().unwrap() {
+                let len = chunk["output_ids"].as_array().unwrap().len();
+                cuts.push(cuts.last().copied().unwrap_or(0) + len);
             }
-        }
-        let flags = &file["prefill_request_flags"];
-        for group in ["before_first", "before_last"] {
-            assert!(!flags[group].as_array().unwrap().is_empty());
-        }
-    }
-
-    #[test]
-    fn prompt_side_flags_request_prefill_output() {
-        let need = |request: Value| merger().prefill_need(&request);
-        let experts = json!({"return_routed_experts": true});
-        assert_eq!(need(experts), PrefillNeed::BeforeLast);
-        let prompt = json!({"return_logprob": true, "logprob_start_len": 0});
-        assert_eq!(need(prompt), PrefillNeed::BeforeFirst);
-        for output_only in [
-            json!({"return_logprob": true}),
-            json!({"return_logprob": true, "logprob_start_len": -1}),
-            json!({"routed_experts_start_len": 2}),
-        ] {
-            assert_eq!(need(output_only), PrefillNeed::None);
+            let truth = Truth {
+                prompt_logprobs: (0..prompt.len())
+                    .map(|i| lp(&unary["meta_info"]["input_token_logprobs"], i))
+                    .collect(),
+                output: ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| (id, lp(&unary["meta_info"]["output_token_logprobs"], i)))
+                    .collect(),
+                stop: unary["meta_info"]["finish_reason"]["type"] == "stop",
+                row_bytes: 1,
+                experts: Vec::new(),
+                cuts,
+                cached_tokens: 0,
+                prompt,
+            };
+            let simulated = sim::stream(
+                &truth,
+                request.as_object().unwrap(),
+                &truth.prompt,
+                Role::Aggregated,
+                &Value::Null,
+            );
+            assert_eq!(simulated.len(), recorded.as_array().unwrap().len());
+            for (sim, real) in simulated.iter().zip(recorded.as_array().unwrap()) {
+                for (path, class) in RULES.fields() {
+                    if matches!(class, FieldClass::Attempt | FieldClass::Cumulative)
+                        || path.contains("cached_tokens")
+                    {
+                        continue;
+                    }
+                    let (sim, real) = (sim.pointer(path), real.pointer(path));
+                    let shape = |v: Option<&Value>| v.map(|v| v.as_array().map(Vec::len));
+                    assert_eq!(shape(sim), shape(real), "{} {path}", fixture["name"]);
+                }
+                assert_eq!(sim["output_ids"], real["output_ids"]);
+            }
         }
     }
 }
