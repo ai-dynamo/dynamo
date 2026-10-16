@@ -455,7 +455,7 @@ func normalizeDGDComponent(
 		}
 	}
 
-	applyDGDTemplateDefaults(normalized, parentDGD, nil)
+	applyDGDTemplateDefaults(normalized, parentDGD, nil, GetComponentDynamoSidecar(normalized) != nil)
 
 	for _, podTemplate := range EnsureComponentPodTemplates(normalized) {
 		if IsWorkerComponent(string(normalized.ComponentType)) {
@@ -1591,8 +1591,9 @@ func addMultinodeTopologyEnvVars(
 	serviceName string,
 	multinodeDeployer MultinodeDeployer,
 	annotations map[string]string,
+	sidecarMode bool,
 ) {
-	if numberOfNodes <= 1 || !usesMultinodeTopologyAliases(annotations) {
+	if numberOfNodes <= 1 || (!sidecarMode && !usesMultinodeTopologyAliases(annotations)) {
 		return
 	}
 
@@ -1648,6 +1649,12 @@ func GenerateBasePodSpec(
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
+	// Resolve sidecar mode before selecting a role that may have no runtime container.
+	if errs := ValidateDynamoSidecar(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	componentSidecar := GetComponentDynamoSidecar(component)
+
 	// Complete role sources preserve user-owned launch arguments during lowering.
 	roleLaunchOwnership := roleLaunchOwnedByOperator
 	if HasRolePodTemplates(component) {
@@ -1671,6 +1678,7 @@ func GenerateBasePodSpec(
 		serviceName,
 		deployerOverride,
 		roleLaunchOwnership,
+		componentSidecar,
 		containerGPUs,
 	)
 }
@@ -1691,6 +1699,10 @@ func generateBasePodSpecWithDefaults(
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
+	// Stored objects must satisfy admission invariants before defaults are applied.
+	if errs := ValidateDynamoSidecar(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
 	return generateBasePodSpecWithDefaultsAndOwnership(
 		component,
 		backendFramework,
@@ -1705,6 +1717,7 @@ func generateBasePodSpecWithDefaults(
 		deployerOverride,
 		componentDefaults,
 		roleLaunchOwnedByOperator,
+		GetComponentDynamoSidecar(component),
 		containerGPUs,
 	)
 }
@@ -1722,6 +1735,7 @@ func generateBasePodSpec(
 	serviceName string,
 	deployerOverride MultinodeDeployer,
 	roleLaunchOwnership roleLaunchOwnership,
+	componentSidecar *corev1.Container,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	return generateBasePodSpecWithDefaultsAndOwnership(
@@ -1738,6 +1752,7 @@ func generateBasePodSpec(
 		deployerOverride,
 		ComponentDefaultsFactory(string(component.ComponentType)),
 		roleLaunchOwnership,
+		componentSidecar,
 		containerGPUs,
 	)
 }
@@ -1759,17 +1774,14 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	deployerOverride MultinodeDeployer,
 	componentDefaults ComponentDefaults,
 	roleLaunchOwnership roleLaunchOwnership,
+	componentSidecar *corev1.Container,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
-	// Stored objects must satisfy the sidecar contract even when admission is not rerun.
-	if errs := ValidateDynamoSidecar(component, field.NewPath("spec")); len(errs) > 0 {
-		return nil, errs.ToAggregate()
-	}
-	nativeSidecar := GetDynamoSidecar(component) != nil
+	nativeSidecar := componentSidecar != nil
 
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
-	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure)
+	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure, componentSidecar)
 	if err != nil {
 		return nil, err
 	}
@@ -1835,15 +1847,14 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 		}
 	}
-	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
+	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations, nativeSidecar)
 
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	// Native-sidecar mode does not yet support multi-node deployments.
-	// Single-node engines are launched entirely by the user.
-	if !nativeSidecar {
+	// Multinode native engines use the same backend adapter and topology bindings.
+	if !nativeSidecar || numberOfNodes > 1 {
 		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
 		}
@@ -1898,10 +1909,27 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
-	// Merge runtime defaults only into the selected restartable init container.
-	if nativeSidecar {
-		if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
+	// A shared SGLang TP template runs runtime only on the leader. Role templates own placement.
+	if nativeSidecar && numberOfNodes > 1 && role == RoleWorker && roleLaunchOwnership == roleLaunchOwnedByOperator {
+		workerSidecar, err := sglangSidecarNeedsWorker(GetMainContainer(component))
+		if err != nil {
 			return nil, err
+		}
+		if !workerSidecar {
+			podSpec.InitContainers = slices.DeleteFunc(podSpec.InitContainers, func(c corev1.Container) bool { return c.Name == commonconsts.RuntimeContainerName })
+		}
+	}
+
+	// Runtime defaults apply only where a runtime container is actually declared.
+	if nativeSidecar {
+		for i := range podSpec.InitContainers {
+			if podSpec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
+				if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
+					return nil, err
+				}
+				addMultinodeTopologyEnvVars(&podSpec.InitContainers[i], numberOfNodes, serviceName, multinodeDeployer, annotations, nativeSidecar)
+				break
+			}
 		}
 	} else {
 		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
@@ -2233,7 +2261,9 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration) (ComponentContext, error) {
+// generateComponentContext resolves Dynamo defaults independently of native engine images.
+// component must not be nil; componentSidecar is nil for integrated runtime mode.
+func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration, componentSidecar *corev1.Container) (ComponentContext, error) {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
@@ -2241,8 +2271,15 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		workerHashSuffix = workerHash
 	}
 
+	runtime := GetDynamoSidecar(component)
+	if runtime == nil {
+		runtime = componentSidecar
+	}
+	if runtime == nil {
+		runtime = GetDynamoContainer(component)
+	}
 	var image string
-	if runtime := GetDynamoContainer(component); runtime != nil {
+	if runtime != nil {
 		image = runtime.Image
 	}
 	var resolvedRuntimeVersion *runtimeversion.Version
@@ -2269,7 +2306,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	// A native sidecar owns the worker runtime identity.
-	if GetDynamoSidecar(component) != nil {
+	if componentSidecar != nil {
 		componentContext.RuntimeContainerName = commonconsts.RuntimeContainerName
 	}
 	return componentContext, nil
@@ -2290,10 +2327,28 @@ func GeneratePodSpecForComponent(
 	deployerOverride MultinodeDeployer,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
+	if component == nil {
+		return nil, fmt.Errorf("component is nil")
+	}
+	// Resolve sidecar mode before selecting a role that may have no runtime container.
+	if errs := ValidateDynamoSidecar(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	componentSidecar := GetComponentDynamoSidecar(component)
+
+	ownership := roleLaunchOwnedByOperator
+	if HasRolePodTemplates(component) {
+		ownership = roleLaunchOwnedByPodTemplate
+		effective, err := EffectiveComponentForRole(component, role)
+		if err != nil {
+			return nil, err
+		}
+		component = effective
+	}
 	return generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		role, numberOfNodes, operatorConfig, multinodeDeploymentType,
-		serviceName, deployerOverride, roleLaunchOwnedByOperator, nil, containerGPUs,
+		serviceName, deployerOverride, ownership, componentSidecar, nil, containerGPUs,
 	)
 }
 
@@ -2309,6 +2364,7 @@ func generatePodSpecForComponent(
 	serviceName string,
 	deployerOverride MultinodeDeployer,
 	roleLaunchOwnership roleLaunchOwnership,
+	componentSidecar *corev1.Container,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -2319,12 +2375,12 @@ func generatePodSpecForComponent(
 		return nil, fmt.Errorf("dynamoDeployment is nil")
 	}
 	component = component.DeepCopy()
-	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains)
+	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains, componentSidecar != nil)
 	if operatorConfig == nil {
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	podSpec, err := generateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, roleLaunchOwnership, containerGPUs)
+	podSpec, err := generateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, roleLaunchOwnership, componentSidecar, containerGPUs)
 	if err != nil {
 		return nil, err
 	}
@@ -2364,6 +2420,7 @@ func applyDGDTemplateDefaults(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
+	sidecarMode bool,
 ) {
 	if component == nil || dynamoDeployment == nil {
 		return
@@ -2388,7 +2445,7 @@ func applyDGDTemplateDefaults(
 	// lacks the parent DGD). Workers publish these in their MDC so the router
 	// reads policy per-worker.
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
-		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains)
+		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains, sidecarMode)
 	}
 
 	propagateDGDSpecMetadata(dynamoDeployment, component)
@@ -2412,6 +2469,7 @@ func applyKvTransferPolicyToWorkerComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	kvt *v1beta1.KvTransferPolicy,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
+	sidecarMode bool,
 ) {
 	if component == nil || kvt == nil {
 		return
@@ -2424,6 +2482,9 @@ func applyKvTransferPolicyToWorkerComponent(
 				runtime = &podTemplate.Spec.InitContainers[i]
 				break
 			}
+		}
+		if sidecarMode && runtime.Name != commonconsts.RuntimeContainerName {
+			continue
 		}
 		runtime.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(runtime.Env), workerKvTransferPolicyEnvVars(kvt))
 		runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
@@ -2639,6 +2700,12 @@ type cliqueParams struct {
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	// Resolve sidecar mode before selecting a role that may have no runtime container.
+	if errs := ValidateDynamoSidecar(p.component, field.NewPath("spec"), string(p.backendFramework)); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	componentSidecar := GetComponentDynamoSidecar(p.component)
+
 	// Complete role templates own backend-specific role launch generation.
 	roleLaunchOwnership := roleLaunchOwnedByOperator
 	if HasRolePodTemplates(p.component) {
@@ -2672,7 +2739,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
 		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName,
-		roleLaunchOwnership, p.groveClusterTopologyDomains, containerGPUs,
+		roleLaunchOwnership, componentSidecar, p.groveClusterTopologyDomains, containerGPUs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
@@ -3143,6 +3210,7 @@ func generatePodSpecForRole(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	serviceName string,
 	roleLaunchOwnership roleLaunchOwnership,
+	componentSidecar *corev1.Container,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -3154,7 +3222,7 @@ func generatePodSpecForRole(
 			component, backendFramework, secretsRetriever, dynamoDeployment,
 			RoleMain, 1, operatorConfig,
 			commonconsts.MultinodeDeploymentTypeGrove, serviceName, nil,
-			roleLaunchOwnership, groveClusterTopologyDomains, containerGPUs,
+			roleLaunchOwnership, componentSidecar, groveClusterTopologyDomains, containerGPUs,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate base podSpec for GMS: %w", err)
@@ -3176,7 +3244,7 @@ func generatePodSpecForRole(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		r.Role, numberOfNodes, operatorConfig,
 		commonconsts.MultinodeDeploymentTypeGrove, serviceName, deployer,
-		roleLaunchOwnership, groveClusterTopologyDomains, containerGPUs,
+		roleLaunchOwnership, componentSidecar, groveClusterTopologyDomains, containerGPUs,
 	)
 	if err != nil {
 		return nil, err
@@ -3477,6 +3545,12 @@ func GenerateBasePodSpecForController(
 	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
+	// Resolve sidecar mode before selecting a role that may have no runtime container.
+	if errs := ValidateDynamoSidecar(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec, field.NewPath("spec"), string(BackendFramework(dynComponent.Spec.BackendFramework))); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	componentSidecar := GetComponentDynamoSidecar(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec)
+
 	// Complete role templates own backend-specific role launch generation.
 	roleLaunchOwnership := roleLaunchOwnedByOperator
 	if HasRolePodTemplates(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec) {
@@ -3536,6 +3610,7 @@ func GenerateBasePodSpecForController(
 		componentName,
 		nil, // use default deployer
 		roleLaunchOwnership,
+		componentSidecar,
 		containerGPUs,
 	)
 	if err != nil {

@@ -4,15 +4,20 @@
 package dynamo
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
@@ -381,7 +386,7 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 		{
 			name: "multinode worker", componentType: v1beta1.ComponentTypeWorker,
 			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), `is not currently supported for component "worker" with a runtime init container; support is planned for a future release`)},
+			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang")},
 		},
 	}
 	for _, tc := range cases {
@@ -501,5 +506,102 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 			}, cacheEnv)
 			require.Equal(t, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: "/cache"}, pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
 		})
+	}
+}
+
+func TestSGLangMultinodeSidecarRendering(t *testing.T) {
+	for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+		for _, roleTemplates := range []bool{false, true} {
+			for _, dpAttention := range []bool{false, true} {
+				for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode} {
+					t.Run(fmt.Sprintf("%s/roles=%t/dp=%t/%s", provider, roleTemplates, dpAttention, componentType), func(t *testing.T) {
+						t.Log("Declare a native engine with an unversioned image and independent runtime")
+						component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+							ComponentName: "engine", ComponentType: componentType,
+							Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+							PodTemplate: &corev1.PodTemplateSpec{
+								ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0", commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "generation"}},
+								Spec: corev1.PodSpec{
+									Containers:     []corev1.Container{{Name: "main", Image: "engine:custom", Command: []string{"python3", "-m", "sglang.launch_server"}, Args: []string{"--model-path", "model", "--tp-size", "2"}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}}}}},
+									InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: []string{"dynamo-sglang-sidecar"}, Args: []string{"--grpc-endpoint", "127.0.0.1:30001"}}},
+								},
+							},
+						}
+						if dpAttention {
+							component.PodTemplate.Spec.Containers[0].Args = append(component.PodTemplate.Spec.Containers[0].Args, "--enable-dp-attention", "--dp-size", "2")
+						}
+						if roleTemplates {
+							for _, role := range []Role{RoleLeader, RoleWorker} {
+								template := component.PodTemplate.DeepCopy()
+								template.Spec.Containers[0].Command = []string{"/custom-launcher"}
+								template.Spec.Containers[0].Args = []string{"--rank", "$(DYNAMO_RANK)", "--leader", "$(DYNAMO_LEADER_ADDRESS)"}
+								if role == RoleWorker && !dpAttention {
+									template.Spec.InitContainers = template.Spec.InitContainers[:1]
+								}
+								component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{Name: string(role), PodTemplate: template})
+							}
+							component.PodTemplate = nil
+						}
+						if provider == commonconsts.MultinodeDeploymentTypeGrove {
+							t.Log("Render the complete Grove group and retain concurrent startup")
+							dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "ns"}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "sglang", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{*component.DeepCopy()}}}
+							pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+							require.NoError(t, err)
+							require.Len(t, pcs.Spec.Template.Cliques, 2)
+							for _, clique := range pcs.Spec.Template.Cliques {
+								require.Empty(t, clique.Spec.StartsAfter)
+								require.NotContains(t, envVarsToMap(clique.Spec.PodSpec.Containers[0].Env), "DYN_SYSTEM_ENABLED")
+								count := 2
+								if strings.HasSuffix(clique.Name, "-wkr") && !dpAttention {
+									count = 1
+								}
+								require.Len(t, clique.Spec.PodSpec.InitContainers, count)
+							}
+						}
+						original := component.DeepCopy()
+						config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "nats://nats:4222", ETCDAddress: "http://etcd:2379"}}
+
+						t.Log("Render both roles through the common and DCD provider entry points")
+						for _, role := range []Role{RoleLeader, RoleWorker} {
+							pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(1))
+							require.NoError(t, err)
+							dcd := &v1beta1.DynamoComponentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "ns"}, Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: "sglang"}}
+							childPod, err := GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+							require.NoError(t, err)
+							for _, rendered := range []*corev1.PodSpec{pod, childPod} {
+								engine := rendered.Containers[0]
+								require.Equal(t, "engine:custom", engine.Image)
+								require.NotContains(t, envVarsToMap(engine.Env), "DYN_SYSTEM_ENABLED")
+								require.NotContains(t, envVarsToMap(engine.Env), "NATS_SERVER")
+								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoRankEnvVar)
+								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoLeaderAddressEnvVar)
+								if roleTemplates {
+									require.Equal(t, []string{"/custom-launcher"}, engine.Command)
+									require.Equal(t, []string{"--rank", "$(DYNAMO_RANK)", "--leader", "$(DYNAMO_LEADER_ADDRESS)"}, engine.Args)
+								} else {
+									require.Equal(t, []string{"python3", "-m", "sglang.launch_server"}, engine.Command)
+									require.Contains(t, strings.Join(engine.Args, " "), "--dist-init-addr $(DYNAMO_LEADER_ADDRESS):29500 --nnodes 2 --node-rank $(DYNAMO_RANK)")
+								}
+								if role == RoleWorker {
+									require.Nil(t, engine.ReadinessProbe)
+								}
+								if role == RoleLeader || dpAttention {
+									require.Len(t, rendered.InitContainers, 2)
+									runtime := rendered.InitContainers[1]
+									require.Equal(t, "runtime", envVarsToMap(runtime.Env)["CONTAINER_NAME"])
+									require.Equal(t, "nats://nats:4222", envVarsToMap(runtime.Env)["NATS_SERVER"])
+									require.Equal(t, "generation", envVarsToMap(runtime.Env)[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
+									require.NotNil(t, runtime.ReadinessProbe)
+								} else {
+									require.Len(t, rendered.InitContainers, 1)
+									require.Equal(t, "setup", rendered.InitContainers[0].Name)
+								}
+							}
+						}
+						require.Equal(t, original, component)
+					})
+				}
+			}
+		}
 	}
 }

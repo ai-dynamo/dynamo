@@ -177,6 +177,28 @@ func GetDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 	return nil
 }
 
+// GetComponentDynamoSidecar returns the component's runtime declaration, including
+// the leader in role-template mode. It does not imply a sidecar runs in every Pod.
+// A nil component has no sidecar.
+func GetComponentDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
+	if runtime := GetDynamoSidecar(component); runtime != nil {
+		return runtime
+	}
+	if component != nil {
+		for i := range component.Roles {
+			role := &component.Roles[i]
+			if role.Name == v1beta1.ComponentRoleLeader && role.PodTemplate != nil {
+				for j := range role.PodTemplate.Spec.InitContainers {
+					if role.PodTemplate.Spec.InitContainers[j].Name == commonconsts.RuntimeContainerName {
+						return &role.PodTemplate.Spec.InitContainers[j]
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // GetDynamoContainer returns the container hosting the Dynamo runtime, or nil
 // when its template entry is absent. A nil component is treated as absent.
 func GetDynamoContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
