@@ -4,7 +4,6 @@
 """E2E coverage for native-gRPC sidecar launch scripts."""
 
 import importlib.util
-import json
 import os
 import pathlib
 
@@ -35,7 +34,11 @@ from tests.utils.payload_builder import (
     sglang_generate_cancellation_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
-from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_ports,
+    deallocate_ports,
+)
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -419,6 +422,61 @@ sidecar_configs = {
             )
         ],
     ),
+    "vllm_dep_kv_router": EngineConfig(
+        name="vllm_dep_kv_router",
+        directory=vllm_sidecar_dir,
+        script_name="dep_kv_router.sh",
+        script_args=["--attention-backend", "TRITON_MLA"],
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.router,
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
+        ],
+        model="silence09/DeepSeek-R1-Small-2layers",
+        health_check_workers=True,
+        health_check_worker_count=1,
+        env={**KV_ROUTING_ENV, "DYN_ROUTER_MIN_INITIAL_WORKERS": "1"},
+        request_payloads=[
+            kv_routing_payload((1,), block_size=KV_ROUTING_BLOCK_SIZE, dp_ranks=(0, 1))
+        ],
+    ),
+    "sglang_dep_kv_router": EngineConfig(
+        name="sglang_dep_kv_router",
+        directory=sglang_sidecar_dir,
+        script_name="dep_kv_router.sh",
+        script_args=[
+            *SGLANG_KV_ROUTING_ARGS,
+            "--attention-backend",
+            "triton",
+            "--moe-runner-backend",
+            "triton",
+            "--moe-a2a-backend",
+            "none",
+        ],
+        marks=[
+            pytest.mark.sglang,
+            pytest.mark.router,
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_sglang_kv_tokens(2048),
+        ],
+        model="silence09/DeepSeek-R1-Small-2layers",
+        health_check_workers=True,
+        health_check_worker_count=1,
+        env={
+            **KV_ROUTING_ENV,
+            "DYN_ROUTER_MIN_INITIAL_WORKERS": "1",
+            # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
+            "SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK": "1",
+        },
+        request_payloads=[
+            kv_routing_payload((1,), block_size=KV_ROUTING_BLOCK_SIZE, dp_ranks=(0, 1))
+        ],
+    ),
 }
 
 
@@ -444,6 +502,20 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
         assert device != "-1", "One visible GPU is required"
         for role in _GPU_ROLES[layout]:
             monkeypatch.setenv(f"{backend.upper()}_{role}_GPU", device)
+    if layout == "dep_kv_router":
+        devices = map_cuda_visible_devices(
+            [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
+        ).split(",")
+        assert (
+            len(set(devices)) == 2 and "-1" not in devices
+        ), "DEP requires two distinct GPUs"
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(devices))
+        # SGLang also takes the ports after its distributed-init port.
+        dist_init_ports = allocate_contiguous_ports(1, 9, DynamoPortRange.SERVE.value)
+        nccl_ports = allocate_ports(1, DynamoPortRange.NCCL.value)
+        request.addfinalizer(lambda: deallocate_ports(dist_init_ports + nccl_ports))
+        monkeypatch.setenv("DYN_DIST_INIT_PORT1", str(dist_init_ports[0]))
+        monkeypatch.setenv("DYN_NCCL_PORT1", str(nccl_ports[0]))
     return config
 
 
@@ -468,130 +540,4 @@ def test_serve_deployment(
         sidecar_config_test,
         request,
         ports=dynamo_dynamic_ports,
-    )
-
-
-@pytest.mark.router
-@pytest.mark.sidecar
-@pytest.mark.e2e
-@pytest.mark.engine_ports
-@pytest.mark.post_merge
-@pytest.mark.gpu_2
-@pytest.mark.model("silence09/DeepSeek-R1-Small-2layers")
-@pytest.mark.timeout(1200)
-@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize("num_system_ports", [1], indirect=True)
-@pytest.mark.parametrize(
-    "backend",
-    [
-        pytest.param(
-            "vllm",
-            marks=[
-                pytest.mark.vllm,
-                pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
-            ],
-        ),
-        pytest.param(
-            "sglang",
-            marks=[pytest.mark.sglang, pytest.mark.requested_sglang_kv_tokens(2048)],
-        ),
-    ],
-)
-def test_sidecar_dep_kv_routing(
-    backend,
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_models,
-    monkeypatch,
-):
-    """Verify native sidecar KV events route requests to the cached DEP rank."""
-    monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
-    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
-    monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
-    model_name = "silence09/DeepSeek-R1-Small-2layers"
-    config = EngineConfig(
-        name=f"{backend}_dep_routing",
-        directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
-        script_name="agg.sh",
-        script_args=[*SGLANG_KV_ROUTING_ARGS] if backend == "sglang" else [],
-        marks=[],
-        model=model_name,
-        health_check_workers=True,
-        health_check_worker_count=1,
-        request_payloads=[
-            kv_routing_payload((1,), block_size=KV_ROUTING_BLOCK_SIZE, dp_ranks=(0, 1))
-        ],
-        env={
-            **KV_ROUTING_ENV,
-            "MODEL": model_name,
-            "DYN_NAMESPACE": f"sidecar-kv-{generate_random_suffix()}",
-            "DYN_ROUTER_MIN_INITIAL_WORKERS": "1",
-        },
-    )
-    devices = map_cuda_visible_devices(
-        [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
-    ).split(",")
-    assert (
-        len(set(devices)) == 2 and "-1" not in devices
-    ), "DEP requires two distinct GPUs"
-    engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
-    # KV publishers offset by rank; SGLang also derives communication ports.
-    dep_ports = allocate_contiguous_ports(
-        1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
-    )
-    request.addfinalizer(lambda: deallocate_ports(dep_ports))
-    config.script_args += [
-        "--kv-events-config",
-        json.dumps(
-            {
-                "publisher": "zmq",
-                "topic": "kv-events",
-                "endpoint": f"tcp://*:{dep_ports[0]}",
-                **({"enable_kv_cache_events": True} if backend == "vllm" else {}),
-            }
-        ),
-    ]
-    if backend == "vllm":
-        engine_env.update(VLLM_DATA_PARALLEL_SIZE="2")
-        config.script_args += [
-            "--tensor-parallel-size",
-            "1",
-            "--enable-expert-parallel",
-            "--block-size",
-            str(KV_ROUTING_BLOCK_SIZE),
-            "--attention-backend",
-            "TRITON_MLA",
-        ]
-    else:
-        engine_env.update(
-            # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
-            SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
-        )
-        config.script_args += [
-            "--tp-size",
-            "2",
-            "--dp-size",
-            "2",
-            "--ep-size",
-            "2",
-            "--enable-dp-attention",
-            "--page-size",
-            str(KV_ROUTING_BLOCK_SIZE),
-            "--attention-backend",
-            "triton",
-            "--moe-runner-backend",
-            "triton",
-            "--moe-a2a-backend",
-            "none",
-            "--dist-init-addr",
-            f"127.0.0.1:{dep_ports[2]}",
-            "--nccl-port",
-            str(dep_ports[-1]),
-        ]
-    run_serve_deployment(
-        config,
-        request,
-        ports=dynamo_dynamic_ports,
-        extra_env=engine_env,
     )
