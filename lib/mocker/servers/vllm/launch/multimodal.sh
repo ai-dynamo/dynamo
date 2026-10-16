@@ -62,10 +62,10 @@ launch_worker() {
 }
 
 if [[ "$MODE" == aggregated ]]; then
-    launch_worker aggregated "${VLLM_GRPC_PORT1:-50051}" "$SYSTEM_PORT1"
+    launch_worker aggregated "${VLLM_GRPC_PORT1:-30001}" "$SYSTEM_PORT1"
 else
-    launch_worker decode "${VLLM_GRPC_PORT1:-50051}" "$SYSTEM_PORT1"
-    launch_worker prefill "${VLLM_GRPC_PORT2:-50052}" "$SYSTEM_PORT2"
+    launch_worker decode "${VLLM_GRPC_PORT1:-30001}" "$SYSTEM_PORT1"
+    launch_worker prefill "${VLLM_GRPC_PORT2:-30011}" "$SYSTEM_PORT2"
 fi
 
 wait_any_exit

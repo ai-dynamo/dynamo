@@ -2764,6 +2764,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "prometheus",
+ "proptest",
  "prost 0.13.5",
  "rand 0.9.4",
  "rayon",
@@ -2771,6 +2772,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.18.2",
+ "rustls",
  "serde",
  "serde_json",
  "serial_test",
@@ -2783,6 +2785,7 @@ dependencies = [
  "tokenizers 0.21.4",
  "tokio",
  "tokio-rayon",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tokio-util",
@@ -2790,6 +2793,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health 0.13.1",
  "tonic-reflection",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2930,6 +2934,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
@@ -3121,6 +3126,7 @@ dependencies = [
  "dynamo-backend-common",
  "dynamo-runtime",
  "futures",
+ "hyper-util",
  "prost-types 0.13.5",
  "prost-types 0.14.3",
  "serde_json",
@@ -3163,9 +3169,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "3.1.0"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2bee9c4bcbcb9c498d03199d4ec6738cc0a9f861463074369fc3f7352539e44"
+checksum = "914bc0a92430a2fc39164e21a7849587de190e0fea824f56c5f8bb9f29413658"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3591,12 +3597,14 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.3.2"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "102017e5eb15d2d2d5308f5bcb537390e38b0547174000f408d1f9d6aa62a369"
+checksum = "a54c07b9d1217010ec476249998b23430d0f4f85a4504114d81f55f2a43d1610"
 dependencies = [
+ "aho-corasick",
  "daachorse",
  "fancy-regex 0.17.0",
+ "fastrand",
  "hf-hub 0.4.3",
  "icu_normalizer",
  "libc",
@@ -3608,6 +3616,7 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.18",
+ "unicode-normalization-alignments",
  "ureq",
 ]
 
@@ -11067,6 +11076,8 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.117",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -11249,9 +11260,9 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vllm-proto"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77383505a016d5090ecf460297c815752339669aee187e29111baf444cd6e171"
+checksum = "556c39cab83e7b52b85503df323ea8bcc8a65a217be9bd4219d8d831ae20d31b"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",

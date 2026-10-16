@@ -86,6 +86,7 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale;podcliquescalinggroups/scale,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;delete
 
 // Reconcile observes dependencies once, then persists the final child status.
 // Workload observations use the cache; Grove validates writes against its installed API.
@@ -195,6 +196,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 // A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
 // pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
 // On error, Reconcile persists status before applying deadline retries.
+//
+//nolint:gocyclo // Keep lifecycle ordering explicit in one reconciliation path.
 func (r *graphReconciler) reconcileWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
@@ -300,6 +303,11 @@ func (r *graphReconciler) reconcileWorkloads(
 		setScalingDeferredCondition(deployment, scalingRequired)
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
 		return ctrl.Result{}, nil
+	}
+
+	// The LPX scheduler waits for old Agent Pods to disappear before releasing the placement.
+	if err := r.removeReleasedAgentPods(ctx, pcsgs, desiredRequests); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.

@@ -1262,6 +1262,20 @@ def _logprobs_processor(vllm_processor_module):
     )
 
 
+def test_disabled_mm_transfer_omits_shm_requirement_log(
+    vllm_processor_module,
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setenv("DYNAMO_DISABLE_NIXL_MM", "1")
+    monkeypatch.delenv("DYNAMO_MM_TRANSFER", raising=False)
+
+    with caplog.at_level("INFO"):
+        _logprobs_processor(vllm_processor_module)
+
+    assert "SHM transfer requires" not in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("top_logprobs", [-1])
 async def test_generator_rejects_negative_top_logprobs_before_preprocess(
@@ -1662,9 +1676,10 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
     request_for_sampling = RequestForSampling(
         max_completion_tokens=None,
         max_tokens=1,
+        logprobs=None,
+        top_logprobs=None,
         cache_salt=None,
         mm_processor_kwargs=None,
-        logprobs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
     )
     monkeypatch.setattr(
@@ -1834,6 +1849,43 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [
+            {"error": "Multimodal SHM transfer failed"},
+            "error: Multimodal SHM transfer failed",
+        ],
+    )
+    async def test_generation_error_ends_stream_with_error_envelope(
+        self,
+        vllm_processor_module,
+        finish_reason,
+    ):
+        class _UnexpectedOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                raise AssertionError("error response reached normal output processing")
+
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [], "index": 0, "finish_reason": finish_reason},
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _UnexpectedOutputProcessor()
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks == [
+            {
+                "_dynamo_annotated": True,
+                "event": "error",
+                "comment": ["Multimodal SHM transfer failed"],
+            }
+        ]
+        assert routed_engine.yielded == 1
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module
@@ -2427,6 +2479,93 @@ class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
 
     tool_call_start_token = "<|im_start|>"
     tool_call_end_token = "<|im_end|>"
+
+
+_GLM_CALL = (
+    "<tool_call>get_weather<arg_key>city</arg_key><arg_value>{}</arg_value></tool_call>"
+)
+_GLM_TWO_CALLS = (
+    "<think>x</think>" + _GLM_CALL.format("Paris") + _GLM_CALL.format("Rome")
+)
+
+
+def _assert_two_glm_calls_streamed(tokenizer, steps):
+    from vllm.reasoning import ReasoningParserManager
+    from vllm.tool_parsers import ToolParserManager
+
+    request, _, _, _, _ = _prepare_request(
+        json.loads(json.dumps(TOOL_REQUEST)),
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+    )
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request,
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=ToolParserManager.get_tool_parser("glm47")(
+            tokenizer, tools=request.tools
+        ),
+        reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("glm45"),
+        chat_template_kwargs={},
+        stream_response=True,
+    )
+    calls: dict[int, tuple[str, str]] = {}
+    content = ""
+    for n, (text, token_ids) in enumerate(steps):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                finish_reason="tool_calls" if n == len(steps) - 1 else None,
+                logprobs=None,
+            )
+        )
+        delta = choice["delta"] if choice else {}
+        content += delta.get("content") or ""
+        # Rebuild calls by index, as an OpenAI client does.
+        for tool_call in delta.get("tool_calls") or []:
+            function = tool_call.get("function") or {}
+            name, arguments = calls.get(tool_call["index"], ("", ""))
+            calls[tool_call["index"]] = (
+                name + (function.get("name") or ""),
+                arguments + (function.get("arguments") or ""),
+            )
+
+    assert [
+        (name, json.loads(arguments)["city"])
+        for name, arguments in (calls[i] for i in sorted(calls))
+    ] == [("get_weather", "Paris"), ("get_weather", "Rome")], (calls, content)
+    assert not content.strip(), content
+
+
+@pytest.mark.parametrize("step_tokens", [3, 4, 5, 6])
+def test_parallel_tool_calls_survive_multi_token_steps(tokenizer, step_tokens):
+    """One step can close a call and open the next (e.g. MTP)."""
+    ids = tokenizer.encode(_GLM_TWO_CALLS, add_special_tokens=False)
+    for offset in range(step_tokens):
+        steps = [ids[:offset]] if offset else []
+        steps += [
+            ids[i : i + step_tokens] for i in range(offset, len(ids), step_tokens)
+        ]
+        _assert_two_glm_calls_streamed(
+            tokenizer,
+            [(tokenizer.decode(s, skip_special_tokens=False), s) for s in steps],
+        )
+
+
+def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
+    end = _GLM_TWO_CALLS.index("</tool_call>")
+    split = _GLM_TWO_CALLS.rindex("<tool_call>") + len("<tool")
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [
+            (_GLM_TWO_CALLS[:end], []),
+            (_GLM_TWO_CALLS[end:split], []),
+            (_GLM_TWO_CALLS[split:], []),
+        ],
+    )
 
 
 class TestControlMarkerStrip:
