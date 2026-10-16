@@ -1921,6 +1921,100 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serving_mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
+)
+@pytest.mark.parametrize("prompt_count, completion_count", [(3, 0), (3, 1), (3, 3)])
+async def test_generate_honors_completion_logprob_count(
+    monkeypatch, serving_mode, prompt_count, completion_count
+):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+    handler = _new_decode_handler(serving_mode=serving_mode)
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    candidates = [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")]
+    engine_chunks = [
+        {
+            "output_ids": [104],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": None,
+                "output_token_logprobs": [(-0.4, 104, "d")],
+                "output_top_logprobs": [candidates],
+            },
+        },
+        {
+            "output_ids": [105],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "length"},
+                "output_token_logprobs": [(-0.5, 105, "e")],
+                "output_top_logprobs": [candidates],
+                "input_token_logprobs": [(None, 1, None), (-0.2, 2, "prompt")],
+                "input_top_logprobs": [None, candidates],
+            },
+        },
+    ]
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream(engine_chunks))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "output_options": {
+            "prompt_logprobs": prompt_count,
+            "logprobs": completion_count,
+        },
+        "stop_conditions": {"max_tokens": 2},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    outputs = await _collect(handler.generate(request, context))
+
+    engine_kwargs = handler.engine.async_generate.await_args.kwargs
+    assert engine_kwargs["top_logprobs_num"] == max(prompt_count, completion_count)
+    assert engine_kwargs["logprob_start_len"] == 0
+    assert [output["token_ids"] for output in outputs] == [[104], [105]]
+    assert [output["log_probs"] for output in outputs] == [[-0.4], [-0.5]]
+    for output in outputs:
+        assert output["top_logprobs"] == [
+            [
+                {"rank": rank, "token_id": token_id, "token": text, "logprob": lp}
+                for rank, (lp, token_id, text) in enumerate(
+                    candidates[:completion_count], start=1
+                )
+            ]
+        ]
+    assert outputs[-1]["engine_data"]["prompt_logprobs"] == [
+        None,
+        {
+            "2": {"logprob": -0.2, "decoded_token": "prompt"},
+            **{
+                str(token_id): {"logprob": lp, "decoded_token": text}
+                for lp, token_id, text in candidates
+            },
+        },
+    ]
+    assert all(
+        chunk["meta_info"]["output_top_logprobs"] == [candidates]
+        for chunk in engine_chunks
+    )
+
+
 def test_metadata_uploader_parses_extra_args_nvext():
     uploader = MetadataUploader.from_backend_request(
         {

@@ -430,6 +430,37 @@ def test_sglang_extract_with_top():
     ]
 
 
+@pytest.mark.parametrize("count", [0, 1, 3, None])
+def test_sglang_extract_limits_completion_alternatives(count):
+    candidates = [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")]
+    meta = {
+        "output_token_logprobs": [(-0.4, 104, "d"), (-0.5, 105, "e")],
+        "output_top_logprobs": [None, candidates],
+    }
+
+    log_probs, top_logprobs = extract_from_sglang_meta(
+        meta, top_logprobs_num=count, return_tokens_as_token_ids=True
+    )
+
+    assert log_probs == [-0.4, -0.5]
+    assert top_logprobs == [
+        [],
+        [
+            {
+                "rank": rank,
+                "token_id": token_id,
+                "token": f"token_id:{token_id}",
+                "logprob": lp,
+            }
+            for rank, (lp, token_id, _) in enumerate(candidates[:count], start=1)
+        ],
+    ]
+    assert meta["output_top_logprobs"] == [
+        None,
+        [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")],
+    ]
+
+
 def test_sglang_extract_return_tokens_as_token_ids():
     meta = {
         "output_token_logprobs": [(-0.1, 101, "a")],

@@ -610,10 +610,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         meta_info: Dict[str, Any],
         *,
         return_tokens_as_token_ids: bool = False,
+        top_logprobs_num: int | None = None,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            top_logprobs_num=top_logprobs_num,
         )
 
     def _native_generate_stream(
@@ -753,6 +755,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
+        completion_logprobs, _ = _shared_logprobs.parse_logprob_options(output_options)
         return_tokens_as_token_ids = bool(
             output_options.get("return_tokens_as_token_ids")
         )
@@ -828,6 +831,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     report_kv_cache_hit=not _has_parallel_prefix_warmup(
                         sampling_params
                     ),
+                    completion_logprobs=completion_logprobs,
                 ):
                     yield out
             else:
@@ -928,6 +932,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     report_kv_cache_hit=not _has_parallel_prefix_warmup(
                         sampling_params
                     ),
+                    completion_logprobs=completion_logprobs,
                 ):
                     yield out
             else:
@@ -1037,6 +1042,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
         report_kv_cache_hit: bool = True,
+        completion_logprobs: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -1121,6 +1127,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                        top_logprobs_num=completion_logprobs,
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs

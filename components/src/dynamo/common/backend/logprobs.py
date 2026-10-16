@@ -315,12 +315,15 @@ def extract_from_sglang_meta(
     meta_info: dict[str, Any],
     *,
     return_tokens_as_token_ids: bool = False,
+    top_logprobs_num: Optional[int] = None,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
     """Extract logprobs from SGLang's ``meta_info`` dict.
 
     Dynamo enables SGLang's incremental streaming output, so
     ``output_token_logprobs`` and ``output_top_logprobs`` already align with
-    the current disjoint ``output_ids`` chunk and can be forwarded directly.
+    the current disjoint ``output_ids`` chunk. ``top_logprobs_num`` limits
+    completion alternatives independently of the engine's shared prompt/output
+    top-k; ``None`` preserves all alternatives.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
@@ -336,6 +339,8 @@ def extract_from_sglang_meta(
             if position_entries is None:
                 top_logprobs.append([])
                 continue
+            if top_logprobs_num is not None:
+                position_entries = position_entries[:top_logprobs_num]
             position_list: list[dict[str, Any]] = []
             for rank_idx, entry in enumerate(position_entries):
                 tok_id = entry[1]
