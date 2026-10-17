@@ -2837,6 +2837,7 @@ dependencies = [
  "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "dynamo-truthy",
  "futures",
  "ndarray 0.16.1",
  "ndarray-interp",
