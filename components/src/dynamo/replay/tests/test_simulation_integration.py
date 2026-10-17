@@ -236,7 +236,14 @@ def test_real_static_path_preserves_goodput() -> None:
 @pytest.mark.pre_merge
 @pytest.mark.post_merge
 @pytest.mark.timeout(300)
-def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
+def test_sweeper_runs_real_dynamo_replay_in_spawned_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check that spawned replay workers return two feasible sweep candidates."""
+    # Spawned workers otherwise size OpenBLAS pools to the visible CPUs, which can
+    # exhaust a container CPU quota; the AISimulate CLI supervisor also pins them to 1.
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
     config = _config(
         scaling_policy="load_180_5",
         candidates_per_round=2,
