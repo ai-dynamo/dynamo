@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Pre-tag check for versioned docs.
+#
+# The release-version job in fern-docs.yml composes a release branch's docs
+# with the live docs-website branch, whose pages-dev tracks main. Main can move
+# or remove a shared page after the branch is cut, and that breaks the snapshot
+# only when the tag is pushed. Pre-merge replays cannot see it, because they
+# run when the release branch changes, not when main does.
+#
+# This workflow dispatches the real release-version job in dry-run mode for
+# every recently active release/X.Y.Z branch that has no vX.Y.Z tag yet. A
+# failing dry run opens a "Docs release dry run failed for vX.Y.Z" issue.
+
+name: Docs Release Dry Run
+
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    name: Dispatch dry runs for untagged release branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch one dry run per active untagged release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Branches with no commit in this window are treated as abandoned.
+          ACTIVE_DAYS: '30'
+        run: |
+          set -euo pipefail
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          tags=$(git ls-remote --tags --refs "$url" 'v*' | awk '{print $2}')
+          cutoff=$(date -u -d "$ACTIVE_DAYS days ago" +%s)
+          dispatched=0
+          while read -r sha ref; do
+            branch="${ref#refs/heads/}"
+            [[ "$branch" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            tag="v${branch#release/}"
+            if grep -qx "refs/tags/$tag" <<<"$tags"; then
+              continue
+            fi
+            committed=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.commit.committer.date')
+            if [ "$(date -u -d "$committed" +%s)" -lt "$cutoff" ]; then
+              echo "Skipping $branch: no commit in $ACTIVE_DAYS days"
+              continue
+            fi
+            echo "Dispatching docs release dry run for $tag from $branch"
+            gh workflow run fern-docs.yml --repo "$GITHUB_REPOSITORY" --ref main \
+              -f tag="$tag" -f source_ref="$branch" -f dry_run=true
+            dispatched=$((dispatched + 1))
+          done < <(git ls-remote --heads "$url" 'refs/heads/release/*')
+          echo "Dispatched $dispatched dry run(s)"
