@@ -944,6 +944,7 @@ def _test_remote_indexer_decisions(
         raise TimeoutError("Timed out waiting for served indexer endpoints to register")
 
     async def run_test(runtimes):
+        """Seed worker prefixes and check routing through the remote indexers."""
         endpoint_path = (
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -1068,6 +1069,30 @@ def _test_remote_indexer_decisions(
             5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
         }
 
+        async def wait_for_serving_indexers(i: int, token_ids: list[int]) -> None:
+            """Wait for every replica to report the expected overlap for request i.
+
+            Remote queries round-robin across serving routers. Each replica must
+            ingest the pinned requests' KV events before scoring. All replicas
+            share a ten-second deadline; a persistent mismatch names the router.
+            """
+            deadline = time.monotonic() + 10
+            for idx, serving_router in enumerate(serving_routers):
+                while True:
+                    try:
+                        await _assert_overlap_scores(
+                            serving_router,
+                            token_ids,
+                            block_size,
+                            expected_overlap_by_request[i],
+                            f"request {i} on serving router {idx}",
+                        )
+                        break
+                    except AssertionError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        await asyncio.sleep(0.1)
+
         responses: list[dict[str, Optional[int]]] = []
         for i, (
             kv_router,
@@ -1091,6 +1116,8 @@ def _test_remote_indexer_decisions(
                 ),
             )
             if i in expected_overlap_by_request:
+                if use_kv_events:
+                    await wait_for_serving_indexers(i, token_ids)
                 await _assert_overlap_scores(
                     kv_router,
                     token_ids,
