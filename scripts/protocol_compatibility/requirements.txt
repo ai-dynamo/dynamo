@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+PyYAML==6.0.2
+tree-sitter==0.26.0
+tree-sitter-rust==0.24.2

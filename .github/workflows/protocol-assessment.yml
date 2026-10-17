@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Frontend protocol assessment
+
+on:
+  pull_request:
+    paths:
+      - 'container/context.yaml'
+      - 'Cargo.lock'
+      - 'lib/llm/src/protocols/**'
+      - 'lib/llm/src/protocols.rs'
+      - 'lib/llm/src/preprocessor.rs'
+      - 'lib/llm/src/types.rs'
+      - 'scripts/protocol_compatibility/**'
+      - '.github/workflows/protocol-assessment.yml'
+  workflow_dispatch:
+    inputs:
+      candidate_commit:
+        description: 'Optional full vLLM candidate commit; does not adopt pins'
+        required: false
+        type: string
+  schedule:
+    - cron: '17 8 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-assessment-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  assess:
+    # Forks can run PR/manual checks, but do not duplicate the upstream schedule.
+    if: github.event_name != 'schedule' || github.repository == 'ai-dynamo/dynamo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [cpu, cuda13.0, xpu]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      CANDIDATE_INPUT: ${{ inputs.candidate_commit }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0 # Compare immutable current/base trees, including historical Cargo.lock.
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install tooling dependency and run source-only regression tests
+        run: |
+          python -m pip install -r scripts/protocol_compatibility/requirements.txt
+          python -m unittest discover -s scripts/protocol_compatibility/tests -t . -q
+      - name: Prepare immutable source inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --bare https://github.com/vllm-project/vllm.git "$RUNNER_TEMP/native-source"
+          if [[ "$EVENT_NAME" == schedule ]]; then
+            candidate_ref=$(python -c 'import json; print(json.load(open("lib/llm/src/protocols/openai/compatibility/assessment/candidate.json"))["ref"])')
+            [[ "$candidate_ref" =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]]
+            git -C "$RUNNER_TEMP/native-source" fetch origin "$candidate_ref"
+            CANDIDATE_INPUT=$(git -C "$RUNNER_TEMP/native-source" rev-parse 'FETCH_HEAD^{commit}')
+          fi
+          if [[ -n "$CANDIDATE_INPUT" ]]; then
+            [[ "$CANDIDATE_INPUT" =~ ^[0-9a-f]{40}$ ]]
+            git -C "$RUNNER_TEMP/native-source" fetch origin "$CANDIDATE_INPUT"
+          fi
+          echo "CANDIDATE_SHA=$CANDIDATE_INPUT" >> "$GITHUB_ENV"
+          # Fetch only declaration crates, not the engine/runtime dependency tree.
+          python - <<'PY'
+          import hashlib
+          import os
+          import re
+          import subprocess
+          import tomllib
+          import urllib.request
+          from pathlib import Path
+
+          cache = Path(os.environ["RUNNER_TEMP"]) / "protocol-crates"
+          cache.mkdir()
+          revisions = ["HEAD"] + ([os.environ["BASE_SHA"]] if os.environ.get("BASE_SHA") else [])
+          for revision in revisions:
+              lock = subprocess.check_output(["git", "show", f"{revision}:Cargo.lock"], text=True)
+              for package in tomllib.loads(lock)["package"]:
+                  name, version = package["name"], package["version"]
+                  if name not in {"dynamo-protocols", "async-openai"}:
+                      continue
+                  if not re.fullmatch(r"[0-9A-Za-z.+-]+", version):
+                      raise ValueError("invalid crate version")
+                  if package["source"] != "registry+https://github.com/rust-lang/crates.io-index":
+                      raise ValueError("non-crates.io dependency requires explicit source configuration")
+                  archive = cache / f"{name}-{version}.crate"
+                  if archive.exists():
+                      data = archive.read_bytes()
+                  else:
+                      url = f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
+                      with urllib.request.urlopen(url, timeout=30) as response:
+                          data = response.read(20 * 1024 * 1024 + 1)
+                      if len(data) > 20 * 1024 * 1024:
+                          raise ValueError("crate archive exceeds size bound")
+                  if hashlib.sha256(data).hexdigest() != package["checksum"]:
+                      raise ValueError("crate checksum mismatch")
+                  if not archive.exists():
+                      archive.write_bytes(data)
+          PY
+      - name: Check compact runtime vocabulary against configured pins
+        run: |
+          python -m scripts.protocol_compatibility check-pins --upstream-repo "$RUNNER_TEMP/native-source"
+          python -m scripts.protocol_compatibility generate-inventory --upstream-repo "$RUNNER_TEMP/native-source" --check
+      - name: Assess configured contract or selected candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--dynamo-commit "$(git rev-parse HEAD)" --platform "$PLATFORM"
+                --upstream-repo "$RUNNER_TEMP/native-source"
+                --crate-cache "$RUNNER_TEMP/protocol-crates"
+                --decisions lib/llm/src/protocols/openai/compatibility/assessment/decisions.json
+                --support-policy lib/llm/src/protocols/openai/compatibility/assessment/support-policy.json
+                --output-dir protocol-assessment)
+          if [[ -n "$CANDIDATE_SHA" ]]; then
+            args+=(--upstream-candidate "$CANDIDATE_SHA")
+          elif [[ -n "$BASE_SHA" ]] && git cat-file -e "$BASE_SHA:lib/llm/src/protocols/openai/compatibility/vllm_pins.json"; then
+            args+=(--baseline-dynamo "$BASE_SHA")
+          fi
+          python -m scripts.protocol_compatibility assess "${args[@]}"
+      - name: Retain assessment, including action-required reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: protocol-assessment-${{ matrix.platform }}-${{ github.run_id }}
+          path: protocol-assessment/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Publish gate summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f protocol-assessment/current/report.json ]]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          report = json.load(open("protocol-assessment/current/report.json"))
+          print("## Frontend protocol assessment")
+          print("\nDownload this platform's artifact and open current/report.md.")
+          print("\n| Gate | Result |\n| --- | --- |")
+          for key in ("extraction", "review", "runtime_conformance"):
+              print(f"| {key} | {report['gates'][key]} |")
+          print(f"\n{len(report['findings'])} findings; CLI exit {report['exit_code']}.")
+          print("\nThis is not runtime parity or release approval.")
+          PY
+          else
+            echo 'Protocol assessment did not produce a report; inspect the tooling/setup failure.' >> "$GITHUB_STEP_SUMMARY"
+          fi
