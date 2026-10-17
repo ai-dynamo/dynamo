@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Sidecar Backends
-subtitle: Run Dynamo beside a stock inference engine through its native gRPC API.
+subtitle: Run Dynamo beside a stock inference engine through its native APIs.
 ---
 
 > [!WARNING]
@@ -12,8 +12,9 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
 engine with Dynamo discovery, forwards engine events into the Dynamo event
-plane, and serves requests from the Dynamo frontend by calling the engine's
-native gRPC API.
+plane, and serves ordinary inference requests from the Dynamo frontend by
+calling the engine's native gRPC API. Native SGLang `/generate` requests use
+the engine's HTTP API instead, as described below.
 
 ## Design Goals
 
@@ -31,16 +32,37 @@ native gRPC API.
 ![Dynamo Sidecar architecture. A client sends OpenAI-compatible HTTP to the Dynamo Frontend, which tokenizes, routes, and sends token IDs over the request plane to the Dynamo Sidecar.](../../../../../assets/img/sidecar-architecture.svg)
 
 The frontend and router discover sidecars and send requests to them over the
-Dynamo request plane. Each sidecar converts requests to the engine's native gRPC
-API and streams responses back.
+Dynamo request plane. Each sidecar converts ordinary inference requests to the
+engine's native gRPC API and streams responses back.
+
+> [!NOTE]
+> **SGLang native `/generate` uses HTTP.** When the frontend's opt-in native
+> SGLang `/generate` route (`DYN_SGLANG_ENABLE_GENERATE`) sends a request, the
+> SGLang sidecar posts it as JSON to the engine's own HTTP `/generate` endpoint,
+> reads the engine's server-sent event (SSE) response, and streams the parsed
+> outputs back over the Dynamo request plane. It does not pass the raw SSE
+> stream to the caller. The sidecar enables this path only when SGLang's
+> `GetServerInfo` reports an HTTP port with `incremental_streaming_output`
+> enabled and the HTTP `/health` check passes at startup; only then does the
+> worker advertise the `sglang_generate` capability. After discovery accepts
+> `incremental_streaming_output: true`, a missing HTTP port or a failed HTTP
+> `/health` check leaves ordinary gRPC serving available without advertising
+> native generate. A missing or false `incremental_streaming_output` value
+> stops startup during discovery, before HTTP readiness is checked. A malformed
+> `port` value also stops startup. A native generate request that reaches a
+> sidecar without a ready HTTP endpoint fails, and an HTTP request failure is
+> returned to the caller.
+> Neither case falls back to gRPC. See the
+> [reinforcement learning implementation guide](../../../../use-cases/reinforcement-learning/implementation-guide.md)
+> to enable the route.
 
 ## Responsibilities
 
 | Layer | Responsibility |
 |---|---|
 | Dynamo frontend and router | OpenAI-compatible API, preprocessing, and routing to sidecars |
-| Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC, and event forwarding |
-| Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
+| Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC (and over HTTP `/generate` for native SGLang generate requests), and event forwarding |
+| Inference engine | Native gRPC request serving (plus the HTTP `/generate` endpoint for native SGLang generate), scheduling, sampling, token generation, KV cache, and GPU execution |
 
 ## Container Packaging
 
