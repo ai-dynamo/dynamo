@@ -4,7 +4,9 @@
 """Unit tests for MM kwargs transfer (NIXL sender/receiver + SHM sender/receiver)."""
 
 import asyncio
+import base64
 import struct
+import zlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -633,7 +635,7 @@ class TestMmKwargsNixlReceiverPreparation:
                         "descriptors": [{"ptr": 1, "size": size, "device": "cpu"}],
                         "operation_kind": nixl_connect.OperationKind.READ.value,
                         "notification_key": str(i),
-                        "nixl_metadata": "unused-before-transfer",
+                        "nixl_metadata": zlib.compress(b"mock-agent").hex(),
                     },
                 )
                 for i, size in enumerate(sizes)
@@ -652,6 +654,7 @@ class TestMmKwargsNixlReceiverPreparation:
             receiver._pool.put(desc)
         receiver._connector.begin_read.assert_not_called()
         native.initialize_xfer.assert_not_called()
+        native.add_remote_agent.assert_not_called()
         native.deregister_memory.assert_not_called()
 
     @pytest.mark.asyncio
@@ -694,6 +697,58 @@ class TestMmKwargsNixlReceiverPreparation:
         self.assert_pool_preserved(receiver, descriptors, native, handles)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_index", [0, 1])
+    @pytest.mark.parametrize(
+        "invalid_field, invalid_value, error",
+        [
+            ("descriptors", [], "at least one"),
+            (
+                "descriptors",
+                [{"ptr": 1, "size": 4}, {"ptr": 2, "size": 4}],
+                "exactly one",
+            ),
+            ("descriptors", [{"ptr": 1, "size": 16}], "same size"),
+            (
+                "descriptors",
+                [{"ptr": 1, "size": 4, "device": "cuda:invalid"}],
+                "invalid literal",
+            ),
+            ("descriptors", [{"size": 4}], "cannot be zero"),
+            ("notification_key", "", "notification_key"),
+            ("nixl_metadata", "", "cannot be empty"),
+            ("nixl_metadata", "not-hex", "fromhex"),
+            ("nixl_metadata", "b64:a", "base64"),
+            ("nixl_metadata", "00", "decompress"),
+        ],
+        ids=[
+            "empty-descriptors",
+            "multiple-descriptors",
+            "size-mismatch",
+            "invalid-device",
+            "missing-pointer",
+            "empty-notification",
+            "empty-agent",
+            "invalid-hex",
+            "invalid-base64",
+            "invalid-compression",
+        ],
+    )
+    async def test_invalid_read_metadata_does_not_borrow_buffers(
+        self, receiver, invalid_index, invalid_field, invalid_value, error
+    ):
+        receiver, descriptors, native = receiver
+        handles = [desc._nixl_hndl for desc in descriptors]
+        metadata = self.metadata([4, 8])
+        request = metadata.tensor_specs[invalid_index].serialized_request
+        request[invalid_field] = invalid_value
+        # These all pass schema validation but cannot start a matching READ.
+        nixl_connect.RdmaMetadata.model_validate(request)
+        with pytest.raises((ValueError, zlib.error), match=error):
+            await receiver.receive(metadata)
+        receiver._acquire_descriptor.assert_not_called()
+        self.assert_pool_preserved(receiver, descriptors, native, handles)
+
+    @pytest.mark.asyncio
     async def test_allocation_failure_restores_prepared_buffers(
         self, receiver, monkeypatch
     ):
@@ -711,7 +766,8 @@ class TestMmKwargsNixlReceiverOrdering:
     """Tests that NIXL receiver preserves spec order under concurrent reads."""
 
     @pytest.mark.asyncio
-    async def test_multi_image_nixl_receive_preserves_order(self):
+    @pytest.mark.parametrize("agent_encoding", ["hex", "base64"])
+    async def test_multi_image_nixl_receive_preserves_order(self, agent_encoding):
         """3 images with different completion delays: results must be in spec order."""
         import asyncio
 
@@ -727,6 +783,12 @@ class TestMmKwargsNixlReceiverOrdering:
             b"item-2-third",
         ]
 
+        compressed_agent = zlib.compress(b"mock-agent")
+        agent_metadata = (
+            compressed_agent.hex()
+            if agent_encoding == "hex"
+            else "b64:" + base64.b64encode(compressed_agent).decode("ascii")
+        )
         # Build metadata as if the sender prepared 3 specs
         specs = [
             TensorTransferSpec(
@@ -737,7 +799,7 @@ class TestMmKwargsNixlReceiverOrdering:
                     "descriptors": [{"ptr": 1, "size": len(item), "device": "cpu"}],
                     "operation_kind": nixl_connect.OperationKind.READ.value,
                     "notification_key": str(i),
-                    "nixl_metadata": "unused-with-mocked-read",
+                    "nixl_metadata": agent_metadata,
                 },
             )
             for i, item in enumerate(items)

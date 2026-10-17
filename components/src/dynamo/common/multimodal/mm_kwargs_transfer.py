@@ -618,9 +618,29 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
             self._nixl_connect.RdmaMetadata.model_validate(spec.serialized_request)
             for spec in metadata.tensor_specs
         ]
-        for rm in read_metadata:
+        read_sizes = []
+        for spec, rm in zip(metadata.tensor_specs, read_metadata):
             if rm.operation_kind != self._nixl_connect.OperationKind.READ.value:
                 raise ValueError("mm_kwargs transfer metadata must be of kind READ")
+            # Schema validation alone accepts empty descriptors and defaults.
+            # Exercise descriptor conversion and the matching READ contract
+            # before borrowing any local buffer or registering a remote agent.
+            remote_desc = rm.to_descriptors()
+            if isinstance(remote_desc, list):
+                raise ValueError(
+                    "mm_kwargs READ requires exactly one remote descriptor"
+                )
+            if remote_desc.ptr == 0:
+                raise ValueError("Remote descriptor pointer cannot be zero")
+            size_bytes = 1
+            for s in spec.shape:
+                size_bytes *= s
+            if remote_desc.size != size_bytes:
+                raise ValueError("Local and remote descriptors must be the same size")
+            if not rm.notification_key:
+                raise ValueError("READ notification_key must not be empty")
+            self._nixl_connect.Remote.decode_metadata(rm.nixl_metadata)
+            read_sizes.append(size_bytes)
         # Track acquired descriptors for release after reads complete.
         acquired: list[tuple[Any, bool, int | None]] = []
         # Store (spec_index, field_name, tensor_view, size_bytes) per task.
@@ -629,10 +649,9 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
         # Preparation cannot issue a transfer. Restore earlier buffers if a later
         # allocation fails, but do not recycle buffers after reads have started.
         with ExitStack() as rollback:
-            for idx, spec in enumerate(metadata.tensor_specs):
-                size_bytes = 1
-                for s in spec.shape:
-                    size_bytes *= s
+            for idx, (spec, size_bytes) in enumerate(
+                zip(metadata.tensor_specs, read_sizes)
+            ):
                 # uint8 → 1 byte per element
                 desc, tensor_view, is_dynamic, orig_size = self._acquire_descriptor(
                     size_bytes
