@@ -30,6 +30,13 @@ tests:
       - equal: {path: spec.activeDeadlineSeconds, value: 600}
       - equal: {path: 'spec.template.spec.containers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
       - equal: {path: spec.template.spec.securityContext.runAsUser, value: 65532}
+  # Keep in sync with the reuse-values case above: values.yaml and the template fallback must pin the same image.
+  - it: uses the same default image from values.yaml
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: 'spec.template.spec.initContainers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
+      - equal: {path: 'spec.template.spec.containers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
   - it: runs after the KAI config deployer and before the Queue hooks
     set: {global.kai-scheduler.install: true}
     documentSelector: {path: kind, value: Job}
@@ -50,13 +57,13 @@ tests:
       - equal:
           path: 'spec.template.spec.containers[0].args'
           value: [wait, --for=condition=Available, deployment/queue-controller, --namespace=dynamo-system, --timeout=600s]
-  - it: grants only Deployment read access in the release namespace before the Job
+  - it: grants only Deployment read access in the release namespace before the Job and removes it on success
     set: {global.kai-scheduler.install: true}
     documentSelector: {path: kind, value: Role}
     asserts:
       - equal: {path: metadata.namespace, value: dynamo-system}
       - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '80'}
-      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: before-hook-creation}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: 'before-hook-creation,hook-succeeded'}
       - equal:
           path: rules
           value:
