@@ -45,9 +45,9 @@ def _make_prefill_handler():
         use_kv_events=True,
     )
     handler.engine_client = SimpleNamespace(
-        add_lora=AsyncMock(),
-        remove_lora=AsyncMock(),
-        reset_prefix_cache=AsyncMock(),
+        add_lora=AsyncMock(return_value=True),
+        remove_lora=AsyncMock(return_value=True),
+        reset_prefix_cache=AsyncMock(return_value=True),
         # LoRA MDC registration reads the engine-actual main-attention block
         # size from here (hybrid-attention models inflate it past the CLI's
         # engine_args.block_size=16 above).
@@ -62,6 +62,8 @@ def _make_prefill_handler():
     # Initialize LoRA state
     from dynamo.vllm.lora_state import LoRAState
 
+    handler._lora_capacity = None
+    handler._lora_capacity_guard = asyncio.Lock()
     handler.engine_args = handler.config.engine_args
     handler.dp_range = (0, 1)
     handler._served_model_name = "llama2-7b"
@@ -259,6 +261,7 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
     monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
     monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", register)
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
 
     results = [
         result
@@ -400,7 +403,8 @@ async def test_legacy_lora_request_admission_serializes_with_unload(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-async def test_legacy_lora_request_closes_engine_generator_before_drain():
+@pytest.mark.parametrize("cancel_cleanup", [False, True])
+async def test_legacy_lora_request_closes_engine_generator_before_drain(cancel_cleanup):
     handler = _make_prefill_handler()
     handler._lora_state.loaded_loras = {
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
@@ -431,8 +435,18 @@ async def test_legacy_lora_request_closes_engine_generator_before_drain():
     assert handler._lora_state.active_requests == {"adapterA": 1}
     assert not close_task.done()
 
+    if cancel_cleanup:
+        close_task.cancel()
+        await asyncio.sleep(0)
+        assert handler._lora_state.active_requests == {"adapterA": 1}
+        assert not close_task.done()
+
     allow_cleanup.set()
-    await close_task
+    if cancel_cleanup:
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+    else:
+        await close_task
     assert engine_generator_closed.is_set()
     assert handler._lora_state.active_requests == {}
 
