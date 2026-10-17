@@ -5,6 +5,13 @@ title: Run a DynoSim Simulation
 subtitle: Predict a synthetic workload or saved trace against one simulated configuration
 ---
 
+<Note>
+The legacy `python -m dynamo.replay` CLI has been removed. Follow the
+[Replay migration map](../../../reference/components/dynosim-replay-cli-reference.mdx#migration-from-dynamo-replay)
+to select the AISimulate command for your workload and check which SDK and live worker paths remain
+available.
+</Note>
+
 A DynoSim prediction evaluates one workload against one simulated Dynamo configuration. AISimulate
 drives the simulated engine cores directly without starting a frontend, registering workers, or
 sending HTTP requests. It runs on CPUs and writes an AIPerf-style summary and JSON report.
