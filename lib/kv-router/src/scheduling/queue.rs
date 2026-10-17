@@ -954,6 +954,8 @@ impl<
                         "unknown policy class {policy_class:?}"
                     ))
                 })?;
+            // Worker selection reads the classifier's class from the request.
+            request.policy_class = Some(policy_class);
         }
         if let Some(cost) = scheduling_cost_tokens {
             metadata.snapshot.scheduling_cost_tokens = cost;
@@ -2861,6 +2863,7 @@ policy_classes:
             queue.profile.class(metadata.class_index).name,
             "bulk_cached"
         );
+        assert_eq!(request.policy_class.as_deref(), Some("bulk"));
         assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
         assert_eq!(metadata.due_at, Some(due_at));
 
