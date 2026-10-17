@@ -506,3 +506,34 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+def test_mooncake_runtime_data_describes_the_direct_linker(register):
+    linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+        page_size=256,
+        tp_size=4,
+    )
+    data = register._get_mooncake_runtime_data(linker)
+    assert data["key_layout"] == "linker"
+    # The linker names keys after model_path, HiCache after served_model_name.
+    assert data["key_prefix"] == "Org-Model"
+    assert data["page_size"] == 256
+
+    hicache = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(hicache)
+    assert data["key_layout"] == "hicache"
+    assert data["key_prefix"] == "served"
+
+    neither = SimpleNamespace(hicache_storage_backend=None)
+    assert register._get_mooncake_runtime_data(neither) is None
