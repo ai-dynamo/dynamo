@@ -5,12 +5,15 @@
 # - GPU-1 subset (`-m "gpu_1"`): 92.35s total for 2 tests (+ 1 skipped).
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
+import json
 import logging
 import os
+import tempfile
 from typing import Any, Dict, Optional
 
 import pytest
 import requests
+from huggingface_hub import snapshot_download
 
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
@@ -19,9 +22,11 @@ from tests.router.e2e_harness import (
     run_cache_salt_isolation_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
+    run_lora_isolation_test,
     run_router_decisions_test,
 )
 from tests.router.helper import generate_random_suffix
+from tests.serve.lora_utils import DEFAULT_LORA_NAME, DEFAULT_LORA_REPO
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
@@ -99,6 +104,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - context_length: Maximum sequence length (optional)
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
                 - extra_args: Additional dynamo.sglang CLI flags (optional)
+                - enable_lora: Enable dynamic LoRA loading (default: False)
+                - kv_events_format: SGLang KV event format, e.g. "dynamo" (optional)
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables this many data-parallel ranks per worker process.
@@ -153,6 +160,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
         extra_args = sglang_args.get("extra_args", ())
+        enable_lora = sglang_args.get("enable_lora", False)
+        kv_events_format = sglang_args.get("kv_events_format")
         # Resolved memory budget, for startup logs (mirrors the command flags).
         mem_budget = (
             f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
@@ -218,6 +227,17 @@ class SGLangProcess(ManagedEngineProcessMixin):
 
             command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args"))
 
+            if enable_lora:
+                command.extend(
+                    [
+                        "--enable-lora",
+                        "--max-lora-rank",
+                        "64",
+                        "--lora-target-modules",
+                        "all",
+                    ]
+                )
+
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
                 command.extend(["--disaggregation-transfer-backend", "nixl"])
@@ -242,7 +262,14 @@ class SGLangProcess(ManagedEngineProcessMixin):
             # ranks publish at base_port + dp_rank, so DP tests must reserve a
             # contiguous port block and pass the block's base port here.
             kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
-            kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
+            kv_events = {
+                "publisher": "zmq",
+                "topic": "kv-events",
+                "endpoint": f"tcp://*:{kv_events_port}",
+            }
+            if kv_events_format is not None:
+                kv_events["format"] = kv_events_format
+            kv_events_config = json.dumps(kv_events)
             command.extend(["--kv-events-config", kv_events_config])
             command.extend(extra_args)
 
@@ -262,6 +289,11 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 "DYN_FORWARDPASS_METRIC_PORT": str(self._fpm_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
+            if enable_lora:
+                env_vars["DYN_LORA_ENABLED"] = "true"
+                env_vars["DYN_LORA_PATH"] = os.path.join(
+                    tempfile.gettempdir(), f"dynamo_loras_{self.namespace}"
+                )
 
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
@@ -302,6 +334,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
 
     process_name = "SGLang worker"
     cleanup_name = "SGLang worker resources"
+
+    @property
+    def system_ports(self) -> list[int]:
+        return list(self._system_ports)
 
 
 @pytest.mark.e2e
@@ -359,6 +395,59 @@ def test_router_decisions_sglang_multiple_workers(
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
+    )
+
+
+LORA_MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+
+def _sglang_has_dynamo_kv_event_format() -> bool:
+    from sglang.srt.disaggregation.kv_events import KVEventsConfig
+
+    return "format" in KVEventsConfig.model_fields
+
+
+@pytest.mark.e2e
+@pytest.mark.model(LORA_MODEL_NAME)
+@pytest.mark.model(DEFAULT_LORA_REPO)
+@pytest.mark.post_merge
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(7.0)  # two workers, peak 6.9 GiB on H200
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(150)  # 3x ~50s on H200
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_router_lora_isolation_sglang(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    """Adapter requests reuse adapter blocks, and base-model requests with the
+    same prompt never match them."""
+    if not _sglang_has_dynamo_kv_event_format():
+        pytest.skip("SGLang does not publish the dynamo KV event format")
+
+    # predownload_models caches the adapter but leaves HF_HUB_OFFLINE set, and
+    # hf:// sources only trust Dynamo's own cache, so load the cached snapshot.
+    lora_dir = snapshot_download(DEFAULT_LORA_REPO, local_files_only=True)
+
+    run_lora_isolation_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args={
+            **SGLANG_ARGS,
+            "model": LORA_MODEL_NAME,
+            "enable_lora": True,
+            "kv_events_format": "dynamo",
+        },
+        request=request,
+        request_plane=request_plane,
+        model_name=LORA_MODEL_NAME,
+        block_size=PAGE_SIZE,
+        component_name="backend",
+        lora_name=DEFAULT_LORA_NAME,
+        lora_uri=f"file://{lora_dir}",
     )
 
 
