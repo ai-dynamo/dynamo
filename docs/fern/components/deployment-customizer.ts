@@ -1240,9 +1240,16 @@ function applyStorage(editor: Editor, info: ManifestInfo, storage: StorageSettin
       (item) => text(child(item.value, "mountPath")) === storage.mountPath,
     );
     if (!mounted) editor.appendItems(container(), "volumeMounts", [{ mountPath: storage.mountPath, name: storage.pvcName }]);
-    const hasVolume = itemsOf(child(podSpec(), "volumes")).some((item) => text(child(item.value, "name")) === storage.pvcName);
-    if (!hasVolume) {
+    const volume = () =>
+      itemsOf(child(podSpec(), "volumes")).find((item) => text(child(item.value, "name")) === storage.pvcName)?.value ?? null;
+    if (!volume()) {
       editor.appendItems(podSpec(), "volumes", [{ name: storage.pvcName, persistentVolumeClaim: { claimName: storage.pvcName } }]);
+    } else if (!child(volume(), "persistentVolumeClaim")) {
+      // A same-named emptyDir or hostPath volume would hide the cache, so back it with the claim instead.
+      const current = volume();
+      const sources = current?.kind === "map" ? current.entries.map((entry) => entry.key).filter((key) => key !== "name") : [];
+      for (const source of sources) editor.deleteEntry(volume(), source);
+      editor.setEntry(volume(), "persistentVolumeClaim", { claimName: storage.pvcName });
     }
   }
   if (loaders.length === 0 && !info.graphs.some((graph) => graph.kind === "DynamoGraphDeploymentRequest")) {

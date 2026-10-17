@@ -62,7 +62,10 @@ Namespace/node-pool bindings and cache names were generalized from the tested de
 
 <div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-audio-sh">
 
-Run it in a runtime that contains the audio fix; the script does not select an image.
+Run it in a runtime that contains the audio fix; the script does not select an image. It also serves
+Nemotron Audex with `--model nvidia/Nemotron-Labs-Audex-2B`; see
+[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for the 30B-A3B stage configuration
+and the Audex request contract.
 
 ```bash
 (cd examples/backends/vllm && bash launch/agg_omni_audio.sh)

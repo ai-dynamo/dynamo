@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Custom Backends and Testing"
-subtitle: "Hello World, sample backends, Mocker deployments, and Triton Server."
+subtitle: "Hello World, sample backends, and Mocker deployments."
 hide-toc: true
 ---
 
@@ -13,7 +13,6 @@ import { ExampleSelector } from "@/components/ExampleSelector";
     {"id": "kubernetes-custom-hello-world-yaml", "target": "kubernetes:custom", "label": "hello_world.yaml", "description": "Custom backend development example"},
     {"id": "kubernetes-mocker-mocker-agg-yaml", "target": "kubernetes:mocker", "label": "mocker/agg.yaml", "description": "Aggregated mock worker"},
     {"id": "kubernetes-mocker-mocker-disagg-yaml", "target": "kubernetes:mocker", "label": "mocker/disagg.yaml", "description": "Disaggregated mock workers"},
-    {"id": "local-tritonserver-identity-sh", "target": "local:tritonserver", "label": "identity.sh", "description": "Identity model with Triton Server"},
     {"id": "local-sample-agg-sh", "target": "local:sample", "label": "agg.sh", "description": "Aggregated Echo Backend"},
     {"id": "local-sample-disagg-sh", "target": "local:sample", "label": "disagg.sh", "description": "Disaggregated Echo Backend"},
     {"id": "local-sample-agg-diffusion-sh", "target": "local:sample", "label": "agg_diffusion.sh", "description": "Aggregated Sample Diffusion Backend"},
@@ -47,20 +46,6 @@ Deploys a minimal Python backend and frontend without a GPU-backed model.
 [Source: `disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/disagg.yaml)
 
 <Code src="../../../../../examples/backends/mocker/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
-
-</div>
-
-<div className="dynamo-example-variant" data-example-variant="local-tritonserver-identity-sh">
-
-**Prerequisites:** [Triton Server README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tritonserver/README.md)
-
-```bash
-(cd examples/backends/tritonserver && bash launch/identity.sh)
-```
-
-[Source: `identity.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tritonserver/launch/identity.sh)
-
-<Code src="../../../../../examples/backends/tritonserver/launch/identity.sh" title="identity.sh" language="bash" maxLines={0} />
 
 </div>
 

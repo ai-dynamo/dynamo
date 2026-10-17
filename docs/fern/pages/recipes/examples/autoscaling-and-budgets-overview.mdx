@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Autoscaling and Budget Examples
 sidebar-title: Overview
-subtitle: Explore Planner, deployment request, and global GPU budget examples
+subtitle: Explore Planner, deployment request, global GPU budget, and GPU sharing examples
 hide-toc: true
 ---
 
@@ -53,6 +53,20 @@ Multi-model GPU budgets and single-endpoint, multi-pool deployments.
 <ExampleTargets targets="kubernetes:vllm kubernetes:mocker" />
 
 <a className="dynamo-example-card-link" href="global-planner.mdx">Open Global Planner example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="gpu-sharing" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm" data-keywords="dgds-16x.yaml dgds-8x.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="layer-group" /></span>
+
+### GPU Sharing
+
+Many models per GPU with KAI-Scheduler, compared with one model per GPU.
+
+<ExampleTargets targets="kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="gpu-sharing.mdx">Open GPU Sharing example</a>
 
 </div>
 

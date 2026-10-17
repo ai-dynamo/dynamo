@@ -8,7 +8,7 @@ export const EXAMPLE_BACKENDS: Record<string, string> = {
   sglang: "SGLang",
   trtllm: "TensorRT-LLM",
   fastvideo: "FastVideo",
-  tritonserver: "Triton Server",
+  tokenspeed: "TokenSpeed",
   mocker: "Mocker",
   sample: "Sample",
   custom: "Custom",

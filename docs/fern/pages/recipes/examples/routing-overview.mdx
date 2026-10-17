@@ -28,7 +28,7 @@ Cache-aware routing to aggregated workers.
 
 </div>
 
-<div className="dynamo-example-card" data-example="disaggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg_router.sh disagg_router.yaml disagg_router_gaudi.sh disagg_router_xpu_dra.yaml disagg_router_xpu_gdr.sh">
+<div className="dynamo-example-card" data-example="disaggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:trtllm kubernetes:vllm local:sglang local:tokenspeed local:trtllm local:vllm" data-keywords="disagg_router.sh disagg_router.yaml disagg_router_gaudi.sh disagg_router_xpu_dra.yaml disagg_router_xpu_gdr.sh launch_disagg.sh">
 
 <span className="dynamo-example-icon"><Icon icon="code-fork" /></span>
 
@@ -36,7 +36,7 @@ Cache-aware routing to aggregated workers.
 
 Cache-aware routing to separate prefill and decode workers.
 
-<ExampleTargets targets="kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" />
+<ExampleTargets targets="kubernetes:trtllm kubernetes:vllm local:sglang local:tokenspeed local:trtllm local:vllm" />
 
 <a className="dynamo-example-card-link" href="disaggregated-kv-routing.mdx">Open Disaggregated KV-Aware Routing example</a>
 
@@ -70,15 +70,15 @@ Select the transport used for worker requests.
 
 </div>
 
-<div className="dynamo-example-card" data-example="gateway-api" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:vllm" data-keywords="agg.yaml disagg.yaml">
+<div className="dynamo-example-card" data-example="gateway-api" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:sglang kubernetes:vllm" data-keywords="agg.yaml disagg.yaml">
 
 <span className="dynamo-example-icon"><Icon icon="archway" /></span>
 
 ### Gateway API Routing
 
-Aggregated and disaggregated vLLM behind an Endpoint Picker.
+Aggregated and disaggregated serving behind an Endpoint Picker.
 
-<ExampleTargets targets="kubernetes:vllm" />
+<ExampleTargets targets="kubernetes:sglang kubernetes:vllm" />
 
 <a className="dynamo-example-card-link" href="gateway-api.mdx">Open Gateway API Routing example</a>
 
