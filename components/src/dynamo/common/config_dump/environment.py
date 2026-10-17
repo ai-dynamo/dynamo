@@ -41,6 +41,10 @@ DEFAULT_ENV_PREFIXES = [
 SENSITIVE_PATTERNS = [
     "TOKEN",
     "API_KEY",
+    # An access key is half of a credential pair, so it is redacted alongside
+    # the secret half. Matched on ACCESS_KEY rather than KEY so that config
+    # keys and key file paths stay readable in a dump.
+    "ACCESS_KEY",
     "SECRET",
     "PASSWORD",
     "CREDENTIAL",
