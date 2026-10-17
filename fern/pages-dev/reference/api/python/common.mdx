@@ -97,7 +97,7 @@ from dynamo.common.http import AiohttpClient
 AiohttpClient(config = None) -> None
 ```
 
-[`components/src/dynamo/common/http/aiohttp_client.py#L90`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L90)
+[`components/src/dynamo/common/http/aiohttp_client.py#L133`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L133)
 
 **Public methods**
 
@@ -109,7 +109,7 @@ __init__(config = None) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L93)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L136)
 
 <h4 id="api-dynamo-common-http-aiohttp-client-aiohttpclient-close">close</h4>
 
@@ -119,7 +119,7 @@ close() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L372)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L421)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache" title="AsyncEncoderCache (class)">
@@ -277,7 +277,7 @@ Supports two paths:
 
 - `List[tuple[np.ndarray, float]]` — List of (waveform, sample_rate) tuples.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L200)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L208)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-baseengine" title="BaseEngine (class)">
@@ -910,7 +910,7 @@ load_image(image_url: str, *, cache_scope: str | None = None) -> Image.Image
 
 Load and decode one media URL through the validated image cache.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L385)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L388)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
@@ -953,7 +953,7 @@ DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L485)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L488)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
@@ -2122,7 +2122,7 @@ Raises ``ValueError`` for malformed items or decoded items when frontend
 decoding is disabled. Validation happens before any load coroutine is
 created so an invalid item cannot leave earlier loads unawaited.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L358)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L365)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">
