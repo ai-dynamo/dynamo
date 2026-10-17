@@ -5,7 +5,9 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use dynamo_memory::SystemStorage;
-use dynamo_memory::nixl::{self, AgentConfig, NixlAgent, NixlDescriptor, RegisteredView};
+use dynamo_memory::nixl::{
+    self, AgentConfig, NixlAgent, NixlCompatible, NixlDescriptor, RegisteredView,
+};
 use dynamo_runtime::config::{
     env_config::parse_or_default, environment_names::llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
 };
@@ -42,8 +44,12 @@ pub struct DecodedMediaData {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RdmaMediaDataDescriptor {
-    // b64 agent metadata
+    // Compressed, base64-encoded metadata for this registration only.
     pub(crate) nixl_metadata: String,
+    // Connection-only metadata. Frontend decoding requires upgrading workers first.
+    // Absent in payloads from older frontends, which include connections in nixl_metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) nixl_connection_metadata: Option<String>,
     // tensor descriptor
     pub(crate) nixl_descriptor: NixlDescriptor,
 
@@ -265,10 +271,12 @@ impl DecodedMediaData {
             .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
         let nixl_descriptor = registered.descriptor();
-        let nixl_metadata = get_nixl_metadata(nixl_agent, registered.storage())?;
+        let (nixl_metadata, nixl_connection_metadata) =
+            get_descriptor_metadata(nixl_agent, &nixl_descriptor)?;
 
         Ok(RdmaMediaDataDescriptor {
             nixl_metadata,
+            nixl_connection_metadata: Some(nixl_connection_metadata),
             nixl_descriptor,
             tensor_info: self.tensor_info,
             content_hash,
@@ -305,20 +313,47 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
     }
 }
 
-// Get NIXL metadata for a descriptor
-// Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
-// This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
+/// Export metadata for storage already registered with `agent`.
+///
+/// Returns `(registration_metadata, connection_metadata)`, each zlib-compressed
+/// and base64-encoded as `b64:<compressed_base64>` for Python nixl_connect.
+/// The caller must keep the storage registration alive until the remote read completes.
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
-pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
-    // WAR: Until https://github.com/ai-dynamo/nixl/pull/970 is merged, can't use get_local_partial_md
-    let nixl_md = agent.raw_agent().get_local_md()?;
-    // let mut reg_desc_list = RegDescList::new(MemType::Dram)?;
-    // reg_desc_list.add_storage_desc(storage)?;
-    // let nixl_partial_md = agent.raw_agent().get_local_partial_md(&reg_desc_list, None)?;
+pub fn get_nixl_metadata(agent: &NixlAgent, storage: &SystemStorage) -> Result<(String, String)> {
+    let (ptr, size, mem_type, device_id) = storage.nixl_params();
+    get_descriptor_metadata(
+        agent,
+        &NixlDescriptor {
+            addr: ptr as u64,
+            size,
+            mem_type,
+            device_id,
+        },
+    )
+}
 
+fn get_descriptor_metadata(
+    agent: &NixlAgent,
+    descriptor: &NixlDescriptor,
+) -> Result<(String, String)> {
+    // The descriptor's source_storage guard owns this registration only.
+    // A fresh receiver also needs the agent's connection information.
+    let mut descriptors = nixl::RegDescList::new(descriptor.mem_type)?;
+    // An empty descriptor list exports connection information without registrations.
+    let connection_metadata = agent.raw_agent().get_local_partial_md(&descriptors, None)?;
+    descriptors.add_storage_desc(descriptor)?;
+    let registration_metadata = agent.raw_agent().get_local_partial_md(&descriptors, None)?;
+
+    Ok((
+        encode_metadata(&registration_metadata)?,
+        encode_metadata(&connection_metadata)?,
+    ))
+}
+
+fn encode_metadata(metadata: &[u8]) -> Result<String> {
     // Compress with zlib (level 6, matching Python's default)
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-    encoder.write_all(&nixl_md)?;
+    encoder.write_all(metadata)?;
     let compressed = encoder.finish()?;
 
     let b64_encoded = general_purpose::STANDARD.encode(&compressed);
@@ -377,6 +412,134 @@ pub fn get_nixl_agent() -> Result<NixlAgent> {
         .add_backend("UCX")
         .context("add UCX backend to media-loader NIXL agent")?;
     Ok(nixl_agent)
+}
+
+#[cfg(all(test, feature = "testing-nixl"))]
+pub(super) mod native_tests {
+    use super::*;
+    use dynamo_memory::actions::Slice;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    fn decode_metadata(encoded: &str) -> Result<Vec<u8>> {
+        let compressed = general_purpose::STANDARD.decode(encoded.strip_prefix("b64:").unwrap())?;
+        let mut metadata = Vec::new();
+        flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut metadata)?;
+        Ok(metadata)
+    }
+
+    pub fn assert_scoped_metadata(
+        selected: &RdmaMediaDataDescriptor,
+        unrelated: &NixlDescriptor,
+    ) -> Result<NixlAgent> {
+        let receiver = get_nixl_agent()?;
+        let connection_metadata =
+            decode_metadata(selected.nixl_connection_metadata.as_deref().unwrap())?;
+        let remote = receiver.raw_agent().load_remote_md(&connection_metadata)?;
+        let mut remote_selected = nixl::XferDescList::new(selected.nixl_descriptor.mem_type)?;
+        remote_selected.add_storage_desc(&selected.nixl_descriptor)?;
+        let mut remote_unrelated = nixl::XferDescList::new(unrelated.mem_type)?;
+        remote_unrelated.add_storage_desc(unrelated)?;
+        // The first import must not expose any registered buffer.
+        for descriptors in [&remote_selected, &remote_unrelated] {
+            assert!(
+                !receiver
+                    .raw_agent()
+                    .check_remote_metadata(&remote, Some(descriptors))
+            );
+        }
+        assert_buffer_read(&receiver, &remote, selected, unrelated)?;
+        Ok(receiver)
+    }
+
+    fn assert_buffer_read(
+        receiver: &NixlAgent,
+        remote: &str,
+        selected: &RdmaMediaDataDescriptor,
+        unrelated: &NixlDescriptor,
+    ) -> Result<()> {
+        let mut remote_selected = nixl::XferDescList::new(selected.nixl_descriptor.mem_type)?;
+        remote_selected.add_storage_desc(&selected.nixl_descriptor)?;
+        let mut remote_unrelated = nixl::XferDescList::new(unrelated.mem_type)?;
+        remote_unrelated.add_storage_desc(unrelated)?;
+        let metadata = decode_metadata(&selected.nixl_metadata)?;
+        assert_eq!(receiver.raw_agent().load_remote_md(&metadata)?, remote);
+        assert!(
+            receiver
+                .raw_agent()
+                .check_remote_metadata(remote, Some(&remote_selected))
+        );
+        assert!(
+            !receiver
+                .raw_agent()
+                .check_remote_metadata(remote, Some(&remote_unrelated))
+        );
+
+        let destination = nixl::register_with_nixl(
+            SystemStorage::new(selected.nixl_descriptor.size)?,
+            receiver,
+            None,
+        )
+        .map_err(|_| anyhow::anyhow!("failed to register receiver buffer"))?;
+        let destination_descriptor = destination.descriptor();
+        let mut local = nixl::XferDescList::new(destination_descriptor.mem_type)?;
+        local.add_storage_desc(&destination_descriptor)?;
+        let request = receiver.raw_agent().create_xfer_req(
+            nixl::XferOp::Read,
+            &local,
+            &remote_selected,
+            remote,
+            None,
+        )?;
+        if receiver.raw_agent().post_xfer_req(&request, None)? {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !receiver.raw_agent().get_xfer_status(&request)?.is_success() {
+                anyhow::ensure!(Instant::now() < deadline, "native read timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        // Both registrations remain live, and the read is complete.
+        unsafe {
+            assert_eq!(
+                destination.storage().as_slice()?,
+                selected
+                    .source_storage
+                    .as_ref()
+                    .unwrap()
+                    .storage()
+                    .as_slice()?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_metadata_survives_unrelated_release() -> Result<()> {
+        let source = get_nixl_agent()?;
+        let unrelated = DecodedMediaData::try_from(ndarray::Array1::from_elem(65536, 0xa5))?
+            .into_rdma_descriptor(&source)?;
+        let selected = DecodedMediaData::try_from(ndarray::Array1::from_elem(65536, 0x5a))?
+            .into_rdma_descriptor(&source)?;
+        let receiver = assert_scoped_metadata(&selected, &unrelated.nixl_descriptor)?;
+        assert_eq!(
+            (
+                selected.nixl_metadata.clone(),
+                selected.nixl_connection_metadata.clone().unwrap()
+            ),
+            get_nixl_metadata(&source, selected.source_storage.as_ref().unwrap().storage())?
+        );
+        let unrelated_descriptor = unrelated.nixl_descriptor.clone();
+        drop(unrelated);
+
+        // Reuse the receiver without invalidating its remote metadata. The selected
+        // registration stays live; this does not test address reuse with a new key.
+        let connection_metadata =
+            decode_metadata(selected.nixl_connection_metadata.as_deref().unwrap())?;
+        let remote = receiver.raw_agent().load_remote_md(&connection_metadata)?;
+        assert_buffer_read(&receiver, &remote, &selected, &unrelated_descriptor)?;
+        assert_scoped_metadata(&selected, &unrelated_descriptor)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

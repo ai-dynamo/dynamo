@@ -907,17 +907,9 @@ mod tests {
 
         // Single decoded image is ~8.57 MB (1125x1999x4 RGBA). Budget = 18 MB
         // accommodates exactly 2 entries; inserting a 3rd forces an eviction.
-        let loader = match MediaLoader::with_cache_budget_bytes(
-            media_decoder,
-            Some(fetcher),
-            18 * 1024 * 1024,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                println!("test_cache_budget_lru_eviction ... ignored ({})", e);
-                return;
-            }
-        };
+        let loader =
+            MediaLoader::with_cache_budget_bytes(media_decoder, Some(fetcher), 18 * 1024 * 1024)
+                .expect("native NIXL/UCX is required");
 
         let make_part = |path: &str| {
             let image_url = ImageUrl::from(format!("{}{}", server.url(), path));
@@ -934,19 +926,14 @@ mod tests {
         let part_c = make_part("/c.png");
 
         // Cold-fetch A and B (cache: [B, A], B is MRU).
-        for (label, part) in [("a", &part_a), ("b", &part_b)] {
-            match loader.fetch_and_decode_media_part(part, None).await {
-                Ok(_) => {}
-                Err(e) if e.to_string().contains("NIXL agent is not available") => {
-                    println!(
-                        "test_cache_budget_lru_eviction ... ignored (NIXL not available, fetch={})",
-                        label
-                    );
-                    return;
-                }
-                Err(e) => panic!("fetch {} failed: {}", label, e),
-            }
-        }
+        let a = loader
+            .fetch_and_decode_media_part(&part_a, None)
+            .await
+            .unwrap();
+        let b = loader
+            .fetch_and_decode_media_part(&part_b, None)
+            .await
+            .unwrap();
         assert_eq!(loader.cache_len(), 2);
 
         // Touch B to make it the LRU front; A becomes the eviction target
@@ -963,6 +950,12 @@ mod tests {
             .await
             .expect("c cold fetch should succeed");
         assert_eq!(loader.cache_len(), 2);
+
+        // The request guard keeps A live after eviction. B's old snapshot
+        // remains usable after that unrelated registration is released.
+        let a_descriptor = a.nixl_descriptor.clone();
+        drop(a);
+        super::super::rdma::native_tests::assert_scoped_metadata(&b, &a_descriptor).unwrap();
 
         // Re-fetching A should miss the cache (A was evicted), triggering a
         // second network GET — matched by mock_a.expect(2).
