@@ -8,8 +8,6 @@ package lpx
 import (
 	"crypto/sha256"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -80,22 +78,6 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 		return "", fmt.Errorf("selected LPX podTemplate has no model storage volume %q", mount.Name)
 	}
 	return mount.MountPath, nil
-}
-
-func lpuRuntimeBuildRef(projection *ModelProjection, modelStoragePath string) string {
-	buildRef := projection.configuredBuild.Path
-	snapshotRef, snapshotErr := url.Parse(buildRef)
-	runtimeRef := strings.TrimSpace(projection.runtimeBuildRef)
-	runtimeURL, runtimeErr := url.Parse(runtimeRef)
-	if snapshotErr != nil || runtimeErr != nil || snapshotRef.Scheme != BuildSchemeFile ||
-		runtimeRef == "" || runtimeURL.Scheme != "" || filepath.IsAbs(runtimeRef) {
-		return buildRef
-	}
-	cleaned := filepath.Clean(runtimeRef)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return buildRef
-	}
-	return (&url.URL{Scheme: BuildSchemeFile, Path: filepath.Join(modelStoragePath, cleaned)}).String()
 }
 
 func resolvedPartitionData(projections []*ModelProjection) map[string]string {
