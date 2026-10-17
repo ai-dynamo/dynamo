@@ -208,13 +208,13 @@ impl VllmSidecarEngine {
         match model.reasoning_parser() {
             None if dynamo_parsers => {
                 let advice = if model.reports_proto_0_6() {
-                    "Start vllm-rs with a reasoning parser"
+                    "start vllm-rs with `--reasoning-parser <name>`, or drop `--reasoning-parser none` so vllm-rs picks the model's parser (its default, `auto`)"
                 } else {
-                    "Upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with a reasoning parser"
+                    "upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with `--reasoning-parser <name>`"
                 };
                 tracing::warn!(
                     proto_version,
-                    "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. {advice} to let the engine gate grammars on reasoning"
+                    "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. To let the engine gate grammars on reasoning, {advice}"
                 );
             }
             // The frontend sends the gate only from its own reasoning parser.
