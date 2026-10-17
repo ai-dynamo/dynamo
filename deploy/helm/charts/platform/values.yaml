@@ -335,10 +335,7 @@ kai-scheduler:
     # -- Affinity for kai-scheduler pods
     affinity: {}
 
-# Bundled KAI starts its queue-controller webhook after Helm's resources are ready, so the
-# dynamo-default and dynamo Queues wait for it in a post-install/post-upgrade hook Job that
-# confirms the webhook admits a server-side dry-run Queue. Rendered only when
-# global.kai-scheduler.install is true and kai-scheduler.queuecontroller.enabled is not false.
+# Hook Job that holds the Dynamo Queues until bundled KAI's queue-controller webhook admits Queues.
 kaiQueueWait:
   # -- Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving.
   enabled: true

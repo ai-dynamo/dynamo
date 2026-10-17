@@ -2,17 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- /*
-  The Queues in kai.yaml are admitted by KAI's queue-controller webhook. Bundled KAI creates
-  queue-controller at runtime, after its kai-config-deployer hook (weight 1), so with
-  `helm install --wait` the webhook can be registered before it serves. This hook runs between
-  that hook and the Queues (weight 100): it waits for the Deployment to exist and become
-  Available, then server-side dry-runs a probe Queue. KAI's Deployment has no readiness probe, so
-  only the dry-run, which calls the webhook, proves it admits Queues; a failed attempt is retried
-  by the Job. An externally managed KAI (global.kai-scheduler.enabled only) or a disabled
-  queue-controller needs no wait.
-
-  Every field has a template default so `helm upgrade --reuse-values` from a release that
-  predates kaiQueueWait still renders.
+  Holds the kai.yaml Queue hooks (weight 100) until bundled KAI's queue-controller webhook admits
+  Queues. KAI creates it at runtime without a readiness probe, so the Job ends with a server-side
+  dry-run. Template defaults keep `--reuse-values` from older releases working.
 */ -}}
 {{- $kai := index .Values.global "kai-scheduler" | default dict -}}
 {{- $kaiValues := index .Values "kai-scheduler" | default dict -}}
@@ -61,7 +53,7 @@ subjects:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
 ---
-{{- /* A server-side dry-run needs create permission; nothing is persisted. */}}
+{{- /* The dry-run needs create; nothing is persisted. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -116,7 +108,7 @@ metadata:
     helm.sh/hook-output-log-policy: hook-failed
 spec:
   activeDeadlineSeconds: {{ $deadline }}
-  # Each retry re-runs the dry-run admission check after the Job's pod backoff (10s, 20s, ...).
+  # Retries the admission check with pod backoff (10s, 20s, ...).
   backoffLimit: 6
   template:
     spec:
@@ -134,7 +126,6 @@ spec:
       {{- with $podSecurityContext }}
       securityContext: {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- /* kai-operator creates the Deployment at runtime, so wait for it to exist first. */}}
       initContainers:
         - name: wait-for-create
           {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}
@@ -171,7 +162,7 @@ spec:
 image: {{ .config.image | default "registry.k8s.io/kubectl:v1.34.12" | quote }}
 command: [kubectl]
 env:
-  # kubectl writes its discovery cache under $HOME; the root filesystem is read-only.
+  # Writable discovery cache; the root filesystem is read-only.
   - name: HOME
     value: /tmp
 volumeMounts:

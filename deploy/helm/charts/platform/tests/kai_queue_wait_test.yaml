@@ -34,7 +34,7 @@ tests:
       - equal: {path: spec.activeDeadlineSeconds, value: 600}
       - equal: {path: 'spec.template.spec.containers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
       - equal: {path: spec.template.spec.securityContext.runAsUser, value: 65532}
-  # Keep in sync with the reuse-values case above: values.yaml and the template fallback must pin the same image.
+  # Pins values.yaml to the template fallback above.
   - it: uses the same default image from values.yaml
     set: {global.kai-scheduler.install: true}
     documentSelector: {path: kind, value: Job}
