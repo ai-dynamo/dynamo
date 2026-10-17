@@ -221,6 +221,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    profiling_config: Optional[str] = None
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -633,6 +634,14 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump config to the specified file path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--profiling-config",
+            env_var="DYN_PROFILING_CONFIG",
+            default=None,
+            help="Opt-in on-demand profiling coordinator configuration JSON (Linux).",
         )
 
         add_argument(
