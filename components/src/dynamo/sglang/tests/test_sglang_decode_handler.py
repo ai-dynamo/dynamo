@@ -1459,6 +1459,10 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
         ({"regex": "a+"}, {"regex": "a+"}),
         ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
         ({"grammar": 'root ::= "a"'}, {"ebnf": 'root ::= "a"'}),
+        (
+            {"grammar": 'root ::= "a"', "ebnf_full_assistant": True},
+            {"ebnf": 'root ::= "a"', "ebnf_full_assistant": True},
+        ),
     ],
 )
 def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, expected):
@@ -1502,6 +1506,7 @@ def test_build_sampling_params_degenerate_choice_does_not_hide_later_constraint(
         {"regex": "a+"},
         {"choice": ["yes", "no"]},
         {"grammar": 'root ::= "a"'},
+        {"grammar": 'root ::= "a"', "ebnf_full_assistant": True},
         # Modifiers ride along with a constraint on the wire. SGLang has no
         # SamplingParams field for either, so they must not be forwarded.
         {"json": {"type": "object"}, "whitespace_pattern": "[\n ]?"},

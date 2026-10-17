@@ -643,6 +643,8 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    thinking_mode: bool = False,
+    full_assistant_ebnf_supported: bool = False,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -694,6 +696,53 @@ def build_tool_call_guided_decoding(
             "parallel_tool_calls" in request and parallel_tool_calls is False
         ),
     )
+
+    # Some native tool formats need a full-assistant grammar rather than a
+    # tool-only structural tag. Let the configured parser advertise that form;
+    # unsupported parsers fall through to the structural-tag policy below.
+    full_assistant_parser_name = (
+        _normalize_sglang_parser_name(tool_call_parser_name)
+        if tool_call_parser_name
+        else None
+    )
+    if (
+        full_assistant_parser_name
+        and full_assistant_ebnf_supported
+        and attempt_structural_tag
+        and not any(
+            tool.get("function", {}).get("strict") is True for tool in raw_tools
+        )
+    ):
+        full_assistant_constraint: Any = None
+        try:
+            parser = FunctionCallParser(
+                tools=sglang_tools,
+                tool_call_parser=full_assistant_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
+            )
+            full_assistant_constraint = _call_structure_constraint(
+                parser.get_structure_constraint,
+                sglang_tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                thinking_mode=thinking_mode,
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            full_assistant_constraint = None
+        if (
+            isinstance(full_assistant_constraint, tuple)
+            and len(full_assistant_constraint) == 2
+            and full_assistant_constraint[0] == "full_assistant_ebnf"
+        ):
+            guided_decoding = _serialize_tool_constraint(full_assistant_constraint)
+            if guided_decoding is not None:
+                return guided_decoding
 
     if attempt_structural_tag and tool_call_parser_name:
         guidance_tools = convert_tools(
@@ -768,6 +817,11 @@ def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
         return None
     if constraint[0] == "json_schema":
         return {"json": constraint[1]}
+    if constraint[0] == "full_assistant_ebnf":
+        return {
+            "grammar": constraint[1],
+            "ebnf_full_assistant": True,
+        }
     if constraint[0] != "structural_tag":
         return None
 
@@ -989,6 +1043,7 @@ def preprocess_chat_request(
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
         tokenizer=tokenizer,
+        thinking_mode=force_reasoning,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently

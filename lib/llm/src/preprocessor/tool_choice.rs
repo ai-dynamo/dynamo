@@ -4,7 +4,9 @@
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::local_model::runtime_config::SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY;
 use crate::preprocessor::structural_tag::requires_native_tool_call_format;
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
@@ -18,6 +20,8 @@ use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, ResponseFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) -> DynamoError {
     let mut error = DynamoError::builder()
@@ -111,6 +115,19 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
+        // A full-assistant grammar covers reasoning, prose, and tool-call XML,
+        // so it cannot compose with a separate assistant response-format schema.
+        if !has_response_format_constraint
+            && self.apply_full_assistant_ebnf(
+                tool_choice,
+                &convert_tools(tools.as_ref()),
+                request,
+                common_request,
+            )?
+        {
+            return Ok(GuidedToolConstraint::None);
+        }
+
         if self.apply_tool_choice_structural_tag(
             &parser_tool_choice,
             &convert_tools(tools.as_ref()),
@@ -200,6 +217,559 @@ impl OpenAIPreprocessor {
         }
 
         Ok(())
+    }
+
+    /// The protocol and installation path are parser-agnostic. A parser must
+    /// provide a grammar for its complete native assistant format before this
+    /// path is engaged.
+    fn apply_full_assistant_ebnf(
+        &self,
+        tool_choice: &ChatCompletionToolChoiceOption,
+        tools: &[ToolDefinition],
+        request: &NvCreateChatCompletionRequest,
+        common_request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        let tools_are_non_strict = tools.iter().all(|tool| !tool.strict.unwrap_or(false));
+        if tools.is_empty()
+            || !tools_are_non_strict
+            || !self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY)
+        {
+            return Ok(false);
+        }
+        let functions = full_assistant_tools(tool_choice, tools);
+        if functions.is_empty() {
+            return Ok(false);
+        }
+
+        let thinking_mode = request
+            .chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("enable_thinking"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let Some(grammar) = generate_full_assistant_grammar(
+            self.tool_call_parser.as_deref(),
+            &functions,
+            thinking_mode,
+            request.inner.parallel_tool_calls.unwrap_or(true),
+            matches!(
+                tool_choice,
+                ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
+            ),
+        ) else {
+            return Ok(false);
+        };
+
+        let gd = common_request
+            .sampling_options
+            .guided_decoding
+            .get_or_insert_default();
+        gd.grammar = Some(grammar);
+        gd.ebnf_full_assistant = true;
+        Ok(true)
+    }
+}
+
+fn full_assistant_tools<'a>(
+    tool_choice: &ChatCompletionToolChoiceOption,
+    tools: &'a [ToolDefinition],
+) -> Vec<&'a ToolDefinition> {
+    match tool_choice {
+        ChatCompletionToolChoiceOption::None => Vec::new(),
+        ChatCompletionToolChoiceOption::Auto | ChatCompletionToolChoiceOption::Required => {
+            tools.iter().collect()
+        }
+        ChatCompletionToolChoiceOption::Named(named) => tools
+            .iter()
+            .filter(|tool| tool.name == named.function.name)
+            .collect(),
+    }
+}
+
+fn generate_full_assistant_grammar(
+    parser_name: Option<&str>,
+    functions: &[&ToolDefinition],
+    enable_thinking: bool,
+    parallel_tool_calls: bool,
+    required: bool,
+) -> Option<String> {
+    match parser_name {
+        Some("glm47") => Some(generate_glm47_full_assistant_grammar(
+            functions,
+            enable_thinking,
+            parallel_tool_calls,
+            required,
+        )),
+        _ => None,
+    }
+}
+
+fn generate_glm47_full_assistant_grammar(
+    functions: &[&ToolDefinition],
+    enable_thinking: bool,
+    parallel_tool_calls: bool,
+    required: bool,
+) -> String {
+    const BEGIN_TOOL_CALL: &str = "<tool_call>";
+    const END_TOOL_CALL: &str = "</tool_call>";
+    const BEGIN_KEY: &str = "<arg_key>";
+    const END_KEY: &str = "</arg_key>";
+    const BEGIN_VALUE: &str = "<arg_value>";
+    const END_VALUE: &str = "</arg_value>";
+    const END_THINKING: &str = "</think>";
+    const ASSISTANT_TOKEN: &str = "<|assistant|>";
+
+    let mut lines = vec![
+        "root ::= assistant_turn".to_string(),
+        "assistant_turn ::= thinking_block text_block tool_call_blocks".to_string(),
+    ];
+    let thinking_exclusions = [
+        BEGIN_TOOL_CALL,
+        END_TOOL_CALL,
+        BEGIN_KEY,
+        END_KEY,
+        BEGIN_VALUE,
+        END_VALUE,
+        END_THINKING,
+    ];
+    if enable_thinking {
+        lines.push(format!(
+            "thinking_block ::= thinking_block_content \"{END_THINKING}\""
+        ));
+        lines.extend(any_string_exclude(
+            "thinking_block_content",
+            &thinking_exclusions,
+        ));
+    } else {
+        lines.push("thinking_block ::= \"\"".to_string());
+    }
+
+    lines.extend(any_string_exclude(
+        "text_without_special_tokens",
+        &[
+            "<think>",
+            END_THINKING,
+            BEGIN_TOOL_CALL,
+            END_TOOL_CALL,
+            BEGIN_KEY,
+            END_KEY,
+            BEGIN_VALUE,
+            END_VALUE,
+            ASSISTANT_TOKEN,
+        ],
+    ));
+    lines.push("text_block ::= (  text_without_special_tokens )?".to_string());
+
+    if functions.is_empty() {
+        lines.push("tool_call_blocks ::= \"\"".to_string());
+    } else {
+        let repetition = if parallel_tool_calls {
+            if required { "+" } else { "*" }
+        } else if required {
+            ""
+        } else {
+            "?"
+        };
+        lines.push(format!(
+            "tool_call_blocks ::= (  tool_call_unit ){repetition}"
+        ));
+        lines.push(format!(
+            "tool_call_unit ::= \"{BEGIN_TOOL_CALL}\" single_tool_call \"{END_TOOL_CALL}\""
+        ));
+
+        let alternatives = functions
+            .iter()
+            .enumerate()
+            .map(|(index, tool)| {
+                format!("call_{}", glm_hash_name(&format!("{}{index}", tool.name)))
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        lines.push(format!("single_tool_call ::= {alternatives}"));
+
+        for (index, tool) in functions.iter().enumerate() {
+            let name_hash = glm_hash_name(&format!("{}{index}", tool.name));
+            let params = tool.parameters.as_ref().unwrap_or(&Value::Null);
+            let mut properties = schema_properties(params);
+            if !has_complete_properties(params) {
+                properties.clear();
+            }
+            let uses_composition = ["allOf", "anyOf", "oneOf"]
+                .iter()
+                .any(|keyword| params.as_object().is_some_and(|p| p.contains_key(*keyword)));
+
+            let pairs = properties
+                .iter()
+                .map(|(name, schema)| {
+                    let value_rule = if uses_composition {
+                        "text_without_special_tokens".to_string()
+                    } else {
+                        value_rule(schema)
+                    };
+                    format!(
+                        "\"{BEGIN_KEY}{}{END_KEY}\"  \"{BEGIN_VALUE}\" ({value_rule}) \"{END_VALUE}\"",
+                        ebnf_string_inner(name)
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let arguments_rule = if pairs.is_empty() {
+                format!(
+                    "( \"{BEGIN_KEY}\" text_without_special_tokens \"{END_KEY}\"  \"{BEGIN_VALUE}\" text_without_special_tokens \"{END_VALUE}\"  )*"
+                )
+            } else {
+                let choices = pairs.join(" | ");
+                format!("( ( {choices} ) (  ( {choices} ) )* )?")
+            };
+
+            lines.push(format!(
+                "call_{name_hash} ::= \"{}\"  ( arguments_{name_hash}  )?",
+                ebnf_string_inner(&tool.name)
+            ));
+            lines.push(format!("arguments_{name_hash} ::= {arguments_rule}"));
+        }
+
+        lines.extend([
+            r#"basic_string ::= (([\"] basic_string_1 [\"]))"#,
+            r#"basic_string_1 ::= "" | [^"\\\x00-\x1F] basic_string_1 | "\\" escape basic_string_1"#,
+            r#"escape ::= ["\\//bfnrt] | "u" [A-Fa-f0-9]{4}"#,
+            r#"basic_integer ::= "-"? ("0" | [1-9] [0-9]*) ".0"?"#,
+            r#"basic_number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?"#,
+            r#"basic_array ::= "[" ("" | ws basic_any (ws "," ws basic_any)*) ws "]""#,
+            r#"basic_object ::= "{" ("" | ws basic_string ws ":" ws basic_any ( ws "," ws basic_string ws ":" ws basic_any)*) ws "}""#,
+            r#"ws ::= [ \n\t]*"#,
+            r#"basic_any ::= basic_number | basic_string | basic_boolean | basic_null | basic_array | basic_object"#,
+            r#"basic_boolean ::= "true" | "false""#,
+            r#"basic_null ::= "null""#,
+        ]
+        .into_iter()
+        .map(String::from));
+    }
+
+    lines.join("\n")
+}
+
+fn glm_hash_name(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let digest = format!("{digest:x}");
+    digest[..16].to_string()
+}
+
+fn ebnf_string_inner(value: &str) -> String {
+    let mut output = String::new();
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{8}' => output.push_str("\\b"),
+            '\u{c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if (character as u32) < 0x20 => {
+                output.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => output.push(character),
+        }
+    }
+    output
+}
+
+fn value_rule(schema: &Value) -> String {
+    let Some(schema) = schema.as_object() else {
+        return "text_without_special_tokens".to_string();
+    };
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        let formatted = values
+            .iter()
+            .map(|value| {
+                let json_value = match value {
+                    Value::String(string) => ebnf_string_inner(string),
+                    other => ebnf_string_inner(
+                        &serde_json::to_string(other).expect("serde_json values always serialize"),
+                    ),
+                };
+                format!("\"{json_value}\"")
+            })
+            .collect::<Vec<_>>();
+        if formatted.is_empty() {
+            return "text_without_special_tokens".to_string();
+        }
+        let rule = formatted.join(" | ");
+        return if formatted.len() > 1 {
+            format!("({rule})")
+        } else {
+            rule
+        };
+    }
+
+    let Some(schema_type) = schema.get("type") else {
+        return "text_without_special_tokens".to_string();
+    };
+    let mapped = |value: &Value| match value.as_str() {
+        Some("string") => "text_without_special_tokens",
+        Some("number" | "integer") => "basic_number",
+        Some("boolean") => "basic_boolean",
+        Some("null") => "basic_null",
+        Some("array") => "basic_array",
+        Some("object") => "basic_object",
+        _ => "text_without_special_tokens",
+    };
+    match schema_type {
+        Value::Array(types) => {
+            let rules = types.iter().map(mapped).collect::<Vec<_>>();
+            if rules.is_empty() {
+                "text_without_special_tokens".to_string()
+            } else {
+                rules.join(" | ")
+            }
+        }
+        value => mapped(value).to_string(),
+    }
+}
+
+fn schema_properties(schema: &Value) -> Vec<(String, Value)> {
+    let Some(object) = schema.as_object() else {
+        return Vec::new();
+    };
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        return properties
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+    }
+
+    let mut merged = Vec::new();
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        for branch in branches {
+            for (key, value) in schema_properties(branch) {
+                if !merged.iter().any(|(existing, _)| existing == &key) {
+                    merged.push((key, value));
+                }
+            }
+        }
+    }
+    merged
+}
+
+fn has_complete_properties(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return schema == &Value::Bool(false);
+    };
+    if [
+        "$ref",
+        "$dynamicRef",
+        "patternProperties",
+        "dependentSchemas",
+        "if",
+        "then",
+        "else",
+    ]
+    .iter()
+    .any(|keyword| object.contains_key(*keyword))
+        || ["additionalProperties", "unevaluatedProperties"]
+            .iter()
+            .any(|keyword| {
+                object.get(*keyword).unwrap_or(&Value::Bool(false)) != &Value::Bool(false)
+            })
+    {
+        return false;
+    }
+
+    let branches = ["allOf", "anyOf", "oneOf"]
+        .iter()
+        .flat_map(|keyword| {
+            object
+                .get(*keyword)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        return branches.is_empty()
+            && (!properties.is_empty()
+                || object.get("additionalProperties") == Some(&Value::Bool(false)));
+    }
+    if !branches.is_empty() {
+        return branches
+            .iter()
+            .all(|branch| has_complete_properties(branch));
+    }
+    object.get("additionalProperties") == Some(&Value::Bool(false))
+}
+
+#[derive(Debug, Default)]
+struct GlmTrieNode {
+    children: BTreeMap<char, usize>,
+    failure: usize,
+    is_end: bool,
+}
+
+fn any_string_exclude(rule_name: &str, negative_strings: &[&str]) -> Vec<String> {
+    let mut patterns = negative_strings
+        .iter()
+        .filter(|pattern| !pattern.is_empty())
+        .copied()
+        .collect::<Vec<_>>();
+    patterns.sort_unstable();
+    patterns.dedup();
+    if patterns.is_empty() {
+        return vec![format!("{rule_name} ::= [^]*")];
+    }
+
+    let hash_prefix = glm_hash_name(&patterns.join("\0"));
+    let mut nodes = vec![GlmTrieNode::default()];
+    for pattern in &patterns {
+        let mut node = 0;
+        for character in pattern.chars() {
+            let next = nodes[node].children.get(&character).copied();
+            node = match next {
+                Some(next) => next,
+                None => {
+                    nodes.push(GlmTrieNode::default());
+                    let next = nodes.len() - 1;
+                    nodes[node].children.insert(character, next);
+                    next
+                }
+            };
+        }
+        nodes[node].is_end = true;
+    }
+
+    let mut queue = std::collections::VecDeque::new();
+    let root_children = nodes[0].children.values().copied().collect::<Vec<_>>();
+    for child in root_children {
+        nodes[child].failure = 0;
+        queue.push_back(child);
+    }
+    while let Some(current) = queue.pop_front() {
+        let children = nodes[current]
+            .children
+            .iter()
+            .map(|(character, child)| (*character, *child))
+            .collect::<Vec<_>>();
+        for (character, child) in children {
+            queue.push_back(child);
+            let mut failure = nodes[current].failure;
+            while failure != 0 && !nodes[failure].children.contains_key(&character) {
+                failure = nodes[failure].failure;
+            }
+            nodes[child].failure = nodes[failure]
+                .children
+                .get(&character)
+                .copied()
+                .filter(|target| *target != child)
+                .unwrap_or(0);
+            let failure_is_end = nodes[nodes[child].failure].is_end;
+            nodes[child].is_end = nodes[child].is_end || failure_is_end;
+        }
+    }
+
+    let mut pattern_chars = BTreeSet::new();
+    for pattern in &patterns {
+        pattern_chars.extend(pattern.chars());
+    }
+    let state_name = |state: usize| format!("s_{hash_prefix}_{state}");
+    let mut rules = vec![format!("{rule_name} ::= {}", state_name(0))];
+
+    for state in 0..nodes.len() {
+        if nodes[state].is_end {
+            continue;
+        }
+        let mut excluded_chars = Vec::new();
+        let mut transitions = BTreeMap::new();
+        for character in &pattern_chars {
+            let mut current = state;
+            loop {
+                if let Some(target) = nodes[current].children.get(character) {
+                    if nodes[*target].is_end {
+                        excluded_chars.push(*character);
+                    } else {
+                        transitions
+                            .entry(*target)
+                            .or_insert_with(Vec::new)
+                            .push(*character);
+                    }
+                    break;
+                }
+                if current == 0 {
+                    if nodes[0].is_end {
+                        excluded_chars.push(*character);
+                    } else {
+                        transitions
+                            .entry(0)
+                            .or_insert_with(Vec::new)
+                            .push(*character);
+                    }
+                    break;
+                }
+                current = nodes[current].failure;
+            }
+        }
+
+        let mut explicit_chars = BTreeSet::from_iter(excluded_chars.iter().copied());
+        for chars in transitions.values() {
+            explicit_chars.extend(chars.iter().copied());
+        }
+        let mut alternatives = Vec::new();
+        if explicit_chars.is_empty() {
+            alternatives.push(format!("[^] {}", state_name(0)));
+        } else {
+            let class = explicit_chars
+                .iter()
+                .map(|c| escape_char_class(*c))
+                .collect::<String>();
+            alternatives.push(format!("[^{class}] {}", state_name(0)));
+        }
+        for (target, chars) in &transitions {
+            for character in chars {
+                alternatives.push(format!(
+                    "\"{}\" {}",
+                    escape_string_literal(*character),
+                    state_name(*target)
+                ));
+            }
+        }
+        alternatives.push("\"\"".to_string());
+        rules.push(format!(
+            "{} ::= {}",
+            state_name(state),
+            alternatives.join(" | ")
+        ));
+    }
+    rules
+}
+
+fn escape_char_class(character: char) -> String {
+    match character {
+        '\\' | ']' | '^' | '-' => format!("\\{character}"),
+        '\n' => "\\n".to_string(),
+        '\t' => "\\t".to_string(),
+        '\r' => "\\r".to_string(),
+        character if (character as u32) < 32 || (character as u32) > 126 => {
+            format!("\\x{:02X}", character as u32)
+        }
+        character => character.to_string(),
+    }
+}
+
+fn escape_string_literal(character: char) -> String {
+    match character {
+        '"' => "\\\"".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\t' => "\\t".to_string(),
+        '\r' => "\\r".to_string(),
+        character if (character as u32) < 32 || (character as u32) > 126 => {
+            format!("\\x{:02X}", character as u32)
+        }
+        character => character.to_string(),
     }
 }
 
@@ -403,12 +973,26 @@ mod tests {
     }
 
     fn preprocessor(parser: &str, mode: StructuralTagMode) -> Arc<OpenAIPreprocessor> {
+        preprocessor_with_capability(parser, mode, true)
+    }
+
+    fn preprocessor_with_capability(
+        parser: &str,
+        mode: StructuralTagMode,
+        full_assistant_supported: bool,
+    ) -> Arc<OpenAIPreprocessor> {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
         mdc.runtime_config.structural_tag = (mode == StructuralTagMode::On)
             .then(crate::local_model::runtime_config::StructuralTagConfig::default);
         mdc.runtime_config.tool_call_parser = Some(parser.to_string());
+        if full_assistant_supported {
+            mdc.runtime_config.runtime_data.insert(
+                SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY.to_string(),
+                json!(true),
+            );
+        }
         OpenAIPreprocessor::new(mdc).unwrap()
     }
 
@@ -454,6 +1038,179 @@ mod tests {
                 expected,
             );
         }
+    }
+
+    #[test]
+    fn glm47_auto_installs_full_assistant_ebnf_guidance() {
+        let preprocessor = preprocessor("glm47", StructuralTagMode::Off);
+        let chat_request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "auto"
+        }));
+        let mut common_request = preprocessed_request();
+
+        let constraint = preprocessor
+            .apply_tool_choice_guided_decoding(&chat_request, &mut common_request, false)
+            .unwrap();
+        let guided = common_request
+            .sampling_options
+            .guided_decoding
+            .expect("GLM-4.7 installs full-assistant EBNF");
+
+        assert_eq!(constraint, GuidedToolConstraint::None);
+        assert!(guided.ebnf_full_assistant);
+        assert!(
+            guided
+                .grammar
+                .as_deref()
+                .is_some_and(|grammar| grammar.contains("\"get_current_time\"")
+                    && grammar.contains("\"<tool_call>\""))
+        );
+        assert!(guided.structural_tag.is_none());
+        guided.validate().unwrap();
+
+        let strict_request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": false
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        }));
+        let mut strict_common_request = preprocessed_request();
+        preprocessor
+            .apply_tool_choice_guided_decoding(&strict_request, &mut strict_common_request, false)
+            .unwrap();
+        assert!(
+            strict_common_request
+                .sampling_options
+                .guided_decoding
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn glm47_full_assistant_grammar_uses_only_current_request_tools() {
+        let tools = [
+            ToolDefinition {
+                name: "get_current_time".to_string(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}}
+                })),
+                strict: Some(false),
+            },
+            ToolDefinition {
+                name: "lookup_country".to_string(),
+                parameters: Some(json!({"type": "object"})),
+                strict: Some(false),
+            },
+        ];
+
+        let auto = full_assistant_tools(&ChatCompletionToolChoiceOption::Auto, &tools)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let auto_grammar = generate_glm47_full_assistant_grammar(&auto, true, false, false);
+        let parallel_grammar = generate_glm47_full_assistant_grammar(&auto, true, true, false);
+        assert!(auto_grammar.contains("\"get_current_time\""));
+        assert!(auto_grammar.contains("\"lookup_country\""));
+        assert!(auto_grammar.contains("thinking_block_content \"</think>\""));
+        assert!(parallel_grammar.contains("tool_call_blocks ::= (  tool_call_unit )*"));
+        assert!(auto_grammar.contains("tool_call_blocks ::= (  tool_call_unit )?"));
+
+        let named = full_assistant_tools(&named("get_current_time"), &tools)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let named_grammar = generate_glm47_full_assistant_grammar(&named, false, false, true);
+        assert!(named_grammar.contains("\"get_current_time\""));
+        assert!(!named_grammar.contains("\"lookup_country\""));
+        assert!(named_grammar.contains("thinking_block ::= \"\""));
+        assert!(named_grammar.contains("tool_call_blocks ::= (  tool_call_unit )"));
+    }
+
+    #[test]
+    fn glm47_full_assistant_ebnf_requires_effective_tools() {
+        let preprocessor = preprocessor("glm47", StructuralTagMode::Off);
+
+        for extra in [
+            json!({"tool_choice": "auto"}),
+            json!({"tools": tools(), "tool_choice": "none"}),
+        ] {
+            let chat_request = request(extra.clone());
+            let mut common_request = preprocessed_request();
+
+            preprocessor
+                .apply_tool_choice_guided_decoding(&chat_request, &mut common_request, false)
+                .unwrap();
+
+            assert!(
+                common_request.sampling_options.guided_decoding.is_none(),
+                "full-assistant EBNF must not be installed without effective tools: {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_string_enum_values_use_json_literals() {
+        let schema = json!({
+            "enum": [
+                "text",
+                7,
+                ["text"],
+                {"kind": "text"}
+            ]
+        });
+
+        let rule = value_rule(&schema);
+
+        assert!(rule.contains("\"text\""));
+        assert!(rule.contains("\"7\""));
+        assert!(rule.contains("\"[\\\"text\\\"]\""));
+        assert!(rule.contains("\"{\\\"kind\\\":\\\"text\\\"}\""));
+    }
+
+    #[test]
+    fn full_assistant_ebnf_requires_a_known_parser_dialect() {
+        let preprocessor = preprocessor_with_capability("hermes", StructuralTagMode::Off, true);
+        let chat_request = request(json!({"tools": tools(), "tool_choice": "auto"}));
+        let mut common_request = preprocessed_request();
+
+        preprocessor
+            .apply_tool_choice_guided_decoding(&chat_request, &mut common_request, false)
+            .unwrap();
+
+        assert!(
+            common_request.sampling_options.guided_decoding.is_none(),
+            "a parser without a registered full-assistant grammar must not receive the GLM grammar"
+        );
+    }
+
+    #[test]
+    fn full_assistant_ebnf_requires_worker_capability() {
+        let preprocessor = preprocessor_with_capability("glm47", StructuralTagMode::Off, false);
+        let chat_request = request(json!({"tools": tools(), "tool_choice": "auto"}));
+        let mut common_request = preprocessed_request();
+
+        preprocessor
+            .apply_tool_choice_guided_decoding(&chat_request, &mut common_request, false)
+            .unwrap();
+
+        assert!(
+            common_request.sampling_options.guided_decoding.is_none(),
+            "an unsupported worker must not receive a full-assistant grammar"
+        );
     }
 
     #[test]

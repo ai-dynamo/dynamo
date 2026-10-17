@@ -16,6 +16,7 @@ from dynamo.common.backend import logprobs as _shared_logprobs
 
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
 DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
+SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY = "sglang_ebnf_full_assistant"
 _PAYLOAD_KEY = "sglang_tito"
 _GENERATE_REQUEST_ADAPTER = TypeAdapter(GenerateReqInput)
 

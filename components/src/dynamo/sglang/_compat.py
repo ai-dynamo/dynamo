@@ -486,6 +486,20 @@ def supports_require_reasoning(engine: Any) -> bool:
     )
 
 
+def supports_full_assistant_ebnf() -> bool:
+    """Return whether SGLang applies EBNF to the complete assistant turn."""
+    try:
+        from sglang.srt.sampling.sampling_params import SamplingParams
+    except ImportError:
+        # Older SGLang releases predate the full-assistant grammar boundary.
+        return False
+
+    try:
+        return "ebnf_full_assistant" in inspect.signature(SamplingParams).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "add_sglang_cli_compat",
@@ -502,5 +516,6 @@ __all__ = [
     "sglang_default_mla_attention_backend",
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
+    "supports_full_assistant_ebnf",
     "supports_external_mm_hashes",
 ]

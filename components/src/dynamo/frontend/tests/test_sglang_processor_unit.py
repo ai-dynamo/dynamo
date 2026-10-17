@@ -2138,6 +2138,125 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert seen["tool_call_parser"] == "minimax-m3"
         assert guided == {"structural_tag": {"type": "object"}}
 
+    def test_glm47_full_assistant_ebnf_guidance_is_preserved(self, monkeypatch):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        seen = {}
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                seen["tool_call_parser"] = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                seen["tool_choice"] = tool_choice
+                seen["thinking_mode"] = kwargs.get("thinking_mode")
+                return "full_assistant_ebnf", 'root ::= "ok"'
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "tools": raw_tools},
+            tool_call_parser_name="glm47",
+            sglang_tools=convert_tools(raw_tools),
+            thinking_mode=True,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            full_assistant_ebnf_supported=True,
+        )
+
+        assert seen["tool_call_parser"] == "glm47"
+        assert seen["tool_choice"] == "auto"
+        assert seen["thinking_mode"] is True
+        assert guided == {
+            "grammar": 'root ::= "ok"',
+            "ebnf_full_assistant": True,
+        }
+
+    def test_full_assistant_ebnf_guidance_is_parser_agnostic(self, monkeypatch):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                self.tool_call_parser = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                assert tool_choice == "auto"
+                return "full_assistant_ebnf", 'root ::= "ok"'
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "tools": raw_tools},
+            tool_call_parser_name="hermes",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            full_assistant_ebnf_supported=True,
+        )
+
+        assert guided == {
+            "grammar": 'root ::= "ok"',
+            "ebnf_full_assistant": True,
+        }
+
+    def test_full_assistant_ebnf_requires_worker_capability(self, monkeypatch):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                pass
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "tools": raw_tools},
+            tool_call_parser_name="glm47",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            full_assistant_ebnf_supported=False,
+        )
+
+        assert guided == {"structural_tag": {"type": "object"}}
+
     @pytest.mark.parametrize(
         "tool_choice_field",
         [{}, {"tool_choice": None}, {"tool_choice": "auto"}],
@@ -3469,6 +3588,17 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
         # Reset to default
         sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
+
+    def test_init_worker_propagates_full_assistant_capability(self):
+        """Preprocess workers retain the worker-advertised EBNF capability."""
+        _init_worker(
+            MODEL,
+            None,
+            None,
+            full_assistant_ebnf_supported=True,
+        )
+        assert sglang_processor_module._w_full_assistant_ebnf_supported is True
+        sglang_processor_module._w_full_assistant_ebnf_supported = False
 
     def test_init_worker_applies_chat_template_override(self, monkeypatch):
         """Preprocess workers use the same chat template override as the main process."""

@@ -42,6 +42,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     sglang_uses_mla_backend,
     supports_disagg_prefill_cancel_anytime,
+    supports_full_assistant_ebnf,
 )
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
@@ -54,6 +55,7 @@ from dynamo.sglang.capacity import (
 )
 from dynamo.sglang.engine_generate import (
     DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+    SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY,
     SGLANG_GENERATE_CAPABILITY,
 )
 from dynamo.sglang.gateway import (
@@ -537,6 +539,11 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    if llm_handler and supports_full_assistant_ebnf():
+        runtime_config.set_engine_specific(
+            SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY,
+            json.dumps(True),
+        )
     # Multimodal and diffusion handlers do not forward the per-request gate.
     if llm_handler and not getattr(server_args, "dllm_algorithm", None):
         publish_sglang_structural_tag_reasoning_policy(
