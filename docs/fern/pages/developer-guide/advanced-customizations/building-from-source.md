@@ -78,8 +78,15 @@ Install Dynamo with a backend extra to pull the inference engine and its CUDA de
 
 ```bash
 # Use .[vllm] or .[sglang] instead to install the relevant framework dependencies
-uv pip install -e .
+uv pip install -e . --prerelease=allow
 ```
+
+`--prerelease=allow` is required on Python < 3.13. The base dependency
+`aisimulate==0.1.0.dev1` is a pre-release, and it in turn pins the pre-releases
+`aiconfigurator==0.11.0.dev20260728` and `tfp-nightly==0.26.0.dev20260626`.
+`uv` refuses those transitive pre-releases even though the direct pin is
+explicit, so without the flag the install fails with `we can conclude that your
+requirements are unsatisfiable`.
 
 > [!NOTE]
 > The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](../../cli/installation/install-dynamo.mdx) for more details.
