@@ -4,6 +4,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use hf_hub::Cache;
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
@@ -53,12 +54,102 @@ fn get_cached_model_path_in(
     cache_dir: PathBuf,
 ) -> Option<PathBuf> {
     let cache = Cache::new(cache_dir);
-    let snapshot_path = cache
-        .model(model_name.to_string())
-        .get("config.json")?
-        .parent()?
-        .to_path_buf();
-    cached_model_dir(model_name, snapshot_path, ignore_weights)
+    let repo = cache.model(model_name.to_string());
+    let config_path = repo.get("config.json")?;
+    let snapshot_path = config_path.parent()?;
+
+    if !is_snapshot_complete(snapshot_path, ignore_weights, None) {
+        return None;
+    }
+
+    let snapshot_path = snapshot_path.to_path_buf();
+    tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
+    Some(snapshot_path)
+}
+
+fn is_snapshot_complete(
+    dir: &Path,
+    ignore_weights: bool,
+    required_files: Option<&[String]>,
+) -> bool {
+    if let Some(files) = required_files {
+        if !files.iter().all(|file| dir.join(file).exists()) {
+            return false;
+        }
+    } else {
+        if !dir.join("config.json").exists() {
+            return false;
+        }
+
+        let has_tokenizer = dir.join("tokenizer.json").exists()
+            || dir.join("tiktoken.model").exists()
+            || has_tiktoken_file(dir);
+        if !has_tokenizer {
+            return false;
+        }
+    }
+
+    if ignore_weights {
+        return true;
+    }
+
+    let safetensors_index = dir.join("model.safetensors.index.json");
+    let pytorch_index = dir.join("pytorch_model.bin.index.json");
+    dir.join("model.safetensors").exists()
+        || dir.join("pytorch_model.bin").exists()
+        || (safetensors_index.exists() && shard_files_present(&safetensors_index))
+        || (pytorch_index.exists() && shard_files_present(&pytorch_index))
+}
+
+/// Returns the snapshot path if that exact revision is already on disk.
+fn get_cached_model_path_at_revision(
+    model_name: &str,
+    revision: &str,
+    ignore_weights: bool,
+    required_files: Option<&[String]>,
+    cache_dir: PathBuf,
+) -> Option<PathBuf> {
+    // This revision reaches the join below from another worker's card over etcd, and a
+    // `..` segment in it would walk out of the cache directory. The HF cache only ever
+    // names a snapshot directory after a commit SHA, so anything else is a miss.
+    if !is_hf_commit_sha(revision) {
+        return None;
+    }
+
+    // HF cache layout: models--{org}--{model}/snapshots/{sha}/
+    let model_key = model_name.replace('/', "--");
+    let snapshot_dir = cache_dir
+        .join(format!("models--{model_key}"))
+        .join("snapshots")
+        .join(revision);
+
+    if !snapshot_dir.exists()
+        || !is_snapshot_complete(&snapshot_dir, ignore_weights, required_files)
+    {
+        return None;
+    }
+
+    tracing::info!(
+        "Found cached model '{model_name}' at revision {revision}({snapshot_dir:?}), skipping download"
+    );
+    Some(snapshot_dir)
+}
+
+/// If `path` sits inside an HF-cache-style snapshot dir
+/// (".../models--{org}--{name}/snapshots/{sha}"), return the repo id "org/name".
+/// Returns `None` for any path that isn't shaped like an HF cache snapshot
+/// (e.g. a plain local checkpoint directory).
+pub(crate) fn hf_repo_from_snapshot_path(path: &Path) -> Option<String> {
+    let snapshots_dir = path.parent()?;
+    if snapshots_dir.file_name()?.to_str()? != "snapshots" {
+        return None;
+    }
+    let models_dir = snapshots_dir.parent()?;
+    let repo_key = models_dir.file_name()?.to_str()?.strip_prefix("models--")?;
+    match repo_key.split_once("--") {
+        Some((org, name)) => Some(format!("{org}/{name}")),
+        None => Some(repo_key.to_string()),
+    }
 }
 
 /// Look up a model in a non-HuggingFace provider's cache. ModelExpress owns the layout.
@@ -73,40 +164,11 @@ fn get_cached_provider_model_path_in(
 }
 
 fn cached_model_dir(model_name: &str, dir: PathBuf, ignore_weights: bool) -> Option<PathBuf> {
-    if !has_required_model_files(&dir, ignore_weights) {
+    if !is_snapshot_complete(&dir, ignore_weights, None) {
         return None;
     }
     tracing::info!("Found cached model '{model_name}' at {dir:?}, skipping download");
     Some(dir)
-}
-
-/// Require model config and tokenizer files, plus weights unless explicitly skipped.
-fn has_required_model_files(dir: &Path, ignore_weights: bool) -> bool {
-    let has = |filename: &str| dir.join(filename).exists();
-
-    if !has("config.json") {
-        return false;
-    }
-
-    // Check for tokenizer files (at least one must exist). Only count
-    // artifacts that ``ModelDeploymentCard::TokenizerKind::from_disk`` can
-    // actually load -- ``tokenizer_config.json`` is metadata describing the
-    // tokenizer and cannot be used on its own, so a snapshot with only
-    // ``config.json`` + ``tokenizer_config.json`` would fall through to a
-    // download even though the cache appears "populated".
-    let has_tokenizer = has("tokenizer.json") || has("tiktoken.model") || has_tiktoken_file(dir);
-    if !has_tokenizer {
-        return false;
-    }
-
-    // For full downloads, check for weight files. When an index file is present,
-    // verify the shard files it references are also cached — an index without its
-    // shards is an incomplete cache that should fall through to download.
-    ignore_weights
-        || has("model.safetensors")
-        || has("pytorch_model.bin")
-        || shard_files_present(&dir.join("model.safetensors.index.json"))
-        || shard_files_present(&dir.join("pytorch_model.bin.index.json"))
 }
 
 /// Check if the snapshot directory contains any `*.tiktoken` file (e.g. `qwen.tiktoken`).
@@ -157,6 +219,22 @@ fn is_no_shared_storage() -> bool {
     dynamo_runtime::config::env_is_truthy(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
 }
 
+/// Build the ModelExpress client config shared by `from_hf` and `from_hf_at_revision`
+/// from the same environment variables.
+fn mx_client_config(provider: MxModelProvider) -> MxClientConfig {
+    let mut config: MxClientConfig = MxClientConfig::default();
+    if provider == MxModelProvider::Ngc {
+        config.cache.local_path = get_model_express_cache_dir(provider);
+    }
+    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
+        config = config.with_endpoint(endpoint);
+    }
+    if is_no_shared_storage() {
+        config.cache.shared_storage = false;
+    }
+    config
+}
+
 /// Download a model using ModelExpress client. The client first requests for the model
 /// from the server and fallbacks to direct download in case of server failure.
 /// `ngc://` names are downloaded from NGC; all other names are Hugging Face repos.
@@ -182,52 +260,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         );
     }
 
-    let mut config: MxClientConfig = MxClientConfig::default();
-    if provider == MxModelProvider::Ngc {
-        config.cache.local_path = get_model_express_cache_dir(provider);
-    }
-    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
-        config = config.with_endpoint(endpoint);
-    }
-    if is_no_shared_storage() {
-        config.cache.shared_storage = false;
-    }
-
-    let result = match MxClient::new(config).await {
-        Ok(mut client) => {
-            tracing::info!("Successfully connected to ModelExpress server");
-            match client
-                .request_model(&model_name, provider, ignore_weights)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!("Server download succeeded for model: {model_name}");
-                    match client.get_model_path(&model_name, provider).await {
-                        Ok(path) => Ok(path),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to resolve local model path after server download for '{model_name}': {e}. \
-                                Falling back to direct download."
-                            );
-                            mx_download_direct(&model_name, provider, ignore_weights).await
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Server download failed for model '{model_name}': {e}. Falling back to direct download."
-                    );
-                    mx_download_direct(&model_name, provider, ignore_weights).await
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Cannot connect to ModelExpress server: {e}. Using direct download.");
-            mx_download_direct(&model_name, provider, ignore_weights).await
-        }
-    };
-
-    match result {
+    match download_from_model_express(&model_name, None, ignore_weights).await {
         Ok(path) => {
             tracing::info!("ModelExpress download completed successfully for model: {model_name}");
             Ok(path)
@@ -239,13 +272,221 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     }
 }
 
-async fn mx_download_direct(
-    model_name: &str,
-    provider: MxModelProvider,
+/// Like `from_hf`, but resolves a specific commit SHA instead of latest.
+/// If the snapshot is already on disk at that revision, returns it immediately.
+/// Otherwise downloads that revision through ModelExpress, which resolves and
+/// fetches pinned branches/tags/commit SHAs natively (falling back to a direct
+/// HuggingFace download of the same pinned revision if the server is
+/// unreachable).
+pub async fn from_hf_at_revision(
+    name: impl AsRef<Path>,
+    revision: &str,
+    required_files: Option<&[String]>,
     ignore_weights: bool,
 ) -> anyhow::Result<PathBuf> {
-    let cache_dir = get_model_express_cache_dir(provider);
-    mx::download_model(model_name, provider, Some(cache_dir), ignore_weights).await
+    let name = name.as_ref();
+    let model_name = name.display().to_string();
+
+    // Both branches below join this revision onto a cache directory — the lookup here,
+    // and hf-hub's ref writer under the download — and it arrives from another worker's
+    // card over etcd. Reject anything that could climb out before either one runs. A
+    // branch or tag is still allowed through; only the cache lookup needs a full SHA.
+    if !is_joinable_revision(revision) {
+        anyhow::bail!("invalid revision for {model_name}: {revision:?}");
+    }
+
+    if let Some(cached) = get_cached_model_path_at_revision(
+        &model_name,
+        revision,
+        ignore_weights,
+        required_files,
+        get_model_express_cache_dir(MxModelProvider::HuggingFace),
+    ) {
+        return Ok(cached);
+    }
+
+    let snapshot = download_from_model_express(&model_name, Some(revision), ignore_weights)
+        .await
+        .with_context(|| {
+            format!("downloading {model_name} at revision {revision} via ModelExpress")
+        })?;
+
+    // The direct-download fallback inside `download_from_model_express` reports no
+    // resolved revision of its own, so when a full SHA was requested the snapshot's own
+    // directory name is the only confirmation available that the pin was honored.
+    if is_hf_commit_sha(revision)
+        && !snapshot
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(revision))
+    {
+        anyhow::bail!(
+            "{model_name} resolved to {snapshot:?}, which is not the pinned revision {revision}"
+        );
+    }
+
+    Ok(snapshot)
+}
+
+/// The first of `required_files` that is not present in `dir`, if any.
+pub(crate) fn first_missing_file<'a>(
+    dir: &Path,
+    required_files: Option<&'a [String]>,
+) -> Option<&'a String> {
+    required_files?
+        .iter()
+        .find(|filename| !dir.join(filename).exists())
+}
+
+async fn download_from_model_express(
+    model_name: &str,
+    revision: Option<&str>,
+    ignore_weights: bool,
+) -> anyhow::Result<PathBuf> {
+    let model_ref = revision
+        .map(|revision| format!("{model_name} at revision {revision}"))
+        .unwrap_or_else(|| model_name.to_string());
+
+    let provider = provider_for(model_name);
+    match MxClient::new(mx_client_config(provider)).await {
+        Ok(mut client) => {
+            tracing::info!("Successfully connected to ModelExpress server");
+            match client
+                .request_model_revision(model_name, provider, ignore_weights, revision)
+                .await
+            {
+                Ok(result) => {
+                    tracing::info!("Server download succeeded for model: {model_ref}");
+                    // Compatibility with ModelExpress servers older than 0.6.0, which
+                    // predate the pinned-revision protocol: they parse the request
+                    // without its revision field and answer with the default snapshot,
+                    // reporting no resolved revision. Accepting that would hand back a
+                    // different commit under the name of the pinned one — the exact skew
+                    // this path exists to prevent — so a revision the server does not
+                    // confirm is a miss.
+                    // TODO: remove once 0.6.0 is the oldest ModelExpress server in the
+                    // supported window; the client crate and both runtime images are
+                    // already pinned to it, so only an operator-run external server can
+                    // still be older.
+                    if let Some(revision) = revision
+                        && !revision_honored(revision, result.resolved_revision.as_deref())
+                    {
+                        tracing::warn!(
+                            resolved_revision = ?result.resolved_revision,
+                            "Server did not confirm the pinned revision for '{model_ref}'. \
+                            Falling back to direct download."
+                        );
+                        return mx_download_direct(model_name, Some(revision), ignore_weights)
+                            .await;
+                    }
+                    // `get_model_path` takes no revision, so it cannot stand in for a
+                    // pinned request even though the server did confirm one.
+                    if revision.is_some() && result.path.is_none() {
+                        tracing::warn!(
+                            "Server confirmed the pinned revision for '{model_ref}' but reported \
+                            no local snapshot path. Falling back to direct download."
+                        );
+                        return mx_download_direct(model_name, revision, ignore_weights).await;
+                    }
+                    let resolved = match result.path {
+                        Some(path) => Ok(path),
+                        None => client.get_model_path(model_name, provider).await,
+                    };
+                    match resolved {
+                        Ok(path) => Ok(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to resolve local model path after server download for '{model_ref}': {e}. \
+                                Falling back to direct download."
+                            );
+                            mx_download_direct(model_name, revision, ignore_weights).await
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Server download failed for model '{model_ref}': {e}. \
+                        Falling back to direct download."
+                    );
+                    mx_download_direct(model_name, revision, ignore_weights).await
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Cannot connect to ModelExpress server: {e}. Using direct download.");
+            mx_download_direct(model_name, revision, ignore_weights).await
+        }
+    }
+}
+
+async fn mx_download_direct(
+    model_name: &str,
+    revision: Option<&str>,
+    ignore_weights: bool,
+) -> anyhow::Result<PathBuf> {
+    let provider = provider_for(model_name);
+    mx::download_model_revision(
+        model_name,
+        provider,
+        Some(get_model_express_cache_dir(provider)),
+        ignore_weights,
+        revision,
+    )
+    .await
+    .map(|result| result.path)
+}
+
+/// Whether the revision a ModelExpress server reports resolving confirms that it
+/// honored `requested`.
+///
+/// `None` means the server never resolved a revision at all, which is what a server
+/// older than the pinned-revision protocol reports. A branch or tag legitimately
+/// resolves to an unrelated immutable commit SHA, so only a requested SHA can be
+/// compared against the answer, and an abbreviated one is a prefix of it.
+fn revision_honored(requested: &str, resolved: Option<&str>) -> bool {
+    let Some(resolved) = resolved else {
+        return false;
+    };
+    if !is_commit_sha_prefix(requested) {
+        return true;
+    }
+    resolved.len() >= requested.len()
+        && resolved.as_bytes()[..requested.len()].eq_ignore_ascii_case(requested.as_bytes())
+}
+
+/// Whether `revision` names a commit directly — full or abbreviated — rather than a
+/// branch or tag. Looser than [`is_hf_commit_sha`] because a caller may abbreviate a
+/// SHA on the command line; use that one for anything joined into a path or published
+/// on a card.
+fn is_commit_sha_prefix(revision: &str) -> bool {
+    (7..=40).contains(&revision.len()) && revision.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether `revision` is a full Hugging Face commit SHA. This is the only shape that
+/// names a snapshot directory, so it is the bar both for joining a revision into a
+/// cache path and for publishing one on a model deployment card.
+pub(crate) fn is_hf_commit_sha(revision: &str) -> bool {
+    huggingface::validate_hf_commit_sha(revision).is_ok()
+}
+
+/// Whether `filename` is a safe relative path within a repository snapshot. Rejects
+/// absolute paths and `.`/`..` components, which would otherwise resolve outside the
+/// snapshot directory they are joined onto.
+pub(crate) fn is_hf_repo_file(filename: &str) -> bool {
+    huggingface::validate_hf_repo_file(filename).is_ok()
+}
+
+/// Whether `repo` is a safe repository id: no absolute or `..` segments, since it is
+/// both a cache key and an outbound Hub request path.
+pub(crate) fn is_hf_repo_path(repo: &str) -> bool {
+    huggingface::validate_hf_relative_path(repo, "repository id").is_ok()
+}
+
+/// Whether `revision` is safe to join onto a cache directory. Looser than
+/// [`is_hf_commit_sha`], so a branch or tag still reaches the download, but it still
+/// rejects anything that could climb out of the cache root.
+fn is_joinable_revision(revision: &str) -> bool {
+    huggingface::validate_hf_relative_path(revision, "revision").is_ok()
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common
@@ -287,7 +528,7 @@ fn cache_dir_from_values(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -343,7 +584,7 @@ mod tests {
     /// Build an hf-hub-format cache layout for `model_name` in `cache_root`,
     /// populated with the given filenames at a fake snapshot revision. Returns
     /// the snapshot directory path that `Cache::model().get()` should resolve to.
-    fn build_hf_cache(cache_root: &Path, model_name: &str, files: &[&str]) -> PathBuf {
+    pub(crate) fn build_hf_cache(cache_root: &Path, model_name: &str, files: &[&str]) -> PathBuf {
         let repo_dir = cache_root.join(format!("models--{}", model_name.replace('/', "--")));
         let snapshot_hash = "0000000000000000000000000000000000000000";
         let snapshot_dir = repo_dir.join("snapshots").join(snapshot_hash);
@@ -448,6 +689,124 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_get_cached_model_path_at_revision_finds_pinned_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        // build_hf_cache always uses "0000000000000000000000000000000000000000" as the SHA
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        let result = get_cached_model_path_at_revision(
+            model,
+            "0000000000000000000000000000000000000000",
+            true,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert_eq!(result.as_deref(), Some(snapshot.as_path()));
+    }
+
+    #[test]
+    fn test_get_cached_model_path_at_revision_wrong_sha_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        let result = get_cached_model_path_at_revision(
+            model,
+            "different_sha",
+            true,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert!(result.is_none(), "wrong SHA should return None");
+    }
+
+    #[test]
+    fn test_get_cached_model_path_at_revision_rejects_traversal_out_of_the_cache() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        // The escape target is a complete snapshot, so only the revision check can
+        // reject it: reaching the join at all would return a path outside the cache.
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("config.json"), "{}").unwrap();
+        std::fs::write(outside.join("tokenizer.json"), "{}").unwrap();
+        build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        for revision in ["../../outside", "..", ""] {
+            assert!(
+                get_cached_model_path_at_revision(
+                    model,
+                    revision,
+                    true,
+                    None,
+                    temp.path().to_path_buf(),
+                )
+                .is_none(),
+                "revision {revision:?} must not resolve a path",
+            );
+        }
+    }
+
+    #[test]
+    fn test_hf_repo_from_snapshot_path_recognizes_hf_cache_layout() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        assert_eq!(
+            hf_repo_from_snapshot_path(&snapshot),
+            Some(model.to_string())
+        );
+    }
+
+    #[test]
+    fn test_hf_repo_from_snapshot_path_recognizes_single_segment_repo() {
+        let temp = TempDir::new().unwrap();
+        let model = "gpt2";
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        assert_eq!(
+            hf_repo_from_snapshot_path(&snapshot),
+            Some(model.to_string())
+        );
+    }
+
+    #[test]
+    fn test_hf_repo_from_snapshot_path_rejects_plain_local_dir() {
+        let temp = TempDir::new().unwrap();
+        let local_checkpoint = temp.path().join("my-finetuned-model");
+        fs::create_dir_all(&local_checkpoint).unwrap();
+
+        assert_eq!(hf_repo_from_snapshot_path(&local_checkpoint), None);
+    }
+
+    #[test]
+    fn test_get_cached_model_path_at_revision_finds_pinned_snapshot_with_weights() {
+        // ignore_weights=false is satisfied once weight files are on disk at the
+        // pinned revision.
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        let snapshot = build_hf_cache(
+            temp.path(),
+            model,
+            &["config.json", "tokenizer.json", "model.safetensors"],
+        );
+
+        let result = get_cached_model_path_at_revision(
+            model,
+            "0000000000000000000000000000000000000000",
+            false,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert_eq!(result.as_deref(), Some(snapshot.as_path()));
+    }
+
     #[serial_test::serial]
     #[tokio::test]
     async fn test_from_hf_cache_first_in_online_mode() {
@@ -483,6 +842,133 @@ mod tests {
             },
         )
         .await;
+    }
+
+    const SHA: &str = "1a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d";
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_from_hf_at_revision_checks_snapshot_sha_case_insensitively() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned-revision";
+        let original = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+        let snapshot = original.with_file_name(SHA);
+        fs::rename(original, &snapshot).unwrap();
+        let refs = snapshot.parent().unwrap().parent().unwrap().join("refs");
+        let uppercase = SHA.to_uppercase();
+        let other = "9f8e7d6c5b4a39209f8e7d6c5b4a39209f8e7d6c";
+        for revision in [SHA, uppercase.as_str(), other] {
+            fs::write(refs.join(revision), SHA).unwrap();
+        }
+
+        temp_env::async_with_vars(
+            [
+                (
+                    env_model::huggingface::HF_HUB_CACHE,
+                    Some(temp.path().to_str().unwrap()),
+                ),
+                (env_model::huggingface::HF_HUB_OFFLINE, Some("1")),
+                // An invalid endpoint forces the direct-download fallback without a connection.
+                (
+                    env_model::model_express::MODEL_EXPRESS_URL,
+                    Some("://invalid"),
+                ),
+            ],
+            async {
+                for revision in [SHA, uppercase.as_str()] {
+                    let result = from_hf_at_revision(model, revision, None, true)
+                        .await
+                        .unwrap();
+                    assert_eq!(result, snapshot);
+                }
+                let error = from_hf_at_revision(model, other, None, true)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("is not the pinned revision"));
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn test_revision_unconfirmed_by_the_server_is_not_honored() {
+        // A server older than the pinned-revision protocol ignores the request field
+        // and resolves nothing, so its default snapshot must not pass as the pin.
+        assert!(!revision_honored(SHA, None));
+    }
+
+    #[test]
+    fn test_revision_honored_when_the_server_resolves_the_requested_sha() {
+        assert!(revision_honored(SHA, Some(SHA)));
+        assert!(revision_honored(SHA, Some(&SHA.to_uppercase())));
+        assert!(revision_honored(&SHA[..12], Some(SHA)));
+    }
+
+    #[test]
+    fn test_revision_not_honored_when_the_server_resolves_a_different_sha() {
+        let other = "9f8e7d6c5b4a39209f8e7d6c5b4a39209f8e7d6c";
+
+        assert!(!revision_honored(SHA, Some(other)));
+        assert!(!revision_honored(SHA, Some(&SHA[..12])));
+    }
+
+    #[test]
+    fn test_branch_or_tag_accepts_the_sha_it_resolves_to() {
+        // A branch or tag has no SHA to compare against; resolving it at all is the
+        // confirmation that the server understood the request.
+        assert!(revision_honored("main", Some(SHA)));
+        assert!(revision_honored("v1.0", Some(SHA)));
+        assert!(!revision_honored("main", None));
+    }
+
+    #[test]
+    fn test_first_missing_file_holds_a_download_to_the_required_set() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("config.json"), "{}").unwrap();
+
+        let present = ["config.json".to_string()];
+        let short = ["config.json".to_string(), "added_tokens.json".to_string()];
+
+        assert_eq!(first_missing_file(temp.path(), None), None);
+        assert_eq!(first_missing_file(temp.path(), Some(&present)), None);
+        assert_eq!(
+            first_missing_file(temp.path(), Some(&short)).map(String::as_str),
+            Some("added_tokens.json"),
+        );
+    }
+
+    #[test]
+    fn test_is_hf_commit_sha_accepts_only_a_full_sha() {
+        assert!(is_hf_commit_sha(SHA));
+        assert!(is_hf_commit_sha(&SHA.to_uppercase()));
+        assert!(
+            !is_hf_commit_sha(&SHA[..12]),
+            "abbreviated is not a snapshot"
+        );
+        assert!(!is_hf_commit_sha("main"));
+        assert!(!is_hf_commit_sha(".."));
+        assert!(!is_hf_commit_sha(""));
+    }
+
+    #[test]
+    fn test_is_hf_repo_file_rejects_paths_that_leave_the_snapshot() {
+        assert!(is_hf_repo_file("config.json"));
+        assert!(is_hf_repo_file("subdir/config.json"));
+        assert!(!is_hf_repo_file(".."));
+        assert!(!is_hf_repo_file("."));
+        assert!(!is_hf_repo_file("../escape.json"));
+        assert!(!is_hf_repo_file("/etc/passwd"));
+        assert!(!is_hf_repo_file(""));
+    }
+
+    #[test]
+    fn test_is_commit_sha_prefix_separates_shas_from_ref_names() {
+        assert!(is_commit_sha_prefix(SHA));
+        assert!(is_commit_sha_prefix("1a2b3c4"));
+        assert!(!is_commit_sha_prefix("1a2b3c")); // too short to be unambiguous
+        assert!(!is_commit_sha_prefix("main"));
+        assert!(!is_commit_sha_prefix("refs/pr/1"));
+        assert!(!is_commit_sha_prefix(&format!("{SHA}0"))); // longer than a SHA
     }
 
     #[test]
