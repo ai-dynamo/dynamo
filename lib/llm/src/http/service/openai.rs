@@ -6011,6 +6011,33 @@ mod tests {
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
 
     #[test]
+    fn completion_chat_only_controls_map_to_payload_free_http_errors() {
+        for field in ["add_generation_prompt", "continue_final_message"] {
+            for value in [
+                serde_json::Value::Null,
+                serde_json::json!(false),
+                serde_json::json!(true),
+                serde_json::json!({"private": "do-not-echo"}),
+            ] {
+                let mut body = serde_json::json!({"model": "test-model", "prompt": "Hello"});
+                body[field] = value;
+                let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+                let response = validate_completion_fields_generic(&request)
+                    .expect_err("HTTP validation must reject chat-only controls");
+                assert_eq!(response.0, StatusCode::BAD_REQUEST);
+                let wire = serde_json::to_value(response.1.0).unwrap();
+                assert!(
+                    wire["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("/v1/chat/completions")
+                );
+                assert!(!wire.to_string().contains("do-not-echo"));
+            }
+        }
+    }
+
+    #[test]
     fn wire_normalized_invalid_request_is_found_through_error_context() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
@@ -8356,6 +8383,8 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -8386,6 +8415,8 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8640,6 +8671,8 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8673,6 +8706,8 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8705,6 +8740,8 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8737,6 +8774,8 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8769,6 +8808,8 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8803,6 +8844,8 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(

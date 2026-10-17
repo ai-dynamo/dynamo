@@ -150,6 +150,8 @@ mod tests {
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 messages,
                 model: "test".to_string(),

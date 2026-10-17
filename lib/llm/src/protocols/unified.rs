@@ -337,6 +337,10 @@ impl OpenAISamplingOptionsProvider for UnifiedRequest {
 }
 
 impl CommonExtProvider for UnifiedRequest {
+    fn get_continue_final_message(&self) -> Option<bool> {
+        self.inner.continue_final_message
+    }
+
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.inner.common)
     }
@@ -539,6 +543,28 @@ impl UnifiedRequest {
 mod tests {
     use super::*;
     use crate::protocols::common::StopConditionsProvider;
+
+    #[test]
+    fn chat_only_generation_controls_survive_unified_roundtrip() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "Continue"}],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .unwrap();
+        let unified = UnifiedRequest::from(request);
+        assert_eq!(unified.get_continue_final_message(), Some(true));
+        let restored = UnifiedRequest::from(
+            serde_json::from_value::<NvCreateChatCompletionRequest>(
+                serde_json::to_value(unified.inner).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(restored.inner.add_generation_prompt, Some(false));
+        assert_eq!(restored.inner.continue_final_message, Some(true));
+        assert_eq!(restored.get_continue_final_message(), Some(true));
+    }
 
     #[test]
     fn test_chat_completions_roundtrip() {

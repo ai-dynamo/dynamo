@@ -61,6 +61,8 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
     use dynamo_llm::protocols::common::SamplingOptionsProvider;
 
     let request = NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner: Default::default(),
         common: CommonExt::builder()
             .include_stop_str_in_output(true)
@@ -317,6 +319,8 @@ fn test_completions_common_values() {
 fn test_serialization_preserves_structure() {
     // Test that serialization preserves the flattened structure
     let request = NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner: dynamo_protocols::types::CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -386,6 +390,8 @@ fn test_sampling_parameters_extraction() {
 
     // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
     let request = NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner: Default::default(),
         common: CommonExt::builder()
             .top_k(42)
@@ -408,7 +414,7 @@ fn test_sampling_parameters_extraction() {
 }
 
 #[test]
-fn test_chat_completions_generation_prompt_fields_from_common() {
+fn test_chat_completions_generation_prompt_fields_are_endpoint_owned() {
     let request: NvCreateChatCompletionRequest = serde_json::from_str(
         r#"{
         "model": "test-model",
@@ -422,9 +428,52 @@ fn test_chat_completions_generation_prompt_fields_from_common() {
     )
     .unwrap();
 
-    assert_eq!(request.common.add_generation_prompt, Some(false));
-    assert_eq!(request.common.continue_final_message, Some(true));
+    assert_eq!(request.add_generation_prompt, Some(false));
+    assert_eq!(request.continue_final_message, Some(true));
     assert_eq!(request.get_continue_final_message(), Some(true));
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(wire["add_generation_prompt"], false);
+    assert_eq!(wire["continue_final_message"], true);
+    assert!(wire.get("common").is_none());
+    assert!(
+        !request
+            .unsupported_fields
+            .contains_key("continue_final_message")
+    );
+    let restored: NvCreateChatCompletionRequest = serde_json::from_value(wire).unwrap();
+    assert_eq!(restored.add_generation_prompt, Some(false));
+    assert_eq!(restored.continue_final_message, Some(true));
+}
+
+#[test]
+fn chat_only_controls_are_exposed_only_in_chat_schema() {
+    use serde_json::Value;
+    use utoipa::PartialSchema;
+
+    fn has_property(schema: &Value, name: &str) -> bool {
+        schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.contains_key(name))
+            || ["allOf", "anyOf", "oneOf"].iter().any(|composition| {
+                schema
+                    .get(*composition)
+                    .and_then(Value::as_array)
+                    .is_some_and(|schemas| schemas.iter().any(|item| has_property(item, name)))
+            })
+    }
+
+    let chat = serde_json::to_value(NvCreateChatCompletionRequest::schema()).unwrap();
+    let completion = serde_json::to_value(NvCreateCompletionRequest::schema()).unwrap();
+    let common = serde_json::to_value(CommonExt::schema()).unwrap();
+    for field in ["add_generation_prompt", "continue_final_message"] {
+        assert!(
+            has_property(&chat, field),
+            "chat must advertise {field}: {chat}"
+        );
+        assert!(!has_property(&completion, field));
+        assert!(!has_property(&common, field));
+    }
 }
 
 #[test]
@@ -437,6 +486,6 @@ fn test_generation_prompt_fields_omitted_default_none() {
     )
     .unwrap();
 
-    assert_eq!(request.common.add_generation_prompt, None);
-    assert_eq!(request.common.continue_final_message, None);
+    assert_eq!(request.add_generation_prompt, None);
+    assert_eq!(request.continue_final_message, None);
 }

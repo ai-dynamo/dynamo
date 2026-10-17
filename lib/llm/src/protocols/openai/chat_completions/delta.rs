@@ -421,6 +421,8 @@ mod tests {
         )];
 
         NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages,
@@ -784,6 +786,8 @@ mod tests {
         )];
 
         NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages,
