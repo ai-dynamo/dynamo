@@ -6,9 +6,8 @@
 # build's unified osrb-deps.csv — the authoritative "did the generators miss
 # anything" check that verify_sbom_diff never was (it only compared our own
 # outputs). Runs as a sibling job (needs:[<fw>-build]) IN PARALLEL with the test
-# jobs so the slow syft pull+scan never blocks testing. SOFT GATE: report-only
-# (no --fail-on-findings) until the name-normalization is proven low-noise; the
-# job is not a required check.
+# jobs so the slow syft pull+scan never blocks testing. Scanner failures and
+# missing attribution fail the audit; backend-status-check requires its result.
 name: Shared Compliance Audit
 
 on:
@@ -74,20 +73,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Install syft
-        # Best-effort: the audit is a soft gate, so never hard-fail the job on a
-        # syft install hiccup — the scan step below is also continue-on-error.
-        continue-on-error: true
         shell: bash
         run: |
+          set -euo pipefail
           # Install into a runner-writable dir and put it on PATH (no sudo).
           # curl||wget — the shipped image normally has curl, but fall back so a
           # missing one doesn't silently no-op the audit.
           mkdir -p "${RUNNER_TEMP}/bin"
-          INSTALL_URL=https://raw.githubusercontent.com/anchore/syft/main/install.sh
+          INSTALL_URL=https://raw.githubusercontent.com/anchore/syft/v1.54.1/install.sh
           if command -v curl >/dev/null 2>&1; then
-            curl -sSfL "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin"
+            curl -sSfL "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin" v1.54.1
           else
-            wget -qO- "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin"
+            wget -qO- "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin" v1.54.1
           fi
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - name: Resolve image ref, baseline + artifact name
@@ -125,7 +122,6 @@ jobs:
           name: ${{ steps.resolve.outputs.artifact }}
           path: /tmp/compliance
       - name: Syft scan (container fs) + audit vs osrb-deps.csv
-        continue-on-error: true   # soft gate — never block tests/merge
         shell: bash
         run: |
           set -euo pipefail
@@ -147,24 +143,37 @@ jobs:
             --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
             --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
             --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
-            -o cyclonedx-json=/tmp/syft.cdx.json
-          OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
-          [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
+            -o cyclonedx-json=/tmp/syft.cdx.json -o syft-json=/tmp/syft.json
+          # Require one full inventory for this build and architecture.
+          # Historical baseline and diff CSVs must never substitute for it.
+          shopt -s nullglob
+          csvs=(/tmp/compliance/linux_amd64/osrb-*-"${GITHUB_SHA:0:8}".csv)
+          if [ "${#csvs[@]}" -eq 0 ]; then
+            csvs=(/tmp/compliance/osrb-*-"${GITHUB_SHA:0:8}".csv)
+          fi
+          if [ "${#csvs[@]}" -ne 1 ]; then
+            echo "::error::Expected one current amd64 OSRB inventory; found ${#csvs[@]}"
+            exit 1
+          fi
+          OUR_CSV="${csvs[0]}"
           echo "auditing against ${OUR_CSV}"
           BASE_ARG=""
           [ -n "${{ steps.resolve.outputs.baseline }}" ] && BASE_ARG="--base-sbom ${{ steps.resolve.outputs.baseline }}"
           PYTHONPATH=container python3 -m compliance.audit_image_sbom \
-            --syft-sbom /tmp/syft.cdx.json \
+            --syft-sbom /tmp/syft.cdx.json --syft-json /tmp/syft.json \
             ${BASE_ARG} \
             --our-csv "${OUR_CSV}" \
             --image "${{ steps.resolve.outputs.image_tag }}" \
-            --report /tmp/audit-report.txt -v
+            --report /tmp/audit-report.txt --fail-on-findings -v
       - name: Upload audit report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           # compliance-audit-<git-sha>-<container>[-cudaN] (image_tag already carries all three).
           name: compliance-audit-${{ steps.resolve.outputs.image_tag }}
-          path: /tmp/audit-report.txt
+          path: |
+            /tmp/audit-report.txt
+            /tmp/syft.cdx.json
+            /tmp/syft.json
           retention-days: 7
           if-no-files-found: ignore
