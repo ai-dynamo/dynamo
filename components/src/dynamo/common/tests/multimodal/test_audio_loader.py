@@ -35,6 +35,16 @@ def _permissive_http_policy() -> UrlValidationPolicy:
     )
 
 
+# A presigned URL is a bearer credential for its lifetime: its signature must
+# reach neither the worker log nor the error body returned to the client.
+_SIGNATURE = "0123456789abcdef" * 16
+_SIGNED_URL = (
+    "https://bucket.s3.amazonaws.com/{name}?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
+)
+
+
 @pytest.mark.asyncio
 async def test_load_audio_rejects_http_by_default():
     """Wiring smoke: AudioLoader plumbs ``url_policy`` to the validator.
@@ -280,3 +290,46 @@ async def test_load_audio_preserves_a_configuration_error(monkeypatch):
         await loader.load_audio("https://example.com/a.wav")
 
     assert not isinstance(excinfo.value, ValueError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        RuntimeError("Error opening <_io.BytesIO>: Format not recognised."),
+        (np.array([], dtype=np.float32), 16000.0),
+    ],
+    ids=["decode_error", "empty_waveform"],
+)
+async def test_load_audio_failure_keeps_signed_url_out(result, caplog):
+    url = _SIGNED_URL.format(name="clip.wav")
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    mock = AsyncMock(side_effect=result) if isinstance(result, Exception) else None
+    loader._load_audio_with_vllm = mock or AsyncMock(  # type: ignore[method-assign]
+        return_value=result
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as exc_info:
+        await loader.load_audio(url)
+
+    assert _SIGNATURE not in str(exc_info.value)
+    assert _SIGNATURE not in caplog.text
+    assert "bucket.s3.amazonaws.com/clip.wav" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_failure_keeps_signed_url_out(caplog):
+    url = _SIGNED_URL.format(name="clip.wav")
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("Format not recognised.")
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception) as exc_info:
+        await loader.load_audio_batch([{"Url": url}])
+
+    # The old batch line cut the URL at 80 characters, which kept the start of
+    # the query; the signature itself sits further along.
+    for text in (str(exc_info.value), caplog.text):
+        assert _SIGNATURE not in text
+        assert "X-Amz-" not in text
