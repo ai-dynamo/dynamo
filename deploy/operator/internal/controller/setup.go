@@ -31,13 +31,11 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
 
 type DynamoGraphDeploymentRequestSetupOptions struct {
 	SetupOptions
-	RBACManager             RBACManager
 	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
 	GPUDiscovery            *gpu.GPUDiscovery
 	OperatorImage           string
@@ -95,7 +93,6 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
 		SSHKeyManager:         opts.SSHKeyManager,
-		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
@@ -126,7 +123,6 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 		GPUDiscovery:            opts.gpuDiscovery(),
 		OperatorImage:           opts.OperatorImage,
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
-		RBACManager:             opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}
