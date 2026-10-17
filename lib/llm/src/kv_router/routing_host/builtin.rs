@@ -221,7 +221,7 @@ impl RoutingHost {
                 } else {
                     let worker_id = match target_constraint {
                         Some(target) => {
-                            self.inner.ensure_routable(target.worker_id)?;
+                            self.inner.ensure_discovered(target.worker_id)?;
                             target.worker_id
                         }
                         None => self.inner.with_selectable_worker_ids(|ids| {

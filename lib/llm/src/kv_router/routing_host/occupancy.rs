@@ -36,7 +36,7 @@ impl HostedOccupancy {
         pinned_worker: Option<u64>,
     ) -> Result<HostedOccupancySelection> {
         if let Some(worker_id) = pinned_worker {
-            router.ensure_routable(worker_id)?;
+            router.ensure_discovered(worker_id)?;
             let reservation = self.state.reserve(worker_id);
             return Ok(HostedOccupancySelection {
                 worker_id,
