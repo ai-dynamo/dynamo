@@ -9,7 +9,7 @@ import os
 import pytest
 
 from dynamo.power import config as power_config
-from dynamo.power.config import MetricsUrl, PowerControlConfigError
+from dynamo.power.config import MetricsUrl, PowerControlConfigError, epd_environment
 from dynamo.power.node_agent_cli import (
     MIN_TGP_REFUSAL,
     build_parser,
@@ -50,11 +50,15 @@ def test_parser_defaults_come_from_the_config_constants():
     assert args.perf_threshold == power_config.DEFAULT_PERF_THRESHOLD
     assert args.ubpc_buffer == power_config.DEFAULT_NODE_UBPC_BUFFER
     assert args.warmup_policy == power_config.DEFAULT_WARMUP_POLICY
+    assert args.allocation == power_config.DEFAULT_ALLOCATION == "draw"
+    assert args.node_buffers == []
     assert (args.min_tgp_w, args.max_tgp_w, args.gpus_per_node) == (None, None, None)
     with pytest.raises(SystemExit):
         build_parser().parse_args(REQUIRED[:-2])  # --fom is required
     with pytest.raises(SystemExit):
         parse("--mode", "turbo")
+    with pytest.raises(SystemExit):
+        parse("--allocation", "greedy")
 
 
 def test_settings_from_args_resolves_every_flag():
@@ -107,6 +111,63 @@ def test_pool_gpu_count_flag_overrides_the_nodes_times_gpus_estimate():
     assert settings.pool_gpu_count == 6
     with pytest.raises(PowerControlConfigError, match="pool_gpu_count"):
         settings_from_args(parse(FRONTEND, "--pool-gpu-count", "0"))
+
+
+def test_allocation_defaults_to_draw_with_no_node_buffers():
+    settings = settings_from_args(parse(FRONTEND))
+    assert settings.allocation == "draw"
+    assert settings.node_buffers == ()
+    assert settings_from_args(parse(FRONTEND, "--node-buffers", "")).node_buffers == ()
+    env = epd_environment(settings, this_node="hecate0001", max_tgp_w=2300.0)
+    assert env["NUPD_ALLOCATION"] == "draw"
+    assert "EPD_NODE_BUFFERS" not in env
+
+
+def test_node_buffers_take_the_comma_separated_and_repeated_forms():
+    expected = (("hecate0002", 1.1), ("hecate0001", 2.0))  # the given order is kept
+    comma = settings_from_args(
+        parse(
+            FRONTEND,
+            "--allocation",
+            "need",
+            "--node-buffers",
+            "hecate0002=1.1,hecate0001=2.0",
+        )
+    )
+    repeated = settings_from_args(
+        parse(
+            FRONTEND,
+            "--allocation",
+            "need",
+            "--node-buffers",
+            "hecate0002=1.1",
+            "--node-buffers",
+            "hecate0001=2.0",
+        )
+    )
+    assert comma.allocation == repeated.allocation == "need"
+    assert comma.node_buffers == repeated.node_buffers == expected
+    env = epd_environment(comma, this_node="hecate0001", max_tgp_w=2300.0)
+    assert env["NUPD_ALLOCATION"] == "need"
+    assert env["EPD_NODE_BUFFERS"] == "hecate0002=1.1,hecate0001=2"
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("elsewhere=2.0", "not in the pool roster"),
+        ("hecate0001=0", "must be > 0"),
+        ("hecate0001=-1.5", "must be > 0"),
+        ("hecate0001=2.0,hecate0001=1.1", "twice"),
+        ("hecate0001", "expected '<node>=<buffer>'"),
+        ("=2.0", "expected '<node>=<buffer>'"),
+        ("hecate0001=", "expected '<node>=<buffer>'"),
+        ("hecate0001=two", "is not a number"),
+    ],
+)
+def test_node_buffers_validation(raw, message):
+    with pytest.raises(PowerControlConfigError, match=message):
+        settings_from_args(parse(FRONTEND, "--node-buffers", raw))
 
 
 def test_rank_is_an_int_checked_against_the_roster():

@@ -21,6 +21,7 @@ from dynamo.power.config import (
     parse_fom,
     parse_gpu_indices,
     parse_metrics_urls,
+    parse_node_buffers,
     parse_nodelist,
     stale_after_s_for,
     urls_for_scope,
@@ -604,6 +605,8 @@ def test_settings_defaults_and_pool_gpu_count():
     assert settings.use_ubpc is False
     assert settings.interval_s == power_config.DEFAULT_INTERVAL_S
     assert settings.ubpc_buffer == power_config.DEFAULT_NODE_UBPC_BUFFER
+    assert settings.allocation == power_config.DEFAULT_ALLOCATION == "draw"
+    assert settings.node_buffers == ()
     assert settings.pool_gpu_count == 8
     assert _settings(gpus_per_node=4, gpu_indices=(0, 1)).pool_gpu_count == 8
     assert _settings(gpu_indices=(0, 1)).pool_gpu_count == 4
@@ -625,6 +628,11 @@ def test_settings_defaults_and_pool_gpu_count():
         {"budget_w_per_gpu": 0},
         {"mode": "turbo"},
         {"warmup_policy": "slow"},
+        {"allocation": "greedy"},
+        {"node_buffers": (("elsewhere", 2.0),)},  # not in the roster
+        {"node_buffers": (("hecate0001", 0.0),)},
+        {"node_buffers": (("hecate0001", 2.0), ("hecate0001", 1.1))},
+        {"node_buffers": ("hecate0001=2.0",)},  # plain strings: use parse_node_buffers
         {"gpu_indices": (1, 1)},
         {"gpus_per_node": 0},
         {"pool_gpu_count_override": 0},
@@ -633,6 +641,14 @@ def test_settings_defaults_and_pool_gpu_count():
 def test_settings_validation(overrides):
     with pytest.raises(PowerControlConfigError):
         _settings(**overrides)
+
+
+def test_node_buffers_must_name_pool_nodes():
+    assert _settings(node_buffers=(("hecate0002", 1.1),)).node_buffers == (
+        ("hecate0002", 1.1),
+    )
+    with pytest.raises(PowerControlConfigError, match="not in the pool roster"):
+        _settings(node_buffers=(("elsewhere", 2.0),))
 
 
 def test_non_controller_rank_needs_no_metrics_url():
@@ -686,8 +702,10 @@ def test_epd_environment_uses_epd_variable_names():
     assert env["NUPD_SKIP_PERFORMANCE_FEEDBACK"] == "0"
     assert env["NUPD_SKIP_HISTORY"] == "1"
     assert env["NUPD_SKIP_UBPC"] == "1"
+    assert env["NUPD_ALLOCATION"] == "draw"
     assert env["EPD_PERF_THRESHOLD"] == "0.03"
     assert env["UBPC_BUFFER"] == "1.1"
+    assert "EPD_NODE_BUFFERS" not in env  # only emitted when --node-buffers was given
     assert env["EPD_WARMUP_POLICY"] == "adaptive"
     assert env["EPD_ACTUATOR"] == "file"
     assert env["EPD_RUN_TRACE"] == "1"
@@ -706,6 +724,32 @@ def test_epd_environment_mode_both_keeps_min_tgp_pinned_to_zero():
     assert both["MIN_TGP"] == "0"  # EPD's cap law has no floor; the applier has
     assert both["UBPC_BUFFER"] == "2"
     assert both["MAX_TGP"] == "1400"
+
+
+def test_epd_environment_need_allocation_and_node_buffers():
+    env = epd_environment(
+        _settings(
+            mode="both",
+            allocation="need",
+            node_buffers=(("hecate0002", 1.1), ("hecate0001", 2.0)),
+        ),
+        this_node="hecate0001",
+        max_tgp_w=2300.0,
+    )
+    assert env["NUPD_ALLOCATION"] == "need"
+    # Given order kept, buffers in :g form; EPD keeps UBPC_BUFFER for other nodes.
+    assert env["EPD_NODE_BUFFERS"] == "hecate0002=1.1,hecate0001=2"
+    assert env["UBPC_BUFFER"] == "1.1"
+    # Both knobs are emitted whatever the mode; EPD decides what reads them.
+    nupd = epd_environment(
+        _settings(node_buffers=(("hecate0001", 2.0),)),
+        this_node="hecate0001",
+        max_tgp_w=2300.0,
+    )
+    assert (nupd["NUPD_ALLOCATION"], nupd["EPD_NODE_BUFFERS"]) == (
+        "draw",
+        "hecate0001=2",
+    )
 
 
 def test_epd_environment_splits_tagged_metrics_urls():
@@ -746,3 +790,25 @@ def test_parse_nodelist():
         parse_nodelist("a,a")
     with pytest.raises(PowerControlConfigError):
         parse_nodelist(" ")
+
+
+def test_parse_node_buffers():
+    assert parse_node_buffers("hecate0002=1.1, hecate0001 = 2") == (
+        ("hecate0002", 1.1),
+        ("hecate0001", 2.0),
+    )
+    assert parse_node_buffers("") == ()
+    assert parse_node_buffers("hecate0001=1.05,") == (("hecate0001", 1.05),)
+    for bad, message in (
+        ("hecate0001", "expected '<node>=<buffer>'"),
+        ("=2.0", "expected '<node>=<buffer>'"),
+        ("hecate0001=", "expected '<node>=<buffer>'"),
+        ("hecate0001=two", "is not a number"),
+        ("hecate0001=0", "must be > 0"),
+        ("hecate0001=-2", "must be > 0"),
+        ("hecate0001=nan", "must be > 0"),
+        ("hecate0001=inf", "must be > 0"),
+        ("hecate0001=2,hecate0001=1.1", "twice"),
+    ):
+        with pytest.raises(PowerControlConfigError, match=message):
+            parse_node_buffers(bad)

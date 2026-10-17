@@ -71,6 +71,18 @@ read from a subset of the workers would make EPD react to how the router
 spreads requests rather than to power. The agent refuses a scope that
 selects no URL.
 
+Two flags choose how NUPD splits the pool budget between its nodes:
+
+| flag | meaning |
+|------|---------|
+| `--allocation draw` (default) | EPD's historical cap law: caps in proportion to each node's mean draw |
+| `--allocation need` | nodes are ranked by the cap they need, mean draw x their UBPC buffer, so a bursty prefill node with buffer 2.0 keeps its burst headroom instead of being read as the cheap node |
+| `--node-buffers node=buffer,node=buffer` | per-node UBPC buffers, comma-separated or repeated; a node without an entry keeps the pool's `--ubpc-buffer`; every node must be in `--nodelist`, every buffer > 0, no node twice |
+
+They map onto EPD's `NUPD_ALLOCATION` (always set) and `EPD_NODE_BUFFERS`
+(only when given), so one shared controller can hold prefill nodes at 2.0 and
+decode nodes at 1.1 instead of one buffer per pool.
+
 `--fom` forms:
 
 | form | meaning |
@@ -229,7 +241,8 @@ appliers (which restore defaults), then runs a final per-node reset
 `NodeAgentSettings` and `epd_environment` show which EPD environment
 variables the agent sets (`LOG_DIR`, `EPD_NODELIST`, `EPD_NUM_NODES`,
 `GPUS_PER_NODE`, `MAX_TGP`, `AVERAGE_GPU_POWER_LIMIT`, `MIN_TGP` pinned to
-`0`, `NUPD_SKIP_UBPC`, `EPD_PERF_THRESHOLD`, `UBPC_BUFFER`,
+`0`, `NUPD_SKIP_UBPC`, `NUPD_ALLOCATION`, `EPD_PERF_THRESHOLD`,
+`UBPC_BUFFER`, `EPD_NODE_BUFFERS` when `--node-buffers` was given,
 `EPD_WARMUP_POLICY`, `EPD_ACTUATOR=file`, `SLURMD_NODENAME`).
 
 Caveats worth knowing: NUPD keeps the *sum of per-node caps* equal to

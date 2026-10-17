@@ -6,8 +6,9 @@
 Kept apart from :mod:`dynamo.power.node_agent` because that module imports
 EPD and NVML at the top; this one imports only the standard library and
 :mod:`dynamo.power.config`, so the CLI contract (defaults, the repeated and
-comma-separated ``--metrics-url`` forms, node-name resolution, the
-``--min-tgp-w`` refusal) is unit-testable on a machine without either.
+comma-separated ``--metrics-url`` and ``--node-buffers`` forms, node-name
+resolution, the ``--min-tgp-w`` refusal) is unit-testable on a machine
+without either.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ import os
 from collections.abc import Mapping
 
 from dynamo.power.config import (
+    ALLOCATIONS,
+    DEFAULT_ALLOCATION,
     DEFAULT_INTERVAL_S,
     DEFAULT_NODE_UBPC_BUFFER,
     DEFAULT_PERF_THRESHOLD,
@@ -29,6 +32,7 @@ from dynamo.power.config import (
     parse_fom,
     parse_gpu_indices,
     parse_metrics_urls,
+    parse_node_buffers,
     parse_nodelist,
 )
 
@@ -76,6 +80,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval-s", type=int, default=DEFAULT_INTERVAL_S)
     parser.add_argument("--perf-threshold", type=float, default=DEFAULT_PERF_THRESHOLD)
     parser.add_argument("--ubpc-buffer", type=float, default=DEFAULT_NODE_UBPC_BUFFER)
+    parser.add_argument(
+        "--allocation",
+        choices=ALLOCATIONS,
+        default=DEFAULT_ALLOCATION,
+        help="NUPD's cap law: draw = caps proportional to each node's mean draw "
+        "(EPD's historical law); need = nodes ranked by the cap they need, mean "
+        "draw x their buffer, so a bursty prefill node keeps its burst headroom",
+    )
+    parser.add_argument(
+        "--node-buffers",
+        action="append",
+        default=[],
+        help="per-node UBPC buffers as node=buffer, comma-separated or repeated; "
+        "a node without an entry keeps --ubpc-buffer",
+    )
     parser.add_argument(
         "--min-tgp-w",
         type=int,
@@ -127,6 +146,8 @@ def settings_from_args(args: argparse.Namespace) -> NodeAgentSettings:
         metrics_urls=parse_metrics_urls(args.metrics_url),
         gpus_per_node=args.gpus_per_node,
         pool_gpu_count_override=args.pool_gpu_count,
+        allocation=args.allocation,
+        node_buffers=parse_node_buffers(",".join(args.node_buffers)),
     )
 
 

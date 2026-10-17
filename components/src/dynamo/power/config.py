@@ -35,11 +35,16 @@ the launcher can validate a recipe without GPUs or EPD installed.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 MODES = ("nupd", "ubpc", "both")
+# NUPD's cap law. ``draw`` is EPD's historical law: caps proportional to each
+# node's mean draw. ``need`` ranks nodes by the cap they need, mean draw x their
+# UBPC buffer, so a bursty prefill node with buffer 2.0 keeps its burst headroom.
+ALLOCATIONS = ("draw", "need")
 APPLIERS = ("sudo-smi", "dcgmi", "nvml")
 WARMUP_POLICIES = ("adaptive", "fixed")
 POOL_SHORTHANDS = ("shared", "per-role")
@@ -64,6 +69,7 @@ _SCOPE_ROLE = {"all": None, "frontend": "frontend", "pool_workers": "worker"}
 FOM_SCOPE_FIELD = "scope"
 
 DEFAULT_MODE = "nupd"
+DEFAULT_ALLOCATION = "draw"
 DEFAULT_INTERVAL_S = 30
 DEFAULT_PERF_THRESHOLD = 0.03
 DEFAULT_UBPC_BUFFERS = (("prefill", 2.0), ("decode", 1.1))
@@ -930,10 +936,19 @@ class NodeAgentSettings:
     gpus_per_node: int | None = None
     # ``--pool-gpu-count``: the pool's exact GPU total when nodes hold unequal shares.
     pool_gpu_count_override: int | None = None
+    # ``--allocation``: NUPD's cap law, one of ALLOCATIONS.
+    allocation: str = DEFAULT_ALLOCATION
+    # ``--node-buffers``: per-node UBPC buffers in the order given; a node
+    # without an entry keeps ``ubpc_buffer`` inside EPD.
+    node_buffers: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise PowerControlConfigError(f"mode {self.mode!r} not in {MODES}")
+        if self.allocation not in ALLOCATIONS:
+            raise PowerControlConfigError(
+                f"allocation {self.allocation!r} not in {ALLOCATIONS}"
+            )
         if self.warmup_policy not in WARMUP_POLICIES:
             raise PowerControlConfigError(
                 f"warmup policy {self.warmup_policy!r} not in {WARMUP_POLICIES}"
@@ -944,6 +959,7 @@ class NodeAgentSettings:
             raise PowerControlConfigError(
                 f"rank {self.rank} outside the pool roster of {len(self.nodelist)} nodes"
             )
+        _check_node_buffers(self.node_buffers, self.nodelist)
         _validated_gpu_indices(self.gpu_indices, "node_agent --gpu-indices")
         if self.budget_w_per_gpu <= 0:
             raise PowerControlConfigError("budget_w_per_gpu must be > 0 W")
@@ -1028,7 +1044,10 @@ def epd_environment(
     ``MAX_TGP`` / ``AVERAGE_GPU_POWER_LIMIT`` for the cap law (``MIN_TGP`` is
     pinned to ``0``: EPD reads it only in the history-based ensemble, which
     ``NUPD_SKIP_HISTORY=1`` keeps off), ``NUPD_SKIP_*`` toggles,
-    ``EPD_PERF_THRESHOLD``, ``UBPC_BUFFER``, ``EPD_WARMUP_POLICY``,
+    ``NUPD_ALLOCATION`` (the cap law, always set), ``EPD_PERF_THRESHOLD``,
+    ``UBPC_BUFFER``, ``EPD_NODE_BUFFERS`` (per-node buffers as
+    ``node=buffer,...``, only when ``--node-buffers`` was given; a node without
+    an entry keeps ``UBPC_BUFFER``), ``EPD_WARMUP_POLICY``,
     ``EPD_ACTUATOR=file`` and ``SLURMD_NODENAME`` (the key of this node's
     snapshot file and decision entry). The ``DYNAMO_POWER_*`` variables are
     for ``python:`` providers.
@@ -1046,6 +1065,7 @@ def epd_environment(
         "NUPD_SKIP_PERFORMANCE_FEEDBACK": "0",
         "NUPD_SKIP_HISTORY": "1",
         "NUPD_SKIP_UBPC": "0" if settings.use_ubpc else "1",
+        "NUPD_ALLOCATION": settings.allocation,
         "EPD_PERF_THRESHOLD": f"{settings.perf_threshold:g}",
         "UBPC_BUFFER": f"{settings.ubpc_buffer:g}",
         "EPD_WARMUP_POLICY": settings.warmup_policy,
@@ -1058,6 +1078,10 @@ def epd_environment(
         "DYNAMO_POWER_WORKER_METRICS_URLS": ",".join(settings.worker_metrics_urls),
         "DYNAMO_POWER_POOL_GPU_COUNT": str(settings.pool_gpu_count),
     }
+    if settings.node_buffers:
+        env["EPD_NODE_BUFFERS"] = ",".join(
+            f"{node}={buffer:g}" for node, buffer in settings.node_buffers
+        )
     return env
 
 
@@ -1084,6 +1108,67 @@ def parse_nodelist(text: str) -> tuple[str, ...]:
     if len(set(nodes)) != len(nodes):
         raise PowerControlConfigError(f"nodelist {text!r} repeats a node")
     return nodes
+
+
+def parse_node_buffers(raw: str) -> tuple[tuple[str, float], ...]:
+    """Parse ``"node=buffer,node=buffer"`` into ``(node, buffer)`` pairs, in order.
+
+    Empty items are skipped, so ``""`` gives ``()``. Every buffer must be a
+    number > 0 and no node may appear twice; whether each node is in the pool
+    roster is checked by :class:`NodeAgentSettings`, which knows the roster.
+    """
+    pairs: list[tuple[str, float]] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        node, separator, text = item.partition("=")
+        node = node.strip()
+        text = text.strip()
+        if not separator or not node or not text:
+            raise PowerControlConfigError(
+                f"node buffer {item!r}: expected '<node>=<buffer>', for example "
+                "hecate0001=2.0"
+            )
+        try:
+            buffer = float(text)
+        except ValueError as exc:
+            raise PowerControlConfigError(
+                f"node buffer {item!r}: {text!r} is not a number"
+            ) from exc
+        pairs.append((node, buffer))
+    _check_node_buffers(pairs, None)
+    return tuple(pairs)
+
+
+def _check_node_buffers(
+    node_buffers: Sequence[tuple[str, float]], nodelist: Sequence[str] | None
+) -> None:
+    seen: set[str] = set()
+    for entry in node_buffers:
+        if (
+            not isinstance(entry, tuple)
+            or len(entry) != 2
+            or not isinstance(entry[0], str)
+            or isinstance(entry[1], bool)
+            or not isinstance(entry[1], (int, float))
+        ):
+            raise PowerControlConfigError(
+                f"node buffer entry {entry!r} must be a (node, buffer) pair "
+                "(use parse_node_buffers)"
+            )
+        node, buffer = entry
+        if not math.isfinite(buffer) or buffer <= 0.0:
+            raise PowerControlConfigError(
+                f"node buffer {node}={buffer:g}: buffer must be > 0"
+            )
+        if node in seen:
+            raise PowerControlConfigError(f"node buffers give {node} twice")
+        seen.add(node)
+        if nodelist is not None and node not in nodelist:
+            raise PowerControlConfigError(
+                f"node buffer for {node}: not in the pool roster {list(nodelist)}"
+            )
 
 
 def _validated_gpu_indices(indices: Sequence[int], what: str) -> tuple[int, ...]:
@@ -1178,7 +1263,9 @@ def _unique(items) -> tuple[str, ...]:
 
 
 __all__ = [
+    "ALLOCATIONS",
     "APPLIERS",
+    "DEFAULT_ALLOCATION",
     "DEFAULT_INTERVAL_S",
     "DEFAULT_NODE_UBPC_BUFFER",
     "DEFAULT_PERF_THRESHOLD",
@@ -1209,6 +1296,7 @@ __all__ = [
     "parse_fom",
     "parse_gpu_indices",
     "parse_metrics_urls",
+    "parse_node_buffers",
     "parse_nodelist",
     "resolve_pools",
     "stale_after_s_for",
