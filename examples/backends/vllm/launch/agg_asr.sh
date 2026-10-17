@@ -18,7 +18,7 @@
 # rates, first run: python -m dynamo.common.utils.install_media_decoders vllm
 #
 # For streaming transcription over /v1/realtime, see
-# agg_realtime_transcription.sh.
+# agg_asr_realtime.sh.
 
 set -e
 
