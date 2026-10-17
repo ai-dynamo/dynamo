@@ -19,11 +19,13 @@ package validation
 
 import (
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	labelvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -32,6 +34,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 	dynamoNamespace string,
+	preserveDynamoNamespace bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(spec.Annotations); invalid {
@@ -42,14 +45,29 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		))
 	}
 
+	// DCDs retain explicit alpha identities; DGD services use the computed namespace.
 	if spec.DynamoNamespace != nil && *spec.DynamoNamespace != "" {
-		v.warnf(
-			"%s.dynamoNamespace is deprecated and ignored. Value %q will be replaced with %q. Remove this field from your configuration",
-			fldPath,
-			*spec.DynamoNamespace,
-			dynamoNamespace,
-		)
+		if preserveDynamoNamespace {
+			v.warnf(
+				"%s.dynamoNamespace is deprecated but preserved for compatibility. Value %q remains the Dynamo namespace",
+				fldPath,
+				*spec.DynamoNamespace,
+			)
+
+			// Reject legacy identities that cannot be rendered as pod labels.
+			if errs := labelvalidation.IsValidLabelValue(*spec.DynamoNamespace); len(errs) > 0 {
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("dynamoNamespace"), *spec.DynamoNamespace, strings.Join(errs, "; ")))
+			}
+		} else {
+			v.warnf(
+				"%s.dynamoNamespace is deprecated and ignored. Value %q will be replaced with %q. Remove this field from your configuration",
+				fldPath,
+				*spec.DynamoNamespace,
+				dynamoNamespace,
+			)
+		}
 	}
+
 	//nolint:staticcheck // SA1019: Intentionally warning about a deprecated preserved field.
 	if spec.Autoscaling != nil {
 		v.warnf(

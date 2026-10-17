@@ -33,6 +33,12 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Legacy namespace compatibility
+
+For a DCD converted from `v1alpha1`, an explicit nonempty `spec.dynamoNamespace` remains the runtime namespace for compatibility, including when the object is accessed through `v1beta1`. Admission warns that the field is deprecated but preserved. The value must satisfy Kubernetes label-value constraints: at most 63 bytes, with alphanumeric first and last characters and only alphanumeric characters, `-`, `_`, or `.` in between. Invalid values are rejected on creation and update before pod rendering.
+
+Keep a valid explicit value to retain an existing runtime identity. Removing or changing it can select a different namespace; it is not an automatic migration. In contrast, `v1alpha1` DGD service entries ignore this field and use the graph's computed namespace.
+
 ## Spec reference
 
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
