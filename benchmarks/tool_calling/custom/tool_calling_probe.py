@@ -3295,17 +3295,33 @@ def validate_result(
                 )
             )
 
+    # Thinking often quotes the call format (`<function=...>` in backticks) before
+    # the real call follows. Markup in reasoning is a leak only when an expected call
+    # never reached tool_calls; otherwise it is reported as a warning.
+    missed_tool_call = not case.expect_no_tool_calls and (
+        len(result.tool_calls) < case.min_tool_calls
+        or any(actual_counter[name] < count for name, count in expected_counter.items())
+    )
     for marker in RAW_TOOL_MARKERS:
         if marker in (result.content or ""):
             errors.append(
                 error("tool_marker_leaked_to_content", f"content contains {marker!r}")
             )
         if marker in (result.reasoning_content or ""):
-            errors.append(
-                error(
-                    "tool_marker_leaked_to_reasoning", f"reasoning contains {marker!r}"
+            if missed_tool_call:
+                errors.append(
+                    error(
+                        "tool_marker_leaked_to_reasoning",
+                        f"reasoning contains {marker!r} and an expected tool call is missing",
+                    )
                 )
-            )
+            else:
+                warnings.append(
+                    error(
+                        "tool_marker_in_reasoning",
+                        f"reasoning contains {marker!r}; no expected tool call is missing",
+                    )
+                )
 
     errors.extend(find_reasoning_corruption(result.reasoning_content, decoded_calls))
     return errors, warnings
