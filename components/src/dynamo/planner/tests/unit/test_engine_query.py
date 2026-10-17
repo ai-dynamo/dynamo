@@ -441,3 +441,77 @@ def test_aggregated_capacity_rejects_duration_overflow():
                 osl=(1 << 32) - 1,
             )
         )
+
+
+def _clamped_fit_estimate(_metrics: list[dict[str, Any]]) -> float:
+    # AISimulate clamps a non-positive regression prediction to 1e-6 ms.
+    return 1e-6
+
+
+def _floor_request() -> EngineCapacityRequest:
+    return EngineCapacityRequest(isl=10, osl=8, ttft_sla_s=0.5, itl_sla_s=0.05)
+
+
+def test_aggregated_capacity_floor_uses_fastest_observed_forward_pass():
+    model, _forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=_clamped_fit_estimate,
+    )
+    model.tune_with_fpms(
+        [
+            [
+                ForwardPassMetrics(
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_prefill_requests=1,
+                        sum_prefill_tokens=50,
+                        num_decode_requests=2,
+                        sum_decode_kv_tokens=200,
+                    ),
+                    wall_time=0.02,
+                )
+            ],
+            # Idle heartbeat: no scheduled work, so it must not set the floor.
+            [ForwardPassMetrics(wall_time=0.001)],
+        ]
+    )
+
+    request = _floor_request()
+    capacity = model.find_engine_capacity_rps(request)
+
+    assert capacity is not None
+    assert capacity.itl_s is not None
+    assert capacity.itl_s >= 0.02
+    assert capacity.rps <= 16 / (request.osl * 0.02)
+
+
+def test_capacity_floor_survives_failed_tuning():
+    model, forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=_clamped_fit_estimate,
+    )
+
+    def _partial_tune(iterations: list[list[dict[str, Any]]]) -> None:
+        forward_pass_model.tuned_iterations.extend(iterations[:1])
+        raise RuntimeError("tuning failed after a partial update")
+
+    forward_pass_model.tune_with_fpms = _partial_tune  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        model.tune_with_fpms(
+            [
+                [
+                    ForwardPassMetrics(
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=2,
+                            sum_decode_kv_tokens=200,
+                        ),
+                        wall_time=0.02,
+                    )
+                ]
+            ]
+        )
+
+    capacity = model.find_engine_capacity_rps(_floor_request())
+
+    assert capacity is not None
+    assert capacity.itl_s is not None
+    assert capacity.itl_s >= 0.02

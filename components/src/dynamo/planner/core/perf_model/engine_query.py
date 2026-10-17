@@ -11,6 +11,7 @@ TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_CAPACITY_SEARCH_CANDIDATES = 128
 MAX_KV_HIT_RATE_DISCOUNT = 0.95
@@ -206,6 +209,10 @@ class AISCoreEnginePerfModel:
         self._limits = limits
         self._attention_dp_size = attention_dp_size
         self._load_averages = _AggLoadAverages(max_observations)
+        # Fastest forward pass seen in tuning FPMs; capacity searches floor at it
+        # because a fit extrapolating to zero (clamped to 1e-6 ms) gives huge rps.
+        self._fastest_observed_forward_s: Optional[float] = None
+        self._warned_forward_floor = False
 
     @classmethod
     def best_available(
@@ -231,6 +238,10 @@ class AISCoreEnginePerfModel:
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
             self._validate_metrics_by_rank(metrics_by_rank)
+        # Record the floor before the fallible tuner: callers keep a model that
+        # may have absorbed part of a batch whose tuning raised.
+        for metrics_by_rank in iterations:
+            self._observe_forward_pass_floor(metrics_by_rank)
         self._model.tune_with_fpms(
             [
                 [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
@@ -238,6 +249,32 @@ class AISCoreEnginePerfModel:
             ]
         )
         self._load_averages.observe_iterations(iterations)
+
+    def _observe_forward_pass_floor(
+        self, metrics_by_rank: list[ForwardPassMetrics]
+    ) -> None:
+        if not any(
+            metrics.scheduled_requests.sum_prefill_tokens > 0
+            or metrics.scheduled_requests.num_decode_requests > 0
+            for metrics in metrics_by_rank
+        ):
+            return
+        # An iteration ends when its slowest attention-DP rank ends.
+        wall_time_s = max(
+            (
+                metrics.wall_time
+                for metrics in metrics_by_rank
+                if math.isfinite(metrics.wall_time)
+            ),
+            default=0.0,
+        )
+        if wall_time_s <= 0:
+            return
+        if (
+            self._fastest_observed_forward_s is None
+            or wall_time_s < self._fastest_observed_forward_s
+        ):
+            self._fastest_observed_forward_s = wall_time_s
 
     def diagnostics(self) -> dict[str, Any]:
         diagnostics = self._model.diagnostics()
@@ -504,7 +541,7 @@ class AISCoreEnginePerfModel:
     def _prefill_time_for_tokens(self, tokens: int) -> Optional[float]:
         return self._prefill_chunk_time(
             tokens,
-            lambda chunk: self._estimate_forward_pass_seconds(
+            lambda chunk: self._capacity_forward_pass_seconds(
                 _synthetic_prefill_by_rank(chunk, self._attention_dp_size)
             ),
         )
@@ -512,7 +549,7 @@ class AISCoreEnginePerfModel:
     def _decode_time_for_batch(
         self, batch_size: int, context_length: int
     ) -> Optional[float]:
-        return self._estimate_forward_pass_seconds(
+        return self._capacity_forward_pass_seconds(
             _synthetic_decode_by_rank(
                 batch_size,
                 _saturating_mul_u32(batch_size, context_length),
@@ -523,7 +560,7 @@ class AISCoreEnginePerfModel:
     def _mixed_time(
         self, prefill_tokens: int, decode_requests: int, decode_kv: int
     ) -> Optional[float]:
-        return self._estimate_forward_pass_seconds(
+        return self._capacity_forward_pass_seconds(
             _synthetic_mixed_by_rank(
                 prefill_tokens,
                 decode_requests,
@@ -611,6 +648,26 @@ class AISCoreEnginePerfModel:
                 if metrics.dp_rank in seen:
                     raise ValueError(f"duplicate dp_rank {metrics.dp_rank}")
                 seen.add(metrics.dp_rank)
+
+    def _capacity_forward_pass_seconds(
+        self, metrics_by_rank: list[ForwardPassMetrics]
+    ) -> Optional[float]:
+        """Forward-pass estimate for capacity searches, bounded below by the
+        fastest observed pass. Load-based queries do not use this bound."""
+        estimate_s = self._estimate_forward_pass_seconds(metrics_by_rank)
+        floor_s = self._fastest_observed_forward_s
+        if estimate_s is None or floor_s is None or estimate_s >= floor_s:
+            return estimate_s
+        if not self._warned_forward_floor:
+            self._warned_forward_floor = True
+            logger.warning(
+                "AISimulate forward-pass estimate %.6g s is below the fastest "
+                "observed forward pass %.6g s; using the observed pass for "
+                "capacity estimates (the perf model fit may be extrapolating)",
+                estimate_s,
+                floor_s,
+            )
+        return floor_s
 
     def _estimate_forward_pass_seconds(
         self, metrics_by_rank: list[ForwardPassMetrics]
