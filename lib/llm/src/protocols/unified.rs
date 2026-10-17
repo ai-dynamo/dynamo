@@ -49,7 +49,7 @@ use crate::protocols::openai::{
 use dynamo_protocols::types::responses::{IncludeEnum, Reasoning, Truncation};
 
 use super::anthropic::types::{AnthropicCreateMessageRequest, ThinkingConfig};
-use super::openai::responses::NvCreateResponse;
+use super::openai::responses::{NvCreateResponse, ToolNameMap};
 
 /// Identifies which API surface originated the request and carries
 /// fields specific to that API that cannot be represented in the
@@ -192,6 +192,15 @@ impl TryFrom<NvCreateResponse> for UnifiedRequest {
     type Error = anyhow::Error;
 
     fn try_from(req: NvCreateResponse) -> Result<Self, Self::Error> {
+        Self::from_responses_with_tool_names(req).map(|(request, _)| request)
+    }
+}
+
+impl UnifiedRequest {
+    /// Preserve response tool aliases alongside the converted request and API context.
+    pub fn from_responses_with_tool_names(
+        req: NvCreateResponse,
+    ) -> anyhow::Result<(Self, ToolNameMap)> {
         // Capture API-specific fields BEFORE the lossy conversion
         let responses_ctx = ResponsesContext {
             previous_response_id: req.inner.previous_response_id.clone(),
@@ -202,12 +211,15 @@ impl TryFrom<NvCreateResponse> for UnifiedRequest {
         };
 
         // Perform the existing lossy conversion
-        let inner: NvCreateChatCompletionRequest = req.try_into()?;
+        let (inner, names) = req.into_chat_completion_with_tool_names()?;
 
-        Ok(Self {
-            inner,
-            api_context: ApiContext::Responses(responses_ctx),
-        })
+        Ok((
+            Self {
+                inner,
+                api_context: ApiContext::Responses(responses_ctx),
+            },
+            names,
+        ))
     }
 }
 
