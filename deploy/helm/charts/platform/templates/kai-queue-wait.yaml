@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- /*
+  Holds the kai.yaml Queue hooks (weight 100) until bundled KAI's queue-controller webhook admits
+  Queues. KAI creates it at runtime without a readiness probe, so the Job ends with a server-side
+  dry-run. Template defaults keep `--reuse-values` from older releases working.
+*/ -}}
+{{- $kai := index .Values.global "kai-scheduler" | default dict -}}
+{{- $kaiValues := index .Values "kai-scheduler" | default dict -}}
+{{- $config := .Values.kaiQueueWait | default dict -}}
+{{- if and ($kai.install | default false) (ne (dig "enabled" true $config) false) (ne (dig "queuecontroller" "enabled" true $kaiValues) false) -}}
+{{- $name := printf "%s-kai-queue-wait" (.Release.Name | trunc 48 | trimSuffix "-") -}}
+{{- $identity := printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 8 -}}
+{{- $clusterRbac := printf "%s-%s" ($name | trunc 54 | trimSuffix "-") $identity -}}
+{{- $deadline := $config.activeDeadlineSeconds | default 600 | int -}}
+{{- $podSecurityContext := $config.podSecurityContext -}}
+{{- if eq $podSecurityContext nil -}}
+{{- $podSecurityContext = dict "runAsNonRoot" true "runAsUser" 65532 "seccompProfile" (dict "type" "RuntimeDefault") -}}
+{{- end -}}
+{{- $tolerations := dig "global" "tolerations" list $kaiValues -}}
+{{- $annotations := dict "helm.sh/hook" "post-install,post-upgrade" "helm.sh/hook-weight" "80" "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- /* The dry-run needs create; nothing is persisted. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $clusterRbac }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+rules:
+  - apiGroups: [scheduling.run.ai]
+    resources: [queues]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $clusterRbac }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $clusterRbac }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+data:
+  queue.yaml: |
+    apiVersion: scheduling.run.ai/v2
+    kind: Queue
+    metadata:
+      name: {{ printf "%s-probe" ($name | trunc 57 | trimSuffix "-") }}
+    spec:
+      resources:
+        cpu: {quota: -1, limit: -1, overQuotaWeight: 1}
+        gpu: {quota: -1, limit: -1, overQuotaWeight: 1}
+        memory: {quota: -1, limit: -1, overQuotaWeight: 1}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "90"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-failed
+spec:
+  activeDeadlineSeconds: {{ $deadline }}
+  # Retries the admission check with pod backoff (10s, 20s, ...).
+  backoffLimit: 6
+  template:
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      {{- with $config.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $config.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-create
+          {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}
+          args:
+            - wait
+            - --for=create
+            - deployment/queue-controller
+            - --namespace={{ .Release.Namespace }}
+            - --timeout={{ $deadline }}s
+        - name: wait-for-available
+          {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}
+          args:
+            - wait
+            - --for=condition=Available
+            - deployment/queue-controller
+            - --namespace={{ .Release.Namespace }}
+            - --timeout={{ $deadline }}s
+      containers:
+        - name: check-admission
+          {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}
+          args:
+            - create
+            - --dry-run=server
+            - --filename=/probe/queue.yaml
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: probe
+          configMap:
+            name: {{ $name }}
+{{- end }}
+
+{{- define "dynamo-platform.kaiQueueWaitContainer" -}}
+image: {{ .config.image | default "registry.k8s.io/kubectl:v1.34.12" | quote }}
+command: [kubectl]
+env:
+  # Writable discovery cache; the root filesystem is read-only.
+  - name: HOME
+    value: /tmp
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+  - name: probe
+    mountPath: /probe
+    readOnly: true
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 128Mi}
+{{- end }}

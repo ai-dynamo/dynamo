@@ -335,6 +335,21 @@ kai-scheduler:
     # -- Affinity for kai-scheduler pods
     affinity: {}
 
+# Hook Job that holds the Dynamo Queues until bundled KAI's queue-controller webhook admits Queues.
+kaiQueueWait:
+  # -- Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving.
+  enabled: true
+  # -- Image providing kubectl 1.31 or later, which can wait for a resource to be created. Override for an internal registry.
+  image: registry.k8s.io/kubectl:v1.34.12
+  # -- Existing pull secrets for the wait image.
+  imagePullSecrets: []
+  # -- Maximum Job duration in seconds, including retries. The Helm timeout still bounds the hook.
+  activeDeadlineSeconds: 600
+  # -- Affinity for the wait Job. Tolerations are inherited from kai-scheduler.global.tolerations.
+  affinity: {}
+  # -- (object) Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it.
+  podSecurityContext: null
+
 # etcd configuration - distributed key-value store
 # Installation is controlled by global.etcd.install above.
 etcd:

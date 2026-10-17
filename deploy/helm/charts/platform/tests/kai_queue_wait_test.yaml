@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: bundled KAI queue-controller wait
+templates:
+  - templates/kai-queue-wait.yaml
+release:
+  name: dynamo-platform
+  namespace: dynamo-system
+tests:
+  - it: renders the hook for bundled KAI
+    set: {global.kai-scheduler.install: true}
+    asserts:
+      - hasDocuments: {count: 7}
+  - it: omits the hook when KAI integration is disabled
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: omits the hook for externally managed KAI
+    set: {global.kai-scheduler.enabled: true}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: can be disabled
+    set: {global.kai-scheduler.install: true, kaiQueueWait.enabled: false}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: omits the hook when bundled KAI runs without its queue-controller
+    set: {global.kai-scheduler.install: true, kai-scheduler.queuecontroller.enabled: false}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: renders with template defaults when values predate kaiQueueWait (helm upgrade --reuse-values)
+    set: {global.kai-scheduler.install: true, kaiQueueWait: null}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: spec.activeDeadlineSeconds, value: 600}
+      - equal: {path: 'spec.template.spec.containers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
+      - equal: {path: spec.template.spec.securityContext.runAsUser, value: 65532}
+  # Pins values.yaml to the template fallback above.
+  - it: uses the same default image from values.yaml
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: 'spec.template.spec.initContainers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
+      - equal: {path: 'spec.template.spec.initContainers[1].image', value: registry.k8s.io/kubectl:v1.34.12}
+      - equal: {path: 'spec.template.spec.containers[0].image', value: registry.k8s.io/kubectl:v1.34.12}
+  - it: runs after the KAI config deployer and before the Queue hooks
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: metadata.name, value: dynamo-platform-kai-queue-wait}
+      - equal: {path: 'metadata.annotations["helm.sh/hook"]', value: 'post-install,post-upgrade'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '90'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: 'before-hook-creation,hook-succeeded'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
+      - equal: {path: spec.backoffLimit, value: 6}
+  - it: waits for queue-controller to be created and Available, then dry-runs a Queue through the webhook
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: 'spec.template.spec.initContainers[0].args'
+          value: [wait, --for=create, deployment/queue-controller, --namespace=dynamo-system, --timeout=600s]
+      - equal:
+          path: 'spec.template.spec.initContainers[1].args'
+          value: [wait, --for=condition=Available, deployment/queue-controller, --namespace=dynamo-system, --timeout=600s]
+      - equal:
+          path: 'spec.template.spec.containers[0].args'
+          value: [create, --dry-run=server, --filename=/probe/queue.yaml]
+      - equal: {path: 'spec.template.spec.volumes[1].configMap.name', value: dynamo-platform-kai-queue-wait}
+  - it: ships a top-level probe Queue that never collides with the Dynamo Queues
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: ConfigMap}
+    asserts:
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '80'}
+      - matchRegex: {path: 'data["queue.yaml"]', pattern: 'kind: Queue'}
+      - matchRegex: {path: 'data["queue.yaml"]', pattern: 'name: dynamo-platform-kai-queue-wait-probe\n'}
+      - notMatchRegex: {path: 'data["queue.yaml"]', pattern: parentQueue}
+  - it: grants only Queue create for the dry-run, cluster-wide, and removes it on success
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: ClusterRole}
+    asserts:
+      - matchRegex: {path: metadata.name, pattern: '^dynamo-platform-kai-queue-wait-[0-9a-f]{8}$'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '80'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: 'before-hook-creation,hook-succeeded'}
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [scheduling.run.ai]
+              resources: [queues]
+              verbs: [create]
+  - it: grants only Deployment read access in the release namespace before the Job and removes it on success
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: Role}
+    asserts:
+      - equal: {path: metadata.namespace, value: dynamo-system}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '80'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: 'before-hook-creation,hook-succeeded'}
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [apps]
+              resources: [deployments]
+              verbs: [get, list, watch]
+  - it: retains secure pod and container defaults
+    set: {global.kai-scheduler.install: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile: {type: RuntimeDefault}
+      - equal: {path: 'spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem', value: true}
+      - equal: {path: 'spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation', value: false}
+  - it: lets OpenShift assign the UID
+    set:
+      global.kai-scheduler.install: true
+      kaiQueueWait.podSecurityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.securityContext.runAsUser}
+  - it: honors image, pull secret, deadline and affinity overrides
+    set:
+      global.kai-scheduler.install: true
+      kaiQueueWait.image: registry.example.com/kubectl:v1.35.0
+      kaiQueueWait.imagePullSecrets: [{name: mirror}]
+      kaiQueueWait.activeDeadlineSeconds: 120
+      kaiQueueWait.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: kubernetes.io/os, operator: In, values: [linux]}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: 'spec.template.spec.initContainers[0].image', value: registry.example.com/kubectl:v1.35.0}
+      - equal: {path: 'spec.template.spec.initContainers[1].image', value: registry.example.com/kubectl:v1.35.0}
+      - equal: {path: 'spec.template.spec.containers[0].image', value: registry.example.com/kubectl:v1.35.0}
+      - equal: {path: spec.template.spec.imagePullSecrets, value: [{name: mirror}]}
+      - equal: {path: spec.activeDeadlineSeconds, value: 120}
+      - contains: {path: 'spec.template.spec.initContainers[1].args', content: --timeout=120s}
+      - exists: {path: spec.template.spec.affinity.nodeAffinity}
+  - it: schedules alongside KAI pods
+    set:
+      global.kai-scheduler.install: true
+      kai-scheduler.global.tolerations:
+        - {key: dedicated, operator: Equal, value: system, effect: NoSchedule}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations
+          value:
+            - {key: dedicated, operator: Equal, value: system, effect: NoSchedule}
