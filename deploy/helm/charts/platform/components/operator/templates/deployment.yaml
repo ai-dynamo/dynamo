@@ -32,7 +32,29 @@ metadata:
 spec:
   replicas: {{ .Values.controllerManager.replicas }}
   strategy:
+    # Cluster-wide installations use RollingUpdate with zero allowed
+    # unavailability: the old ReplicaSet pods are only terminated after new
+    # (surge) pods become Ready, so DGD reconciliation and the CRD conversion
+    # webhook stay available across chart upgrades. The operator is
+    # leader-elected, so a brief overlap of old/new generations is safe.
+    # See #15411 for the background (Recreate took availability to zero on
+    # every upgrade).
+    #
+    # Namespace-restricted installations keep Recreate: the namespace-scope
+    # marker lease (LeaseManager.Stop) is deleted unconditionally on shutdown
+    # and assumes a single live restricted operator (see lease_manager.go:
+    # "only one operator instance in namespace-restricted mode"). A rolling
+    # overlap of old/new restricted pods would let the cluster-wide operator
+    # briefly process the tenant namespace while the replacement is still
+    # responsible for it (review r4165554147).
+    {{- if .Values.namespaceRestriction.enabled }}
     type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- end }}
   selector:
     matchLabels:
       control-plane: controller-manager
