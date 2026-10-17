@@ -32,6 +32,7 @@ from .url_validator import (
     UrlValidationPolicy,
     describe_error_detail,
     describe_media_source,
+    mentions_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,48 @@ _REDIRECT_SCHEMES = frozenset({"http", "https", ""})
 # Set to "1" to assert that the configured egress proxy enforces destination
 # policy itself. Spelled like DYN_MM_ALLOW_INTERNAL, which it sits beside.
 DYN_MM_TRUST_EGRESS_PROXY = "DYN_MM_TRUST_EGRESS_PROXY"
+
+
+def _bounded_cause(exc: BaseException) -> BaseException | None:
+    """A copy of an aiohttp error with the URL it carries bounded, to chain as ``__cause__``.
+
+    The bounded errors this client raises keep what aiohttp raised (its type,
+    status and description) for callers and tests, but a formatted traceback
+    renders the cause's text, and aiohttp's text quotes the request URL: for a
+    presigned URL that is its signature. Rebuild the error around the bounded
+    label instead; an error whose text names no URL is chained as it is, and
+    one this cannot rebuild is not chained at all.
+    """
+    try:
+        if isinstance(exc, aiohttp.InvalidURL):
+            return type(exc)(describe_media_source(str(exc.url)), exc.description)
+        if isinstance(exc, aiohttp.NonHttpUrlClientError):
+            return type(exc)(describe_error_detail(str(exc)))
+        if isinstance(exc, aiohttp.ClientResponseError):
+            info = exc.request_info
+            if info is not None:
+                info = aiohttp.RequestInfo(
+                    URL(describe_media_source(str(info.url)), encoded=True),
+                    info.method,
+                    info.headers,
+                    URL(describe_media_source(str(info.real_url)), encoded=True),
+                )
+            # The message is the server's reason phrase, so it can echo the URL too.
+            return type(exc)(
+                info,
+                exc.history,
+                status=exc.status,
+                message=describe_error_detail(exc.message),
+                headers=exc.headers,
+            )
+        if not mentions_url(str(exc)):
+            return exc
+        # A plain message error (ClientConnectionError and the like): same type,
+        # bounded text. One whose constructor takes more than a message is not
+        # chained.
+        return type(exc)(describe_error_detail(str(exc)))
+    except Exception:  # an aiohttp change must not leak the original instead
+        return None
 
 
 def _redirect_target(base: URL, location: str, previous: str) -> str:
@@ -291,23 +334,25 @@ class AiohttpClient(HttpClient):
                         response.content.iter_chunked(_READ_CHUNK), url, max_bytes
                     )
         except aiohttp.ClientResponseError as e:
-            raise HttpStatusError(e.status, e.message or "", url) from e
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
+            raise HttpStatusError(e.status, e.message or "", url) from _bounded_cause(e)
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
             raise HttpTimeoutError(
                 f"Timeout loading {describe_media_source(url)}"
-            ) from e
+            ) from _bounded_cause(exc)
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
             raise HttpConnectionError(
-                f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"Connection error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
         except aiohttp.ClientError as e:
             raise HttpConnectionError(
-                f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"HTTP error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
 
     async def _fetch_body_or_redirect(
         self,
@@ -345,29 +390,33 @@ class AiohttpClient(HttpClient):
                 try:
                     response.raise_for_status()
                 except aiohttp.ClientResponseError as e:
-                    raise HttpStatusError(e.status, e.message or "", url) from e
+                    raise HttpStatusError(
+                        e.status, e.message or "", url
+                    ) from _bounded_cause(e)
                 return (
                     await collect_capped(
                         response.content.iter_chunked(_READ_CHUNK), url, max_bytes
                     ),
                     None,
                 )
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
             raise HttpTimeoutError(
                 f"Timeout loading {describe_media_source(url)}"
-            ) from e
+            ) from _bounded_cause(exc)
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
             raise HttpConnectionError(
-                f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"Connection error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
         except aiohttp.ClientError as e:
             raise HttpConnectionError(
-                f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
-            ) from e
+                f"HTTP error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
 
     async def close(self) -> None:
         async with self._lock:
