@@ -33,7 +33,8 @@ These were functional checks, not performance benchmarks; changing infrastructur
     {"id": "local-sglang-text-to-video-diffusion-sh", "target": "local:sglang", "label": "text-to-video-diffusion.sh", "description": "Text-to-Video Generation"},
     {"id": "local-trtllm-agg-video-diffusion-sh", "target": "local:trtllm", "label": "agg_video_diffusion.sh", "description": "Text-to-Video Generation"},
     {"id": "local-vllm-agg-omni-i2v-sh", "target": "local:vllm", "label": "agg_omni_i2v.sh", "description": "Image-to-Video Generation"},
-    {"id": "local-vllm-agg-omni-video-sh", "target": "local:vllm", "label": "agg_omni_video.sh", "description": "Text-to-Video Generation"}
+    {"id": "local-vllm-agg-omni-video-sh", "target": "local:vllm", "label": "agg_omni_video.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-minimax-h3-sh", "target": "local:vllm", "label": "agg_omni_minimax_h3.sh", "description": "MiniMax-H3 Text-to-Video with Audio"}
   ]}
 >
 
@@ -108,6 +109,22 @@ and decoding, not general image fidelity or model quality.
 [Source: `agg_omni_video.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_video.sh)
 
 <Code src="../../../../../examples/backends/vllm/launch/agg_omni_video.sh" title="agg_omni_video.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-minimax-h3-sh">
+
+**Prerequisites:** [MiniMax-H3 workflow](../../use-cases/diffusion/workflows/text-to-video.md#minimax-h3)
+
+Requires four B200 GPUs and the video-audio image overlay described in the workflow.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_minimax_h3.sh)
+```
+
+[Source: `agg_omni_minimax_h3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_minimax_h3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_minimax_h3.sh" title="agg_omni_minimax_h3.sh" language="bash" maxLines={0} />
 
 </div>
 

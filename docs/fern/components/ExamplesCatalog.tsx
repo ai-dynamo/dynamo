@@ -269,7 +269,7 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 .dynamo-example-chip[data-backend="fastvideo"] {
   --example-chip-fg: var(--example-orange-fg); --example-chip-bg: var(--example-orange-bg); --example-chip-border: var(--example-orange-border);
 }
-.dynamo-example-chip[data-backend="tritonserver"] {
+.dynamo-example-chip[data-backend="tokenspeed"] {
   --example-chip-fg: var(--example-violet-fg); --example-chip-bg: var(--example-violet-bg); --example-chip-border: var(--example-violet-border);
 }
 .dynamo-example-chip-platforms {

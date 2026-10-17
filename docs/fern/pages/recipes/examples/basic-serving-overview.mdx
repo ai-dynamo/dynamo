@@ -70,7 +70,7 @@ Kubernetes deployments that distribute prefill and decode across nodes.
 
 </div>
 
-<div className="dynamo-example-card" data-example="parallelism" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="dep.sh disagg_dp_attn.sh dsr1_dep.sh gpt_oss_disagg.sh multi_node_tp.sh">
+<div className="dynamo-example-card" data-example="parallelism" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_dp_attn.sh dsr1_dep.sh gpt_oss_disagg.sh multi_node_tp.sh">
 
 <span className="dynamo-example-icon"><Icon icon="table-cells" /></span>
 
@@ -84,15 +84,15 @@ Tensor-parallel, expert-parallel, and data-parallel attention examples.
 
 </div>
 
-<div className="dynamo-example-card" data-example="speculative-decoding" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:vllm" data-keywords="agg_spec_decoding.sh">
+<div className="dynamo-example-card" data-example="speculative-decoding" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:vllm" data-keywords="agg_spec_decoding.sh">
 
 <span className="dynamo-example-icon"><Icon icon="forward-fast" /></span>
 
 ### Speculative Decoding
 
-vLLM aggregated serving with EAGLE speculative decoding.
+Aggregated serving with EAGLE speculative decoding.
 
-<ExampleTargets targets="local:vllm" />
+<ExampleTargets targets="local:sglang local:vllm" />
 
 <a className="dynamo-example-card-link" href="speculative-decoding.mdx">Open Speculative Decoding example</a>
 

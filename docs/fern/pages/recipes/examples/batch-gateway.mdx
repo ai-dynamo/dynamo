@@ -1,16 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "llm-d Batch Gateway"
-subtitle: "Batch inference on a dedicated Dynamo worker pool."
+title: "Offline Batch Inference"
+subtitle: "Batch jobs through the Dynamo frontend on a dedicated worker pool."
 hide-toc: true
 ---
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-<Warning>
-**Experimental.** Follow the [Batch Gateway README](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/llm-d-batch-gateway/README.md) for installation prerequisites and validation.
-</Warning>
+**Prerequisites:** [Offline Batch Inference README](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/batch-gateway/README.md)
 
 <ExampleSelector
   variants={[
@@ -20,9 +18,12 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-dynamo-yaml">
 
-[Source: `dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/llm-d-batch-gateway/dynamo.yaml)
+The frontend forwards `/v1/files` and `/v1/batches` to the batch services that the README's
+`dynamo-batch` Helm release installs for this DGD.
 
-<Code src="../../../../../examples/deployments/llm-d-batch-gateway/dynamo.yaml" title="dynamo.yaml" language="yaml" maxLines={0} />
+[Source: `dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/batch-gateway/dynamo.yaml)
+
+<Code src="../../../../../examples/deployments/batch-gateway/dynamo.yaml" title="dynamo.yaml" language="yaml" maxLines={0} />
 
 </div>
 

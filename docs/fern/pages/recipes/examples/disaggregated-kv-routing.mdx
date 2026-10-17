@@ -14,6 +14,7 @@ import { ExampleSelector } from "@/components/ExampleSelector";
     {"id": "kubernetes-vllm-disagg-router-yaml", "target": "kubernetes:vllm", "label": "disagg_router.yaml", "description": "Disaggregated with KV-aware routing"},
     {"id": "kubernetes-vllm-disagg-router-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "disagg_router_xpu_dra.yaml", "description": "Disaggregated with KV-aware routing"},
     {"id": "local-sglang-disagg-router-sh", "target": "local:sglang", "label": "disagg_router.sh", "description": "Independent Prefill and Decode Pools"},
+    {"id": "local-tokenspeed-launch-disagg-sh", "target": "local:tokenspeed", "label": "launch_disagg.sh", "description": "LongCat-Flash with Two Prefill Replicas"},
     {"id": "local-trtllm-disagg-router-sh", "target": "local:trtllm", "label": "disagg_router.sh", "description": "Cache-Aware Prefill Routing"},
     {"id": "local-vllm-disagg-router-sh", "target": "local:vllm", "label": "disagg_router.sh", "description": "Independent Prefill and Decode Pools"},
     {"id": "local-vllm-disagg-router-gaudi-sh", "target": "local:vllm", "label": "disagg_router_gaudi.sh", "description": "KV-Aware Routing on Intel Gaudi"},
@@ -54,6 +55,25 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 [Source: `disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh)
 
 <Code src="../../../../../examples/backends/sglang/launch/disagg_router.sh" title="disagg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-tokenspeed-launch-disagg-sh">
+
+**Prerequisites:** [TokenSpeed README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tokenspeed/README.md)
+
+**Experimental.** Uses three hosts with eight H200 or four GB300 GPUs each, an RDMA fabric, and
+shared etcd and NATS. Run `prefill` on two hosts, `decode` on the third, and `frontend` on the first.
+
+```bash
+bash examples/backends/tokenspeed/launch_disagg.sh prefill
+bash examples/backends/tokenspeed/launch_disagg.sh decode
+bash examples/backends/tokenspeed/launch_disagg.sh frontend
+```
+
+[Source: `launch_disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tokenspeed/launch_disagg.sh)
+
+<Code src="../../../../../examples/backends/tokenspeed/launch_disagg.sh" title="launch_disagg.sh" language="bash" maxLines={0} />
 
 </div>
 

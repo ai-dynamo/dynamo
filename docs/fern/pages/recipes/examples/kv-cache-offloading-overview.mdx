@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: KV Cache Offloading Examples
 sidebar-title: Overview
-subtitle: Explore KVBM, LMCache, and FlexKV deployment examples
+subtitle: Explore KVBM, LMCache, FlexKV, and KVCR deployment examples
 hide-toc: true
 ---
 
@@ -53,6 +53,20 @@ Local vLLM cache offloading with FlexKV.
 <ExampleTargets targets="local:vllm" />
 
 <a className="dynamo-example-card-link" href="flexkv.mdx">Open FlexKV example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="kvcr" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm" data-keywords="agg-memory-service.yaml agg.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="share-nodes" /></span>
+
+### KV Cache Runner
+
+Cross-node KV-cache tier with KVCR over RDMA.
+
+<ExampleTargets targets="kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="kvcr.mdx">Open KV Cache Runner example</a>
 
 </div>
 

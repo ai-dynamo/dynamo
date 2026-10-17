@@ -1,0 +1,52 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GPU Sharing"
+subtitle: "Many models per GPU with KAI-Scheduler, compared with one model per GPU."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+These manifests reproduce the [GPU sharing benchmark](../../use-cases/gpu-sharing/gpu-sharing-results.mdx)
+on one node with eight A100 40GB GPUs.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-baseline-dgds-8x-yaml", "target": "kubernetes:vllm", "label": "baseline/dgds-8x.yaml", "description": "Eight models, one dedicated GPU each"},
+    {"id": "kubernetes-vllm-kai-hami-dgds-16x-yaml", "target": "kubernetes:vllm", "label": "kai-hami/dgds-16x.yaml", "description": "Sixteen models, two per GPU with HAMi memory caps"},
+    {"id": "kubernetes-vllm-kai-gpu-fractions-dgds-16x-yaml", "target": "kubernetes:vllm", "label": "kai-gpu-fractions/dgds-16x.yaml", "description": "Sixteen models, two per GPU with memory and compute caps"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-baseline-dgds-8x-yaml">
+
+**Prerequisites:** [Deploy the Baseline Experiment](../../use-cases/gpu-sharing/deploy-baseline.md)
+
+[Source: `dgds-8x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/dgds-8x.yaml)
+
+<Code src="../../../../../examples/gpu-sharing/baseline/dgds-8x.yaml" title="dgds-8x.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-kai-hami-dgds-16x-yaml">
+
+**Prerequisites:** [Deploy the KAI + HAMi Experiment](../../use-cases/gpu-sharing/deploy-kai-hami.md)
+
+[Source: `dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/dgds-16x.yaml)
+
+<Code src="../../../../../examples/gpu-sharing/kai-hami/dgds-16x.yaml" title="dgds-16x.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-kai-gpu-fractions-dgds-16x-yaml">
+
+**Prerequisites:** [Deploy the KAI + GPU Fractions Experiment](../../use-cases/gpu-sharing/deploy-kai-gpu-fractions.md)
+
+[Source: `dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/dgds-16x.yaml)
+
+<Code src="../../../../../examples/gpu-sharing/kai-gpu-fractions/dgds-16x.yaml" title="dgds-16x.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>
