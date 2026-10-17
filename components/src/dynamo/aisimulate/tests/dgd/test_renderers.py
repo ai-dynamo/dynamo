@@ -117,6 +117,7 @@ def _stub_legacy_materialization(monkeypatch) -> None:
 
 
 def test_materialize_uses_official_candidate_bridge(monkeypatch) -> None:
+    pytest.importorskip("aisimulate_core")
     captured = {}
 
     def fake_from_sweeper_candidate(
@@ -187,6 +188,7 @@ spec:
 
 
 def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None:
+    pytest.importorskip("aisimulate.generator")
     from aisimulate.generator.request.schema import ModelFacts
 
     from dynamo.profiler.utils.config_modifiers import vllm
@@ -256,6 +258,7 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
 
 
 def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
+    pytest.importorskip("aisimulate_core")
     captured = {}
 
     class FakeMaterializationError(Exception):
@@ -335,7 +338,15 @@ def test_materialize_requires_renderer_candidate_fields(candidate, message) -> N
         )
 
 
-def test_patch_manifest_preserves_non_dgd_documents() -> None:
+def test_patch_manifest_preserves_non_dgd_documents(monkeypatch) -> None:
+    monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
+    monkeypatch.setitem(
+        sys.modules,
+        "dynamo.profiler.utils.dgd_materialization",
+        SimpleNamespace(
+            DGDMaterializationPurpose=SimpleNamespace(FINAL_OUTPUT=object())
+        ),
+    )
     rendered = """
 apiVersion: v1
 kind: ConfigMap
@@ -366,6 +377,7 @@ spec:
 
 
 def test_patch_manifest_applies_shared_legacy_finalization(monkeypatch) -> None:
+    pytest.importorskip("aisimulate_core")
     calls = []
 
     def fake_materialize(dgd, *, purpose, runtime_backend, model_name_or_path):
@@ -611,7 +623,15 @@ spec:
     assert "namespace" not in yaml.safe_load(patched)["metadata"]
 
 
-def test_runtime_version_override_is_only_written_when_explicit() -> None:
+def test_runtime_version_override_is_only_written_when_explicit(monkeypatch) -> None:
+    monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
+    monkeypatch.setitem(
+        sys.modules,
+        "dynamo.profiler.utils.dgd_materialization",
+        SimpleNamespace(
+            DGDMaterializationPurpose=SimpleNamespace(FINAL_OUTPUT=object())
+        ),
+    )
     rendered = """
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment

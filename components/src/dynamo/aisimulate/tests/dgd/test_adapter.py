@@ -1,19 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
-from aisimulate.output_adapter import validate_output_adapter
-from aisimulate.sweeper.result import SweepResult
 from pydantic import ValidationError
 
-from dynamo.aisimulate.output.dgd import adapter as adapter_module
-from dynamo.aisimulate.output.dgd.adapter import DGDOutputConfig, create_adapter
-from dynamo.aisimulate.output.dgd.renderers import CandidateMaterializationError
+# The standalone aisimulate package is only installed on Python >= 3.11 (see pyproject.toml);
+pytest.importorskip("aisimulate.output_adapter")
+
+from aisimulate.output_adapter import validate_output_adapter  # noqa: E402
+from aisimulate.sweeper.result import SweepResult  # noqa: E402
+
+from dynamo.aisimulate.output.dgd import adapter as adapter_module  # noqa: E402
+from dynamo.aisimulate.output.dgd.adapter import (  # noqa: E402
+    DGDOutputConfig,
+    create_adapter,
+)
+from dynamo.aisimulate.output.dgd.renderers import (  # noqa: E402
+    CandidateMaterializationError,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -114,7 +123,7 @@ def _real_scalar_result() -> SweepResult:
             "provenance": {
                 "search_strategy": "optimizer_guided",
                 "run_id": "adapter-test",
-                "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
                 "input_fingerprint": "sha256:adapter-test",
                 "config": smart_config,
             },
