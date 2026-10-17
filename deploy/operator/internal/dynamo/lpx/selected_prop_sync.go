@@ -112,14 +112,15 @@ func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
 // The result keeps the first stage's ID; input stages are unchanged.
 // Partitions must be nonempty and normalized, with positive chip counts and node widths.
 func packPropSyncPartitions(partitions []BuildPartition) []BuildPartition {
-	// Shared-node stages need matching geometry and, for XT, identical topology names.
+	// Shared-node stages need matching chip counts and, for XT, identical topology
+	// names. Decoding guarantees that every partition of a build has one node width.
 	root := partitions[0]
 	chips, chipsPerNode := root.Topology.ChipCount, root.DevicesPerNode
 	if len(partitions) < 2 || chips >= chipsPerNode || chipsPerNode%chips != 0 {
 		return partitions
 	}
 	for _, partition := range partitions[1:] {
-		if partition.Topology.ChipCount != chips || partition.DevicesPerNode != chipsPerNode ||
+		if partition.Topology.ChipCount != chips ||
 			(len(partition.HXExtent) == 0 && partition.Topology.Raw != root.Topology.Raw) {
 			return partitions
 		}
