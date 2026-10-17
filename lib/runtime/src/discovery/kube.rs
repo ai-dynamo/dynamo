@@ -12,7 +12,7 @@ pub use utils::{hash_container_name, hash_pod_name};
 
 use crd::{apply_cr, build_cr};
 use daemon::{DaemonOutputs, DaemonState, DiscoveryDaemon, ListState};
-use utils::{KubeDiscoveryMode, PodInfo};
+use utils::PodInfo;
 
 use crate::CancellationToken;
 use crate::discovery::{
@@ -20,16 +20,67 @@ use crate::discovery::{
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID,
     ModelCardInstanceId, reconcile_discovery_snapshot, resync_discovery_events,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use kube::{
     Api, Client as KubeClient,
-    api::{DeleteParams, ListParams},
+    api::{DeleteParams, ListParams, Preconditions},
 };
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, watch};
+
+/// A container restart preserves its Pod and discovery identity but may change its TCP port.
+/// Retire the previous incarnation before starting a reflector that could advertise it again.
+async fn clear_stale_metadata(kube_client: KubeClient, pod_info: &PodInfo) -> Result<()> {
+    let cr_name = pod_info.target.cr_name();
+    let api: Api<DynamoWorkerMetadata> = Api::namespaced(kube_client, &pod_info.pod_namespace);
+    let Some(existing) = api.get_opt(&cr_name).await? else {
+        return Ok(());
+    };
+    let owners = existing
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default();
+    anyhow::ensure!(
+        owners.len() == 1
+            && owners[0].api_version == "v1"
+            && owners[0].kind == "Pod"
+            && owners[0].name == pod_info.pod_name
+            && owners[0].uid == pod_info.pod_uid,
+        "refusing to clear discovery metadata {cr_name}: not exclusively owned by the starting Pod"
+    );
+    let uid = existing
+        .metadata
+        .uid
+        .context("discovery metadata has no UID")?;
+    let resource_version = existing
+        .metadata
+        .resource_version
+        .context("discovery metadata has no resourceVersion")?;
+    // Do not delete a replacement or a concurrent publisher's update after the ownership check.
+    let params = DeleteParams {
+        preconditions: Some(Preconditions {
+            uid: Some(uid),
+            resource_version: Some(resource_version),
+        }),
+        ..Default::default()
+    };
+    match api.delete(&cr_name, &params).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(error)) if error.code == 404 => {}
+        Err(error) => return Err(error).context("failed to clear stale discovery metadata"),
+    }
+    // A finalizer or concurrent replacement must not leave stale state visible to startup.
+    anyhow::ensure!(
+        api.get_opt(&cr_name).await?.is_none(),
+        "discovery metadata {cr_name} still exists after cleanup; refusing to start with stale state"
+    );
+    tracing::info!("Deleted stale CR: {cr_name}");
+    Ok(())
+}
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -139,26 +190,9 @@ impl KubeDiscoveryClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
-        // In container mode, delete any stale CR from a previous incarnation of this container.
-        // In failover pods, the pod stays alive when a container crashes and restarts,
-        // so the old CR persists. Deleting it ensures the daemon doesn't see stale data.
-        // In pod mode this is unnecessary — pod restart creates a new pod (and new CR name).
-        if pod_info.mode == KubeDiscoveryMode::Container {
-            let cr_api: Api<DynamoWorkerMetadata> =
-                Api::namespaced(kube_client.clone(), &pod_info.pod_namespace);
-            match cr_api.delete(&cr_name, &DeleteParams::default()).await {
-                Ok(_) => tracing::info!("Deleted stale CR: {}", cr_name),
-                Err(kube::Error::Api(err_resp)) if err_resp.code == 404 => {
-                    tracing::debug!("No stale CR to delete: {}", cr_name);
-                }
-                Err(e) => {
-                    panic!(
-                        "Failed to clear stale CR '{}': {} — cannot start with stale discovery state",
-                        cr_name, e
-                    );
-                }
-            }
-        }
+        // Both discovery modes survive an in-Pod container restart. Keep their readiness
+        // sources unchanged, but never let the new runtime inherit its predecessor's record.
+        clear_stale_metadata(kube_client.clone(), &pod_info).await?;
 
         let list_state: ListState = Arc::new(RwLock::new(HashMap::new()));
         let (event_tx, _) = broadcast::channel::<DiscoveryEvent>(4096);
@@ -591,6 +625,246 @@ mod tests {
     use crate::component::TransportType;
     use crate::discovery::startup_contract as contract;
     use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
+    use axum::{
+        Json, Router,
+        body::Body,
+        extract::State,
+        http::{Method, Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use std::{collections::VecDeque, sync::Mutex};
+    use utils::{KubeDiscoveryMode, KubeDiscoveryTarget};
+
+    fn restart_pod(container: Option<&str>) -> PodInfo {
+        PodInfo {
+            pod_name: "pod".into(),
+            pod_namespace: "ns".into(),
+            pod_uid: "pod-uid".into(),
+            system_port: 9090,
+            mode: if container.is_some() {
+                KubeDiscoveryMode::Container
+            } else {
+                KubeDiscoveryMode::Pod
+            },
+            target: match container {
+                Some(name) => KubeDiscoveryTarget::Container("pod".into(), name.into()),
+                None => KubeDiscoveryTarget::Pod("pod".into()),
+            },
+        }
+    }
+
+    fn stale_record(pod: &PodInfo) -> Value {
+        let mut metadata = DiscoveryMetadata::new();
+        metadata
+            .register_endpoint(endpoint_instance(
+                pod.target.instance_id(),
+                "127.0.0.1:1234",
+            ))
+            .unwrap();
+        let mut record = build_cr(
+            &pod.target.cr_name(),
+            &pod.pod_name,
+            &pod.pod_uid,
+            &metadata,
+        )
+        .unwrap();
+        record.metadata.uid = Some("old-record".into());
+        record.metadata.resource_version = Some("42".into());
+        serde_json::to_value(record).unwrap()
+    }
+
+    fn api_status(code: u16) -> Value {
+        let reason = match code {
+            404 => "NotFound",
+            409 => "Conflict",
+            403 => "Forbidden",
+            _ => "fixture",
+        };
+        json!({"apiVersion":"v1", "kind":"Status", "code":code,
+            "status":if code < 400 { "Success" } else { "Failure" },
+            "reason":reason, "message":"fixture"})
+    }
+
+    // Exercise the real kube request serialization and error handling without a live API server.
+    async fn exercise_cleanup(
+        pod: PodInfo,
+        steps: Vec<(Method, u16, Value)>,
+    ) -> (Result<()>, Vec<Value>) {
+        struct ApiScript {
+            responses: VecDeque<(u16, Value)>,
+            requests: Vec<(Method, String, Value)>,
+        }
+        let methods: Vec<_> = steps.iter().map(|step| step.0.clone()).collect();
+        let state = Arc::new(Mutex::new(ApiScript {
+            responses: steps
+                .into_iter()
+                .map(|(_, code, body)| (code, body))
+                .collect(),
+            requests: Vec::new(),
+        }));
+        let router = Router::new()
+            .fallback(
+                |State(state): State<Arc<Mutex<ApiScript>>>, request: Request<Body>| async move {
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, 65536).await.unwrap();
+                    let body = if bytes.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_slice(&bytes).unwrap()
+                    };
+                    let mut script = state.lock().unwrap();
+                    script
+                        .requests
+                        .push((parts.method, parts.uri.path().to_string(), body));
+                    let (code, body) = script
+                        .responses
+                        .pop_front()
+                        .unwrap_or((500, api_status(500)));
+                    (StatusCode::from_u16(code).unwrap(), Json(body))
+                },
+            )
+            .with_state(state.clone());
+        let result = clear_stale_metadata(KubeClient::new(router, "ns"), &pod).await;
+        let mut script = state.lock().unwrap();
+        assert!(script.responses.is_empty(), "unconsumed API responses");
+        assert_eq!(
+            script.requests.len(),
+            methods.len(),
+            "unexpected API requests"
+        );
+        let path = format!(
+            "/apis/nvidia.com/v1alpha1/namespaces/ns/dynamoworkermetadatas/{}",
+            pod.target.cr_name()
+        );
+        for ((method, actual_path, _), expected) in script.requests.iter().zip(methods) {
+            assert_eq!(*method, expected);
+            assert_eq!(*actual_path, path);
+        }
+        (
+            result,
+            std::mem::take(&mut script.requests)
+                .into_iter()
+                .map(|(_, _, body)| body)
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cleanup_fences_both_discovery_modes() {
+        for container in [None, Some("engine-0")] {
+            let pod = restart_pod(container);
+            let record = stale_record(&pod);
+            let (result, requests) = exercise_cleanup(
+                pod,
+                vec![
+                    (Method::GET, 200, record),
+                    (Method::DELETE, 200, api_status(200)),
+                    (Method::GET, 404, api_status(404)),
+                ],
+            )
+            .await;
+            result.unwrap();
+            assert_eq!(
+                requests[1]["preconditions"],
+                json!({"uid":"old-record", "resourceVersion":"42"})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cleanup_allows_fresh_start() {
+        let (result, _) =
+            exercise_cleanup(restart_pod(None), vec![(Method::GET, 404, api_status(404))]).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cleanup_rejects_foreign_or_unfenced_records() {
+        for field in [
+            "owner",
+            "pod_uid",
+            "pod_name",
+            "co_owner",
+            "uid",
+            "resourceVersion",
+        ] {
+            let pod = restart_pod(None);
+            let mut record = stale_record(&pod);
+            match field {
+                "owner" => record["metadata"]["ownerReferences"] = json!([]),
+                "pod_uid" => record["metadata"]["ownerReferences"][0]["uid"] = json!("other-pod"),
+                "pod_name" => record["metadata"]["ownerReferences"][0]["name"] = json!("other"),
+                "co_owner" => {
+                    let owner = record["metadata"]["ownerReferences"][0].clone();
+                    record["metadata"]["ownerReferences"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(owner);
+                }
+                key => {
+                    record["metadata"].as_object_mut().unwrap().remove(key);
+                }
+            }
+            let (result, _) = exercise_cleanup(pod, vec![(Method::GET, 200, record)]).await;
+            assert!(result.is_err(), "accepted invalid {field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cleanup_fails_closed_on_api_errors_or_races() {
+        for code in [403, 409] {
+            let pod = restart_pod(None);
+            let record = stale_record(&pod);
+            let (result, _) = exercise_cleanup(
+                pod,
+                vec![
+                    (Method::GET, 200, record),
+                    (Method::DELETE, code, api_status(code)),
+                ],
+            )
+            .await;
+            assert!(result.is_err(), "ignored delete status {code}");
+        }
+        let (result, _) =
+            exercise_cleanup(restart_pod(None), vec![(Method::GET, 403, api_status(403))]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cleanup_accepts_already_deleted_record() {
+        let pod = restart_pod(None);
+        let record = stale_record(&pod);
+        let (result, _) = exercise_cleanup(
+            pod,
+            vec![
+                (Method::GET, 200, record),
+                (Method::DELETE, 404, api_status(404)),
+                (Method::GET, 404, api_status(404)),
+            ],
+        )
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cleanup_rejects_pending_deletion_or_replacement() {
+        for uid in ["old-record", "replacement-record"] {
+            let pod = restart_pod(None);
+            let record = stale_record(&pod);
+            let mut remaining = record.clone();
+            remaining["metadata"]["uid"] = json!(uid);
+            let (result, _) = exercise_cleanup(
+                pod,
+                vec![
+                    (Method::GET, 200, record),
+                    (Method::DELETE, 200, api_status(200)),
+                    (Method::GET, 200, remaining),
+                ],
+            )
+            .await;
+            assert!(result.is_err(), "started while {uid} was still present");
+        }
+    }
 
     // Regression: suppressing NotFound reports healthy for a missing discovery
     // API, even though discovery cannot list or watch any workers.
