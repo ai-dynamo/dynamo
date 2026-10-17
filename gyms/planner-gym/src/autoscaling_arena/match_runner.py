@@ -5,20 +5,26 @@
 
 from __future__ import annotations
 
+import glob
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
 import platform
 import subprocess
 import tempfile
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from autoscaling_arena import __version__
+from autoscaling_arena.checkpoints import RunJournal
+from autoscaling_arena.execution import run_isolated
 from autoscaling_arena.match_config import (
     EngineConfig,
     MatchConfig,
@@ -29,7 +35,9 @@ from autoscaling_arena.match_config import (
     SimBackendConfig,
     SLAProfileConfig,
 )
+from autoscaling_arena.measurement import AllocationConfig, MeasurementWindow
 from autoscaling_arena.scorecard import SLOProfile
+from autoscaling_arena.trace_preparation import TracePreparationConfig, prepare_trace
 from autoscaling_arena.workloads import Workload, get_workload
 
 ProgressCallback = Callable[[str, MatchRun, Optional[dict[str, Any]]], None]
@@ -108,6 +116,7 @@ class _ExecutionContext:
     session_id: str
     session_root: Path
     external_trace_root: Optional[Path] = None
+    materialized_trace_root: Optional[Path] = None
     trace_paths: dict[tuple[Any, ...], Path] = field(default_factory=dict)
     trace_fingerprints: dict[Path, dict[str, Any]] = field(default_factory=dict)
     arrival_series: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
@@ -118,6 +127,8 @@ def execute_match_config(
     *,
     on_progress: Optional[ProgressCallback] = None,
     run_ids: set[str] | None = None,
+    session_dir: Optional[Path] = None,
+    resume_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Execute selected expanded matrix cells and return a normalized report.
 
@@ -128,6 +139,8 @@ def execute_match_config(
     matrix.
     """
 
+    if session_dir is not None and resume_dir is not None:
+        raise ValueError("session_dir and resume_dir are mutually exclusive")
     matrix = list(config.iter_runs())
     if run_ids is not None:
         available = {item.run_id for item in matrix}
@@ -144,21 +157,35 @@ def execute_match_config(
     session_prefix = started_wall.strftime("%Y%m%dT%H%M%S%fZ") + "-" + config_hash[:10]
     try:
         config.publish.artifact_root.mkdir(parents=True, exist_ok=True)
-        session_root = Path(
-            tempfile.mkdtemp(
-                prefix=session_prefix + "-",
-                dir=config.publish.artifact_root,
+        if resume_dir is not None:
+            session_root = Path(resume_dir).expanduser().resolve()
+            if not session_root.is_dir():
+                raise ValueError(
+                    "resume_dir must identify an existing execution session"
+                )
+        elif session_dir is not None:
+            session_root = Path(session_dir).expanduser().resolve()
+            session_root.mkdir(parents=True, exist_ok=False)
+        else:
+            session_root = Path(
+                tempfile.mkdtemp(
+                    prefix=session_prefix + "-", dir=config.publish.artifact_root
+                )
             )
-        )
     except OSError as exc:
         raise MatchPublishError(
             f"cannot create artifact session under "
             f"{config.publish.artifact_root}: {exc}"
         ) from exc
     session_id = session_root.name
-    with tempfile.TemporaryDirectory(
-        prefix="autoscaling-arena-external-traces-"
-    ) as external_trace_root:
+    with (
+        RunJournal(
+            session_root, execution_signature(config), resume=resume_dir is not None
+        ) as journal,
+        tempfile.TemporaryDirectory(
+            prefix="autoscaling-arena-external-traces-"
+        ) as external_trace_root,
+    ):
         context = _ExecutionContext(
             session_id=session_id,
             session_root=session_root,
@@ -172,6 +199,7 @@ def execute_match_config(
             started_wall=started_wall,
             started_monotonic=started_monotonic,
             on_progress=on_progress,
+            journal=journal,
         )
 
 
@@ -184,28 +212,87 @@ def _execute_match_matrix(
     started_wall: datetime,
     started_monotonic: float,
     on_progress: Optional[ProgressCallback],
+    journal: RunJournal,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
-    for item in matrix:
-        if on_progress:
-            on_progress("started", item, None)
-        try:
-            if config.backend.type == "sim":
-                result = _run_sim_item(config, item, context)
-            else:
-                result = _run_real_item(config, item, context)
-        except Exception as exc:
-            result = _failure_result(
-                item,
-                artifact_dir=context.session_root / "runs" / item.run_id,
-                error_type=type(exc).__name__,
-                message=_redact_exception_message(config, str(exc)),
-            )
-        results.append(_sanitize_json(result))
+    pending = iter(matrix)
+    stopped = False
+    cancel_event = threading.Event()
+    controls = config.execution
+    isolated = (
+        controls.max_parallel_runs > 1
+        or controls.timeout_s is not None
+        or controls.max_memory_mb is not None
+    )
+
+    def finish(item: MatchRun, result: dict[str, Any], *, reused: bool = False) -> None:
+        nonlocal stopped
+        result = _sanitize_json(result)
+        result.setdefault("execution", {})["reused"] = reused
+        if not reused:
+            journal.record(item.run_id, result)
+        results.append(result)
         if on_progress:
             on_progress("finished", item, result)
-        if result["status"] != "ok" and config.execution.fail_fast:
-            break
+        if result["status"] != "ok" and controls.fail_fast:
+            stopped = True
+
+    if isolated:
+        executor = ThreadPoolExecutor(max_workers=controls.max_parallel_runs)
+        running = {}
+        try:
+            exhausted = False
+            while running or (not exhausted and not stopped):
+                while (
+                    len(running) < controls.max_parallel_runs
+                    and not exhausted
+                    and not stopped
+                ):
+                    item = next(pending, None)
+                    if item is None:
+                        exhausted = True
+                        break
+                    if on_progress:
+                        on_progress("started", item, None)
+                    cached = journal.load_success(item.run_id)
+                    if cached is not None:
+                        finish(item, cached, reused=True)
+                        continue
+                    journal.prepare_run(item.run_id)
+                    future = executor.submit(
+                        run_isolated,
+                        config,
+                        item,
+                        context,
+                        timeout_s=controls.timeout_s,
+                        max_memory_mb=controls.max_memory_mb,
+                        cancel_event=cancel_event,
+                    )
+                    running[future] = item
+                if running:
+                    completed, _ = wait(running, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        item = running.pop(future)
+                        finish(item, future.result())
+        except BaseException:
+            cancel_event.set()
+            raise
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+    else:
+        for item in pending:
+            if on_progress:
+                on_progress("started", item, None)
+            cached = journal.load_success(item.run_id)
+            if cached is not None:
+                finish(item, cached, reused=True)
+            else:
+                journal.prepare_run(item.run_id)
+                finish(item, _run_one_item(config, item, context))
+            if stopped:
+                break
+    order = {item.run_id: item.index for item in matrix}
+    results.sort(key=lambda result: order[result["run_id"]])
 
     finished_wall = datetime.now(timezone.utc)
     failed = sum(result["status"] != "ok" for result in results)
@@ -252,6 +339,105 @@ def _execute_match_matrix(
         "results": results,
     }
     return _sanitize_json(_redact_report_paths(report, config, context))
+
+
+def _run_one_item(
+    config: MatchConfig, item: MatchRun, context: _ExecutionContext
+) -> dict[str, Any]:
+    """One failure boundary; a failed cell remains a persisted matrix result."""
+    started = time.monotonic()
+    # Isolated workers must not concurrently materialize into the same filename.
+    if config.execution.max_parallel_runs > 1:
+        assert context.external_trace_root is not None
+        context = _ExecutionContext(
+            session_id=context.session_id,
+            session_root=context.session_root,
+            external_trace_root=context.external_trace_root / item.run_id,
+            materialized_trace_root=context.session_root
+            / "runs"
+            / item.run_id
+            / "traces",
+        )
+        context.external_trace_root.mkdir(parents=True, exist_ok=True)
+    try:
+        result = (
+            _run_sim_item(config, item, context)
+            if config.backend.type == "sim"
+            else _run_real_item(config, item, context)
+        )
+    except Exception as exc:
+        # Matrix boundary deliberately records the failure; CLI exits nonzero.
+        result = _failure_result(
+            item,
+            artifact_dir=context.session_root / "runs" / item.run_id,
+            error_type=type(exc).__name__,
+            message=_redact_exception_message(config, str(exc)),
+        )
+    result.setdefault("execution", {})["wall_time_s"] = time.monotonic() - started
+    return result
+
+
+def execution_signature(config: MatchConfig) -> dict[str, Any]:
+    """Pin replay semantics, input contents, and software for result reuse."""
+    payload = config.to_dict()
+    # Budgets may be raised when retrying; completed simulation semantics stay pinned.
+    for key in (
+        "max_parallel_runs",
+        "timeout_s",
+        "max_memory_mb",
+        "fail_fast",
+        "max_runs",
+    ):
+        payload["execution"].pop(key, None)
+    payload.pop("publish", None)
+    source_paths: set[Path] = set()
+    for evaluation in config.evaluations:
+        source_paths.update(evaluation.trace_paths)
+        if evaluation.trace_path is not None:
+            source_paths.add(evaluation.trace_path)
+        if evaluation.warmup_path is not None:
+            source_paths.add(evaluation.warmup_path)
+        if evaluation.trace_path is None and not evaluation.trace_paths:
+            builtin = get_workload(evaluation.workload)
+            if builtin.static_trace is not None:
+                source_paths.add(builtin.static_trace)
+    if isinstance(config.backend, SimBackendConfig):
+        warmup = config.backend.planner_config.get("load_predictor_warmup_trace")
+        if warmup:
+            for value in glob.glob(str(warmup), recursive=True):
+                path = Path(value)
+                source_paths.update(
+                    path.rglob("*.jsonl*") if path.is_dir() else (path,)
+                )
+    inputs = []
+    for path in sorted(source_paths):
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise ValueError(_redact_exception_message(config, str(exc))) from exc
+        inputs.append({"sha256": digest.hexdigest()})
+    versions = {}
+    for package in (
+        "autoscaling-arena",
+        "ai-dynamo",
+        "ai-dynamo-runtime",
+        "aisimulate",
+    ):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    return {
+        "config_sha256": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, allow_nan=False).encode()
+        ).hexdigest(),
+        "inputs": inputs,
+        "versions": versions,
+        "git_commit": _git_commit(),
+    }
 
 
 def publish_match_results(
@@ -547,6 +733,8 @@ def _run_sim_item(
     workload = _workload_for_item(item)
     run_dir = context.session_root / "runs" / item.run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    setup_started = time.monotonic()
+    preparation = None
     if item.trace_format == "dynamo":
         # Native shards are passed straight to Dynamo, in the declared order.
         # Match Config must not sort, merge, cap, or translate exact traces.
@@ -558,9 +746,19 @@ def _run_sim_item(
             "trace_format": "dynamo",
         }
     else:
+        trace_options = _external_trace_options(item)
+        if item.prepare is not None:
+            assert item.trace_path is not None
+            preparation = prepare_trace(
+                item.trace_path,
+                run_dir / "prepared-trace.jsonl",
+                config=TracePreparationConfig.from_mapping(item.prepare),
+                block_size=workload.block_size,
+            )
+            trace_options.update(trace_path=preparation.path, trace_presorted=True)
         trace_path = _materialize_trace(
             context,
-            **_external_trace_options(item),
+            **trace_options,
             workload_name=item.workload,
             seed=item.seed,
             max_requests=item.max_requests,
@@ -573,8 +771,20 @@ def _run_sim_item(
 
     profile = _to_slo_profile(item.slo_profile)
     planner_config = _sim_planner_config(
-        backend, report_filename=run_dir / "planner.html"
+        backend, report_filename=run_dir / "planner.html", profile=profile
     )
+    warmup_preparation = None
+    if item.warmup_path is not None and autoscaler.type == "planner":
+        warmup_path = item.warmup_path
+        if item.warmup_prepare is not None:
+            warmup_preparation = prepare_trace(
+                warmup_path,
+                run_dir / "prepared-warmup.jsonl",
+                config=TracePreparationConfig.from_mapping(item.warmup_prepare),
+                block_size=workload.block_size,
+            )
+            warmup_path = warmup_preparation.path
+        planner_config["load_predictor_warmup_trace"] = str(warmup_path)
     factory_options = {}
     if autoscaler.type == "jev":
         factory_options = {
@@ -608,7 +818,7 @@ def _run_sim_item(
         "sla_ttft_ms": profile.ttft_ms,
         "sla_itl_ms": profile.itl_ms,
         "sla_e2e_ms": profile.e2e_ms,
-        "capture_per_request": True,
+        "capture_per_request": backend.replay.request_capture == "memory",
         "telemetry_sample_interval_s": (backend.replay.telemetry_sample_interval_s),
         "telemetry_jsonl_path": (
             str(run_dir / "telemetry.jsonl")
@@ -619,6 +829,13 @@ def _run_sim_item(
         "performance_model_metadata": performance_model_metadata,
         "report_json": str(run_dir / "trace-report.json"),
     }
+    request_jsonl = (
+        run_dir / "requests.jsonl"
+        if backend.replay.request_capture == "jsonl"
+        else None
+    )
+    if request_jsonl is not None:
+        replay_args["report_jsonl_path"] = str(request_jsonl)
     if backend.topology == "disagg":
         assert backend.engines.prefill is not None
         assert backend.engines.decode is not None
@@ -640,9 +857,43 @@ def _run_sim_item(
             ),
             num_workers=autoscaler.start.decode,
         )
+    setup_wall_s = time.monotonic() - setup_started
+    replay_started = time.monotonic()
     report = run_arena_replay(**replay_args)
+    replay_wall_s = time.monotonic() - replay_started
     telemetry_artifact = getattr(report, "telemetry_artifact", None) or {}
-    raw_scorecard = scorecard(report, profiles=(profile,), sla_profile=profile)
+    allocation = None
+    if item.measurement_window is not None:
+        if backend.topology == "agg":
+            initial = {"agg": autoscaler.start.decode}
+            gpu_cost = {"agg": backend.engines.aggregate.num_gpus}
+        else:
+            initial = {
+                "prefill": autoscaler.start.prefill,
+                "decode": autoscaler.start.decode,
+            }
+            gpu_cost = {
+                "prefill": backend.engines.prefill.num_gpus,
+                "decode": backend.engines.decode.num_gpus,
+            }
+        allocation = AllocationConfig(
+            initial, gpu_cost, allow_idle_tail=autoscaler.type == "static"
+        )
+    raw_scorecard = scorecard(
+        report,
+        profiles=(profile,),
+        sla_profile=profile,
+        short_output_itl=config.metrics.short_output_itl,
+        measurement_window=(
+            None
+            if item.measurement_window is None
+            else MeasurementWindow(**item.measurement_window)
+        ),
+        allocation=allocation,
+        request_records=(
+            None if request_jsonl is None else _request_records(request_jsonl)
+        ),
+    )
     metrics = _project_sim_metrics(
         raw_scorecard, profile_name=profile.name, include=config.metrics.include
     )
@@ -670,6 +921,7 @@ def _run_sim_item(
             "topology": backend.topology,
             "router_mode": backend.router.mode,
             "replay": {
+                "request_capture": backend.replay.request_capture,
                 "telemetry_sample_interval_s": (
                     backend.replay.telemetry_sample_interval_s
                 ),
@@ -689,6 +941,11 @@ def _run_sim_item(
             "directory": str(run_dir),
             "trace_report": str(run_dir / "trace-report.json"),
             **(
+                {"requests_jsonl": str(request_jsonl)}
+                if request_jsonl is not None
+                else {}
+            ),
+            **(
                 {
                     "telemetry": str(run_dir / "telemetry.jsonl"),
                     "telemetry_metadata": {
@@ -704,6 +961,20 @@ def _run_sim_item(
             ),
         },
     }
+    result["execution"] = {"setup_wall_s": setup_wall_s, "replay_wall_s": replay_wall_s}
+    if preparation is not None:
+        result["evaluation"]["preparation"] = dict(preparation.manifest)
+        result["artifacts"]["preparation_manifest"] = str(preparation.manifest_path)
+    if item.warmup_path is not None:
+        result["evaluation"]["warmup"] = {
+            "source": _trace_fingerprint(item.warmup_path, context),
+            "preparation": (
+                None
+                if warmup_preparation is None
+                else dict(warmup_preparation.manifest)
+            ),
+            "applied": autoscaler.type == "planner",
+        }
     if rank_error:
         result["error"] = {
             "type": "RankMetricUnavailable",
@@ -715,6 +986,18 @@ def _run_sim_item(
         result["artifacts"]["jev_decisions"] = str(run_dir / "jev-decisions.jsonl")
         result["runtime"]["jev"] = summarize_decisions(run_dir / "jev-decisions.jsonl")
     return result
+
+
+def _request_records(path: Path):
+    """Read native terminal rows without a second in-memory request list."""
+    with path.open() as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"request JSONL line {line_number} must be an object")
+            yield row
 
 
 def _run_real_item(
@@ -852,7 +1135,7 @@ def _materialize_trace(
     key_hash = hashlib.sha256(
         json.dumps(key, separators=(",", ":")).encode()
     ).hexdigest()[:12]
-    trace_root = context.session_root / "traces"
+    trace_root = context.materialized_trace_root or context.session_root / "traces"
     if trace_path is not None and context.external_trace_root is not None:
         trace_root = context.external_trace_root
     trace_dir = trace_root / key_hash
@@ -965,6 +1248,7 @@ def _evaluation_metadata(
                 transformed=(
                     not item.trace_presorted
                     or item.max_requests is not None
+                    or item.prepare is not None
                     or (item.backend == "real" and item.arrival_speedup != 1.0)
                 ),
             )
@@ -997,7 +1281,10 @@ def _evaluation_metadata(
 
 
 def _sim_planner_config(
-    backend: SimBackendConfig, *, report_filename: Path
+    backend: SimBackendConfig,
+    *,
+    report_filename: Path,
+    profile: Optional[SLOProfile] = None,
 ) -> dict[str, Any]:
     planner_config: dict[str, Any] = {
         "mode": backend.topology,
@@ -1013,6 +1300,10 @@ def _sim_planner_config(
         "min_endpoint": 1,
     }
     planner_config.update(backend.planner_config)
+    if profile is not None:
+        for key, bound in (("ttft_ms", profile.ttft_ms), ("itl_ms", profile.itl_ms)):
+            if bound is not None:
+                planner_config[key] = bound
     if backend.topology == "disagg":
         assert backend.engines.prefill is not None
         assert backend.engines.decode is not None
@@ -1035,10 +1326,33 @@ def _sim_planner_config(
 
 
 def _render_engine_args(engine: EngineConfig, ais_model_path: str) -> str:
-    # Typed fields remain authoritative even for programmatically-constructed
-    # configs that bypass the YAML parser's reserved-key validation. Replay binds
-    # worker_type to the engine slot before Dynamo loads the canonical AIS config.
-    args: dict[str, Any] = dict(engine.extra_args)
+    # Match-owned identity wins over raw overrides; the replay slot binds its role.
+    rank: dict[str, Any] = dict(engine.extra_args)
+    timing = rank.get("timing_model")
+    if timing is not None and (
+        not isinstance(timing, dict)
+        or timing.get("type") not in {"fixed", "polynomial"}
+    ):
+        raise ValueError(
+            "extra_args.timing_model may override only fixed or polynomial timing; AIS identity belongs in model and engines"
+        )
+    launch = {}
+    for key in (
+        "gpu_memory_utilization",
+        "mem_fraction_static",
+        "free_gpu_memory_fraction",
+        "cuda_graph_reserved_bytes",
+        "num_gpu_blocks_is_explicit",
+        "dynamo",
+    ):
+        if key in rank:
+            launch[key] = rank.pop(key)
+    for alias in _RESERVED_RENDER_ALIASES:
+        rank.pop(alias, None)
+    nextn = engine.nextn
+    rank.pop("ais_nextn", None)
+    if nextn is not None:
+        rank["aic_nextn"] = nextn
     perf_config = {
         "model": ais_model_path,
         "system": engine.system,
@@ -1048,25 +1362,59 @@ def _render_engine_args(engine: EngineConfig, ais_model_path: str) -> str:
         "moe_tp_size": engine.moe_tp_size,
         "moe_ep_size": engine.moe_ep_size,
         "attention_dp": engine.attention_dp_size,
-        "nextn": args.get("ais_nextn"),
+        "nextn": nextn,
         "estimation_mode": "auto",
         "fallback_policy": "deny",
     }
-    args.update(
-        engine_type=engine.backend,
-        tensor_parallel_size=engine.tp_size,
-        dp_size=engine.attention_dp_size or 1,
-        ais_perf_config={
-            key: value for key, value in perf_config.items() if value is not None
+    rank["backend"] = engine.backend
+    rank.setdefault(
+        "timing_model",
+        {
+            "type": "external",
+            "provider": "ais",
+            "config": {
+                key: value for key, value in perf_config.items() if value is not None
+            },
         },
     )
-    optional = {
-        "startup_time": engine.runtime.cold_start_delay_s,
-        "kv_transfer_bandwidth": engine.runtime.kv_transfer_bandwidth_gbps,
-        "kv_bytes_per_token": engine.runtime.kv_bytes_per_token,
+    for key, value in (
+        ("kv_transfer_bandwidth", engine.runtime.kv_transfer_bandwidth_gbps),
+        ("kv_transfer_bytes_per_token", engine.runtime.kv_bytes_per_token),
+    ):
+        if value is not None:
+            rank[key] = value
+    launch.update(
+        engine=rank,
+        tensor_parallel_size=engine.tp_size,
+        dp_size=engine.attention_dp_size or 1,
+    )
+    if engine.runtime.cold_start_delay_s is not None:
+        launch["startup_time"] = engine.runtime.cold_start_delay_s
+    return json.dumps(launch, sort_keys=True, allow_nan=False)
+
+
+_RESERVED_RENDER_ALIASES = frozenset(
+    {
+        "engine_type",
+        "tensor_parallel_size",
+        "dp_size",
+        "ais_perf_config",
+        "worker_type",
+        "is_prefill",
+        "is_decode",
+        "startup_time",
+        "kv_bytes_per_token",
+        "kv_transfer_bandwidth",
+        "ais_backend",
+        "ais_system",
+        "ais_model_path",
+        "ais_tp_size",
+        "ais_backend_version",
+        "ais_moe_tp_size",
+        "ais_moe_ep_size",
+        "ais_attention_dp_size",
     }
-    args.update({key: value for key, value in optional.items() if value is not None})
-    return json.dumps(args, sort_keys=True, allow_nan=False)
+)
 
 
 def _sim_engines_metadata(backend: SimBackendConfig) -> dict[str, Any]:
@@ -1100,6 +1448,13 @@ def _sim_performance_model_metadata(
         if getattr(backend.engines, role) is not None
     ]
     for role, engine in engines:
+        timing = engine.extra_args.get("timing_model")
+        if timing is not None:
+            metadata["aggregated" if role == "aggregate" else role] = {
+                "provider": timing["type"],
+                "config": dict(timing),
+            }
+            continue
         config = {
             "backend": engine.ais_backend,
             "backend_version": engine.ais_backend_version,
@@ -1109,7 +1464,7 @@ def _sim_performance_model_metadata(
             "moe_tp_size": engine.moe_tp_size,
             "moe_ep_size": engine.moe_ep_size,
             "attention_dp_size": engine.attention_dp_size,
-            "nextn": engine.extra_args.get("ais_nextn"),
+            "nextn": engine.nextn,
         }
         metadata["aggregated" if role == "aggregate" else role] = {
             "provider": "ais",
@@ -1409,6 +1764,9 @@ def match_replay_sha256(config: MatchConfig) -> str:
     if isinstance(backend, dict):
         backend.pop("planner_config_path", None)
         backend.pop("endpoint_catalog", None)
+        planner = backend.get("planner_config", {})
+        if planner.get("load_predictor_warmup_trace") is not None:
+            planner["load_predictor_warmup_trace"] = "<predictor-warmup>"
     evaluations = payload.get("evaluations", [])
     if isinstance(evaluations, list):
         for evaluation in evaluations:
@@ -1416,6 +1774,8 @@ def match_replay_sha256(config: MatchConfig) -> str:
                 continue
             if evaluation.get("trace_path") is not None:
                 evaluation["trace_path"] = "<source-trace>"
+            if evaluation.get("warmup_path") is not None:
+                evaluation["warmup_path"] = "<predictor-warmup>"
             trace_paths = evaluation.get("trace_paths")
             if isinstance(trace_paths, list):
                 evaluation["trace_paths"] = [
@@ -1501,14 +1861,18 @@ def _redact_report_paths(
     protect(context.external_trace_root, "<external-trace-temp>")
     for evaluation in config.evaluations:
         protect(evaluation.trace_path, "<external-trace>")
+        protect(evaluation.warmup_path, "<predictor-warmup>")
         for trace_path in evaluation.trace_paths:
             protect(trace_path, "<external-trace>")
     for destination in config.publish.destinations:
         protect(destination.path, "<publish-destination>")
     if isinstance(config.backend, RealBackendConfig):
         protect(config.backend.endpoint_catalog, "<endpoint-catalog>")
-    elif config.backend.planner_config_path is not None:
+    else:
         protect(config.backend.planner_config_path, "<planner-config>")
+        warmup = config.backend.planner_config.get("load_predictor_warmup_trace")
+        if warmup is not None:
+            protect(Path(warmup), "<predictor-warmup>")
 
     ordered = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
 

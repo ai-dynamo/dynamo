@@ -6,6 +6,7 @@
 import pytest
 
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 
 pytestmark = [
     pytest.mark.unit,
@@ -45,3 +46,20 @@ def test_images_response_keeps_the_generation_parameters():
         "quality": "high",
         "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
     }
+
+
+def test_image_request_parsing_preserves_output_format_and_unsupported_controls():
+    request, request_type = parse_request_type(
+        {
+            "prompt": "a cat",
+            "output_format": "jpeg",
+            "quality": "high",
+            "background": "transparent",
+        },
+        ["image"],
+    )
+
+    assert request_type == RequestType.IMAGE_GENERATION
+    assert request.output_format == "jpeg"
+    assert request.quality == "high"
+    assert request.background == "transparent"

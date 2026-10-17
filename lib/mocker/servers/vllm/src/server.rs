@@ -55,6 +55,7 @@ impl fmt::Display for ServerMode {
 pub struct MockerServerConfig {
     pub model: String,
     pub mode: ServerMode,
+    pub supports_multimodal: bool,
     pub seed: u64,
     pub max_concurrent_requests: usize,
 }
@@ -64,6 +65,7 @@ impl Default for MockerServerConfig {
         Self {
             model: "mocker-model".to_string(),
             mode: ServerMode::Aggregated,
+            supports_multimodal: false,
             seed: 42,
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
         }
@@ -97,6 +99,12 @@ impl VllmMockerService {
             "Mocker worker_type must be aggregated; use the server mode for the emulated wire role"
         );
         let engine_args = engine_args.normalized()?;
+        if config.supports_multimodal && engine_args.enable_prefix_caching {
+            tracing::warn!(
+                "Multimodal mock prefix caching uses token IDs only: different images can share \
+                 a cache entry. Disable prefix caching for image deployments."
+            );
+        }
         let max_concurrent_requests = config.max_concurrent_requests;
         let model_info = pb::ModelInfo {
             model_id: config.model.clone(),
@@ -105,7 +113,7 @@ impl VllmMockerService {
             supports_text_input: false,
             supports_token_ids_input: true,
             supports_lora: false,
-            supports_multimodal: false,
+            supports_multimodal: config.supports_multimodal,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
         };
@@ -149,6 +157,7 @@ impl VllmMockerService {
                 .unwrap_or_default(),
             effective_attention_block_size: Some(engine_args.block_size as u64),
             rl_capabilities: None,
+            proto_version: pb::VERSION.to_string(),
         };
         // The wire role is separate from the aggregated scheduler used to
         // emulate disaggregated requests.
@@ -370,6 +379,15 @@ impl pb::inference_server::Inference for VllmMockerService {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for VllmMockerService {
+    async fn shutdown(
+        &self,
+        _: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented(
+            "shutdown is not supported by the mocker",
+        ))
+    }
+
     async fn load_lora(
         &self,
         _request: Request<pb::LoadLoraRequest>,

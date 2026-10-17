@@ -41,14 +41,14 @@ func TestComposeGroveOverrides(t *testing.T) {
 					ComponentName: "frontend",
 					ProviderOverride: providerOverrideFixture(
 						TargetPodCliqueTemplateSpec,
-						`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`,
+						`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}},"rollingUpdate":{"maxUnavailable":1}}`,
 					),
 				},
 				{
 					ComponentName: "worker",
 					ProviderOverride: providerOverrideFixture(
 						TargetPodCliqueScalingGroupConfig,
-						`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`,
+						`{"rollingUpdate":{"maxUnavailable":2}}`,
 					),
 					Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
 					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
@@ -99,7 +99,8 @@ func TestComposeGroveOverrides(t *testing.T) {
 	assertNestedValue(t, got.Object, true, "spec", "template", "topologyConstraint", "futureProviderField", "enabled")
 	assertNestedValue(t, got.Object, nil, "spec", "template", "topologyConstraint", "nullableProviderField")
 	assertNamedNestedValue(t, got.Object, []string{"spec", "template", "cliques"}, "frontend", "host", "topologyConstraint", "pack", "required")
-	assertNamedNestedValue(t, got.Object, []string{"spec", "template", "podCliqueScalingGroups"}, "worker", "rack", "topologyConstraint", "pack", "required")
+	assertNamedNestedValue(t, got.Object, []string{"spec", "template", "podCliqueScalingGroups"}, "worker", int64(2), "rollingUpdate", "maxUnavailable")
+	assertNamedNestedValue(t, got.Object, []string{"spec", "template", "cliques"}, "frontend", int64(1), "rollingUpdate", "maxUnavailable")
 	assertNamedNestedValue(t, got.Object, []string{"spec", "template", "cliques"}, "worker-"+consts.GroveRoleSuffixLeader, "host", "topologyConstraint", "pack", "required")
 	assertNamedNestedValue(t, got.Object, []string{"spec", "template", "cliques"}, "worker-"+consts.GroveRoleSuffixWorker, "preserved", "topologyConstraint", "newProviderField")
 	assertNestedValue(t, got.Object, int64(1), "spec", "replicas")
