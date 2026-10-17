@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: DeepSeek V4 Pro Nightly Smoke
+
+on:
+  # Temporary pre-merge validation trigger. Remove after the copy-branch run.
+  push:
+    branches:
+      - pull-request/14893
+    paths:
+      - .github/ci/deepseek-v4-pro/**
+      - .github/scripts/run_deepseek_v4_pro_smoke.sh
+      - .github/workflows/deepseek-v4-pro-nightly.yml
+      - recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/**
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deepseek-v4-pro-nightly
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # Keep schedules inert until the nightly benchmark is enabled. Manual
+    # dispatch and this copy-branch push are for pre-merge bring-up.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      vars.DEEPSEEK_V4_PRO_NIGHTLY_ENABLED == 'true'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 150
+    env:
+      NAMESPACE: dynamo-nightly-dsv4
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Deploy upstream recipe and run AIPerf smoke
+        shell: bash
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/deepseek-v4-pro-smoke
+        run: bash .github/scripts/run_deepseek_v4_pro_smoke.sh
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: deepseek-v4-pro-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deepseek-v4-pro-smoke/
+          retention-days: 14
+          if-no-files-found: warn
