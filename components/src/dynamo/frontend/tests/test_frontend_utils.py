@@ -11,6 +11,7 @@ from dynamo.frontend.utils import (
     make_backend_error,
     make_internal_error,
     resolve_chat_template,
+    routing_hints_from_request,
     validate_legacy_guided_decoding_constraints,
 )
 from dynamo.llm.exceptions import InvalidArgument
@@ -194,3 +195,57 @@ class TestBackendInvalidArgumentToHttpError:  # FRONTEND.8 — backend 4xx must 
     )
     def test_unrelated_errors_are_left_alone(self, text):
         assert backend_invalid_argument_to_http_error(ValueError(text)) is None
+
+
+class TestRoutingHintsFromRequest:
+    """Shared by the vLLM and SGLang chat processors."""
+
+    def test_no_hints(self):
+        assert routing_hints_from_request({}) is None
+        assert routing_hints_from_request({"nvext": {}}) is None
+
+    def test_priority_projects_to_routing(self):
+        request = {"nvext": {"agent_hints": {"priority": 5, "strict_priority": 2}}}
+        assert routing_hints_from_request(request) == {
+            "priority": 5,
+            "priority_jump": 5.0,
+            "strict_priority": 2,
+        }
+
+    def test_negative_priority_keeps_engine_priority_and_clamps_jump(self):
+        request = {"nvext": {"agent_hints": {"priority": -3}}}
+        assert routing_hints_from_request(request) == {
+            "priority": -3,
+            "priority_jump": 0.0,
+        }
+
+    def test_latency_sensitivity_without_priority(self):
+        request = {"nvext": {"agent_hints": {"latency_sensitivity": 2.5, "osl": 64}}}
+        assert routing_hints_from_request(request) == {
+            "priority_jump": 2.5,
+            "expected_output_tokens": 64,
+        }
+
+    def test_invalid_values_are_ignored(self):
+        request = {
+            "nvext": {
+                "agent_hints": {
+                    "priority": True,
+                    "strict_priority": -1,
+                    "latency_sensitivity": float("nan"),
+                    "osl": 2**32,
+                }
+            }
+        }
+        assert routing_hints_from_request(request) is None
+
+    def test_explicit_routing_wins(self):
+        request = {
+            "nvext": {"agent_hints": {"priority": 5}, "dp_rank": 0},
+            "routing": {"priority": 1},
+        }
+        assert routing_hints_from_request(request) == {
+            "priority": 1,
+            "priority_jump": 5.0,
+            "dp_rank": 0,
+        }
