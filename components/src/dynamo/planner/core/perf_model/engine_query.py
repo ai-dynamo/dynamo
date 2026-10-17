@@ -12,7 +12,6 @@ TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from itertools import pairwise
@@ -27,6 +26,7 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
+from dynamo.planner.core.perf_model.moving_average import NonnegativeMovingAverage
 
 MAX_CAPACITY_SEARCH_CANDIDATES = 128
 MAX_KV_HIT_RATE_DISCOUNT = 0.95
@@ -101,36 +101,10 @@ class EngineCapacity:
     eligible: bool = True
 
 
-class _MovingAverage:
-    def __init__(self, max_len: int) -> None:
-        self._values: deque[float] = deque()
-        self._sum = 0.0
-        self._max_len = max(1, max_len)
-        self._seen_nonzero = False
-
-    def add_after_first_nonzero(self, value: float) -> None:
-        if value > 0:
-            self._seen_nonzero = True
-        if self._seen_nonzero:
-            self.add(max(0.0, value))
-
-    def add(self, value: float) -> None:
-        self._values.append(value)
-        self._sum += value
-        while len(self._values) > self._max_len:
-            self._sum -= self._values.popleft()
-
-    @property
-    def value(self) -> float:
-        if not self._values:
-            return 0.0
-        return self._sum / len(self._values)
-
-
 class _AggLoadAverages:
     def __init__(self, max_observations: int) -> None:
-        self._avg_num_prefill = _MovingAverage(max_observations)
-        self._avg_prefill_tokens = _MovingAverage(max_observations)
+        self._avg_num_prefill = NonnegativeMovingAverage(max_observations)
+        self._avg_prefill_tokens = NonnegativeMovingAverage(max_observations)
 
     def observe_iterations(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
