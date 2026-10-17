@@ -28,8 +28,8 @@ func MatchCapturedManifests(t testing.TB, objects []unstructured.Unstructured, p
 	result := comparison{expected: expected, actual: map[schema.GroupVersionKind][]actualDocument{}}
 	for _, object := range objects {
 		object = *object.DeepCopy()
-		// managedFields contains API-server field ownership bookkeeping, not
-		// controller output. Keep it in raw captures but omit it from goldens.
+		// The API server recreates managedFields; exclude that bookkeeping
+		// from comparisons just as the fixture writers do.
 		unstructured.RemoveNestedField(object.Object, "metadata", "managedFields")
 		node, err := objectNode(object.Object)
 		if err != nil {
@@ -98,7 +98,7 @@ func ReadManifests(path string) ([]unstructured.Unstructured, error) {
 	return objects, nil
 }
 
-// WriteManifests writes concrete API objects in the existing golden YAML format.
+// WriteManifests writes concrete API objects without managedFields bookkeeping.
 func WriteManifests(path string, objects []unstructured.Unstructured) error {
 	var out strings.Builder
 	out.WriteString("# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n# Generated from observed API objects; do not edit historical inputs.\n")
@@ -106,7 +106,9 @@ func WriteManifests(path string, objects []unstructured.Unstructured) error {
 		if i > 0 {
 			out.WriteString("---\n")
 		}
-		node, err := objectNode(objects[i].Object)
+		object := objects[i].DeepCopy()
+		unstructured.RemoveNestedField(object.Object, "metadata", "managedFields")
+		node, err := objectNode(object.Object)
 		if err != nil {
 			return err
 		}

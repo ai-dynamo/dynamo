@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """One-time 1.5 bootstrap using pinned production admission/controllers (requires PyYAML)."""
 import argparse
+import copy
 import hashlib
 import io
 import json
@@ -34,6 +35,10 @@ SCENARIOS = {
 
 
 def dump(path, objects):
+    # Field-manager bookkeeping is discarded on replay and is not fixture state.
+    objects = copy.deepcopy(objects)
+    for obj in objects:
+        obj["metadata"].pop("managedFields", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(HEADER + yaml.safe_dump_all(objects, sort_keys=True))
 

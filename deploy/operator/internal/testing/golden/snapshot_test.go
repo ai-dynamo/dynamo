@@ -26,8 +26,16 @@ func TestReadManifestsPreservesHistoricalScalars(t *testing.T) {
 	replicas, _, err := unstructured.NestedInt64(object.Object, "spec", "replicas")
 	require.NoError(t, err)
 	require.EqualValues(t, 2, replicas)
+
+	t.Log("Omit field-manager bookkeeping without mutating the observed object")
+	require.NoError(t, unstructured.SetNestedSlice(objects[0].Object, []any{
+		map[string]any{"manager": "historical-operator", "operation": "Update"},
+	}, "metadata", "managedFields"))
 	require.NoError(t, WriteManifests(path, objects))
+	_, found, err := unstructured.NestedSlice(objects[0].Object, "metadata", "managedFields")
+	require.NoError(t, err)
+	require.True(t, found, "export must not mutate its input")
 	again, err := ReadManifests(path)
 	require.NoError(t, err)
-	require.Equal(t, objects, again)
+	require.Equal(t, []unstructured.Unstructured{*object}, again, "only managedFields may be omitted")
 }

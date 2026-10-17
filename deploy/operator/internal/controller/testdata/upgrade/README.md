@@ -53,7 +53,8 @@ it cannot run the ordinary clusterenv suite concurrently.
 The captured graph includes DGD, PCS, Services, ServiceAccount, Role and RoleBinding.
 API discovery finds the ownership closure through immediate workloads and Services;
 Kubernetes/Grove descendants are excluded. Expected output does not determine
-which kinds are observed. Only server metadata, Service addresses and condition
+which kinds are observed. Snapshot writers omit top-level `metadata.managedFields`
+because replay discards it. Only server metadata, Service addresses and condition
 timestamps are wildcarded. Worker hashes and namespace suffixes are literal
 historical values, never recomputed to build an expected historical result.
 
