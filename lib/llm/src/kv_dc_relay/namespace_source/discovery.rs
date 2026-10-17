@@ -114,7 +114,7 @@ impl NamespaceSource for DiscoveryNamespaces {
                 namespaces.sort();
                 NamespaceScope::Namespaces(namespaces)
             };
-            yield Ok(NamespaceSelection { scope, revision: None });
+            yield Ok(NamespaceSelection { scope, logical_namespaces: Default::default(), revision: None });
             cancel.cancelled().await;
         })
     }

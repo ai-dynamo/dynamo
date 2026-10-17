@@ -20,6 +20,7 @@ see [DC KV Relay Concepts](../../developer-guide/knowledge-base/modular-componen
 | `--namespaces` | `DYN_RELAY_NAMESPACES` | All visible Dynamo namespaces | Comma-separated Dynamo namespace allowlist. |
 | `--namespace-filter` | None | Unset | Legacy single-namespace form of `--namespaces`. |
 | `--watch-all` | `DYN_RELAY_WATCH_ALL` | Enabled when no scope is set | Include model cards from every Dynamo namespace visible to the discovery backend. |
+| `--sources-file` | None | Unset | Live-reloaded JSON source file; cannot be combined with discovery filters. |
 | `--endpoint-prefix` | `DYN_RELAY_ENDPOINT_PREFIXES` | No prefix filter | Repeat the CLI option, or use a comma-separated environment value. Match namespace/component/endpoint segments. |
 | `--expected-unique-blocks` | `DYN_RELAY_EXPECTED_UNIQUE_BLOCKS` | `1048576` | Positive expected number of unique blocks per pool; sizes the CKF, not a global Relay memory limit. |
 | `--bind` | `DYN_RELAY_BIND` | No listener | Plaintext gRPC socket address, such as `127.0.0.1:5561` or `[::1]:5561`. Requires a numeric IP and port. |
@@ -51,6 +52,45 @@ successively narrower endpoint scopes. `production.back` does not match `product
 > Dynamo namespaces are logical discovery scopes, not Kubernetes namespaces. The current
 > Kubernetes discovery backend watches only the Relay pod's Kubernetes namespace. Neither
 > `--watch-all` nor `--namespaces` expands that Kubernetes watch.
+
+### File Sources and Logical Namespaces
+
+Use `--sources-file /etc/relay/sources.json` to select physical discovery namespaces
+and optionally give them stable public names:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {"namespace": "production-llama-a1b2c3", "logicalNamespace": "production-llama"}
+  ]
+}
+```
+
+Relay uses `namespace` to discover workers and resolve their KV domains.
+`logicalNamespace` changes the endpoint namespace published in the catalog,
+serving readiness, and endpoint status. It does not rename workers or merge KV
+pools. Omitting the field preserves the physical namespace as the public name.
+Both fields must be nonempty, have no surrounding whitespace, and fit in 512 bytes.
+
+The file is polled once per second. Changing the physical namespace while keeping
+the logical name withdraws the old pool and starts a new pool lifetime under the
+same public name. Changing only the logical name also withdraws old readiness and
+restarts the endpoint's pool. Independent components or endpoints may share a
+logical namespace, but if multiple physical endpoints claim the same public
+namespace/component/endpoint, all conflicting endpoints are withheld.
+
+With system HTTP enabled, `GET /engine/state` reports source revisions and
+`sources.logicalEndpointConflicts`, the number of ambiguous public endpoints.
+An empty source list watches nothing. Invalid initial files fail startup;
+invalid updates retain the last valid source set. Files without `logicalNamespace`
+retain their canonical revisions. Older Relay images that reject unknown fields
+require an upgrade before consuming files with this extension.
+
+An optional top-level `connectionRevision` must match
+`DYN_RELAY_CONNECTION_REVISION`; omit both for standalone operation without a
+connection guard. The operator supplies both to prevent a process from applying
+sources intended for a different connection configuration.
 
 ## Runtime Environment
 

@@ -106,6 +106,7 @@ struct NamespaceMembership {
     streams: futures::stream::SelectAll<SourceWatchStream>,
     epoch: u64,
     selection: Option<NamespaceSelection>,
+    logical_endpoint_conflicts: usize,
     sender: watch::Sender<DcMembershipView>,
 }
 
@@ -171,8 +172,17 @@ impl NamespaceMembership {
         for stream in streams {
             self.streams.push(stream);
         }
-        if self.state.replace_all(instances, &self.filter) {
-            publish_membership_if_changed(&self.sender, self.state.view(&self.filter));
+        let cards_changed = self.state.replace_all(instances, &self.filter);
+        if cards_changed || self.selection.as_ref() != Some(&selection) {
+            let (view, conflicts) = selection.project(self.state.view(&self.filter));
+            if conflicts != self.logical_endpoint_conflicts && conflicts > 0 {
+                tracing::error!(
+                    logical_endpoint_conflicts = conflicts,
+                    "Withdrawing ambiguous Relay logical endpoints"
+                );
+            }
+            self.logical_endpoint_conflicts = conflicts;
+            publish_membership_if_changed(&self.sender, view);
         }
         self.selection = Some(selection);
         Ok(count)
@@ -255,7 +265,9 @@ impl NamespaceMembership {
                             } else if let Some(event @ DiscoveryEvent::ModelTaintsUpdated(_)) = event {
                                 // Taints are runtime updates, not namespace selection changes.
                                 if self.state.apply(event, &self.filter) {
-                                    publish_membership_if_changed(&self.sender, self.state.view(&self.filter));
+                                    let view = self.state.view(&self.filter);
+                                    let view = match &self.selection { Some(selection) => selection.project(view).0, None => view };
+                                    publish_membership_if_changed(&self.sender, view);
                                 }
                                 None
                             } else {
@@ -277,6 +289,7 @@ impl NamespaceMembership {
                         status.send_modify(|s| {
                             s.applied_revision = revision;
                             s.count = count;
+                            s.logical_endpoint_conflicts = self.logical_endpoint_conflicts;
                             if !source_invalid {
                                 s.last_error = None;
                             }
@@ -333,6 +346,7 @@ impl DcMembershipWatch {
             streams: Default::default(),
             epoch: 0,
             selection: None,
+            logical_endpoint_conflicts: 0,
             sender,
         };
         let count = membership.bounded_apply(selection, &cancel).await?;
@@ -340,6 +354,7 @@ impl DcMembershipWatch {
             desired_revision: revision.clone(),
             applied_revision: revision,
             count,
+            logical_endpoint_conflicts: membership.logical_endpoint_conflicts,
             last_error: None,
         });
         let task_cancel = cancel.clone();
@@ -474,6 +489,7 @@ mod tests {
             sources: names
                 .iter()
                 .map(|name| RelaySource {
+                    logical_namespace: None,
                     namespace: (*name).into(),
                 })
                 .collect(),
@@ -515,6 +531,7 @@ mod tests {
             streams: Default::default(),
             epoch: 0,
             selection: None,
+            logical_endpoint_conflicts: 0,
             sender,
         };
         let cancel = CancellationToken::new();
@@ -564,6 +581,108 @@ mod tests {
         assert!(membership.watches.is_empty());
         cancel.cancel();
         drop(registrations);
+    }
+
+    #[tokio::test]
+    async fn logical_alias_keeps_physical_discovery_and_withdraws_colliding_cutovers() {
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()));
+        let _a = register_model(&discovery, "physical-a", "worker").await;
+        let _b = register_model(&discovery, "physical-b", "worker").await;
+        let _role = register_model(&discovery, "physical-role", "prefill").await;
+        let mut state = MembershipState::default();
+        let (sender, receiver) = watch::channel(state.view(&DcDiscoveryFilter::default()));
+        let mut membership = NamespaceMembership {
+            discovery,
+            filter: DcDiscoveryFilter::default(),
+            state,
+            watches: HashMap::new(),
+            streams: Default::default(),
+            epoch: 0,
+            selection: None,
+            logical_endpoint_conflicts: 0,
+            sender,
+        };
+        let selection = |bindings: &[(&str, &str)]| {
+            let mut doc = document(
+                &bindings
+                    .iter()
+                    .map(|(physical, _)| *physical)
+                    .collect::<Vec<_>>(),
+            );
+            for source in &mut doc.sources {
+                source.logical_namespace = Some(
+                    bindings
+                        .iter()
+                        .find(|(p, _)| *p == source.namespace)
+                        .unwrap()
+                        .1
+                        .into(),
+                );
+            }
+            doc.canonicalize(Some("connection")).unwrap();
+            NamespaceSelection::from(doc)
+        };
+        let cancel = CancellationToken::new();
+        let a = EndpointId::from("physical-a.worker.generate");
+        let b = EndpointId::from("physical-b.worker.generate");
+        membership
+            .bounded_apply(selection(&[("physical-a", "stable")]), &cancel)
+            .await
+            .unwrap();
+        let original = receiver.borrow().endpoints[&a].clone();
+        assert_eq!(
+            original.public_endpoint(),
+            EndpointId::from("stable.worker.generate")
+        );
+        assert_eq!(original.endpoint, a);
+        let query = DiscoveryQuery::NamespacedModels {
+            namespace: "physical-a".into(),
+        };
+        let epoch = membership.watches[&query].epoch;
+        // A pure identity remap must publish even though model cards are unchanged.
+        membership
+            .bounded_apply(selection(&[("physical-a", "renamed")]), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(receiver.borrow().endpoints[&a].namespace, "renamed");
+        assert_eq!(receiver.borrow().endpoints[&a].domain, original.domain);
+        assert_eq!(membership.watches[&query].epoch, epoch);
+        // Distinct physical namespaces of different roles may share a logical namespace.
+        membership
+            .bounded_apply(
+                selection(&[("physical-a", "stable"), ("physical-role", "stable")]),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(receiver.borrow().endpoints.len(), 2);
+        // Same logical namespace/component/endpoint cannot merge two physical KV domains.
+        membership
+            .bounded_apply(
+                selection(&[("physical-a", "stable"), ("physical-b", "stable")]),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(receiver.borrow().endpoints.is_empty());
+        assert_eq!(membership.logical_endpoint_conflicts, 1);
+        membership
+            .bounded_apply(selection(&[("physical-b", "stable")]), &cancel)
+            .await
+            .unwrap();
+        let new = receiver.borrow().endpoints[&b].clone();
+        assert!(!receiver.borrow().endpoints.contains_key(&a));
+        assert_eq!(new.public_endpoint(), original.public_endpoint());
+        assert_ne!(new.domain, original.domain);
+        assert!(!membership.watches.contains_key(&query));
+        // Removing the alias explicitly restores the legacy public identity.
+        membership
+            .bounded_apply(document(&["physical-b"]).into(), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(receiver.borrow().endpoints[&b].public_endpoint(), b);
+        cancel.cancel();
     }
 
     #[tokio::test]

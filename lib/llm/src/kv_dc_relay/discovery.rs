@@ -153,6 +153,7 @@ pub(crate) struct EndpointMembership {
     pub(crate) endpoint: EndpointId,
     pub(crate) generation: u64,
     pub(crate) domain: Option<KvCacheDomainKey>,
+    /// Public logical namespace; `endpoint` remains the physical discovery identity.
     pub(crate) namespace: String,
     pub(crate) registrations: Vec<CanonicalModelRegistration>,
     pub(crate) models: Vec<String>,
@@ -165,6 +166,14 @@ pub(crate) struct EndpointMembership {
 }
 
 impl EndpointMembership {
+    pub(crate) fn public_endpoint(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.namespace.clone(),
+            component: self.endpoint.component.clone(),
+            name: self.endpoint.name.clone(),
+        }
+    }
+
     pub(crate) fn has_pool_materialization_conflict(&self) -> bool {
         self.conflicts.iter().any(|conflict| {
             matches!(
