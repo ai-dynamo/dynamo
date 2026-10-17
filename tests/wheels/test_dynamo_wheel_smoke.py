@@ -37,6 +37,7 @@ pytestmark = [
 WHEELHOUSE_ENV = "DYNAMO_WHEEL_SMOKE_WHEELHOUSE"
 PLATFORM_ENV = "DYNAMO_WHEEL_SMOKE_PLATFORM"
 PYTHONS_ENV = "DYNAMO_WHEEL_SMOKE_PYTHONS"
+COMMIT_SHA_ENV = "DYNAMO_COMMIT_SHA"
 DEFAULT_WHEELHOUSE = "/opt/dynamo/wheelhouse"
 # Core-only versions; 3.12 (image Python) is covered by the combined core+kvbm test.
 DEFAULT_PYTHONS = "3.10,3.11,3.13"
@@ -89,6 +90,16 @@ def test_mocker_support_install_clean_room(wheelhouse: Path) -> None:
 
 def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:
     smoke_install.assert_no_bundled_libraries(wheelhouse)
+
+
+def test_ai_dynamo_wheel_records_git_commit(wheelhouse: Path) -> None:
+    """Check that wheel metadata identifies the source used to build the image."""
+    # CI images set DYNAMO_COMMIT_SHA to the same build arg that the wheel build
+    # receives, so this checks the published wheel against the built source.
+    expected = os.environ.get(COMMIT_SHA_ENV, "").strip().lower()
+    if not expected:
+        pytest.skip(f"{COMMIT_SHA_ENV} is not set (image built without the build arg)")
+    smoke_install.assert_git_commit(wheelhouse, expected)
 
 
 def test_wheel_metadata_tags_auditwheel_glibc(wheelhouse: Path) -> None:
