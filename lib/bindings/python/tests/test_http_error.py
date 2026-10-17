@@ -39,3 +39,22 @@ def test_long_http_error_message():
     # Ensure the exception string uses the truncated message too.
     assert message[:8189] in str(error)
     assert "B" not in str(error)
+
+
+def test_http_error_parameter_is_explicit_public_context():
+    error = HttpError(400, "private diagnostic", param="reasoning_effort")
+    assert error.param == "reasoning_effort"
+    assert error.message == "private diagnostic"
+    assert HttpError(400, "legacy").param is None
+
+
+@pytest.mark.parametrize("param", ["", "private/path", "x y", "x" * 129, 1, True, "é"])
+def test_http_error_rejects_malformed_parameter(param):
+    with pytest.raises(ValueError, match="top-level field"):
+        HttpError(400, "private diagnostic", param=param)
+
+
+@pytest.mark.parametrize("status", [200, 404, 422, 500])
+def test_http_error_parameter_requires_validation_status(status):
+    with pytest.raises(ValueError, match="status 400"):
+        HttpError(status, "private diagnostic", param="reasoning_effort")

@@ -31,6 +31,8 @@ MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
+MSG_PUBLIC_PARAMETER = "parameter-validation-probe"
+MSG_DUCK_PARAMETER = "duck-parameter-validation-probe"
 
 
 class _StatusLikeError(Exception):
@@ -55,6 +57,18 @@ class MockHttpEngine:
     def __init__(self, model_name: str = "test_model"):
         self.model_name = model_name
 
+    def generate_entry(self, request: Dict, context):
+        # Exercise failure while invoking the callable as well as failure while
+        # polling its async generator; they cross different binding adapters.
+        if any(
+            message.get("content") == "early-parameter-validation-probe"
+            for message in request.get("messages", [])
+        ):
+            raise HttpError(
+                400, "PRIVATE_DIAGNOSTIC_SENTINEL", param="reasoning_effort"
+            )
+        return self.generate(request, context)
+
     async def generate(self, request: Dict, context) -> AsyncGenerator[Dict, None]:
         """
         Raises the requested exception, otherwise streams a mock response.
@@ -69,7 +83,15 @@ class MockHttpEngine:
             print(f"Request {context.id()} was cancelled before starting.")
             return
 
-        if MSG_CONTAINS_ERROR.lower() in user_message.lower():
+        if user_message == MSG_PUBLIC_PARAMETER:
+            raise HttpError(
+                400, "PRIVATE_DIAGNOSTIC_SENTINEL", param="reasoning_effort"
+            )
+        elif user_message == MSG_DUCK_PARAMETER:
+            error = _StatusLikeError(400, "PRIVATE_DIAGNOSTIC_SENTINEL")
+            error.param = "reasoning_effort"
+            raise error
+        elif MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
             raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
@@ -130,7 +152,7 @@ async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime
         try:
             loop = asyncio.get_running_loop()
             python_engine = MockHttpEngine(model_name)
-            engine = HttpAsyncEngine(python_engine.generate, loop)
+            engine = HttpAsyncEngine(python_engine.generate_entry, loop)
 
             service.add_chat_completions_model(model_name, checksum, engine)
             service.enable_endpoint("chat", True)
@@ -193,6 +215,44 @@ DEFAULT_SERVICE = pytest.param(False, id="default")
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_server", [WAIT_FOR_FIRST_ITEM], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "trigger, parameter, message",
+    [
+        (MSG_PUBLIC_PARAMETER, "reasoning_effort", "Invalid request"),
+        ("early-parameter-validation-probe", "reasoning_effort", "Invalid request"),
+        (MSG_DUCK_PARAMETER, None, "Bad Request"),
+    ],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_public_error_parameter_crosses_python_http_boundary(
+    http_server, stream, trigger, parameter, message
+):
+    base_url, model_name = http_server
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": model_name,
+                "messages": [{"role": "user", "content": trigger}],
+                "stream": stream,
+            },
+        ) as response:
+            assert response.status == 400
+            body = await response.json()
+            assert body["error"]["param"] == parameter
+            assert body["error"]["message"] == message
+            assert body["error"]["type"] == "BadRequestError"
+            assert body["error"]["code"] == 400
+            assert "PRIVATE_DIAGNOSTIC_SENTINEL" not in json.dumps(body)
+            assert "details" not in body["error"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "http_server", [DEFAULT_SERVICE, WAIT_FOR_FIRST_ITEM], indirect=True
 )
@@ -230,7 +290,7 @@ async def test_chat_completion_success(http_server):
 
 
 HTTP_ERROR_CASES = (
-    (MSG_CONTAINS_ERROR, 400, "Bad Request", "Bad Request"),
+    (MSG_CONTAINS_ERROR, 400, "Bad Request", "BadRequestError"),
     (
         MSG_CONTAINS_STATUS_ERROR,
         415,
@@ -241,22 +301,22 @@ HTTP_ERROR_CASES = (
         MSG_CONTAINS_INVALID_ARGUMENT,
         400,
         "Invalid request",
-        "Bad Request",
+        "BadRequestError",
     ),
     (
         MSG_CONTAINS_INTERNAL_ERROR,
         500,
         "Internal server error",
-        "Internal Server Error",
+        "InternalServerError",
     ),
 )
 
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:
-    body = {"message": message, "type": error_type, "code": status}
+    body = {"message": message, "type": error_type, "param": None, "code": status}
     if status == 500:
         body["details"] = {"backend_status": status}
-    return body
+    return {"error": body}
 
 
 @pytest.mark.asyncio
@@ -314,7 +374,7 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(http_se
         async with session.post(url, json=data) as response:
             assert response.status == 400
             assert await response.json() == expected_error_body(
-                400, "Bad Request", "Bad Request"
+                400, "Bad Request", "BadRequestError"
             )
 
 
