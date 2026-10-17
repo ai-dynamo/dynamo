@@ -27,6 +27,7 @@ use tracing::Instrument;
 use super::disconnect::{
     ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
 };
+use super::engine_output_metrics::{GenerateMetricCollector, generate_dispatch_span};
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
@@ -44,6 +45,9 @@ use crate::protocols::response_merge::{
 use crate::protocols::sglang::generate::SglangGenerateRequest;
 use crate::protocols::sglang::merge::merger;
 use crate::protocols::sglang::stream::SglangGenerateStream;
+use crate::request_trace::{
+    RequestEndTraceState, build_request_end_trace_state, wrap_engine_output_request_end_stream,
+};
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -311,11 +315,11 @@ async fn handler(
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return adapt_openai_error(response);
     }
-    let engine = match state
+    let selection = match state
         .manager()
-        .get_generate_engine_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
+        .get_generate_engine_for_capability_with_routing(&model, SGLANG_GENERATE_CAPABILITY)
     {
-        Ok(engine) => engine,
+        Ok(selection) => selection,
         Err(error) => {
             let status = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
@@ -340,37 +344,39 @@ async fn handler(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id, &headers) {
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
-    let engine_context = context.context();
+    let trace_state = build_request_end_trace_state(
+        &context,
+        &context.tracker,
+        &context,
+        selection.kv_cache_block_size as usize,
+    );
+    let metric_model = state.manager().metric_model_for(&model).to_string();
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&model).to_string(),
+        model: metric_model.clone(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),
         request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
     let (mut connection_handle, stream_handle) = create_connection_monitor(
-        engine_context,
+        context.context(),
         Some(state.metrics_clone()),
         cancellation_labels,
     )
     .await;
 
-    let dispatch_span = tracing::info_span!(
-        target: "request_span",
-        "generate",
-        request_id = %request_id
-    );
+    let dispatch_span = generate_dispatch_span(context.id(), &metric_model);
     let response = match tokio::spawn(
         dispatch(
-            engine,
+            selection.engine,
             context,
-            request_id,
-            model,
+            metric_model,
             state.clone(),
             stream_handle,
             streaming,
+            trace_state,
         )
         .instrument(dispatch_span),
     )
@@ -390,19 +396,26 @@ async fn handler(
 async fn dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
-    request_id: String,
-    model: String,
+    metric_model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
     streaming: bool,
+    trace_state: Option<RequestEndTraceState>,
 ) -> Response {
+    let request_context = context.context();
+    let request_id = request_context.id();
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        state.manager().metric_model_for(&model),
+        &metric_model,
         super::metrics::Endpoint::Generate,
         streaming,
-        &request_id,
+        request_id,
     );
-    let request_context = context.context();
+    let mut metric_collector = GenerateMetricCollector::new(
+        state.metrics_clone(),
+        &metric_model,
+        context.tracker.clone().unwrap_or_default(),
+        context.token_ids.len(),
+    );
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
             Some(result) => result,
@@ -443,7 +456,7 @@ async fn dispatch(
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected SGLang generate request");
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                    .inc_rejection(&metric_model, super::metrics::Endpoint::Generate);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "engine rejected the request".to_string(),
@@ -473,6 +486,11 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    let stream =
+        wrap_engine_output_request_end_stream(stream, trace_state).map(move |mut output| {
+            metric_collector.observe(&mut output);
+            output
+        });
     if !streaming {
         let fold = SglangGenerateStream::fold(stream, merger());
         return match run_until_killed(request_context.as_ref(), fold).await {
@@ -528,336 +546,5 @@ async fn dispatch(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
-    use crate::http::service::metrics::{Endpoint, RequestType, Status};
-    use crate::protocols::common::llm_backend::LLMEngineOutput;
-    use dynamo_runtime::protocols::maybe_error::MaybeError;
-
-    #[test]
-    fn cache_salt_matches_routing_and_native_payload() {
-        for salt in [None, Some(""), Some("tenant-a")] {
-            let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
-                "input_ids": [1, 2],
-                "cache_salt": salt,
-            }))
-            .unwrap();
-            let request = preprocessed_request(request, "test-model", None, "request-id").unwrap();
-            assert_eq!(request.tracker.unwrap().isl_tokens(), Some(2));
-            let expected = salt.filter(|salt| !salt.is_empty());
-            assert_eq!(
-                request.routing.unwrap().cache_namespace.as_deref(),
-                expected
-            );
-            assert_eq!(
-                request.extra_args.unwrap()["sglang_tito"]["cache_salt"].as_str(),
-                expected,
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn worker_unavailable_dispatch_returns_503() {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            std::sync::Arc::new(WorkerUnavailableEngine);
-        let state = crate::http::service::service_v2::HttpService::builder()
-            .build()
-            .unwrap()
-            .state_clone();
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-
-        let response = dispatch(
-            engine,
-            dispatch_test_context(),
-            "req-sglang-worker-unavailable".to_string(),
-            "test-model".to_string(),
-            state.clone(),
-            ConnectionHandle::create_disabled(tx),
-            true,
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read error response");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
-        assert_eq!(body["error"]["message"], "Service temporarily unavailable");
-        assert!(!body.to_string().contains("unknown endpoint"));
-
-        let metric_model = state.manager().metric_model_for("test-model");
-        assert_eq!(
-            state.metrics_clone().get_request_counter(
-                metric_model,
-                &Endpoint::Generate,
-                &RequestType::Stream,
-                &Status::Error,
-                &ErrorType::Unavailable,
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn model_aliases_are_deduplicated_before_implicit_selection() {
-        let manager = crate::discovery::ModelManager::new();
-        assert!(manager.register_alias("alias", "primary"));
-
-        let models = canonical_generate_models(
-            &manager,
-            vec![
-                "primary".to_string(),
-                "alias".to_string(),
-                "other".to_string(),
-            ],
-        );
-
-        assert_eq!(models, vec!["other".to_string(), "primary".to_string()]);
-    }
-
-    #[test]
-    fn streaming_errors_use_sglang_shape() {
-        let error = anyhow::anyhow!("backend failure");
-        let (error_type, body) = stream_error(error.as_ref());
-        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(error_type, ErrorType::Internal);
-        assert_eq!(
-            error,
-            serde_json::json!({"error": {"message": "Internal server error"}})
-        );
-    }
-
-    #[test]
-    fn streaming_errors_preserve_typed_classification() {
-        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
-
-        for (dynamo_type, expected_type, expected_message) in [
-            (
-                DynamoErrorType::InvalidArgument,
-                ErrorType::Validation,
-                "invalid sampling parameters",
-            ),
-            (
-                DynamoErrorType::Unavailable,
-                ErrorType::Unavailable,
-                "Service temporarily unavailable",
-            ),
-            (
-                DynamoErrorType::WorkerUnavailable,
-                ErrorType::Unavailable,
-                "Service temporarily unavailable",
-            ),
-            (
-                DynamoErrorType::Cancelled,
-                ErrorType::Cancelled,
-                "Request cancelled",
-            ),
-        ] {
-            let error = DynamoError::builder()
-                .error_type(dynamo_type)
-                .message("invalid sampling parameters")
-                .build();
-            let error = axum::Error::new(error);
-            let (error_type, body) = stream_error(&error);
-            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-
-            assert_eq!(error_type, expected_type);
-            assert_eq!(body["error"]["message"], expected_message);
-        }
-    }
-
-    #[test]
-    fn streaming_deadline_wins_over_overload_classification() {
-        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
-
-        let error = DynamoError::builder()
-            .error_type(DynamoErrorType::WorkerOverloaded)
-            .message("worker overloaded")
-            .cause(
-                DynamoError::builder()
-                    .error_type(DynamoErrorType::DeadlineExceeded)
-                    .reason(
-                        dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
-                            .unwrap(),
-                    )
-                    .message("internal deadline detail")
-                    .build(),
-            )
-            .build();
-        let (error_type, body) = stream_error(&error);
-        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-
-        assert_eq!(error_type, ErrorType::Cancelled);
-        assert_eq!(body["error"]["message"], "request deadline exceeded");
-    }
-
-    struct DeadlineEngine;
-
-    #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<
-                crate::protocols::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
-            >,
-            dynamo_runtime::pipeline::Error,
-        > for DeadlineEngine
-    {
-        async fn generate(
-            &self,
-            _request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<
-                crate::protocols::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
-            >,
-            dynamo_runtime::pipeline::Error,
-        > {
-            Err(dynamo_runtime::error::DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
-                .reason(
-                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
-                        .unwrap(),
-                )
-                .message("router deadline exceeded before stream start")
-                .build()
-                .into())
-        }
-    }
-
-    #[tokio::test]
-    async fn pre_stream_deadline_maps_to_http_429_with_cancelled_metric() {
-        use crate::http::service::metrics::{Endpoint, RequestType, Status};
-
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(DeadlineEngine);
-        let service = service_v2::HttpService::builder().build().unwrap();
-        let state = service.state_clone();
-        let context = Context::new(
-            PreprocessedRequest::builder()
-                .model("test-model".to_string())
-                .token_ids(vec![1])
-                .stop_conditions(Default::default())
-                .sampling_options(Default::default())
-                .output_options(Default::default())
-                .build()
-                .expect("build dispatch test request"),
-        );
-        let (mut connection_handle, stream_handle) = create_connection_monitor(
-            context.context(),
-            None,
-            CancellationLabels {
-                model: "test-model".to_string(),
-                endpoint: Endpoint::Generate.to_string(),
-                request_type: "streaming".to_string(),
-            },
-        )
-        .await;
-
-        let response = dispatch(
-            engine,
-            context,
-            "req-deadline".to_string(),
-            "test-model".to_string(),
-            state.clone(),
-            stream_handle,
-            true,
-        )
-        .await;
-        connection_handle.disarm();
-
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["error"]["message"], "request deadline exceeded");
-        assert_eq!(
-            state.metrics_clone().get_request_counter(
-                state.manager().metric_model_for("test-model"),
-                &Endpoint::Generate,
-                &RequestType::Stream,
-                &Status::Error,
-                &ErrorType::Cancelled,
-            ),
-            1
-        );
-    }
-
-    struct ReplayEngine(Vec<crate::protocols::Annotated<LLMEngineOutput>>);
-
-    #[async_trait::async_trait]
-    impl
-        dynamo_runtime::engine::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > for ReplayEngine
-    {
-        async fn generate(
-            &self,
-            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-        ) -> Result<
-            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
-            dynamo_runtime::pipeline::Error,
-        > {
-            let stream = Box::pin(futures::stream::iter(self.0.clone()));
-            Ok(dynamo_runtime::engine::ResponseStream::new(
-                stream,
-                request.context(),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
-        let chunk = |ids: serde_json::Value| {
-            crate::protocols::Annotated::from_data(LLMEngineOutput {
-                engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": ids}})),
-                ..Default::default()
-            })
-        };
-        let invalid = dynamo_runtime::error::DynamoError::builder()
-            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
-            .message("bad sampling params")
-            .build();
-        let failed = crate::protocols::Annotated::from_err(invalid);
-        for (outputs, status, body) in [
-            (
-                vec![chunk(serde_json::json!([5])), chunk(serde_json::json!([6]))],
-                StatusCode::OK,
-                serde_json::json!({"output_ids": [5, 6]}),
-            ),
-            (
-                vec![chunk(serde_json::json!([5])), failed],
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"error": {"message": "bad sampling params"}}),
-            ),
-        ] {
-            let state = service_v2::HttpService::builder()
-                .build()
-                .unwrap()
-                .state_clone();
-            let (tx, _rx) = tokio::sync::oneshot::channel();
-            let response = dispatch(
-                Arc::new(ReplayEngine(outputs)),
-                dispatch_test_context(),
-                "req-unary".to_string(),
-                "test-model".to_string(),
-                state,
-                ConnectionHandle::create_disabled(tx),
-                false,
-            )
-            .await;
-            assert_eq!(response.status(), status);
-            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-                body
-            );
-        }
-    }
-}
+#[path = "sglang_generate_tests.rs"]
+mod tests;

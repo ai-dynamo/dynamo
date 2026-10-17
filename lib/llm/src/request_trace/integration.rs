@@ -9,6 +9,7 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
+use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
@@ -56,10 +57,10 @@ fn shared_replay_metrics(
     super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
 }
 
-pub(crate) fn build_request_end_trace_state(
+pub(crate) fn build_request_end_trace_state<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
     trace_block_size: usize,
 ) -> Option<RequestEndTraceState> {
     build_request_end_trace_state_for_policy(
@@ -71,10 +72,10 @@ pub(crate) fn build_request_end_trace_state(
     )
 }
 
-fn build_request_end_trace_state_for_policy(
+pub(crate) fn build_request_end_trace_state_for_policy<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
     trace_block_size: usize,
     request_trace_enabled: bool,
 ) -> Option<RequestEndTraceState> {
@@ -219,6 +220,41 @@ pub(crate) fn wrap_completion_request_end_stream(
 
     let stream = stream.map(move |response| {
         super::record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
+        response
+    });
+    wrap_request_end_stream(Box::pin(stream), trace_state)
+}
+
+/// Request-end tracing for routes that serve the raw engine stream, such as
+/// native `/generate`. Tool calls are not parsed on these routes.
+pub(crate) fn wrap_engine_output_request_end_stream(
+    stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
+    trace_state: Option<RequestEndTraceState>,
+) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
+    let Some(request) = trace_state.as_ref().and_then(|s| s.request.as_ref()) else {
+        return wrap_request_end_stream(stream, trace_state);
+    };
+    let tracker = request.request_tracker.clone();
+    let input_tokens = request.replay_metrics.input_length;
+    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
+    let mut output_tokens = 0;
+    let stream = stream.map(move |response| {
+        if let Some(output) = response.data.as_ref() {
+            super::record_backend_finish_reason_metadata(
+                finish_reason_metadata.as_ref(),
+                output.index,
+                output.finish_reason.as_ref(),
+                output.stop_reason.as_ref(),
+            );
+            output_tokens += output.token_ids.len();
+            // ISL was recorded at request construction (first write wins).
+            super::record_llm_metric_tokens(
+                Some(&tracker),
+                None,
+                output_tokens,
+                output.cached_tokens_for_prompt(input_tokens),
+            );
+        }
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state)
