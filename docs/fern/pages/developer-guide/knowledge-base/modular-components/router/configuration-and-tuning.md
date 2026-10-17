@@ -11,6 +11,39 @@ boolean forms, use the [Frontend Configuration Reference](../../../../reference/
 For the routing cost model and worker-selection behavior, see
 [Routing Concepts](routing-concepts.md).
 
+## Flag Quick Reference
+
+Boolean flags come in pairs: `--router-foo` turns the behavior on and `--no-router-foo` turns it off. The default column shows the value used when neither form is passed. Each flag also reads the environment variable listed in the [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router).
+
+Essential flags decide how routing works. Most deployments set only these:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--router-mode` | `round-robin` (frontend) | Routing strategy. Use `kv` for KV cache aware routing. |
+| `--router-kv-events / --no-router-kv-events` | on | Consume KV events from workers, or predict cache state from routing decisions. |
+| `--router-policy-config` | unset | YAML file for worker-selection policies, policy-class queues, and shared router settings. |
+| `--router-session-affinity-ttl-secs` | unset (off) | Enable session affinity with this binding TTL. |
+
+Tuning knobs adjust load tracking and indexing. The defaults suit aggregated serving:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--router-track-active-blocks / --no-router-track-active-blocks` | on | Track blocks used by in-flight requests. |
+| `--router-assume-kv-reuse / --no-router-assume-kv-reuse` | on | Assume active blocks are deduplicated by KV cache reuse. |
+| `--router-track-prefill-tokens / --no-router-track-prefill-tokens` | on | Count prompt tokens in active load. |
+| `--router-track-output-blocks / --no-router-track-output-blocks` | off | **Experimental.** Track output blocks during generation. |
+| `--router-replica-sync / --no-router-replica-sync` | off | Synchronize active-sequence state across router replicas. |
+| `--router-prefill-load-model` | `none` | Prompt-side load model: `none` or `ais`. |
+| `--router-host-cache-hit-weight` | `0.75` | Credit for host-pinned (CPU offload) prefix overlap. |
+| `--router-disk-cache-hit-weight` | `0.25` | Credit for disk-tier prefix overlap. |
+| `--router-ttl-secs` | `120.0` | TTL for predicted cache entries without KV events. |
+| `--router-approximate-cache-policy` | `ttl` | Retention policy for the approximate indexer: `ttl` or experimental `lru`. |
+| `--router-event-threads` | `4` | KV indexer worker threads. |
+| `--router-predicted-ttl-secs` | unset (off) | Enable predict-on-route with this TTL. |
+| `--router-conditional-disagg / --no-router-conditional-disagg` | off | **Experimental.** Conditional disaggregation. |
+
+Flags deprecated for removal in v1.7 (`--router-queue-threshold`, `--router-queue-policy`, `--router-prefill-policy`, `--router-decode-policy`, `--load-aware`, and the scoring flags listed under [Configure the Default Policy](#configure-the-default-policy)) are left out of these tables; configure them in the policy YAML instead.
+
 ## Configuration Scope and Precedence
 
 The Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
@@ -72,11 +105,11 @@ its configuration even if the endpoint is unchanged.
 
 `--router-queue-threshold` and `--router-queue-policy` are deprecated starting in v1.6, with removal planned for v1.7. Their replacements configure each queue in the policy YAML.
 
-- `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to the policy’s `overlap_score_credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
-- `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
-- `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
-- `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIS prefill load decay to reflect prompt work.
-- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
+- `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to the policy’s `overlap_score_credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to `0.75`.
+- `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to `0.25`.
+- `--router-conditional-disagg / --no-router-conditional-disagg`: **Experimental.** Off by default. Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
+- `--router-track-prefill-tokens / --no-router-track-prefill-tokens`: On by default. Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIS prefill load decay to reflect prompt work.
+- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker. Defaults to `none`.
 - `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
 - `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
@@ -469,7 +502,7 @@ For Kimi-style TP-only MoE runs, use `--ais-moe-tp-size` equal to `--ais-tp-size
 
 ## KV Event Transport
 
-- `--no-router-kv-events`: Disables KV event tracking. By default, the router consumes KV events to monitor block creation and deletion from workers that publish them. When disabled, the router predicts cache state from routing decisions. Predicted entries use TTL retention by default; the experimental local LRU policy is described below.
+- `--router-kv-events / --no-router-kv-events`: On by default. `--no-router-kv-events` disables KV event tracking. By default, the router consumes KV events to monitor block creation and deletion from workers that publish them. When disabled, the router predicts cache state from routing decisions. Predicted entries use TTL retention by default; the experimental local LRU policy is described below.
 
 ## Topology-Aware KV Transfer
 
@@ -480,11 +513,11 @@ For the Kubernetes configuration fields, see the [KvTransferPolicy API](../../..
 
 ## Block Tracking
 
-- `--no-router-track-active-blocks`: Disables tracking of active blocks used for ongoing generation or decode phases. Disable this when routing to workers that only perform prefill.
-- `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated. With an expected output sequence length (`agent_hints.osl` in `nvext`), fractional decay applies to output blocks and the structurally exclusive prompt suffix; shared prompt blocks retain full weight. For the cost-model behavior, see [Decode Load Modeling](routing-concepts.md#decode-load-modeling).
-- `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
-- `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
-- `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
+- `--router-track-active-blocks / --no-router-track-active-blocks`: On by default. `--no-router-track-active-blocks` disables tracking of active blocks used for ongoing generation or decode phases. Disable this when routing to workers that only perform prefill.
+- `--router-track-output-blocks / --no-router-track-output-blocks`: **Experimental.** Off by default. `--router-track-output-blocks` enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated. With an expected output sequence length (`agent_hints.osl` in `nvext`), fractional decay applies to output blocks and the structurally exclusive prompt suffix; shared prompt blocks retain full weight. For the cost-model behavior, see [Decode Load Modeling](routing-concepts.md#decode-load-modeling).
+- `--router-assume-kv-reuse / --no-router-assume-kv-reuse`: On by default. When tracking active blocks, `--no-router-assume-kv-reuse` disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
+- `--router-track-prefill-tokens / --no-router-track-prefill-tokens`: On by default. `--no-router-track-prefill-tokens` disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
+- `--router-replica-sync / --no-router-replica-sync`: Off by default. `--router-replica-sync` enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
 - `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS`: Environment-only request-liveness duration. The default is `300` seconds for both implementations. Legacy selection-service and standalone slot-tracker state expires by absolute age, approximately five to six minutes after admission regardless of output progress. The embedded `KvRouter` uses the duration as its shared CLOCK scan interval. Output progress grants a lease one second chance, so idle cleanup occurs approximately five to ten minutes after the last progress touch. Replica mirrors refresh only from synchronized lifecycle events. Each router expires local and mirrored copies independently without publishing `Free`; expiry removes only that router's scheduler state and local approximate-LRU references. Explicit lifecycle completion publishes `Free` and remains idempotent after local expiry. This request-liveness policy is separate from approximate-cache retention TTL and does not turn best-effort synchronization into authoritative state.
 
 ### Tracking Hash Identities
@@ -524,11 +557,11 @@ traffic. Mixed epochs are not detected.
 
 ## KV Indexer / Approx KV Indexer
 
-- `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
-- `--router-approximate-cache-policy`: Retention policy for a local approximate primary indexer. `ttl` is the default. Experimental `lru` models the physical KV capacity advertised by each worker data-parallel rank, retains complete canonical prompt and output blocks, and evicts the least recently used unreferenced copies under pressure. It requires `--no-router-kv-events`. Remote and served approximate indexers fall back to TTL; the predict-on-route side indexer is always TTL-only. The equivalent environment variable is `DYN_ROUTER_APPROXIMATE_CACHE_POLICY`.
+- `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Used when `--no-router-kv-events` is set. Defaults to `120.0`.
+- `--router-approximate-cache-policy`: Retention policy for a local approximate primary indexer. Defaults to `ttl`. Experimental `lru` models the physical KV capacity advertised by each worker data-parallel rank, retains complete canonical prompt and output blocks, and evicts the least recently used unreferenced copies under pressure. It requires `--no-router-kv-events`. Remote and served approximate indexers fall back to TTL; the predict-on-route side indexer is always TTL-only. The equivalent environment variable is `DYN_ROUTER_APPROXIMATE_CACHE_POLICY`.
 - Approximate-LRU mutation lanes currently use unbounded queues. Bounded backpressure is deferred while this policy remains experimental.
-- `--router-event-threads`: Number of KV indexer worker threads (default: 4). Values greater than 1 use the concurrent radix tree for event-driven routing, approximate routing with `--no-router-kv-events`, and the predict-on-route side indexer.
-- `--router-predicted-ttl-secs`: Enables predict-on-route with this TTL in seconds for entries in a local side indexer. Requires KV events; omit to disable. When enabled, the router feeds each routing decision into the side indexer and scores each worker with the larger overlap from the primary indexer and the local side indexer. Independent of `--router-ttl-secs`; kept short so decisions the engine never confirms (cancelled requests, prefill failures) age out quickly.
+- `--router-event-threads`: Number of KV indexer worker threads. Defaults to `4`. Values greater than 1 use the concurrent radix tree for event-driven routing, approximate routing with `--no-router-kv-events`, and the predict-on-route side indexer.
+- `--router-predicted-ttl-secs`: Enables predict-on-route with this TTL in seconds for entries in a local side indexer. Requires KV events. Unset (off) by default. When enabled, the router feeds each routing decision into the side indexer and scores each worker with the larger overlap from the primary indexer and the local side indexer. Independent of `--router-ttl-secs`; kept short so decisions the engine never confirms (cancelled requests, prefill failures) age out quickly.
 
 ### When to use `--router-predicted-ttl-secs`
 
