@@ -161,13 +161,14 @@ class HttpErrorPayload(BasePayload):
 
 @dataclass
 class HttpCancellationPayload(BasePayload):
-    """Disconnect an active chat stream and require early engine cleanup.
+    """Disconnect a chat stream after its first content, before completion.
 
-    Follow this with a normal chat payload to verify recovery on the same
-    deployment. The supplied checker owns engine-specific metric semantics.
+    Follow this with a normal chat payload to verify public recovery behavior.
+    With metrics, also require early engine cleanup. Without metrics this does
+    not assert that the engine stopped generating or reclaimed resources.
     """
 
-    metrics: EngineMetrics = field(kw_only=True)
+    metrics: EngineMetrics | None = field(kw_only=True)
     endpoint: str = "/v1/chat/completions"
     http_stream: bool = True
     timeout: int = 30
@@ -175,7 +176,8 @@ class HttpCancellationPayload(BasePayload):
     _completion_progress: float = field(default=0, init=False, repr=False)
 
     def bind_environment(self, env: dict[str, str]) -> None:
-        self.metrics.bind_environment(env)
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
 
     def before_request(self) -> None:
         if not self.http_stream or self.body.get("stream") is not True:
@@ -187,13 +189,14 @@ class HttpCancellationPayload(BasePayload):
             raise ValueError("Cancellation requires max_tokens > 1")
         if self.max_attempts != 1:
             raise ValueError("Cancellation checks must not retry failed assertions")
-        self._completion_progress = self.metrics.completion_progress(max_tokens)
-        self.metrics.wait_for_scheduler()
-        self._before = self.metrics.progress()
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(max_tokens)
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
 
     def response_handler(self, response: requests.Response) -> str:
         try:
-            if self._before is None:
+            if self.metrics is not None and self._before is None:
                 raise RuntimeError("before_request must run before cancellation")
             response.raise_for_status()
             deadline = time.monotonic() + self.timeout
@@ -222,12 +225,14 @@ class HttpCancellationPayload(BasePayload):
                 if content:
                     break
             assert content, "Stream ended without generated content"
-            self.metrics.wait_for_scheduler(is_active=True)
+            if self.metrics is not None:
+                self.metrics.wait_for_scheduler(is_active=True)
         finally:
             response.close()
-        self.metrics.assert_cancelled(
-            before=self._before, completion_progress=self._completion_progress
-        )
+        if self.metrics is not None:
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
         return content
 
 
@@ -361,6 +366,12 @@ class DisaggregatedChatPayload(ChatPayload):
                 completion_tokens == self.expected_completion_tokens
             ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
             _validate_chat_token_usage(result)
+        if self.body.get("logprobs"):
+            logprobs = (choices[0].get("logprobs") or {}).get("content")
+            _validate_chat_logprobs(logprobs)
+            assert [item["token_id"] for item in logprobs] == result["nvext"][
+                "completion_token_ids"
+            ], "Handoff logprobs do not match completion token positions"
 
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
@@ -636,6 +647,14 @@ class StreamingChatPayload(BasePayload):
                         assert int(entry["token"].removeprefix("token_id:")) >= 0
                         if entry["token"] == item["token"]:
                             assert entry["logprob"] == item["logprob"]
+        if "prompt_token_ids" in fields:
+            prompt_ids = terminal_nvext.get("prompt_token_ids")
+            assert prompt_ids, "Missing requested prompt token IDs"
+            assert all(type(token) is int and token >= 0 for token in prompt_ids)
+            if usage is not None:
+                assert (
+                    len(prompt_ids) == usage["prompt_tokens"]
+                ), "Incorrect prompt usage"
         if "prompt_logprobs" in fields:
             prompt_ids = terminal_nvext.get("prompt_token_ids")
             prompt_logprobs = terminal_nvext.get("prompt_logprobs")
