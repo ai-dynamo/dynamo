@@ -53,6 +53,7 @@ aiperf plot artifacts/my-benchmark
 
 ## Directory Contents
 
+- **`gateway_ab/`** — A/B benchmark of the Dynamo Frontend against Gateway + EPP (Dynamo runtime mode) on mocker workers, for aggregated and disaggregated serving
 - **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster
 - **`multimodal/`** — Media and multimodal benchmarks, including frontend media decoding
 - **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)

@@ -494,6 +494,8 @@ areas:
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
   - benchmarks/frontend/
+  - benchmarks/gateway_ab/
+  - benchmarks/gateway_ab/tests/
   - benchmarks/incluster/
   - benchmarks/mocker/README.md
   - benchmarks/mocker/bench_ais_concurrency.py
