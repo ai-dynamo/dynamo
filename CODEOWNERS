@@ -466,12 +466,10 @@ requirements.txt                                                                
 /tests/router/                                                                                          @ai-dynamo/dynamo-router-codeowners
 /tests/wheels/                                                                                          @ai-dynamo/dynamo-ops-codeowners
 /tests/lmcache/                                                                                         @ai-dynamo/dynamo-kv-memory-codeowners
-/lib/llm/src/kv/                                                                                        @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/frontend/                                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /tests/mm_router/                                                                                       @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/grpc/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
-/lib/llm/src/kv.rs                                                                                      @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/lora/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
 /tests/benchmarks/                                                                                      @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/kvbm/                                                                                     @ai-dynamo/dynamo-kv-memory-codeowners

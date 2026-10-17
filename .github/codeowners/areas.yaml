@@ -184,8 +184,6 @@ areas:
   - lib/llm/src/block_manager/v2.rs
   - lib/llm/src/block_manager/v2/
   - lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/
-  - lib/llm/src/kv.rs
-  - lib/llm/src/kv/
   - lib/memory/
   - lib/memory/bin/
   - lib/memory/src/nixl.rs
