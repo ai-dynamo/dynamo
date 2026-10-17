@@ -164,11 +164,20 @@ class GMSRPCServer:
             writer.close()
             return None
 
-        granted_mode = await self._gms.acquire_lock(
-            msg.lock_type,
-            msg.timeout_ms,
-            session_id,
-        )
+        try:
+            granted_mode = await self._gms.acquire_lock(
+                msg.lock_type,
+                msg.timeout_ms,
+                session_id,
+            )
+        except OperationNotAllowed as exc:
+            try:
+                await send_message(writer, ErrorResponse(error=str(exc)))
+            except Exception as send_exc:
+                logger.debug("Handshake rejection send failed: %s", send_exc)
+            finally:
+                writer.close()
+            return None
         if granted_mode is None:
             try:
                 await send_message(
