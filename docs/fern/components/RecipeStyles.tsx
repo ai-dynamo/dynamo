@@ -213,6 +213,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
 #provider-minimax:checked ~ .dynamo-recipe-browser label[for="provider-minimax"],
 #provider-motif:checked ~ .dynamo-recipe-browser label[for="provider-motif"],
+#provider-reflection:checked ~ .dynamo-recipe-browser label[for="provider-reflection"],
 /* provider-chip-rules:end */
 #runtime-all:checked ~ .dynamo-recipe-browser label[for="runtime-all"],
 #runtime-vllm:checked ~ .dynamo-recipe-browser label[for="runtime-vllm"],
@@ -225,6 +226,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #hardware-gb200:checked ~ .dynamo-recipe-browser label[for="hardware-gb200"],
 #hardware-gb300:checked ~ .dynamo-recipe-browser label[for="hardware-gb300"],
 #hardware-b200:checked ~ .dynamo-recipe-browser label[for="hardware-b200"],
+#hardware-b300:checked ~ .dynamo-recipe-browser label[for="hardware-b300"],
 #technique-all:checked ~ .dynamo-recipe-browser label[for="technique-all"],
 #technique-aggregated:checked ~ .dynamo-recipe-browser label[for="technique-aggregated"],
 #technique-disaggregated:checked ~ .dynamo-recipe-browser label[for="technique-disaggregated"],
@@ -698,6 +700,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
 #provider-minimax:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="minimax"]),
 #provider-motif:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="motif"]),
+#provider-reflection:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="reflection"]),
 /* provider-filter-rules:end */
 #runtime-vllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="vllm"]),
 #runtime-trtllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="trtllm"]),
@@ -708,6 +711,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #hardware-gb200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb200"]),
 #hardware-gb300:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb300"]),
 #hardware-b200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="b200"]),
+#hardware-b300:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="b300"]),
 #technique-aggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="aggregated"]),
 #technique-disaggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="disaggregated"]),
 #technique-kv-routing:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="kv-routing"]),
@@ -2283,21 +2287,16 @@ body:has(input[name="recipe-variant"][value="kvbm"]:checked) tr[data-variant~="k
     font-weight: 600;
 }
 
-/* Recipe matrices keep every target readable; only the selected target is highlighted. */
-body:has(input[name="recipe-sku"]:checked):has(input[name="recipe-variant"]:checked) tr.dynamo-muse-spark-performance-row {
-    opacity: 1;
-    font-weight: 400;
-}
-
-body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="agg"],
-body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="disagg"],
-body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb200"][data-variant~="kv-router"],
-body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="agg"],
-body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="disagg"],
-body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-sku~="gb300"][data-variant~="kv-router"] {
-    opacity: 1;
-    font-weight: 600;
+/* Muse-Spark SGLang tables highlight GPU and mode together.
+   vLLM and TensorRT-LLM use the shared data-highlight-sku rule above. */
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb200"][data-muse-variant="agg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb200"][data-muse-variant="disagg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb200"][data-muse-variant="kv-router"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb300"][data-muse-variant="agg"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb300"][data-muse-variant="disagg"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked):has(input[name="recipe-variant"][value="kv-router"]:checked) tr.dynamo-muse-spark-performance-row[data-muse-sku="gb300"][data-muse-variant="kv-router"] {
     background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    font-weight: 600;
 }
 
 /* Combined sku x variant row highlighting (matrix pages) */
