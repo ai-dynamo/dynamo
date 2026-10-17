@@ -213,6 +213,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
 #provider-minimax:checked ~ .dynamo-recipe-browser label[for="provider-minimax"],
 #provider-motif:checked ~ .dynamo-recipe-browser label[for="provider-motif"],
+#provider-reflection:checked ~ .dynamo-recipe-browser label[for="provider-reflection"],
 /* provider-chip-rules:end */
 #runtime-all:checked ~ .dynamo-recipe-browser label[for="runtime-all"],
 #runtime-vllm:checked ~ .dynamo-recipe-browser label[for="runtime-vllm"],
@@ -225,6 +226,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #hardware-gb200:checked ~ .dynamo-recipe-browser label[for="hardware-gb200"],
 #hardware-gb300:checked ~ .dynamo-recipe-browser label[for="hardware-gb300"],
 #hardware-b200:checked ~ .dynamo-recipe-browser label[for="hardware-b200"],
+#hardware-b300:checked ~ .dynamo-recipe-browser label[for="hardware-b300"],
 #technique-all:checked ~ .dynamo-recipe-browser label[for="technique-all"],
 #technique-aggregated:checked ~ .dynamo-recipe-browser label[for="technique-aggregated"],
 #technique-disaggregated:checked ~ .dynamo-recipe-browser label[for="technique-disaggregated"],
@@ -698,6 +700,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
 #provider-minimax:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="minimax"]),
 #provider-motif:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="motif"]),
+#provider-reflection:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="reflection"]),
 /* provider-filter-rules:end */
 #runtime-vllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="vllm"]),
 #runtime-trtllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="trtllm"]),
@@ -708,6 +711,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #hardware-gb200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb200"]),
 #hardware-gb300:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb300"]),
 #hardware-b200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="b200"]),
+#hardware-b300:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="b300"]),
 #technique-aggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="aggregated"]),
 #technique-disaggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="disaggregated"]),
 #technique-kv-routing:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="kv-routing"]),
