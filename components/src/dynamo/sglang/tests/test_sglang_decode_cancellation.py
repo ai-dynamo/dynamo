@@ -52,6 +52,56 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+async def test_cancellation_monitor_cleanup_finishes_when_owner_cancelled(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation._CANCELLATION_DISPATCH_WAIT_TIMEOUT_S",
+        5,
+    )
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = None
+    handler._abort_tasks = set()
+    abort_calls = []
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            abort_request=lambda rid, abort_all: abort_calls.append(rid)
+        )
+    )
+    monitor_cancelled = asyncio.Event()
+
+    async def monitor_never_finishes(*_args):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            monitor_cancelled.set()
+            raise
+
+    handler._handle_cancellation = monitor_never_finishes
+    request_id_future = asyncio.get_running_loop().create_future()
+    request_id_future.set_result("sglang-request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: True)
+    in_cleanup = asyncio.Event()
+
+    async def owner():
+        async with handler._cancellation_monitor(
+            request_id_future, context, request_ids={"sglang-request-id"}
+        ):
+            in_cleanup.set()
+
+    owner_task = asyncio.create_task(owner())
+    await in_cleanup.wait()
+    await asyncio.sleep(0)  # the owner is now waiting on the monitor
+    owner_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await owner_task
+    assert monitor_cancelled.is_set()
+    assert abort_calls == ["sglang-request-id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_cancellation_monitor_keeps_pending_ordered_abort_alive(
     decode_cancellation_case,
 ):
