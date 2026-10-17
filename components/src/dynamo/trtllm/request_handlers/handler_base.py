@@ -1665,6 +1665,12 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        # SamplingOptions now carries logit_bias from the OpenAI frontend,
+        # but TRT-LLM's SamplingParams has no such field, so drop it here.
+        if overrides.pop("logit_bias", None) is not None:
+            logger.warning(
+                "logit_bias is not supported by the TensorRT-LLM backend; the bias was ignored"
+            )
         if "top_k" in overrides:
             overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 

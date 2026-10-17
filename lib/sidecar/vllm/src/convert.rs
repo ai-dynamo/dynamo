@@ -255,7 +255,7 @@ pub(crate) fn build_generate_request(
             presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
             frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
-            logit_bias: Default::default(),
+            logit_bias: sampling.logit_bias.unwrap_or_default(),
             allowed_token_ids,
             structured_output: structured_output(sampling.guided_decoding)?,
             bad_words_token_ids,

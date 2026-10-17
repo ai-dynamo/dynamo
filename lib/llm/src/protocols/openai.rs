@@ -92,6 +92,10 @@ pub(crate) trait OpenAISamplingOptionsProvider {
 
     fn get_best_of(&self) -> Option<u8>;
 
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        None
+    }
+
     fn nvext(&self) -> Option<&NvExt>;
 }
 
@@ -179,6 +183,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
 
+        let logit_bias = self.get_logit_bias();
+
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
             if greedy {
@@ -215,6 +221,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             seed,
             use_beam_search: None,
             length_penalty: None,
+            logit_bias,
             guided_decoding,
             include_stop_str_in_output,
         })
