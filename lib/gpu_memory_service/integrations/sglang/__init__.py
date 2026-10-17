@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Type
 try:
     from sglang.srt.arg_groups.overrides import declare_resolution
 except ImportError:
-    # The separately pinned XPU SGLang 0.5.11 predates declarations.
-    # Remove when that pin is upgraded to 0.5.19+.
+    # SGLang <0.5.19 predates declarations. Both container pins are now on
+    # 0.5.21, so setup_gms() rejects such a build instead of running inert.
     declare_resolution = None
 
 if TYPE_CHECKING:
@@ -60,9 +60,13 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     if declare_resolution is not None:
         declare_resolution(server_args, "dynamo.gms", enable_memory_saver=True)
     else:
-        # The separately pinned XPU image still uses SGLang 0.5.11, which
-        # predates declarations. Remove when that pin is upgraded to 0.5.19+.
-        server_args.enable_memory_saver = True
+        # The XPU pin moved off SGLang 0.5.11, so every supported build
+        # declares. Assigning enable_memory_saver directly is a silent no-op on
+        # builds that resolve config separately from raw ServerArgs, which would
+        # leave GMS regions inert -- fail loudly instead.
+        raise RuntimeError(
+            "GMS requires an SGLang build exposing declare_resolution(); " "none found."
+        )
 
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.

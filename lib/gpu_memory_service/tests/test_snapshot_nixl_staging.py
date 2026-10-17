@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     )
 
 from _fake_vmm import FakeVMM
+from gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -132,3 +133,22 @@ def test_staging_prep_starts_before_restore(monkeypatch):
     finally:
         allow_finish.set()
         session.close()
+
+
+def test_pinned_copy_slot_skips_unsupported_host_register():
+    class HostRegisterUnsupportedVMM(FakeVMM):
+        def host_register(self, ptr, size):
+            raise RuntimeError(
+                "_sycl_vmm: register_host_memory not available (oneAPI too old)"
+            )
+
+        def host_unregister(self, ptr):
+            raise AssertionError(
+                "host_unregister should be skipped when registration is unsupported"
+            )
+
+    slot = PinnedCopySlot(HostRegisterUnsupportedVMM())
+
+    assert slot._registered is False
+
+    slot.close()
