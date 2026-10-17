@@ -426,12 +426,48 @@ jobs:
             echo "::warning::sccache prerequisites missing (bucket or IRSA token); EPP Rust build will run without sccache"
           fi
 
+          # Inputs key: git trees of every path the EPP Dockerfile COPYs, plus base image digests and platforms.
+          EPP_DIR=deploy/inference-gateway/ext-proc
+          EPP_INPUT_PATHS=(.dockerignore .cargo Cargo.toml Cargo.lock README.md lib
+            examples/router/custom-policy-example "${EPP_DIR}" deploy/inference-gateway/sidecar
+            container/use-sccache.sh container/compliance/cargo_sbom.py)
+          EPP_INPUTS_REF=""
+          # Nightly (schedule) always rebuilds so a missed input can't stay stale for long.
+          if [[ "${{ inputs.no_cache }}" != "true" ]] && [[ "${{ github.event_name }}" != "schedule" ]] \
+              && [[ -z "$(git status --porcelain --ignored -- "${EPP_INPUT_PATHS[@]}")" ]]; then
+            EPP_MAKE_VARS="DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/"
+            EPP_PLATFORMS="$(make -s -C "${EPP_DIR}" --eval 'print-%: ; @echo $($*)' print-MULTIARCH_PLATFORMS "${EPP_MAKE_VARS}")"
+            if EPP_INPUTS_KEY="$({
+                  git ls-tree HEAD -- "${EPP_INPUT_PATHS[@]}" || exit 1
+                  echo "platforms=${EPP_PLATFORMS}"
+                  for v in RUST_IMAGE BASE_IMAGE; do
+                    img="$(make -s -C "${EPP_DIR}" --eval 'print-%: ; @echo $($*)' "print-${v}" "${EPP_MAKE_VARS}")" || exit 1
+                    digest="$(docker buildx imagetools inspect "${img}" --format '{{json .Manifest.Digest}}')" || exit 1
+                    echo "${v}=${img}@${digest}"
+                  done
+                } | sha256sum | cut -c1-16)"; then
+              EPP_INPUTS_REF="${EPP_IMAGE_REPO}:inputs-${EPP_INPUTS_KEY}"
+            fi
+          fi
+
+          if [[ -n "${EPP_INPUTS_REF}" ]] && docker buildx imagetools inspect "${EPP_INPUTS_REF}" >/dev/null 2>&1; then
+            echo "EPP inputs unchanged; reusing ${EPP_INPUTS_REF}"
+            docker buildx imagetools create -t "${EPP_IMAGE_REPO}:${EPP_IMAGE_TAG}" "${EPP_INPUTS_REF}"
+            exit 0
+          fi
+
           make -C deploy/inference-gateway/ext-proc image-multiarch-push \
             IMAGE_REPO="${EPP_IMAGE_REPO}" \
             GIT_TAG="${EPP_IMAGE_TAG}" \
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
             ${SCCACHE_MAKE_ARGS} \
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
+
+          # Publish the inputs tag only after a successful multi-arch push.
+          if [[ -n "${EPP_INPUTS_REF}" ]]; then
+            docker buildx imagetools create -t "${EPP_INPUTS_REF}" "${EPP_IMAGE_REPO}:${EPP_IMAGE_TAG}" \
+              || echo "::warning::failed to publish ${EPP_INPUTS_REF}; later builds will rebuild EPP"
+          fi
       - name: Refresh BuildKit builder (For Frontend Only)
         if: ${{ inputs.target == 'frontend' }}
         uses: $/.github/actions/builder-refresher
