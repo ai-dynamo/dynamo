@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Global Discovery HTTP service POC, applied directly to the hub cluster (not
+# through Karmada). Replace IMAGE with the pushed image, for example:
+#   sed "s#IMAGE#<registry>/global-discovery-poc:<tag>#" global-discovery-poc.yaml | kubectl apply -f -
+# It needs only read access to EndpointSlices.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: global-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: global-discovery-poc
+  namespace: global-discovery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: global-discovery-poc
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: global-discovery-poc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: global-discovery-poc
+subjects:
+  - kind: ServiceAccount
+    name: global-discovery-poc
+    namespace: global-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-discovery-poc
+  namespace: global-discovery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: global-discovery-poc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: global-discovery-poc
+    spec:
+      serviceAccountName: global-discovery-poc
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: global-discovery
+          image: IMAGE
+          args: ["--listen", "0.0.0.0:8080"]
+          env:
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-discovery-poc
+  namespace: global-discovery
+spec:
+  selector:
+    app.kubernetes.io/name: global-discovery-poc
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

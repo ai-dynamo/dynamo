@@ -39,6 +39,8 @@ request-trace-bench = []
 request-trace-s3 = []
 # Optional read-only Global View HTTP endpoints for POC inspection.
 global-view-diagnostics = ["dynamo-kv-router/global-view-diagnostics"]
+# POC HTTP service that serves Relay pools discovered from Karmada-imported EndpointSlices.
+global-discovery-poc = ["dep:clap", "dep:kube", "dep:k8s-openapi"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -167,6 +169,10 @@ flate2 = { version = "1" }
 clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
+# global-discovery-poc
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+
 # http-service
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
@@ -270,6 +276,11 @@ path = "tests/lora_simulation/main.rs"
 name = "global-router-poc"
 path = "src/bin/global_router_poc.rs"
 required-features = ["global-view-diagnostics"]
+
+[[bin]]
+name = "global-discovery-poc"
+path = "src/bin/global_discovery_poc.rs"
+required-features = ["global-discovery-poc"]
 
 [[bin]]
 name = "kv-dc-relay-poc"
