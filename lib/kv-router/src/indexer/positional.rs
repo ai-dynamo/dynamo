@@ -224,6 +224,14 @@ impl SyncIndexer for PositionalIndexer {
         event_receiver: flume::Receiver<WorkerTask>,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
+        self.worker_with_retention(event_receiver.into(), metrics)
+    }
+
+    fn worker_with_retention(
+        &self,
+        mut event_receiver: crate::indexer::WorkerTaskReceiver,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut worker_blocks = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
         #[cfg(feature = "bench")]

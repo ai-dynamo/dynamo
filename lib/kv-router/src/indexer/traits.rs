@@ -216,6 +216,20 @@ pub trait SyncIndexer: Send + Sync + 'static {
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()>;
 
+    /// Process a retention-aware task stream without changing the public worker protocol.
+    ///
+    /// The default keeps existing implementations source-compatible by forwarding
+    /// original `WorkerTask` values through one additional dispatch thread. Backends
+    /// can override this and use `receiver.recv()` directly in their blocking worker
+    /// loop to perform retention bookkeeping inline, without the extra thread/hop.
+    fn worker_with_retention(
+        &self,
+        receiver: super::WorkerTaskReceiver,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
+        receiver.run_legacy(|receiver| self.worker(receiver, metrics))
+    }
+
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
