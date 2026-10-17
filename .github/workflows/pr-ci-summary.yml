@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR CI Summary
+
+on:
+  workflow_run:
+    workflows: [PR, Pre Merge, PR-XPU]
+    types: [in_progress, completed]
+  pull_request:
+    paths:
+      - '.github/scripts/ci-summary*'
+      - '.github/workflows/pr-ci-summary.yml'
+
+permissions: {}
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '22'
+      - run: node --test .github/scripts/ci-summary*.test.cjs
+
+  resolve:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.resolve.outputs.pr }}
+    steps:
+      # workflow_run's github.sha is on the default branch, never the PR head.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - id: resolve
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        with:
+          script: |
+            const { resolvePullRequest } = require('./.github/scripts/ci-summary.cjs');
+            const pr = await resolvePullRequest({ github, context, core });
+            if (pr) core.setOutput('pr', pr.number);
+
+  publish:
+    needs: resolve
+    if: needs.resolve.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Every event rebuilds all sections, so replacing a queued update loses no results.
+    concurrency:
+      group: pr-ci-summary-${{ needs.resolve.outputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Update CI summary comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        env:
+          PR_NUMBER: ${{ needs.resolve.outputs.pr }}
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const { publishSummary } = require('./.github/scripts/ci-summary.cjs');
+            await publishSummary({ github, context, core, pullNumber: Number(process.env.PR_NUMBER) });
