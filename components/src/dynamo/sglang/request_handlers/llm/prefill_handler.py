@@ -12,7 +12,10 @@ from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
-from dynamo.sglang._disagg import validate_disagg_parallel_sampling
+from dynamo.sglang._disagg import (
+    validate_disagg_parallel_sampling,
+    validate_disagg_routed_experts,
+)
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
@@ -24,6 +27,7 @@ from dynamo.sglang.engine_generate import (
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
+    DecodeWorkerHandler,
     _kv_cache_hit_engine_data,
     _native_payload_is_batched,
     _ordered_cancellation_request_id,
@@ -35,7 +39,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
     reject_unconsumed_media,
 )
-from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.request_utils import nvext_extra_field_requested, request_cache_salt
 from dynamo.sglang.thinking_budget import (
     apply_thinking_budget,
     thinking_budget_requested,
@@ -49,6 +53,8 @@ _DP_RANK_UNSET = 2**32 - 1
 
 class PrefillWorkerHandler(BaseWorkerHandler):
     """Handler for prefill workers in disaggregated serving mode."""
+
+    _returns_routed_experts = False
 
     def __init__(
         self,
@@ -70,6 +76,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
         super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
+        self._returns_routed_experts = bool(
+            DecodeWorkerHandler._resolve_routed_experts_kwargs(
+                engine, config.server_args
+            )
+        )
         self._consume_tasks: set[asyncio.Task[Any]] = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -228,6 +239,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
             results = native_generate_stream(self.engine, native_request)
         else:
+            # The router dispatches decode concurrently, and decode runs the same
+            # check, so neither side waits on a handoff the other never starts.
+            if self._returns_routed_experts and nvext_extra_field_requested(
+                inner_request, "routed_experts"
+            ):
+                validate_disagg_routed_experts(inner_request, input_param)
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
                 sampling_params,

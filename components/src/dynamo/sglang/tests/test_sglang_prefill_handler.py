@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers import cancellation
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 
@@ -333,6 +334,39 @@ async def test_prefill_omits_kv_cache_hit_after_cancellation(
 
     assert len(chunks) == 1
     assert "disaggregated_params" in chunks[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("enabled,rejected", [(True, True), (False, False)])
+async def test_prefill_rejects_stale_prompt_routed_experts_before_handoff(
+    monkeypatch, prefill_responses, enabled, rejected
+):
+    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=False)
+    handler._returns_routed_experts = enabled
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    stream = handler.generate(
+        {
+            "request": {
+                "token_ids": [1, 2, 3],
+                "routing": {},
+                "extra_args": {
+                    "nvext": {"extra_fields": ["routed_experts"]},
+                    "sampling_options": {"routed_experts_start_len": 2},
+                },
+            },
+            "sampling_params": {},
+        },
+        context,
+    )
+
+    if rejected:
+        with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
+            await anext(stream)
+    else:
+        assert "disaggregated_params" in (await _drain(stream))[0]
 
 
 async def _drain(stream):

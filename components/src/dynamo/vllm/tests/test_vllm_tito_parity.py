@@ -198,6 +198,12 @@ class TestTokenInSamplingDefaults:
         sp = self._build({"nvext": {"extra_fields": ["engine_data"]}}, enable_rl=True)
         assert sp.top_p == pytest.approx(0.5)
 
+    def test_routed_experts_start_len_rejected(self):
+        from dynamo.llm.exceptions import InvalidArgument
+
+        with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
+            self._build({"sampling_options": {"routed_experts_start_len": 1}})
+
     def test_token_in_marker_skips_generation_defaults(self):
         sp = self._build({"nvext": {"token_in": True}}, enable_rl=True)
         assert sp.top_p == pytest.approx(1.0)

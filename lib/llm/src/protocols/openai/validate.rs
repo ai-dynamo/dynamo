@@ -116,6 +116,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "allowed_token_ids",
     "bad_words_token_ids",
     "logprob_token_ids",
+    "routed_experts_start_len",
 ];
 
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
@@ -196,6 +197,11 @@ fn validate_no_unsupported_fields_with_ignore(
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("routed_experts_start_len")
+        && value.as_u64().and_then(|v| u32::try_from(v).ok()).is_none()
+    {
+        anyhow::bail!("`routed_experts_start_len` must be a non-negative integer");
     }
     Ok(())
 }
@@ -1282,6 +1288,7 @@ mod tests {
             "allowed_token_ids": [1],
             "bad_words_token_ids": [[2]],
             "logprob_token_ids": [3],
+            "routed_experts_start_len": 0,
         }))
         .unwrap();
         validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
@@ -1296,6 +1303,7 @@ mod tests {
             ("allowed_token_ids", json!([-1])),
             ("bad_words_token_ids", json!([1])),
             ("logprob_token_ids", json!(["1"])),
+            ("routed_experts_start_len", json!(-1)),
             ("experimental_field", json!({"nested": null})),
         ] {
             let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();

@@ -31,7 +31,6 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _extract_sglang_stop_reason,
     _kv_cache_hit_engine_data,
     _native_payload_is_batched,
-    _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _ordered_cancellation_request_id,
     _public_native_response_id,
@@ -46,7 +45,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
-from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.request_utils import nvext_extra_field_requested, request_cache_salt
 
 pytestmark = [
     pytest.mark.unit,
@@ -1962,14 +1961,14 @@ def test_metadata_uploader_rejects_invalid_settings(settings, message):
 
 
 def test_nvext_extra_field_requested_supports_raw_and_preprocessed_shapes():
-    assert _nvext_extra_field_requested(
+    assert nvext_extra_field_requested(
         {"nvext": {"extra_fields": ["stop_reason"]}}, "stop_reason"
     )
-    assert _nvext_extra_field_requested(
+    assert nvext_extra_field_requested(
         {"extra_args": {"nvext": {"extra_fields": ["stop_reason"]}}},
         "stop_reason",
     )
-    assert not _nvext_extra_field_requested(
+    assert not nvext_extra_field_requested(
         {"extra_args": {"nvext": {"extra_fields": ["engine_data"]}}},
         "stop_reason",
     )
@@ -2825,6 +2824,96 @@ async def test_parallel_sampling_omits_kv_cache_hit(n):
     reports = [output.get("engine_data", {}).get("kv_cache_hit") for output in outputs]
     expected = {"prompt_tokens": 2, "reused_tokens": 1} if n == 1 else None
     assert reports == [expected] * n
+
+
+def _routed_experts_handler(mode):
+    chunk = {
+        "index": 0,
+        "output_ids": [42],
+        "meta_info": {"id": "sample-0", "finish_reason": {"type": "length"}},
+    }
+    handler = _new_decode_handler()
+    handler.serving_mode = mode
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {"return_routed_experts": True}
+    handler._supports_routed_experts_start_len = True
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream([chunk]))
+    )
+    return handler
+
+
+def _routed_experts_request(extra_fields=None, start_len=None):
+    extra_args = {}
+    if extra_fields is not None:
+        extra_args["nvext"] = {"extra_fields": extra_fields}
+    if start_len is not None:
+        extra_args["sampling_options"] = {"routed_experts_start_len": start_len}
+    return {
+        "sampling_options": {"n": 1},
+        "stop_conditions": {"max_tokens": 1},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 23,
+        },
+        "extra_args": extra_args,
+    }
+
+
+async def _routed_experts_engine_kwargs(handler, request):
+    await _collect(handler.generate(request, _Context()))
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    return {key: value for key, value in kwargs.items() if "routed_experts" in key}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_fields,start_len,expected",
+    [
+        (None, 1, {}),
+        (["routed_experts"], None, {"return_routed_experts": True}),
+        (
+            ["routed_experts"],
+            1,
+            {"return_routed_experts": True, "routed_experts_start_len": 1},
+        ),
+    ],
+)
+async def test_routed_experts_follow_request_opt_in(extra_fields, start_len, expected):
+    handler = _routed_experts_handler(DisaggregationMode.AGGREGATED)
+    request = _routed_experts_request(extra_fields, start_len)
+
+    assert await _routed_experts_engine_kwargs(handler, request) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "start_len,multimodal,rejected",
+    [(1, False, True), (2, True, True), (2, False, False)],
+)
+async def test_disagg_decode_returns_only_output_routed_experts(
+    start_len, multimodal, rejected
+):
+    handler = _routed_experts_handler(DisaggregationMode.DECODE)
+    request = _routed_experts_request(["routed_experts"], start_len)
+    if multimodal:
+        request["multi_modal_data"] = {"image_url": [{"Url": "http://image"}]}
+
+    if rejected:
+        with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
+            await _collect(handler.generate(request, _Context()))
+        handler.engine.async_generate.assert_not_awaited()
+    else:
+        assert await _routed_experts_engine_kwargs(handler, request) == {
+            "return_routed_experts": True,
+            "routed_experts_start_len": 2,
+        }
 
 
 def test_prefill_dp_rank_kwargs_follows_engine_signature():
