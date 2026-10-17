@@ -50,6 +50,14 @@ dynamo.topology/rack=rack-22
 
 The KV-transfer policy uses only `kv_transfer_domain` to derive the decode constraint. Other topology domains remain available as ordinary routing taints.
 
+### Domain Model and Limits
+
+- A worker has at most one value per topology domain, and it can have values for several domains, for example a zone, a rack, and a host.
+- `kv_transfer_domain` names one of those domains. Workers with the same value for it form an island; KV transfer routing, both prefill-to-decode and [KV fetch hints](#kv-fetch-hints), looks only at that domain.
+- With the operator, `KvTransferPolicy` is graph-wide, so every worker in a deployment uses the same transfer domain.
+- The router treats domains as independent labels and does not assume nesting, such as racks inside zones. An island contains whatever workers the chosen label groups together: with a host label, an island never spans zones, and with a zone label, it spans hosts.
+- Islands partition the workers: each worker is in at most one island (none without a value for the domain). They cannot describe links where A reaches B and C over RDMA but B and C cannot reach each other.
+
 ## Request Flow
 
 ```mermaid
@@ -153,7 +161,7 @@ When workers advertise router-hint support, as vLLM workers with KVCR do, the ro
 
 KVCR caches are hint sources through their cache owners. A vLLM worker publishes its topology with each cache owner it creates, because KVCR runs in the worker's pod. An owner without published topology, for example one created by an older worker, takes the island of the worker it is attached to. An unattached owner without published topology is in no island.
 
-Islands partition the workers, so they cannot describe links where A reaches B and C over RDMA but B and C cannot reach each other. A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.
+A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.
 
 For KVCR, use `required`. If each host is its own RDMA island, set `labelKey: kubernetes.io/hostname` on the `KvTransferPolicy` so nodes need no extra labels.
 
