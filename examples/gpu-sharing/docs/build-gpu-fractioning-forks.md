@@ -1,18 +1,13 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-title: Build the KAI + GPU Fractions Stack
-sidebar-title: Build the KAI + GPU Fractions Stack
-subtitle: Build, push, and install the two forks that give each model a hard compute and memory share of a GPU
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-> [!NOTE]
-> This is part 1 of the KAI + GPU Fractions experiment. It builds KAI-Scheduler
-> and gpu-fractioning from open upstream pull requests and installs them. When the
-> smoke test in Step 5 passes, continue to
-> [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md).
+# Build the KAI-Scheduler and GPU Fractioning Forks
 
-This guide builds two forks from source, pushes the images to a registry you control, and installs them on a Kubernetes cluster. Together they give each pod a hard share of a GPU's streaming multiprocessors (SMs) and memory, enforced by CUDA Multi-Process Service (MPS) v3 namespaces. You need them for the "KAI + GPU fractions" experiment in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx): 16 Qwen3-4B models on 8 A100 GPUs, each model capped at 50% of the SMs and 50% of the memory of one GPU.
+_Build, push, and install the two forks that give each model a hard compute and memory share of a GPU_
+
+This guide builds two forks from source, pushes the images to a registry you control, and installs them on a Kubernetes cluster. Together they give each pod a hard share of a GPU's streaming multiprocessors (SMs) and memory, enforced by CUDA Multi-Process Service (MPS) v3 namespaces. You need them for the "KAI + GPU fractions" experiment in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx): 16 Qwen3-4B models on 8 A100 GPUs, each model capped at 50% of the SMs and 50% of the memory of one GPU.
 
 When the install is done, a pod that asks for `gpu-fraction: "0.5"` lands on a shared GPU in its own MPS namespace. The MPS server enforces the pod's SM share, and the driver enforces its memory cap, so the pod cannot raise either one. The next step is [deploying the models](deploy-kai-gpu-fractions.md).
 
@@ -499,4 +494,4 @@ kubectl delete namespace kai-resource-reservation kai-scheduler gpu-fractioning
 
 - [Deploy the 16-model experiment](deploy-kai-gpu-fractions.md) on the cluster you just built.
 - [Per-GPU Compute and Memory Limits with MPS](mps-per-gpu-limits.md) covers the MPS v3 mechanism that these forks drive for you.
-- [Interpreting GPU Sharing Results](gpu-sharing-results.mdx) explains how to read the benchmark.
+- [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) explains how to read the benchmark.

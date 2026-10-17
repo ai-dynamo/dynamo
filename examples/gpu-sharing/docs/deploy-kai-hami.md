@@ -1,15 +1,15 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-title: Deploy the KAI + HAMi Experiment
-subtitle: Run 16 Qwen3-4B models on 8 A100 GPUs, two per GPU, with KAI-Scheduler and HAMi memory caps
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Deploy the KAI + HAMi Experiment
+
+_Run 16 Qwen3-4B models on 8 A100 GPUs, two per GPU, with KAI-Scheduler and HAMi memory caps_
 
 This guide deploys 16 Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), packed two per A100 40GB GPU. The upstream [KAI-Scheduler](https://github.com/kai-scheduler/KAI-Scheduler) places each worker on a half-GPU fraction, and the HAMi resource isolator enforces a per-pod memory cap. HAMi limits memory only: the two models on a GPU share all of its streaming multiprocessors (SMs), and the CUDA driver time-slices between them.
 
-The scripts, manifests, and results for this experiment are co-authored by [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV).
-
-This is the middle configuration in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx). It uses stock upstream components, so you can run it without building anything:
+This is the middle configuration in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx). It uses stock upstream components, so you can run it without building anything:
 
 | Experiment | DGDs | Placement | Isolation | Guide |
 |---|---:|---|---|---|
@@ -47,13 +47,24 @@ export GPU_NODE=<node-name>
 kubectl get node "$GPU_NODE" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 8
 ```
 
-## Step 1: Complete the Common Setup
+## Step 1: Install the Dynamo Platform
 
-Install the Dynamo platform and download the model as described in
-[Common Setup](common-setup.md). Skip this step if you already did it for
-another experiment on this cluster.
+```bash
+cd examples/gpu-sharing
+common/install-dynamo-platform.sh
+```
 
-## Step 2: Install KAI-Scheduler and HAMi
+The script installs the `dynamo-platform` Helm chart, version 1.4.2, into the `dynamo-system` namespace and waits for its pods to be Ready. It sets `global.etcd.install=true` and `global.nats.install=true`, which is deliberate. Platform 1.4.x installs without etcd and NATS by default and configures Kubernetes-based discovery, and with that default the `vllm-runtime:1.3.0` frontend never lists the model: `/v1/models` is empty and chat requests return 404. The generated DGDs set `DYN_DISCOVERY_BACKEND=etcd`, which needs the etcd and NATS the script installs.
+
+## Step 2: Download the Model to the GPU Node
+
+```bash
+NODE_NAME="$GPU_NODE" common/download-model.sh
+```
+
+The script runs a Kubernetes Job on `$GPU_NODE` that downloads `Qwen/Qwen3-4B` at revision `1cfa9a7208912126459214e8b04321603b3df60c` into the `hostPath` cache `HF_CACHE_DIR` (default `/opt/hf-cache`) on that node, and prints the snapshot path. An init container running as root creates the directory and opens its permissions, because the download container, like the workers, runs as a non-root user. The script also reads `NAMESPACE` (default `default`), `HF_TOKEN`, and `RUNTIME_IMAGE`.
+
+## Step 3: Install KAI-Scheduler and HAMi
 
 ```bash
 kai-hami/install-kai-hami.sh
@@ -69,7 +80,7 @@ kai-hami/install-kai-hami.sh
 
 The script waits up to 30 attempts at 2 seconds for each queue to exist before it patches it. It ends with `KAI + HAMi stack ready`.
 
-## Step 3: Deploy the 16 DGDs
+## Step 4: Deploy the 16 DGDs
 
 [`kai-hami/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/gen-dgds.sh) renders the 16 DGDs. With `NODE_NAME` set, it pins every frontend and worker to that node, where the model cache is. Render and apply in one step:
 
@@ -78,7 +89,7 @@ NODE_NAME="$GPU_NODE" kai-hami/gen-dgds.sh | kubectl apply -f -
 kubectl get dgd -n default      # wait until all 16 DGDs are Ready
 ```
 
-The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in [Common Setup](common-setup.md#download-the-model-to-the-gpu-node). It takes an optional model snapshot path as its first argument. The checked-in [`kai-hami/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/dgds-16x.yaml) is the same output without a node pin, for reference.
+The generator also reads `NAMESPACE` (default `default`) and `HF_CACHE_DIR` (default `/opt/hf-cache`); set them to the values you used in Step 2. It takes an optional model snapshot path as its first argument. The checked-in [`kai-hami/dgds-16x.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-hami/dgds-16x.yaml) is the same output without a node pin, for reference.
 
 `NUM_MODELS` (default `16`) sets the number of DGDs. Each worker carries the label `kai.scheduler/queue: default-queue`, the annotation `gpu-fraction: "0.5"`, and `schedulerName: kai-scheduler`. It has no `nvidia.com/gpu` resource.
 
@@ -111,7 +122,7 @@ kubectl exec -n default "${POD#pod/}" -- env | grep CUDA_DEVICE_MEMORY_LIMIT
 
 `nvidia-smi` reports about 20,070 MiB, not 40,960, and the environment has `CUDA_DEVICE_MEMORY_LIMIT=20070m`. A `Fail to create synthesized container dir` warning from HAMi is benign.
 
-## Step 4: Run the Concurrency Sweep
+## Step 5: Run the Concurrency Sweep
 
 The frontends' ClusterIPs are reachable only from inside the cluster, so the sweep runs in a load-generator pod, [`common/aiperf-client-pod.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/common/aiperf-client-pod.yaml). The pod requests 16 CPUs, one per concurrent AIPerf process, and its node affinity keeps it off `$GPU_NODE`, so load generation does not compete with the workers for host CPU.
 
@@ -173,7 +184,7 @@ The published run (8x A100 40GB, driver 595.91.07) used the same payload and req
 | 16 | 777 | 35.6 | 6,651 | 831.4 |
 | 32 | 1,702 | 55.9 | 7,544 | 943.0 |
 
-The first five rows of `tok/s per GPU` are the HAMi column in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx), which matches rows on requests resident per GPU (this configuration at `c` equals the baseline at `2c`). The `c=32` row has no counterpart there, because the baseline would need `c=64`.
+The first five rows of `tok/s per GPU` are the HAMi column in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx), which matches rows on requests resident per GPU (this configuration at `c` equals the baseline at `2c`). The `c=32` row has no counterpart there, because the baseline would need `c=64`.
 
 Throughput scales about 9.3x from `c=1` to `c=32`, but the gain from `c=16` to `c=32` is only 13%: the shared GPUs saturate near `c=16`. At `c=32` the TTFT p90 reaches about 5.5 s as prefills queue behind full batches. Per-model results were uniform to within a few percent at every point, because the two models on a GPU are identical.
 
@@ -184,7 +195,7 @@ Throughput scales about 9.3x from `c=1` to `c=32`, but the gain from `c=16` to `
 | `gpu-fraction` annotation | `"0.5"`, with no `nvidia.com/gpu` | KAI's admission webhook rejects a pod that carries both a fraction and an `nvidia.com/gpu` resource |
 | `--gpu-memory-utilization` | `0.85` | HAMi shows the pod a virtual GPU of about 20 GB. 0.85 of 20 GB is about 17 GB. The 0.40 that suits a full 40 GB card would give 8 GB, less than the model weights, and the worker would crash |
 | `--max-model-len` / `--max-num-seqs` | `4096` / `32` | A cap of 32 sequences keeps the high-concurrency points measuring GPU contention rather than vLLM queueing |
-| `DYN_DISCOVERY_BACKEND` | `etcd` on both components | Required with operator 1.4.2 and `vllm-runtime:1.3.0` (see [Common Setup](common-setup.md#install-the-dynamo-platform)) |
+| `DYN_DISCOVERY_BACKEND` | `etcd` on both components | Required with operator 1.4.2 and `vllm-runtime:1.3.0` (see Step 1) |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | empty, on the worker | The operator otherwise appends a random suffix to the worker namespace. Pinning it empty makes the worker and frontend namespaces match exactly |
 | `nvidia.com/container.main.gpu-compute.mode: sm-sharing` | Present but inert | It belongs to the GPU fractions stack. HAMi ignores it. It stays so the manifest matches the one that produced the published results |
 | Compute isolation | None | The CUDA driver time-slices the two workers on each GPU, so one model's kernels can wait behind the other's. This is the effect the GPU fractions experiment removes |
@@ -205,5 +216,5 @@ The model cache stays in `/opt/hf-cache` on `$GPU_NODE`; keep it if you plan to 
 ## Next Steps
 
 - [Deploy the Baseline Experiment](deploy-baseline.md) produces the dedicated-GPU numbers that the percentages are measured against.
-- [Build the KAI + GPU Fractions Stack](build-gpu-fractioning-forks.md), then [deploy the KAI + GPU Fractions experiment](deploy-kai-gpu-fractions.md), to give each model a hard 50% compute share.
-- [Interpreting GPU Sharing Results](gpu-sharing-results.mdx) explains how to compare the three sweeps.
+- [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md), then [deploy the KAI + GPU Fractions experiment](deploy-kai-gpu-fractions.md), to give each model a hard 50% compute share.
+- [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) explains how to compare the three sweeps.

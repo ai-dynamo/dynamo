@@ -535,7 +535,7 @@ To run your own vision tower, see [Custom Vision Encoders](custom-vision-encoder
   - You want to run the vision encoder on different hardware (e.g., smaller GPUs for encoding, larger GPUs for LLM inference)
   - Your deployment handles high volumes of multimodal requests and encoding throughput is limiting
 
-  For simple deployments or development and testing, the aggregated pattern (EPD, one worker) is easier to set up. See [Deployment Notation](#deployment-notation) for the layout names used in this section.
+  For simple deployments or development and testing, the aggregated pattern (EPD, one worker) is easier to set up.
 
   **Deployment Patterns**
 
@@ -606,18 +606,6 @@ To run your own vision tower, see [Custom Vision Encoders](custom-vision-encoder
   </Accordion>
 
 </AccordionGroup>
-
-## Deployment Notation
-
-Layouts are named by which stages share a process. A slash marks a process
-boundary:
-
-| Notation | Meaning |
-| --- | --- |
-| EPD | One worker encodes, prefills, and decodes (aggregated) |
-| EP/D | The prefill worker also encodes; decode runs separately |
-| E/PD | A separate encode worker; one worker prefills and decodes |
-| E/P/D | Separate encode, prefill, and decode workers |
 
 ## Support Matrix
 

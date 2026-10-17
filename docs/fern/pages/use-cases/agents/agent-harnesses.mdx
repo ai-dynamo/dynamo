@@ -13,7 +13,7 @@ Preflight runs independently of structural-tag activation. Passing preflight doe
 
 <Steps toc={true}>
 <Step title="Start a local agent endpoint" id="local-setup">
-To test locally, use the bundled script. It requires a Dynamo source checkout (run it from the repository root) and 2 GPUs. It serves `zai-org/GLM-4.7-Flash` with SGLang at TP2 on port 8000, enables the Anthropic Messages API, and writes request traces to one uncompressed file, `/tmp/dynamo-request-trace-<timestamp>-<pid>.jsonl`. The script prints the path at startup. When you follow [Agent Tracing](agent-tracing.md) or [Agent Trace Replay](agent-simulation.mdx), pass this `.jsonl` file in place of the `*.jsonl.gz` segments those pages use.
+To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
 
 To start it, run:
 

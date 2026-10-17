@@ -1,21 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Interpreting GPU Sharing Results
-subtitle: How to read the dedicated vs. shared GPU benchmark for many-model serving
+title: GPU Sharing
+subtitle: Packing many small models onto a shared GPU and understanding the performance tradeoffs
 ---
 
-This page explains how to read the benchmark that compares serving one model per GPU against packing two models onto each GPU. It covers what each column measures and why the percentage columns are the ones to base a decision on.
-
-The benchmark scripts, manifests, and results on this page are co-authored by [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV). To reproduce them, see [Reproducing the Results](#reproducing-the-results).
-
-<Note>
-Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
-</Note>
+GPU sharing enables many lightly-used models to run on the same GPU. Dynamo offers multiple paths - MIG, MPS, HAMi and GPU fractions. This page compares serving one model per GPU against packing two models onto each GPU, and shows what the packing costs in throughput and latency.
 
 ## Setup
 
-All runs used one 8× A100-SXM4 40GB node serving Qwen3-4B, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens. Baseline and GPU fractions ran on driver 615.71.09; HAMi ran on driver 595.91.07.
+We ran the same models on an 8× A100 node with Qwen3-4B, with a fixed input length of 2048 tokens, and a fixed output length of 256 tokens.
 
 The results are pessimistic: they assume no KV caching between requests, so the entire 2048-token input sequence length (ISL) is computed on every request.
 
@@ -30,7 +24,18 @@ In the HAMi and GPU fractions configurations, each model receives half of the GP
 - **Time-slicing:** both models share all of the GPU's SMs, and the CUDA driver context switches between them, so one model's work waits while the other's runs.
 - **GPU fractioning:** each model is assigned its own fixed share of the GPU's SMs and memory, so both models run concurrently without waiting on each other.
 
-## Results
+The configurations are built from these components:
+
+- **KAI-Scheduler:** an open-source Kubernetes scheduler that can place a pod on a fraction of a GPU. A pod asks for a share with `gpu-fraction: "0.5"`. Both shared configurations use it. The baseline requests whole GPUs.
+- **HAMi:** a resource isolator that enforces a per-pod GPU memory cap. It does not partition compute, so the CUDA driver time-slices the models on a GPU.
+- **MPS:** the CUDA Multi-Process Service lets processes share a GPU at the same time and caps the share of SMs each client can use. MPS v3 namespaces give each pod its own limits.
+- **GPU fractions:** KAI-Scheduler and kai-gpu-fractioning, built from forks, with each pod running in its own MPS namespace. The scheduler tracks compute as well as memory, MPS enforces the SM share, and the driver enforces the memory cap.
+
+## GPU Sharing Benchmark Results (Experimental)
+
+<Note>
+These results are experimental. More extensive benchmarks are coming soon. Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
+</Note>
 
 ### Throughput
 
@@ -89,53 +94,41 @@ Unlike the tables above, rows here are matched on concurrency per model, not req
 
 $/1M is the hourly node cost divided by output tokens per hour, scaled to one million tokens. Only output tokens are counted. At light per-model load, a dedicated GPU sits mostly idle, and packing two models onto it recovers that idle capacity. At 32 concurrent requests per model, the dedicated GPUs are busy enough that the cost advantage disappears.
 
-## Reading the Table
-
-### Rows Are Matched on Load per GPU
-
-Each row compares the configurations at the same number of requests resident on each GPU. A shared GPU hosts two models, so HAMi and GPU fractions at concurrency `c` match the baseline at concurrency `2c`.
-
-Comparing rows at equal `c` instead would give the shared configurations twice the load of the baseline and make them look better than they are.
-
-### Latency Columns
-
-**TTFT p50** (time to first token) and **ITL p50** (inter-token latency) are per-request medians. Sharing always costs latency, because each model runs on only part of the GPU. Treat these columns as a check that latency is still acceptable for your service. GPU fractions matches or beats HAMi on ITL in every row, and ITL stays under 30 ms throughout.
-
-### Throughput Columns
-
-**tok/s per GPU** is output tokens per second per GPU, summed across all models on that GPU. The absolute values depend on this model, GPU, and prompt shape, so they do not carry over to your workload.
-
-### Percentage Columns
-
-**Fractions % of Baseline** answers the deployment question directly: when you put two models on one GPU instead of giving each its own, how much of that GPU's throughput do you keep?
-
-Base decisions on the percentage columns for three reasons:
-
-1. **They cancel out the setup.** Model size, GPU type, and sequence lengths shift all three configurations together. A ratio against a dedicated baseline at the same load isolates the cost of sharing, which makes it the number most likely to transfer to your workload.
-2. **They map to a GPU-count decision.** At one request per model, GPU fractions keeps 63.5%: one GPU serves two distinct models at about 63% of the throughput a dedicated GPU would deliver, rising to 87.9% at 16 requests per model. For every pair of models that can tolerate that, you free a whole GPU. In this benchmark, 16 models run on 8 GPUs instead of 16.
-3. **They separate how the GPU is shared from the fact that it is shared.** HAMi and GPU fractions both pay the cost of splitting a GPU. The 15 to 20 point gap between them is the gain from partitioning compute instead of time-slicing it. Under time-slicing, one model's kernels wait behind the other's. With dedicated SMs, each model's kernels start immediately.
-
-## Why Sharing Costs Throughput
-
-Each decode step reads the model's full weights from GPU memory, and at low load that read dominates the step time. One model serving two requests reads its weights once per step for both. Two models serving one request each read two sets of weights, which roughly doubles the memory traffic for the same output. At low load this duplication dominates, and GPU fractions keeps about 63% of dedicated throughput.
-
-As load rises, each step does more compute per weight read, so the duplicated reads matter less. GPU fractions climbs to about 88% of dedicated throughput at 32 requests per GPU.
-
-## Summary
+## How to Read the Benchmark
 
 Read across a row to confirm that latency meets your requirements, then use **Fractions % of Baseline** to decide whether giving up that share of throughput is worth one GPU saved per pair of models.
 
+<AccordionGroup>
+  <Accordion title="Rows are matched on load per GPU">
+  Each row compares the configurations at the same number of requests resident on each GPU. A shared GPU hosts two models, so HAMi and GPU fractions at concurrency `c` match the baseline at concurrency `2c`.
+
+  Comparing rows at equal `c` instead would give the shared configurations twice the load of the baseline and make them look better than they are.
+  </Accordion>
+  <Accordion title="Latency columns">
+  **TTFT p50** (time to first token) and **ITL p50** (inter-token latency) are per-request medians. Sharing always costs latency, because each model runs on only part of the GPU. Treat these columns as a check that latency is still acceptable for your service. GPU fractions matches or beats HAMi on ITL in every row, and ITL stays under 30 ms throughout.
+  </Accordion>
+  <Accordion title="Throughput columns">
+  **tok/s per GPU** is output tokens per second per GPU, summed across all models on that GPU. The absolute values depend on this model, GPU, and prompt shape, so they do not carry over to your workload.
+  </Accordion>
+  <Accordion title="Percentage columns">
+  **Fractions % of Baseline** answers the deployment question directly: when you put two models on one GPU instead of giving each its own, how much of that GPU's throughput do you keep?
+
+  Base decisions on the percentage columns for three reasons:
+
+  1. **They cancel out the setup.** Model size, GPU type, and sequence lengths shift all three configurations together. A ratio against a dedicated baseline at the same load isolates the cost of sharing, which makes it the number most likely to transfer to your workload.
+  2. **They map to a GPU-count decision.** At one request per model, GPU fractions keeps 63.5%: one GPU serves two distinct models at about 63% of the throughput a dedicated GPU would deliver, rising to 87.9% at 16 requests per model. For every pair of models that can tolerate that, you free a whole GPU. In this benchmark, 16 models run on 8 GPUs instead of 16.
+  3. **They separate how the GPU is shared from the fact that it is shared.** HAMi and GPU fractions both pay the cost of splitting a GPU. The 15 to 20 point gap between them is the gain from partitioning compute instead of time-slicing it. Under time-slicing, one model's kernels wait behind the other's. With dedicated SMs, each model's kernels start immediately.
+  </Accordion>
+  <Accordion title="Why sharing costs throughput">
+  Each decode step reads the model's full weights from GPU memory, and at low load that read dominates the step time. One model serving two requests reads its weights once per step for both. Two models serving one request each read two sets of weights, which roughly doubles the memory traffic for the same output. At low load this duplication dominates, and GPU fractions keeps about 63% of dedicated throughput.
+
+  As load rises, each step does more compute per weight read, so the duplicated reads matter less. GPU fractions climbs to about 88% of dedicated throughput at 32 requests per GPU.
+  </Accordion>
+</AccordionGroup>
+
 ## Reproducing the Results
 
-Each configuration has its own deployment guide. The manifests and benchmark scripts they use are in [`examples/gpu-sharing/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing).
-
-| Configuration | Guide |
-|---|---|
-| Baseline | [Deploy the Baseline Experiment](deploy-baseline.md) |
-| HAMi | [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) |
-| GPU fractions | [Build the KAI + GPU Fractions Stack](build-gpu-fractioning-forks.md), then [Deploy the KAI + GPU Fractions Experiment](deploy-kai-gpu-fractions.md) |
-
-Scripts, manifests, and results: [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV).
+The manifests, scripts, and step-by-step guides for every configuration are in the [`examples/gpu-sharing`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing) directory on GitHub. Start with its [README](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/README.md), which covers the shared workload, the files, and the commands.
 
 ## Appendix: Node Throughput at Equal Per-Model Concurrency
 

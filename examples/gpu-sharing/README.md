@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Many Models per GPU: Reference Manifests and Scripts
 
 This directory holds the manifests and scripts behind the
-[GPU sharing results](../../docs/fern/pages/use-cases/gpu-sharing/gpu-sharing-results.mdx)
+[GPU sharing results](../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx)
 for many-model serving. It reproduces three experiments on one node with 8x A100 40GB GPUs:
 
 | Experiment | Directory | DGDs | Placement | Isolation |
@@ -14,9 +14,6 @@ for many-model serving. It reproduces three experiments on one node with 8x A100
 | Baseline | [`baseline/`](baseline/) | 8 | One model per GPU (`nvidia.com/gpu: "1"`) | Dedicated GPU |
 | KAI + HAMi | [`kai-hami/`](kai-hami/) | 16 | Two models per GPU (`gpu-fraction: "0.5"`) | Memory cap only (HAMi); compute is time-sliced |
 | KAI + GPU fractions | [`kai-gpu-fractions/`](kai-gpu-fractions/) | 16 | Two models per GPU (`gpu-fraction: "0.5"` + `sm-sharing`) | Memory cap (19,968 MiB) and 50% MPS active threads |
-
-Scripts, manifests, and results by [@marckarp](https://github.com/marckarp) and
-[@scheckerNV](https://github.com/scheckerNV).
 
 ## Common Setup
 
@@ -73,7 +70,7 @@ Install the scheduler stack for the experiment first:
   [kai-scheduler/KAI-Scheduler#2368](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) and
   [kai-scheduler/gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147),
   as described in
-  [Build the KAI + GPU Fractions Stack](../../docs/fern/pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md).
+  [Build the KAI-Scheduler and GPU Fractioning Forks](docs/build-gpu-fractioning-forks.md).
   This requires driver r615 or later for per-namespace MPS limits. Then verify the caps
   with `kai-gpu-fractions/smoke-test-half-gpu.yaml`.
 
@@ -104,9 +101,9 @@ kubectl cp aiperf-client:/work/results ./results
 For the baseline, use `baseline/gen-dgds.sh` and run the sweep with `NUM_MODELS=8`.
 For GPU fractions, use `kai-gpu-fractions/gen-dgds.sh` with `NUM_MODELS=16`.
 The deployment guides walk through each experiment step by step:
-[baseline](../../docs/fern/pages/use-cases/gpu-sharing/deploy-baseline.md),
-[KAI + HAMi](../../docs/fern/pages/use-cases/gpu-sharing/deploy-kai-hami.md), and
-[KAI + GPU fractions](../../docs/fern/pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md).
+[baseline](docs/deploy-baseline.md),
+[KAI + HAMi](docs/deploy-kai-hami.md), and
+[KAI + GPU fractions](docs/deploy-kai-gpu-fractions.md).
 
 The sweep is done when `/work/sweep.exit` exists in the pod; `0` means every AIPerf run
 succeeded. Results land in `results/<run-label>/c<N>/worker-NN/`, with a
@@ -159,8 +156,9 @@ Also confirm the per-worker caps:
 
 ## Related Documentation
 
-- [Interpreting GPU Sharing Results](../../docs/fern/pages/use-cases/gpu-sharing/gpu-sharing-results.mdx)
-- [Deploy the Baseline Experiment](../../docs/fern/pages/use-cases/gpu-sharing/deploy-baseline.md)
-- [Deploy the KAI + HAMi Experiment](../../docs/fern/pages/use-cases/gpu-sharing/deploy-kai-hami.md)
-- [Build the KAI + GPU Fractions Stack](../../docs/fern/pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md)
-- [Deploy the KAI + GPU Fractions Experiment](../../docs/fern/pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md)
+- [GPU Sharing](../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx)
+- [Deploy the Baseline Experiment](docs/deploy-baseline.md)
+- [Deploy the KAI + HAMi Experiment](docs/deploy-kai-hami.md)
+- [Build the KAI-Scheduler and GPU Fractioning Forks](docs/build-gpu-fractioning-forks.md)
+- [Deploy the KAI + GPU Fractions Experiment](docs/deploy-kai-gpu-fractions.md)
+- [Per-GPU Compute and Memory Limits with MPS](docs/mps-per-gpu-limits.md)

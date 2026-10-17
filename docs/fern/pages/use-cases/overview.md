@@ -18,10 +18,10 @@ setup and a first working request.
 | Serve coding agents and multi-step agent sessions | [Agents](agents/overview.md) |
 | Answer questions about images | [Image Understanding](image-understanding/overview.md) |
 | Answer questions about video | [Video Understanding](video-understanding/overview.md) |
-| Generate images or video from a prompt | [Diffusion](diffusion/overview.md) |
 | Transcribe speech, synthesize speech, or build a voice agent | [Speech](speech/voice-pipelines.md) |
+| Generate images or video from a prompt | [Diffusion](diffusion/overview.md) |
 | Speed up image and video workloads | [VLM Performance Optimization](image-understanding/vlm-performance-optimization.md) |
-| Pack many small models onto shared GPUs | [Many-Model Serving](gpu-sharing/overview.md) |
+| Pack many small models onto shared GPUs | [GPU Sharing](gpu-sharing/overview.mdx) |
 
 Tool calling and reasoning output parsing apply to every chat deployment and
 are documented with the frontend in the Developer Guide:

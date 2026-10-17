@@ -1,9 +1,11 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-title: Per-GPU Compute and Memory Limits with MPS
-subtitle: Give a multi-GPU application a fixed share of every GPU, and pack smaller models into the rest
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Per-GPU Compute and Memory Limits with MPS
+
+_Give a multi-GPU application a fixed share of every GPU, and pack smaller models into the rest_
 
 A large model that spans several GPUs often leaves part of each GPU idle. This guide shows how to cap that model at a fixed share of every GPU it uses and run smaller models, such as embedding or BERT-class servers, in the remainder. It uses CUDA Multi-Process Service (MPS) v3 for compute limits and the cgroup v2 `dmem` controller for memory limits.
 
@@ -42,7 +44,7 @@ cgroup v2 dmem              per container, per GPU:   nvidia/<pci>/vidmem <bytes
 - **Memory** is capped in one of two ways:
   - The namespace's `pinned_memory_limit` is one value for every GPU.
   - A cgroup `dmem` limit is set separately for each GPU, and is the only way to give one container a different budget on each GPU.
-- **Memory bandwidth is not partitioned.** Neither MPS nor `dmem` splits DRAM bandwidth. A memory-bound tenant slows its neighbors no matter how SMs are divided. [Interpreting GPU Sharing Results](gpu-sharing-results.mdx) shows the effect on decode throughput.
+- **Memory bandwidth is not partitioned.** Neither MPS nor `dmem` splits DRAM bandwidth. A memory-bound tenant slows its neighbors no matter how SMs are divided. [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) shows the effect on decode throughput.
 
 ## Same Limits on Every GPU
 

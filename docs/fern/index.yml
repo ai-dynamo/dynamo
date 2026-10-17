@@ -637,6 +637,8 @@ navigation:
             path: pages/developer-guide/advanced-customizations/metrics-developer-guide.md
           - page: Developing with Tilt
             path: pages/developer-guide/advanced-customizations/developing-with-tilt.md
+          - page: Additional Media Decoders
+            path: pages/developer-guide/advanced-customizations/additional-media-decoders.md
       # ==================== Hidden Pages (User Guide) ====================
       # Pages accessible via direct URL but not shown in main navigation.
       - section: Additional Resources
@@ -768,6 +770,24 @@ navigation:
             slug: video-decoding
             path: pages/use-cases/video-understanding/video-decoding.md
 
+      # ==================== Speech ====================
+      - section: Speech
+        collapsed: true
+        icon: microphone
+        slug: speech
+        contents:
+          - page: Voice Pipelines
+            path: pages/use-cases/speech/voice-pipelines.md
+          - page: Speech to Text (STT)
+            slug: speech-to-text
+            path: pages/use-cases/speech/speech-to-text.md
+          - page: Text to Speech (TTS)
+            slug: text-to-speech
+            path: pages/use-cases/speech/text-to-speech.md
+          - page: Speech to Speech
+            slug: speech-to-speech
+            path: pages/use-cases/speech/speech-to-speech.md
+
       # ==================== Diffusion ====================
       - section: Diffusion
         collapsed: true
@@ -788,48 +808,12 @@ navigation:
             slug: image-to-video
             path: pages/use-cases/diffusion/image-to-video.md
 
-      # ==================== Speech ====================
-      - section: Speech
-        collapsed: true
-        icon: microphone
-        slug: speech
-        contents:
-          - page: Voice Pipelines
-            path: pages/use-cases/speech/voice-pipelines.md
-          - page: Speech to Text (STT)
-            slug: speech-to-text
-            path: pages/use-cases/speech/speech-to-text.md
-          - page: Text to Speech (TTS)
-            slug: text-to-speech
-            path: pages/use-cases/speech/text-to-speech.md
-          - page: Speech to Speech
-            slug: speech-to-speech
-            path: pages/use-cases/speech/speech-to-speech.md
-
-      # ==================== Many-Model Serving ====================
-      - section: Many-Model Serving
+      - section: GPU Sharing
         collapsed: true
         icon: layer-group
-        slug: many-model-serving
-        contents:
-          - page: Overview
-            path: pages/use-cases/gpu-sharing/overview.md
-          - page: GPU Sharing Benchmark Results
-            slug: interpreting-gpu-sharing-results
-            path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
-          - page: Common Setup
-            path: pages/use-cases/gpu-sharing/common-setup.md
-          - page: Deploy the Baseline Experiment
-            path: pages/use-cases/gpu-sharing/deploy-baseline.md
-          - page: Deploy the KAI + HAMi Experiment
-            path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
-          - page: Build the KAI + GPU Fractions Stack
-            slug: build-the-kai-scheduler-and-gpu-fractioning-forks
-            path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
-          - page: Deploy the KAI + GPU Fractions Experiment
-            path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
-          - page: Per-GPU Compute and Memory Limits with MPS
-            path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
+        slug: gpu-sharing
+        path: pages/use-cases/gpu-sharing/overview.mdx
+        contents: []
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
