@@ -5,7 +5,7 @@ title: GPU Sharing
 subtitle: Packing many small models onto a shared GPU and understanding the performance tradeoffs
 ---
 
-GPU sharing enables many lightly-used models to run on the same GPU. Dynamo offers multiple paths - MIG, MPS, HAMi and GPU fractions. This page compares serving one model per GPU against packing two models onto each GPU, and shows what the packing costs in throughput and latency.
+GPU sharing enables many lightly-used models to run on the same GPU. Dynamo offers multiple paths - MIG, MPS, HAMi and GPU fractions, offering various levels of isolation - to enable sharing a GPU. This page compares serving one model per GPU against packing two models onto a GPU and walks you through evaluating the throughput and latency tradeoffs involved.
 
 ## Setup
 
