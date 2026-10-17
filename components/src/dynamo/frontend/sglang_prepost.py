@@ -340,11 +340,14 @@ def create_parsers(
     )
     if reasoning_parser_name and (not guided_decoding_active or force_reasoning):
         reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
+        reasoning_kwargs = _parser_tokenizer_kwargs(ReasoningParser, tokenizer)
+        if _callable_accepts_kwarg(ReasoningParser, "tool_call_parser_active"):
+            reasoning_kwargs["tool_call_parser_active"] = tool_call_parser is not None
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
             force_reasoning=force_reasoning,
-            **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
+            **reasoning_kwargs,
         )
 
     return tool_call_parser, reasoning_parser
