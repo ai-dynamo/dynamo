@@ -75,4 +75,5 @@ fi
 
 echo
 echo "Prerequisites installed. Next:"
-echo "  python3 benchmarks/gateway_ab/gateway_ab.py --context $KUBE_CONTEXT --namespace $BENCH_NAMESPACE preflight"
+echo "  python3 -m benchmarks.gateway_ab --context $KUBE_CONTEXT --namespace $BENCH_NAMESPACE preflight"
+echo "  (run from the repository root)"

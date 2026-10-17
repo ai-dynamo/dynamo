@@ -26,6 +26,17 @@ log = logging.getLogger(__name__)
 
 RESULTS_ROOT = "/results"
 
+# aiperf renames its processes ("aiperf system_controller", "aiperf
+# worker_<id>", ...), so "aiperf profile" matches only the wrapper shell.
+# Killing just that leaves the real aiperf running, orphaned, still sending
+# load into whatever runs next.
+_AIPERF_PROCS = "^aiperf |aiperf profile"
+
+
+def _num(value: float) -> str:
+    """A number without exponent notation, so labels stay parseable."""
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
 
 @dataclasses.dataclass(frozen=True, order=True)
 class LoadPoint:
@@ -44,10 +55,11 @@ class LoadPoint:
 
     @property
     def label(self) -> str:
-        return f"{self.kind}{self.value:g}"
+        return f"{self.kind}{_num(self.value)}"
 
     def describe(self) -> str:
-        return f"c={self.value:g}" if self.kind == "c" else f"{self.value:g} req/s"
+        v = _num(self.value)
+        return f"c={v}" if self.kind == "c" else f"{v} req/s"
 
     @classmethod
     def parse(cls, label: str) -> LoadPoint:
@@ -121,7 +133,7 @@ def aiperf_command(
     if point.kind == "c":
         load = ["--concurrency", str(int(point.value))]
     else:
-        load = ["--request-rate", f"{point.value:g}", "--arrival-pattern", "poisson"]
+        load = ["--request-rate", _num(point.value), "--arrival-pattern", "poisson"]
     cmd = [
         "aiperf",
         "profile",
@@ -248,9 +260,21 @@ class LoadGen:
         return float(out.strip().splitlines()[-1])
 
     def kill_aiperf(self) -> None:
+        """Stop every aiperf process in the pod and wait until they are gone."""
         self.kube.exec(
-            self.pod, ["pkill", "-f", "aiperf profile"], check=False, timeout=60
+            self.pod, ["pkill", "-9", "-f", _AIPERF_PROCS], check=False, timeout=60
         )
+        for _ in range(30):
+            # pgrep exits 1 when nothing matches.
+            if (
+                self.kube.exec(
+                    self.pod, ["pgrep", "-f", _AIPERF_PROCS], check=False, timeout=60
+                ).returncode
+                == 1
+            ):
+                return
+            time.sleep(1)
+        raise KubeError(f"aiperf processes in {self.pod} did not exit")
 
     def aiperf_version(self) -> str:
         return self.kube.exec(self.pod, ["aiperf", "--version"]).stdout.strip()

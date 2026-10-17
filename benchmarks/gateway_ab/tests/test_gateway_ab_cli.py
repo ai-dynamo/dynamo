@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from benchmarks.gateway_ab import cli, loadgen
+from benchmarks.gateway_ab import cli, loadgen, manifests
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -316,8 +316,10 @@ def test_resume_refuses_a_changed_workload(tmp_path, monkeypatch):
 
 
 class _FakeKube:
-    def __init__(self, cat_replies):
+    def __init__(self, cat_replies, pgrep_replies=None):
         self.cat_replies = list(cat_replies)
+        # pgrep exits 0 while aiperf processes remain, 1 once they are gone.
+        self.pgrep_replies = list(pgrep_replies or [])
         self.commands = []
 
     def exec(self, pod, command, *, input=None, check=True, timeout=None):
@@ -327,6 +329,9 @@ class _FakeKube:
         if command[0] == "cat":
             rc, out, err = self.cat_replies.pop(0)
             return subprocess.CompletedProcess(command, rc, out, err)
+        if command[0] == "pgrep":
+            rc = self.pgrep_replies.pop(0) if self.pgrep_replies else 1
+            return subprocess.CompletedProcess(command, rc, "", "")
         if command[0] == "python3":
             return subprocess.CompletedProcess(command, 0, json.dumps({"ok": 1}), "")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -334,10 +339,25 @@ class _FakeKube:
 
 def test_loadgen_kills_strays_and_polls_until_done(monkeypatch):
     monkeypatch.setattr(loadgen.time, "sleep", lambda s: None)
-    kube = _FakeKube([(1, "", "cat: x: No such file or directory"), (0, "0\n", "")])
+    kube = _FakeKube(
+        [(1, "", "cat: x: No such file or directory"), (0, "0\n", "")],
+        pgrep_replies=[0, 0, 1],
+    )
     out = loadgen.LoadGen(kube, "pod").run(["aiperf", "profile"], "/results/a", 60)
     assert out == {"ok": 1}
-    assert kube.commands[0] == ["pkill", "-f", "aiperf profile"]
+    # aiperf renames its processes, so the pattern must match those too, and
+    # the launch waits until pgrep finds none.
+    assert kube.commands[0] == ["pkill", "-9", "-f", "^aiperf |aiperf profile"]
+    assert [c[0] for c in kube.commands[1:4]] == ["pgrep", "pgrep", "pgrep"]
+    assert kube.commands[4][:2] == ["sh", "-c"]
+
+
+def test_loadgen_refuses_to_launch_over_unkillable_aiperf(monkeypatch):
+    monkeypatch.setattr(loadgen.time, "sleep", lambda s: None)
+    kube = _FakeKube([], pgrep_replies=[0] * 30)
+    with pytest.raises(cli.KubeError, match="did not exit"):
+        loadgen.LoadGen(kube, "pod").run(["aiperf", "profile"], "/results/a", 60)
+    assert not any(c[:2] == ["sh", "-c"] for c in kube.commands)
 
 
 def test_loadgen_gives_up_when_the_pod_is_gone(monkeypatch):
@@ -346,3 +366,55 @@ def test_loadgen_gives_up_when_the_pod_is_gone(monkeypatch):
     kube = _FakeKube([gone, gone, gone])
     with pytest.raises(cli.KubeError, match="cannot reach loadgen pod"):
         loadgen.LoadGen(kube, "pod").run(["aiperf", "profile"], "/results/a", 3600)
+
+
+def test_load_point_labels_never_use_exponents():
+    big = loadgen.LoadPoint("c", 1_000_000)
+    assert big.label == "c1000000"
+    assert loadgen.LoadPoint.parse(big.label) == big
+    assert loadgen.LoadPoint("rps", 0.25).label == "rps0.25"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--concurrency", "0"],
+        ["--concurrency", "8,-1"],
+        ["--request-rate", "0"],
+        ["--rounds", "0"],
+    ],
+)
+def test_non_positive_values_are_rejected(argv):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["run", *argv])
+
+
+def test_success_clears_stale_failure_marker(tmp_path, monkeypatch):
+    bench = _bench(tmp_path, "--concurrency", "4", "--rounds", "1", "--no-prime")
+    monkeypatch.setattr(bench, "url", lambda topology, side: "http://x")
+    marker = tmp_path / "runs/agg/frontend/c4/r0.error"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("failed earlier\n")
+    monkeypatch.setattr(bench.loadgen, "run", lambda cmd, d, t: _fake_result(200))
+    assert bench.measure_topology("agg", tmp_path) == 0
+    assert not marker.exists()
+
+
+def test_loadgen_pod_recreated_when_spec_changes(tmp_path, monkeypatch):
+    bench = _bench(tmp_path, "--hf-secret", "hf")
+    old = manifests.build_loadgen_pod(manifests.BenchConfig())  # no secret
+    old["status"] = {"phase": "Running"}
+    calls = []
+    monkeypatch.setattr(bench.kube, "get_json", lambda args, **k: old)
+    monkeypatch.setattr(bench.kube, "kubectl", lambda args, **k: calls.append(args))
+    monkeypatch.setattr(bench.kube, "apply", lambda objs: calls.append(["apply"]))
+    monkeypatch.setattr(bench.kube, "wait", lambda *a: None)
+    bench.deploy_loadgen()
+    assert calls[0][:2] == ["delete", "pod"] and calls[1] == ["apply"]
+
+    calls.clear()
+    same = manifests.build_loadgen_pod(bench.cfg)
+    same["status"] = {"phase": "Running"}
+    monkeypatch.setattr(bench.kube, "get_json", lambda args, **k: same)
+    bench.deploy_loadgen()
+    assert calls == []

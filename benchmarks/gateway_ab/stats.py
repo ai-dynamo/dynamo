@@ -4,7 +4,7 @@
 """Statistics for the Frontend vs Gateway+EPP A/B benchmark. Standard library only.
 
 The unit of replication is a *round*: one aiperf run per side at one
-concurrency. Rounds differ by more than requests within a round do (warm caches,
+load point. Rounds differ by more than requests within a round do (warm caches,
 node noise, neighbours), so confidence intervals come from a two-level
 bootstrap — resample rounds, then requests within each chosen round. A plain
 per-request bootstrap would treat 1,000 requests from three runs as 1,000
@@ -213,13 +213,13 @@ def compare_scalar(
         "delta_pct": pct_delta(a, b),
         "ci_pct": ci,
         "verdict": verdict(ci, min_effect_pct, higher_is_better),
-        "a_cv_pct": _cv(values_a),
-        "b_cv_pct": _cv(values_b),
+        "a_cv_pct": cv(values_a),
+        "b_cv_pct": cv(values_b),
     }
 
 
-def _cv(values: Sequence[float]) -> float:
-    """Coefficient of variation across rounds, in percent: the A/A noise floor."""
+def cv(values: Sequence[float]) -> float:
+    """Coefficient of variation, in percent: across rounds, the A/A noise floor."""
     if len(values) < 2:
         return math.nan
     mean = statistics.fmean(values)

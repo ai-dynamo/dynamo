@@ -18,6 +18,8 @@ dependency.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 from typing import Any
 
 TOPOLOGIES = ("agg", "disagg")
@@ -30,6 +32,22 @@ MODEL_HEADER = "X-Gateway-Model-Name"
 
 SIDECAR_NAME = "sidecar-frontend"
 LOADGEN_LABEL = "gateway-ab-loadgen"
+# Annotation holding a hash of the loadgen pod spec, so a changed image or
+# secret recreates the pod instead of silently reusing the old one.
+LOADGEN_SPEC_HASH = "gateway-ab/spec-hash"
+
+# PID 1 of the loadgen pod. Every aiperf run is detached and ends up
+# reparented to PID 1, so it must reap; `sleep infinity` does not, and each
+# run would leave zombies behind.
+_REAPER = (
+    "import os, signal, time\n"
+    "signal.signal(signal.SIGTERM, lambda *_: os._exit(0))\n"
+    "while True:\n"
+    "    try:\n"
+    "        os.waitpid(-1, 0)\n"
+    "    except ChildProcessError:\n"
+    "        time.sleep(1)\n"
+)
 
 
 @dataclasses.dataclass
@@ -192,7 +210,7 @@ def build_loadgen_pod(cfg: BenchConfig) -> dict[str, Any]:
     container: dict[str, Any] = {
         "name": "loadgen",
         "image": cfg.frontend_image,
-        "command": ["sleep", "infinity"],
+        "command": ["python3", "-c", _REAPER],
         "env": [
             {"name": "HF_HOME", "value": "/results/.hf"},
             # aiperf prints a rich UI otherwise; keep the logs plain.
@@ -211,6 +229,9 @@ def build_loadgen_pod(cfg: BenchConfig) -> dict[str, Any]:
         "terminationGracePeriodSeconds": 5,
     }
     _add_pull_secret(cfg, spec)
+    spec_hash = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[
+        :16
+    ]
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -220,6 +241,7 @@ def build_loadgen_pod(cfg: BenchConfig) -> dict[str, Any]:
                 "app.kubernetes.io/part-of": "gateway-ab",
                 "app": LOADGEN_LABEL,
             },
+            "annotations": {LOADGEN_SPEC_HASH: spec_hash},
         },
         "spec": spec,
     }

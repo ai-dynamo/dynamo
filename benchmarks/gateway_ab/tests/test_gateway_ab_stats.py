@@ -233,3 +233,66 @@ def test_trend_skips_summaries_without_load_labels(tmp_path):
         json.dumps({"meta": {}, "points": [{"topology": "agg", "concurrency": 8}]})
     )
     assert "legacy" not in report.render_trend(tmp_path)
+
+
+def _write_rps_run(root, side, rnd, samples):
+    path = root / "runs" / "agg" / side / "rps6" / f"r{rnd}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "records": len(samples),
+                "errors": 0,
+                "expected_requests": len(samples),
+                "request_throughput": 6.0,
+                "output_token_throughput": 760.0,
+                "samples": {
+                    "time_to_first_token": samples,
+                    "inter_token_latency": [5.0] * len(samples),
+                    "request_latency": [s + 500 for s in samples],
+                },
+            }
+        )
+    )
+
+
+def test_open_loop_throughput_gets_no_verdict(tmp_path):
+    for rnd in range(2):
+        _write_rps_run(tmp_path, "frontend", rnd, [50.0] * 50)
+        _write_rps_run(tmp_path, "gateway", rnd, [52.0] * 50)
+    (point,) = report.build_summary(tmp_path, bootstrap_iterations=50)["points"]
+    assert (
+        point["throughput"]["output_token_throughput"]["verdict"] == "n/a (open loop)"
+    )
+    assert (
+        point["latency"]["time_to_first_token"]["mean"]["verdict"] != "n/a (open loop)"
+    )
+
+
+def test_point_with_only_failure_markers_is_reported(tmp_path):
+    for side in ("frontend", "gateway"):
+        marker = tmp_path / "runs" / "disagg" / side / "c8" / "r0.error"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("failed twice\n")
+    summary = report.build_summary(tmp_path)
+    (point,) = summary["points"]
+    assert point["topology"] == "disagg" and not point["latency"]
+    assert len(summary["failed_runs"]) == 2
+    gaps = report.incomplete(summary)
+    assert any("failed, no result" in g for g in gaps)
+    assert "failed, no result" in report.render_markdown(summary)
+
+
+def test_failure_marker_superseded_by_valid_run_is_ignored(tmp_path):
+    _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10)
+    (tmp_path / "runs/agg/frontend/c8/r0.error").write_text("old\n")
+    assert report.load_failures(tmp_path) == []
+
+
+def test_noise_line_uses_per_round_ttft_means(tmp_path):
+    for rnd, mean in enumerate((50.0, 60.0)):
+        _write_run(tmp_path, "agg", "frontend", 8, rnd, [mean] * 20)
+        _write_run(tmp_path, "agg", "gateway", 8, rnd, [55.0] * 20)
+    (point,) = report.build_summary(tmp_path, bootstrap_iterations=50)["points"]
+    assert point["ttft_round_cv_pct"]["a"] == pytest.approx(12.856, abs=0.01)
+    assert point["ttft_round_cv_pct"]["b"] == 0.0

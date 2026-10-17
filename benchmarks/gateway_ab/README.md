@@ -56,7 +56,8 @@ python3 -m benchmarks.gateway_ab --context gateway-ab all
 ```
 
 Run all `python3 -m benchmarks.gateway_ab` commands from the repository root. Results land in
-`gateway_ab_results/<UTC timestamp>/`, and the report also prints to stdout.
+`benchmarks/results/gateway_ab/<UTC timestamp>/`, which the repository ignores, and the report
+also prints to stdout.
 
 ## On an existing cluster
 
@@ -118,7 +119,7 @@ exits `1`.
 
 ```bash
 B="python3 -m benchmarks.gateway_ab --context gateway-ab"
-$B render                       # write the manifests to gateway_ab_manifests/ for review
+$B render                       # write the manifests to benchmarks/results/gateway_ab/manifests/
 $B deploy                       # loadgen pod + both sides of every topology, smoke-tested
 $B --results out/run1 run       # measure; re-running the same command resumes
 $B --results out/run1 report    # recompute summary.json and report.md
@@ -207,7 +208,9 @@ Latency intervals come from a two-level bootstrap. It resamples rounds first, th
 each chosen round. Run-to-run variance is usually larger than request-to-request variance, and a
 per-request bootstrap would hide it. That is why the default is three rounds and why one round
 cannot produce a trustworthy interval. Throughput is a single number per run, so its interval is the
-range of all pairwise round deltas.
+range of all pairwise round deltas. Under open-loop load below saturation, each side delivers the
+rate it is offered, so throughput rows carry `n/a (open loop)` instead of a verdict. Use the
+closed-loop mode to compare capacity.
 
 Verdicts read the interval against `--min-effect` (default 2%):
 
@@ -218,9 +221,10 @@ Verdicts read the interval against `--min-effect` (default 2%):
 | `same` | Includes zero and lies within ±min-effect |
 | `inconclusive` | Includes zero but reaches past ±min-effect. The data cannot separate a negligible difference from a large one. Add rounds or use a quieter cluster. |
 | `n/a (1 round)` | Fewer than two valid rounds on a side. With no between-round variance, the interval is too narrow to support a verdict. |
+| `n/a (open loop)` | Throughput rows under open-loop load, where each side delivers the rate it is offered |
 
-The per-round coefficient of variation printed under each table is the A/A noise floor for that
-cluster. Treat any Δ smaller than it with suspicion.
+Under each table, the coefficient of variation of the per-round TTFT mean shows the A/A noise floor
+for that cluster. Treat any Δ smaller than it with suspicion.
 
 `summary.json` holds the same data in machine-readable form, along with `meta.json`: images,
 aiperf version, repository commit, node list, and the full configuration.

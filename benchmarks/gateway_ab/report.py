@@ -40,6 +40,21 @@ def load_runs(
     return runs
 
 
+def load_failures(results: pathlib.Path) -> list[tuple[str, LoadPoint, str, int]]:
+    """Measurements that failed outright: an ``.error`` marker, no valid run."""
+    out = []
+    for marker in sorted((results / "runs").glob("*/*/*/r*.error")):
+        run_file = marker.with_suffix(".json")
+        try:
+            if is_valid(json.loads(run_file.read_text())):
+                continue
+        except (OSError, ValueError):
+            pass
+        topology, side, label = marker.parts[-4], marker.parts[-3], marker.parts[-2]
+        out.append((topology, LoadPoint.parse(label), side, int(marker.stem[1:])))
+    return out
+
+
 def is_valid(run: dict[str, Any]) -> bool:
     """A run counts only if every request succeeded and none went missing."""
     expected = run.get("expected_requests")
@@ -56,11 +71,15 @@ def build_summary(
     bootstrap_iterations: int = 1000,
 ) -> dict[str, Any]:
     runs = load_runs(results)
+    failures = load_failures(results)
     meta_path = results / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     points: list[dict[str, Any]] = []
     invalid: list[dict[str, Any]] = []
-    keys = sorted({(t, lp) for (t, lp, _) in runs})
+    # A point whose every run failed has only markers, and must still show.
+    keys = sorted(
+        {(t, lp) for (t, lp, _) in runs} | {(t, lp) for t, lp, _, _ in failures}
+    )
     for topology, load in keys:
         sides = {}
         for side in (SIDE_A, SIDE_B):
@@ -85,6 +104,10 @@ def build_summary(
             "load": load.label,
             "load_desc": load.describe(),
             "rounds": {"a": len(a_runs), "b": len(b_runs)},
+            "ttft_round_cv_pct": {
+                "a": _round_mean_cv(a_runs),
+                "b": _round_mean_cv(b_runs),
+            },
             "latency": {},
             "throughput": {},
         }
@@ -103,9 +126,14 @@ def build_summary(
                 va = [r[metric] for r in a_runs if r.get(metric) is not None]
                 vb = [r[metric] for r in b_runs if r.get(metric) is not None]
                 if va and vb:
-                    point["throughput"][metric] = stats.compare_scalar(
+                    row = stats.compare_scalar(
                         va, vb, higher_is_better=True, min_effect_pct=min_effect_pct
                     )
+                    if load.kind == "rps":
+                        # Below saturation an open-loop run delivers what it
+                        # offers, so throughput cannot tell the sides apart.
+                        row["verdict"] = "n/a (open loop)"
+                    point["throughput"][metric] = row
             if min(len(a_runs), len(b_runs)) < MIN_ROUNDS:
                 # One round has no between-round variance to resample, so its
                 # intervals are far too narrow to support a verdict.
@@ -120,7 +148,21 @@ def build_summary(
         "min_effect_pct": min_effect_pct,
         "points": points,
         "invalid_runs": invalid,
+        "failed_runs": [
+            {"topology": t, "load": lp.describe(), "side": side, "round": rnd}
+            for t, lp, side, rnd in failures
+        ],
     }
+
+
+def _round_mean_cv(runs: list[dict[str, Any]]) -> float:
+    """Run-to-run noise: the CV of each round's mean TTFT, in percent."""
+    means = [
+        sum(t) / len(t)
+        for t in (r["samples"].get("time_to_first_token") for r in runs)
+        if t
+    ]
+    return stats.cv(means)
 
 
 def incomplete(summary: dict[str, Any]) -> list[str]:
@@ -135,6 +177,10 @@ def incomplete(summary: dict[str, Any]) -> list[str]:
         f"{r['topology']} {r['load']} {r['side']} round {r['round']}: excluded "
         f"(errors={r['errors']} records={r['records']} expected={r['expected']})"
         for r in summary["invalid_runs"]
+    ]
+    out += [
+        f"{r['topology']} {r['load']} {r['side']} round {r['round']}: failed, no result"
+        for r in summary.get("failed_runs", [])
     ]
     return out
 
@@ -171,7 +217,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
         "",
         "Δ is B relative to A; negative latency Δ means B is faster. "
         "Intervals are 95% hierarchical-bootstrap (rounds, then requests). "
-        f"Verdicts treat |Δ| < {summary['min_effect_pct']:g}% as `same`.",
+        f"`same` means the interval lies within ±{summary['min_effect_pct']:g}%; "
+        "`inconclusive` means it includes zero but reaches past that.",
         "",
     ]
     if meta:
@@ -201,27 +248,27 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 if row:
                     lines.append(_row(c, label, row, "{:.1f}"))
         lines.append("")
-        noise = [
-            (p["load_desc"], p["throughput"]["output_token_throughput"])
-            for p in pts
-            if "output_token_throughput" in p["throughput"]
-        ]
+        noise = [(p["load_desc"], p["ttft_round_cv_pct"]) for p in pts if p["latency"]]
         if noise:
             lines += [
-                "Run-to-run noise (coefficient of variation of output tok/s across rounds):",
+                "Run-to-run noise (coefficient of variation of the per-round TTFT mean):",
                 "",
             ]
-            for c, row in noise:
-                lines.append(
-                    f"- {c}: A {_fmt_pct(row['a_cv_pct'])}, B {_fmt_pct(row['b_cv_pct'])}"
-                )
+            for c, cv in noise:
+                lines.append(f"- {c}: A {_fmt_pct(cv['a'])}, B {_fmt_pct(cv['b'])}")
             lines.append("")
-    if summary["invalid_runs"]:
+    failed = summary.get("failed_runs", [])
+    if summary["invalid_runs"] or failed:
         lines += ["## Excluded runs", ""]
         for r in summary["invalid_runs"]:
             lines.append(
                 f"- {r['topology']} {r['load']} {r['side']} round {r['round']}: "
                 f"errors={r['errors']} records={r['records']} expected={r['expected']}"
+            )
+        for r in failed:
+            lines.append(
+                f"- {r['topology']} {r['load']} {r['side']} round {r['round']}: "
+                "failed, no result"
             )
         lines.append("")
     return "\n".join(lines)

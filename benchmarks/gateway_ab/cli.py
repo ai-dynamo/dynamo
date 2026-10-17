@@ -36,6 +36,9 @@ REQUIRED_CRDS = (
 )
 EXIT_PREFLIGHT = 2
 EXIT_REGRESSION = 3
+# Relative to the working directory. Run from the repository root, it lands
+# under benchmarks/results, which the repository already ignores.
+DEFAULT_OUTPUT = "benchmarks/results/gateway_ab"
 
 
 class Bench:
@@ -117,17 +120,27 @@ class Bench:
 
     def deploy_loadgen(self) -> None:
         pod = manifests.loadgen_pod_name(self.cfg)
+        want = manifests.build_loadgen_pod(self.cfg)
         current = self.kube.get_json(["pod", pod])
-        if current and current.get("status", {}).get("phase") in (
-            "Failed",
-            "Succeeded",
-        ):
-            # restartPolicy is Never, so a terminated loadgen never comes back.
-            log.info("Recreating terminated loadgen pod %s", pod)
-            self.kube.kubectl(["delete", "pod", pod, "--wait=true"])
-            current = None
+        if current is not None:
+            # restartPolicy is Never, so a terminated loadgen never comes back;
+            # and a pod built from another image or secret must not be reused.
+            terminated = current.get("status", {}).get("phase") in (
+                "Failed",
+                "Succeeded",
+            )
+            stale = (
+                current["metadata"]
+                .get("annotations", {})
+                .get(manifests.LOADGEN_SPEC_HASH)
+                != want["metadata"]["annotations"][manifests.LOADGEN_SPEC_HASH]
+            )
+            if terminated or stale:
+                log.info("Recreating loadgen pod %s", pod)
+                self.kube.kubectl(["delete", "pod", pod, "--wait=true"])
+                current = None
         if current is None:
-            self.kube.apply([manifests.build_loadgen_pod(self.cfg)])
+            self.kube.apply([want])
         self.kube.wait(f"pod/{pod}", "Ready", 600)
 
     def deploy_topology(self, topology: str) -> None:
@@ -436,6 +449,8 @@ class Bench:
                     result["errors"],
                 )
                 continue
+            # A failure marker left by an earlier attempt or run no longer applies.
+            out.with_suffix(".error").unlink(missing_ok=True)
             ttft = result["samples"]["time_to_first_token"]
             log.info(
                 "  ok: %d requests, %d errors, TTFT p50 %.2f ms, %.0f output tok/s",
@@ -693,12 +708,12 @@ def build_parser() -> argparse.ArgumentParser:
     w = p.add_argument_group("workload (identical on both sides)")
     w.add_argument(
         "--request-rate",
-        type=_csv(float),
+        type=_csv(_positive(float)),
         help="open-loop Poisson load points in requests/s (default: 6,14)",
     )
     w.add_argument(
         "--concurrency",
-        type=_csv(int),
+        type=_csv(_positive(int)),
         help="closed-loop load points instead of --request-rate, e.g. 8,32",
     )
     w.add_argument("--isl", type=int, default=1024)
@@ -709,12 +724,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--requests",
         type=int,
         default=0,
-        help="per point; 0 = max(200, 10 x concurrency)",
+        help="per point; 0 = about 40 s of arrivals (closed loop: max(200, 10 x c))",
     )
     w.add_argument(
-        "--warmup-requests", type=int, default=0, help="0 = max(10, 2 x concurrency)"
+        "--warmup-requests",
+        type=int,
+        default=0,
+        help="0 = about 5 s of arrivals (closed loop: max(10, 2 x c))",
     )
-    w.add_argument("--rounds", type=int, default=3)
+    w.add_argument("--rounds", type=_positive(int), default=3)
     w.add_argument("--seed", type=int, default=42)
     w.add_argument(
         "--run-timeout", type=int, default=1800, help="seconds per aiperf run"
@@ -727,10 +745,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = p.add_argument_group("results")
     r.add_argument(
-        "--results", help="results directory (default: gateway_ab_results/<UTC time>)"
+        "--results",
+        help=f"results directory (default: {DEFAULT_OUTPUT}/<UTC time>)",
     )
     r.add_argument(
-        "--out", default="gateway_ab_manifests", help="render: output directory"
+        "--out",
+        default=f"{DEFAULT_OUTPUT}/manifests",
+        help="render: output directory",
     )
     r.add_argument(
         "--min-effect",
@@ -790,6 +811,16 @@ def _csv(kind, choices=None):
     return parse
 
 
+def _positive(kind):
+    def parse(text: str):
+        value = kind(text)
+        if value <= 0:
+            raise argparse.ArgumentTypeError(f"must be positive: {text}")
+        return value
+
+    return parse
+
+
 def _results_dir(args: argparse.Namespace, must_exist: bool = False) -> pathlib.Path:
     if args.results:
         path = pathlib.Path(args.results)
@@ -797,7 +828,7 @@ def _results_dir(args: argparse.Namespace, must_exist: bool = False) -> pathlib.
         raise KubeError("--results is required for this command")
     else:
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = pathlib.Path("gateway_ab_results") / stamp
+        path = pathlib.Path(DEFAULT_OUTPUT) / stamp
         args.results = str(path)
     if must_exist and not path.exists():
         raise KubeError(f"results directory {path} does not exist")
