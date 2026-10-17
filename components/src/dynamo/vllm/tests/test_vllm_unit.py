@@ -335,11 +335,18 @@ def test_connector_to_kv_transfer_json_multi():
     result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
     assert result["kv_role"] == "kv_both"
+    assert result["kv_connector_module_path"] == "dynamo.vllm.pd_connector"
     nested = result["kv_connector_extra_config"]["connectors"]
     assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
         "DynamoConnector": "kv_both",
         "NixlConnector": "kv_consumer",
     }
+
+
+def test_pd_connector_importable_from_module_path():
+    """Test PdConnector resolves from the module path vLLM loads it by."""
+    module = importlib.import_module("dynamo.vllm.pd_connector")
+    assert module.PdConnector.__name__ == "PdConnector"
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests

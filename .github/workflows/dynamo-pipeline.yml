@@ -169,8 +169,6 @@ jobs:
           # benches; lib suite 7s -> 35s single-threaded, other targets sub-second; and
           # under 12x contention 3/3 parallel shards segfault vs 0/3 single-threaded.)
           RUST_TEST_THREADS=1 cargo test --locked --all-targets --features=block-manager,media-ffmpeg,mm-routing,testing-nixl,integration -- --nocapture
-          cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
   mypy:

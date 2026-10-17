@@ -444,9 +444,9 @@ RUN mkdir -p ${WORKSPACE_DIR} && chmod g+w ${WORKSPACE_DIR}
 # Space is only recovered if the image is later squashed / compacted (e.g. docker-squash,
 # `docker build --squash`, or export/import).
 {% if device == "xpu" and framework == "sglang" %}
-RUN uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
+RUN uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 {% else %}
-RUN uv pip uninstall ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
+RUN uv pip uninstall ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 {% endif %}
 
 # Install maturin only (no editable install of the dynamo package).
