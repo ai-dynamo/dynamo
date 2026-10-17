@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Qwen3-TTS text-to-audio serving with vLLM-Omni. This is the Kubernetes
+# equivalent of launch/agg_omni_audio.sh.
+#
+# For response_format=wav and data_source=b64_json, the speech endpoint returns
+# raw WAV bytes; save them with curl -o output.wav.
+#
+# Usage:
+#   export NAMESPACE=<your-namespace> DYNAMO_VERSION=1.5.1
+#   envsubst '${DYNAMO_VERSION}' < agg_omni_audio.yaml | kubectl apply -n ${NAMESPACE} -f -
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-omni-audio-agg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_VERSION}
+  - name: OmniAudioWorker
+    type: worker
+    replicas: 1
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}
+          command:
+          - python3
+          - -m
+          - dynamo.vllm.omni
+          args:
+          - --model
+          - Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+          - --output-modalities
+          - audio
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          - --trust-remote-code
+          - --enforce-eager
+          env:
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: "1"
+          # With Dynamo 1.5.x, the operator enables canary health checks, but the
+          # vLLM-Omni canary is a text-token request that the speech handler
+          # rejects, so the worker never becomes ready. Remove once fixed upstream.
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: media-output
+            mountPath: /tmp/dynamo_media
+        volumes:
+        - name: media-output
+          emptyDir:
+            sizeLimit: 20Gi
