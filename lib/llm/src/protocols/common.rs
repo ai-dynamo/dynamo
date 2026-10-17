@@ -378,10 +378,14 @@ pub struct StopConditions {
 }
 
 impl StopConditions {
+    /// Remove implicit model/parser stop IDs when `ignore_eos` is true.
+    ///
+    /// Call after attaching those IDs. Explicit caller stop strings and token IDs
+    /// remain active, including a caller-supplied ID that is also a model EOS.
+    /// False/omitted `ignore_eos` leaves all conditions unchanged; token budgets
+    /// and the flag itself are never modified.
     pub fn apply_ignore_eos(&mut self) {
         if self.ignore_eos.unwrap_or(false) {
-            self.stop = None;
-            self.stop_token_ids = None;
             self.stop_token_ids_visible = None;
             self.stop_token_ids_hidden = None;
         }
@@ -852,6 +856,30 @@ impl From<CompletionContext> for PromptType {
 mod tests {
 
     use super::*;
+
+    /// Ignoring model EOS must not erase explicit stops, even overlapping IDs.
+    #[test]
+    fn ignore_eos_preserves_user_stops() {
+        for ignore_eos in [None, Some(false), Some(true)] {
+            let mut conditions = StopConditions {
+                stop: Some(vec!["7".into()]),
+                stop_token_ids: Some(vec![22, 42, 43]),
+                stop_token_ids_hidden: Some(vec![42]),
+                stop_token_ids_visible: Some(vec![43]),
+                ignore_eos,
+                min_tokens: Some(2),
+                max_tokens: Some(4),
+                ..Default::default()
+            };
+            let mut expected = serde_json::to_value(&conditions).unwrap();
+            if ignore_eos == Some(true) {
+                expected["stop_token_ids_hidden"] = serde_json::Value::Null;
+                expected["stop_token_ids_visible"] = serde_json::Value::Null;
+            }
+            conditions.apply_ignore_eos();
+            assert_eq!(serde_json::to_value(&conditions).unwrap(), expected);
+        }
+    }
 
     fn all_finish_reasons() -> Vec<FinishReason> {
         vec![
