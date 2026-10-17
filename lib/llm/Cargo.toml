@@ -166,7 +166,8 @@ clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
 # http-service
-axum = { workspace = true }
+axum = { workspace = true, features = ["multipart"] }
+mime = "0.3"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
 tower = { workspace = true }
