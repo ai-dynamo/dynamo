@@ -68,7 +68,10 @@ impl RoutedEngine {
         crate::future_into_py(
             py,
             async move {
-                let mut stream = inner.generate(request_context).await.map_err(to_pyerr)?;
+                let mut stream = inner
+                    .generate(request_context)
+                    .await
+                    .map_err(|e| crate::errors::semantic_to_pyerr(&e))?;
                 let task_context = stream.context();
                 let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(32);
 
