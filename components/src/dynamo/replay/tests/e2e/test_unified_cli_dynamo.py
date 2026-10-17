@@ -20,8 +20,8 @@ pytest.importorskip(
     reason="AISimulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config.cli import CorePredictionConfig
-from aisimulate.config.common import split_config_sections
+from aisimulate.config.cli import CorePredictionConfig  # noqa: E402
+from aisimulate.config.common import split_config_sections  # noqa: E402
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -42,11 +42,20 @@ _PREDICT_CASES = tuple(
 _RECOMMEND_CASES = tuple(
     sorted((_REPO_ROOT / _CONFIG_ROOT / "recommend/dynamo").glob("*.yaml"))
 )
+# AISimulate's supervisor exits 124 past its 60 s ready or 5 s exit defaults on
+# loaded CI. Keep init + shutdown + run under the subprocess timeout.
+_SUPERVISOR_BUDGETS = (
+    "--set",
+    "execution.resources.initialization_timeout_seconds=120",
+    "--set",
+    "execution.resources.shutdown_timeout_seconds=30",
+)
 
 
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+    """Run AISimulate with CI supervisor budgets and assert a successful exit."""
     result = subprocess.run(
-        [sys.executable, "-m", "aisimulate", *args],
+        [sys.executable, "-m", "aisimulate", *args, *_SUPERVISOR_BUDGETS],
         cwd=_REPO_ROOT,
         text=True,
         capture_output=True,
