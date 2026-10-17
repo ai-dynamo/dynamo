@@ -20,13 +20,15 @@ _CANCELLATION_DRAIN_TIMEOUT_S = 1.0
 _CANCELLATION_REGISTRATION_WAIT_TIMEOUT_S = 30.0
 # Leave most of the drain window available after an ordered abort is submitted.
 _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S = 0.25
+# Ends a stream without storing an exception (and its traceback cycle) in the reply.
+_STREAM_END = object()
 
 
 def _consume_detached_task(task: asyncio.Task[Any]) -> None:
     """Consume a detached cancellation task result without surfacing closure."""
     try:
         task.result()
-    except (asyncio.CancelledError, StopAsyncIteration):
+    except asyncio.CancelledError:
         pass
     except Exception:
         logging.exception("Detached SGLang task failed during cancellation")
@@ -119,7 +121,7 @@ class CancellationMixin:
                 pending = await request
                 request = loop.create_future()
                 try:
-                    item = await anext(iterator)
+                    item = await anext(iterator, _STREAM_END)
                 except (Exception, asyncio.CancelledError) as exc:
                     if pending.done():
                         raise  # surfaced by _consume_detached_task
@@ -128,6 +130,8 @@ class CancellationMixin:
                 if pending.done():  # the consumer stopped waiting
                     return
                 pending.set_result(item)
+                if item is _STREAM_END:
+                    return
 
         def interrupt() -> None:
             nonlocal interrupted
@@ -148,9 +152,8 @@ class CancellationMixin:
             while not interrupted:
                 reply = loop.create_future()
                 request.set_result(reply)
-                try:
-                    item = await reply
-                except StopAsyncIteration:
+                item = await reply
+                if item is _STREAM_END:
                     return
                 if interrupted:
                     break
