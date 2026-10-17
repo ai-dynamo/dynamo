@@ -812,7 +812,7 @@ The frontend exposes the following HTTP endpoints.
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | Chat completions (streaming and non-streaming) |
 | `POST` | `/v1/completions` | Text completions |
-| `POST` | `/v1/embeddings` | Text embeddings |
+| `POST` | `/v1/embeddings` | Embeddings (text and token IDs; chat-style multimodal input on vLLM embedding workers) |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/responses/input_tokens` | Estimated input token count for the Responses API |
 | `POST` | `/v1/images/generations` | Image generation |

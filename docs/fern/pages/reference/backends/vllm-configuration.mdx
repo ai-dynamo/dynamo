@@ -171,7 +171,18 @@ These flags control which role this worker plays in a disaggregated deployment. 
 </ParamField>
 
 <ParamField path="--embedding-worker" type="boolean" default="false">
-  Run as a text-embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
+  Run as an embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
+
+  Besides OpenAI text and token-ID `input`, the worker accepts vLLM's chat-style embedding input for multimodal embedding models: `messages` holding one conversation, or a list of conversations (one embedding each), or the same conversations passed as `input`. Content parts can be `text`, `image_url`, `video_url`, `audio_url`, or `input_audio`. vLLM renders each conversation with the model's chat template, or `--custom-jinja-template`, and loads the media, subject to `--limit-mm-per-prompt` and the allowed media sources. This does not need `--enable-multimodal`, and it is not available with `--embedding-frontend-tokenization`.
+
+  ```bash
+  curl localhost:8000/v1/embeddings -H 'Content-Type: application/json' -d '{
+    "model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+    "messages": [{"role": "document", "content": [
+      {"type": "image_url", "image_url": {"url": "https://example.com/page.png"}}
+    ]}]
+  }'
+  ```
 
   Environment variable: `DYN_VLLM_EMBEDDING_WORKER`
 </ParamField>
