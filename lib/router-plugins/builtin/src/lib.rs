@@ -9,6 +9,7 @@
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+mod jsew;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{DefaultWorkerSelector, default_factory, default_policy};
@@ -28,6 +29,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
     two_tier_cost_fn::register(registry)?;
+    jsew::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())
 }
@@ -80,6 +82,41 @@ worker_selection:
             .unwrap()
             .expect("a configured instance resolves to a factory");
 
+        let partition = RoutingPartitionRef::new("model", "default");
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            factory(&config, worker_type, partition);
+        }
+    }
+
+    /// The documented `dynamo-jsew` instance, parameters included, constructs for every stage.
+    #[test]
+    fn resolves_documented_jsew_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: dynamo-jsew
+  prefill: dynamo-jsew
+  decode: dynamo-jsew
+  instances:
+    - name: dynamo-jsew
+      type: dynamo-jsew
+      parameters:
+        effective_work_predictor: ema_uncached_tokens
+        decode_work_scale: 17.601
+        decode_footprint_weight: 1.526
+        ema_alpha: 0.01737
+        decode_work_exponent: 1.0
+        decode_load_exponent: 1.2
+        decode_share_exponent: 0.13
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
         let partition = RoutingPartitionRef::new("model", "default");
         for worker_type in [
             WorkerType::Aggregated,
