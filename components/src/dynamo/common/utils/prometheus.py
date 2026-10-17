@@ -13,6 +13,7 @@ while Dynamo runtime metrics are available immediately after component creation.
 
 import enum
 import logging
+import os
 import re
 import threading
 from collections.abc import Mapping
@@ -83,6 +84,22 @@ _SHARED_IMAGE_CACHE_DURATION_BUCKETS = (
     2.0,
     4.0,
 )
+
+
+# Comma-separated metric name prefixes that are appended to each backend's
+# built-in whitelist, so custom engine components can expose their metrics.
+EXTRA_METRIC_PREFIXES_ENV_VAR = "DYN_EXTRA_METRIC_PREFIXES"
+
+
+def get_extra_metric_prefixes() -> list[str]:
+    """Parse DYN_EXTRA_METRIC_PREFIXES into a list of metric name prefixes.
+
+    Segments are stripped of surrounding whitespace and empty segments are
+    ignored. Prefixes must match the engine's metric names exactly (e.g.
+    "myconnector_", "vllm:")
+    """
+    raw = os.environ.get(EXTRA_METRIC_PREFIXES_ENV_VAR, "")
+    return [prefix.strip() for prefix in raw.split(",") if prefix.strip()]
 
 
 def register_engine_metrics_callback(
