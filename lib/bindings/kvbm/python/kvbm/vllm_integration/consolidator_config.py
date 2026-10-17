@@ -9,7 +9,7 @@ import logging
 import os
 from typing import Optional, Tuple
 
-from kvbm.utils import get_consolidator_mode, is_truthy
+from kvbm.utils import derive_consolidator_port, get_consolidator_mode, is_truthy
 from vllm.distributed.kv_events import ZmqEventPublisher
 
 __all__ = [
@@ -127,23 +127,8 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
         data_parallel_rank=data_parallel_rank,
     ).replace("*", "127.0.0.1")
 
-    # Derive consolidator port deterministically from KVBM leader ZMQ pub port
-    # Default value (56001) aligns with Rust constant DEFAULT_LEADER_ZMQ_PUB_PORT defined in:
-    # dynamo/lib/bindings/python/rust/llm/block_manager/distributed/utils.rs
-    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
-    kvbm_pub_port = int(kvbm_pub_port_str)
-
-    # Use 1000 offset to keep ports close together
     # Example: 56001 -> 57001
-    consolidator_port_offset = 1000
-    output_port = kvbm_pub_port + consolidator_port_offset
-
-    # Validate the derived port is within valid range
-    if output_port > 65535:
-        raise ValueError(
-            f"Derived consolidator port {output_port} exceeds maximum (65535). "
-            f"KVBM port {kvbm_pub_port} is too high. Use a lower base port."
-        )
+    kvbm_pub_port, output_port = derive_consolidator_port()
 
     # Build bind and connect endpoints
     # Consolidator binds to 0.0.0.0 (all interfaces), clients connect to 127.0.0.1
