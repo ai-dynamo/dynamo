@@ -9936,6 +9936,7 @@ def test_scheduler_cls_resolution_installs_the_patch():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.timeout(60)
 def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     """Through vLLM's own utility dispatch, both FPM payload kinds carry the new id."""
     import queue
@@ -9947,15 +9948,16 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     from dynamo.common.forward_pass_metrics import decode
 
     ctx = zmq.Context.instance()
-    sub = ctx.socket(zmq.SUB)
-    sub.setsockopt(zmq.SUBSCRIBE, b"")
-    port = sub.bind_to_random_port("tcp://127.0.0.1")
-    sub.unbind(sub.getsockopt(zmq.LAST_ENDPOINT))
+    # Keep publishing paused until the subscriber connects and the worker ID is set.
     publisher = instrumented_scheduler_module._FpmPublisherThread(
-        f"tcp://127.0.0.1:{port}", worker_id="", dp_rank=0
+        "tcp://127.0.0.1:*", worker_id="", dp_rank=0, start_paused=True
     )
-    sub.connect(f"tcp://127.0.0.1:{port}")
+    sub = None
     try:
+        sub = ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.SUBSCRIBE, b"")
+        sub.connect(publisher.endpoint)
+
         scheduler = object.__new__(InstrumentedScheduler)
         scheduler._fpm_worker_id = ""
         scheduler._fpm_dp_rank = 0
@@ -9969,6 +9971,7 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
             EngineCoreRequestType.UTILITY,
             (0, 7, FPM_UTILITY_NAME, ("8465209922961459",)),
         )
+        publisher.resume()
 
         _client, outputs = engine.output_queue.get_nowait()
         assert outputs.utility_output.failure_message is None
@@ -9986,4 +9989,5 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
         assert heartbeat.worker_id == "8465209922961459"
     finally:
         publisher.shutdown()
-        sub.close(linger=0)
+        if sub is not None:
+            sub.close(linger=0)
