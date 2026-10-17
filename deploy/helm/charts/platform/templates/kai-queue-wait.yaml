@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- /*
+  The Queues in kai.yaml are admitted by KAI's queue-controller webhook. Bundled KAI creates
+  queue-controller at runtime, after its kai-config-deployer hook (weight 1), so with
+  `helm install --wait` the webhook can be registered before it has endpoints. This hook waits
+  for queue-controller between that hook and the Queues (weight 100). An externally managed
+  KAI (global.kai-scheduler.enabled only) already serves the webhook and needs no wait.
+
+  Every field has a template default so `helm upgrade --reuse-values` from a release that
+  predates kaiQueueWait still renders.
+*/ -}}
+{{- $kai := index .Values.global "kai-scheduler" | default dict -}}
+{{- $config := .Values.kaiQueueWait | default dict -}}
+{{- if and ($kai.install | default false) (ne (dig "enabled" true $config) false) -}}
+{{- $name := printf "%s-kai-queue-wait" (.Release.Name | trunc 48 | trimSuffix "-") -}}
+{{- $deadline := $config.activeDeadlineSeconds | default 600 | int -}}
+{{- $podSecurityContext := $config.podSecurityContext -}}
+{{- if eq $podSecurityContext nil -}}
+{{- $podSecurityContext = dict "runAsNonRoot" true "runAsUser" 65532 "seccompProfile" (dict "type" "RuntimeDefault") -}}
+{{- end -}}
+{{- $tolerations := dig "global" "tolerations" list (index .Values "kai-scheduler" | default dict) -}}
+{{- $annotations := dict "helm.sh/hook" "post-install,post-upgrade" "helm.sh/hook-weight" "80" "helm.sh/hook-delete-policy" "before-hook-creation" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "90"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-failed
+spec:
+  activeDeadlineSeconds: {{ $deadline }}
+  backoffLimit: 2
+  template:
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      {{- with $config.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $config.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- /* kai-operator creates the Deployment at runtime, so wait for it to exist first. */}}
+      initContainers:
+        - name: wait-for-create
+          {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}
+          args:
+            - wait
+            - --for=create
+            - deployment/queue-controller
+            - --namespace={{ .Release.Namespace }}
+            - --timeout={{ $deadline }}s
+      containers:
+        - name: wait-for-available
+          {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}
+          args:
+            - wait
+            - --for=condition=Available
+            - deployment/queue-controller
+            - --namespace={{ .Release.Namespace }}
+            - --timeout={{ $deadline }}s
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+
+{{- define "dynamo-platform.kaiQueueWaitContainer" -}}
+image: {{ .config.image | default "registry.k8s.io/kubectl:v1.34.12" | quote }}
+command: [kubectl]
+env:
+  # kubectl writes its discovery cache under $HOME; the root filesystem is read-only.
+  - name: HOME
+    value: /tmp
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 128Mi}
+{{- end }}
