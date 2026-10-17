@@ -322,6 +322,13 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 - **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/advanced-platform/service-discovery)** — K8s-native vs etcd vs file-based discovery
 - **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
+## License
+
+Dynamo is licensed under the [Apache License 2.0](LICENSE). The `LICENSE` entries in the packaged
+platform and operator Helm chart directories are symbolic links to that top-level file. They exist
+only so Helm includes the license when packaging each chart; Helm dereferences the links and writes
+regular-file copies into the chart archives.
+
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design-docs/disagg-serving.md
 [kv-routing]: docs/components/router/README.md
