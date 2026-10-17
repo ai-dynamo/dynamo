@@ -43,7 +43,7 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
     handler._handle_cancellation = set_shutdown_when_cancelled
     request_id_future = asyncio.get_running_loop().create_future()
     request_id_future.set_result("sglang-request-id")
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     with pytest.raises(EngineShutdown, match="shut down during token generation"):
         async with handler._cancellation_monitor(request_id_future, context):
@@ -607,8 +607,9 @@ async def test_cancelled_stream_starts_deadline_when_chunk_is_already_ready(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+@pytest.mark.parametrize("cancel_during_read", [False, True])
 async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
-    decode_cancellation_case, monkeypatch, caplog
+    decode_cancellation_case, monkeypatch, caplog, cancel_during_read
 ):
     caplog.set_level(logging.WARNING)
     monkeypatch.setattr(
@@ -627,8 +628,11 @@ async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
         iterator_finished.set()
         yield {}
 
-    cancellation_task = asyncio.create_task(asyncio.sleep(0))
-    await cancellation_task
+    if cancel_during_read:
+        cancellation_task = asyncio.create_task(asyncio.sleep(0.005))
+    else:
+        cancellation_task = asyncio.create_task(asyncio.sleep(0))
+        await cancellation_task
     started = asyncio.get_running_loop().time()
     outputs = await _collect(
         decode_cancellation_case.handler._stream_until_cancelled(
