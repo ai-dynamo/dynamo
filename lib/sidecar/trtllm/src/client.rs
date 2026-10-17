@@ -27,10 +27,9 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The engine's limits, resolved at startup from `--context-length` and
-/// `Control.GetModelInfo`.
+/// Startup metadata from `--context-length` and `Control.GetModelInfo`.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ModelLimits {
+pub(crate) struct ModelMetadata {
     /// Maximum input + output tokens; backs both the registered context window
     /// and the default `max_tokens`. Absent when neither source supplied one,
     /// which leaves requests that omit `max_tokens` to be rejected.
@@ -38,6 +37,14 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
+    /// Whether both portable and engine-specific capabilities advertise images.
+    /// `None` means startup discovery failed transiently and may be retried.
+    pub(crate) supports_image: Option<bool>,
+}
+
+pub(crate) enum ModelInfoResponse {
+    Available(ModelMetadata),
+    Unsupported(tonic::Status),
 }
 
 pub(crate) struct TrtllmClient {
@@ -94,7 +101,7 @@ impl TrtllmClient {
     /// unset rather than substituting its `max_input_len` default (measured
     /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
     /// server did not say", and `--context-length` supplies it instead.
-    async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
+    async fn get_model_info(&self, model: &str) -> Result<ModelMetadata, tonic::Status> {
         let info = self
             .control()
             .get_model_info(pb::GetModelInfoRequest {
@@ -102,24 +109,46 @@ impl TrtllmClient {
             })
             .await?
             .into_inner();
-        Ok(ModelLimits {
+        let supports_image = info.supports_multimodal == Some(true)
+            && info.extra.as_ref().is_some_and(|extra| {
+                extra
+                    .fields
+                    .get("trtllm_supported_modalities")
+                    .and_then(|value| value.kind.as_ref())
+                    .is_some_and(|kind| match kind {
+                        prost_types::value::Kind::ListValue(modalities) => {
+                            modalities.values.iter().any(|value| {
+                                matches!(
+                                    value.kind.as_ref(),
+                                    Some(prost_types::value::Kind::StringValue(modality))
+                                        if modality == "image"
+                                )
+                            })
+                        }
+                        _ => false,
+                    })
+            });
+        Ok(ModelMetadata {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+            supports_image: Some(supports_image),
         })
     }
 
     /// One `GetModelInfo` call, for when `--context-length` already supplies the
     /// window and the engine is consulted only to cross-check it and to learn
     /// its output cap.
-    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelLimits, DynamoError> {
-        tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model))
-            .await
-            .map_err(|_| {
-                connection_timeout(format!(
-                    "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
-                ))
-            })?
-            .map_err(|status| status_to_dynamo("GetModelInfo", status))
+    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelInfoResponse, DynamoError> {
+        match tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model)).await {
+            Ok(Ok(metadata)) => Ok(ModelInfoResponse::Available(metadata)),
+            Ok(Err(status)) if is_request_itself_wrong(&status) => {
+                Ok(ModelInfoResponse::Unsupported(status))
+            }
+            Ok(Err(status)) => Err(status_to_dynamo("GetModelInfo", status)),
+            Err(_) => Err(connection_timeout(format!(
+                "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
+            ))),
+        }
     }
 
     /// Polls `GetModelInfo` until the engine reports a usable context length or
@@ -139,7 +168,7 @@ impl TrtllmClient {
         model: &str,
         deadline: Instant,
         retry_interval: Duration,
-    ) -> Result<ModelLimits, DynamoError> {
+    ) -> Result<ModelMetadata, DynamoError> {
         let mut last = "it never answered".to_string();
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {

@@ -31,6 +31,7 @@ from tests.utils.payload_builder import (
     disaggregated_chat_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
+    multimodal_payload_default,
 )
 from tests.utils.payloads import (
     ChatPayload,
@@ -115,10 +116,7 @@ def _disaggregated_payloads(
     ]
 
 
-# Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
-# has not been profiled for the sidecar launch path. Add one once measured, to
-# admit these into the parallel stage alongside the equivalent dynamo.{backend}
-# scenarios in tests/serve/test_{vllm,sglang,trtllm}.py.
+# Text cases stay sequential until their sidecar launch paths are profiled.
 sidecar_configs = {
     "vllm_aggregated": EngineConfig(
         name="vllm_aggregated",
@@ -126,6 +124,7 @@ sidecar_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.vllm,
+            pytest.mark.core,
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
@@ -149,6 +148,7 @@ sidecar_configs = {
         script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
@@ -179,6 +179,7 @@ sidecar_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.trtllm,
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
@@ -198,12 +199,37 @@ sidecar_configs = {
             chat_payload_default(),
         ],
     ),
+    "trtllm_aggregated_image": EngineConfig(
+        name="trtllm_aggregated_image",
+        directory=trtllm_sidecar_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(12.0),
+            pytest.mark.requested_trtllm_kv_tokens(32768),
+            pytest.mark.timeout(960),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        timeout=900,
+        delayed_start=60,
+        env={"PYTHONUNBUFFERED": "1"},
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+    ),
     "trtllm_disaggregated": EngineConfig(
         name="trtllm_disaggregated",
         directory=trtllm_sidecar_dir,
         script_name="disagg.sh",
         marks=[
             pytest.mark.trtllm,
+            pytest.mark.core,
             # Both engines share one GPU: the handoff is what this covers, and
             # a co-resident pair keeps it on the existing 1-GPU sidecar runner.
             # `requested_trtllm_kv_tokens` caps each engine's KV pool so the
@@ -250,6 +276,7 @@ sidecar_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.vllm,
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
@@ -282,6 +309,7 @@ sidecar_configs = {
         ],
         marks=[
             pytest.mark.sglang,
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
@@ -307,6 +335,10 @@ sidecar_configs = {
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
+    if config.name == "trtllm_aggregated_image" and not _trtllm_serves_openengine():
+        if os.environ.get("DYNAMO_TEST_SIDECAR_BACKEND") == "trtllm":
+            pytest.fail(TRTLLM_OPENENGINE_SKIP_REASON)
+        pytest.skip(TRTLLM_OPENENGINE_SKIP_REASON)
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
@@ -320,7 +352,6 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     return config
 
 
-@pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports

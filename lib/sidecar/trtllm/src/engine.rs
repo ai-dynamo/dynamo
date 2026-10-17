@@ -18,7 +18,7 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelLimits, TrtllmClient};
+use crate::client::{self, ModelInfoResponse, ModelMetadata, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
@@ -41,7 +41,8 @@ pub struct TrtllmSidecarEngine {
     /// Engine limits resolved at `start` from `--context-length` and
     /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
     /// for requests that omit one.
-    limits: OnceCell<ModelLimits>,
+    limits: OnceCell<ModelMetadata>,
+    rediscovered_metadata: OnceCell<ModelMetadata>,
     cancel: CancellationToken,
 }
 
@@ -59,6 +60,7 @@ impl TrtllmSidecarEngine {
             mode,
             client: OnceCell::new(),
             limits: OnceCell::new(),
+            rediscovered_metadata: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -167,6 +169,55 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
+
+    async fn metadata_for_request(
+        &self,
+        client: &TrtllmClient,
+        request: &PreprocessedRequest,
+    ) -> Result<ModelMetadata, DynamoError> {
+        let initial = self
+            .limits
+            .get()
+            .copied()
+            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
+        if let Some(metadata) = self.rediscovered_metadata.get() {
+            return Ok(*metadata);
+        }
+        let has_images = request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .get("image_url")
+                .is_some_and(|images| !images.is_empty())
+        });
+        if !has_images || initial.supports_image.is_some() {
+            return Ok(initial);
+        }
+
+        self.rediscovered_metadata
+            .get_or_try_init(|| async {
+                match client.model_limits(&self.model.source).await? {
+                    ModelInfoResponse::Available(mut reported) => {
+                        if let Some(engine_context_length) = reported.context_length
+                            && Some(engine_context_length) != initial.context_length
+                        {
+                            tracing::warn!(
+                                configured_context_length = ?initial.context_length,
+                                engine_context_length,
+                                "--context-length disagrees with the context length TensorRT-LLM \
+                                 reported; using the configured --context-length"
+                            );
+                        }
+                        reported.context_length = initial.context_length;
+                        Ok(reported)
+                    }
+                    ModelInfoResponse::Unsupported(_) => Ok(ModelMetadata {
+                        supports_image: Some(false),
+                        ..initial
+                    }),
+                }
+            })
+            .await
+            .copied()
+    }
 }
 
 #[async_trait]
@@ -205,22 +256,28 @@ impl LLMEngine for TrtllmSidecarEngine {
             // `Watch`). Do not grow a second readiness protocol here.
             Some(configured) => {
                 let reported = match client.model_limits(&model.source).await {
-                    Ok(reported) => reported,
+                    Ok(ModelInfoResponse::Available(reported)) => reported,
+                    Ok(ModelInfoResponse::Unsupported(status)) => {
+                        tracing::warn!(
+                            code = ?status.code(),
+                            message = status.message(),
+                            configured_context_length = configured,
+                            "Control.GetModelInfo is unavailable; using the configured \
+                             --context-length"
+                        );
+                        ModelMetadata {
+                            supports_image: Some(false),
+                            ..Default::default()
+                        }
+                    }
                     Err(error) => {
-                        // Tolerated because some OpenEngine servicer builds ship
-                        // without Control, which is what --context-length exists
-                        // for. UNIMPLEMENTED also fits an engine left on the
-                        // default --grpc-protocol smg, where Generate will fail
-                        // too -- name both so the log points at the real fix.
                         tracing::warn!(
                             %error,
                             configured_context_length = configured,
-                            "Control.GetModelInfo failed; using the configured \
-                             --context-length. If this is UNIMPLEMENTED, the engine either \
-                             ships no Control service or was started without \
-                             --grpc-protocol openengine"
+                            "Control.GetModelInfo failed transiently; using the configured \
+                             --context-length and deferring media capability discovery"
                         );
-                        ModelLimits::default()
+                        ModelMetadata::default()
                     }
                 };
                 if let Some(engine_context_length) = reported.context_length
@@ -233,7 +290,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                          reported; using the configured --context-length"
                     );
                 }
-                ModelLimits {
+                ModelMetadata {
                     context_length: Some(configured),
                     ..reported
                 }
@@ -286,13 +343,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let proto_request = build_generate_request(
-            &request,
-            &request_id,
-            &self.model.source,
-            self.limits.get().copied(),
-            self.mode,
-        )?;
+        let limits = self.metadata_for_request(client, &request).await?;
         let mut state = ResponseState::new(&request, self.mode);
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
@@ -303,6 +354,13 @@ impl LLMEngine for TrtllmSidecarEngine {
         // consumer. A decode-mode request without a handoff ran locally and
         // has nothing to strand.
         let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
+        let proto_request = build_generate_request(
+            request,
+            &request_id,
+            &self.model.source,
+            Some(limits),
+            self.mode,
+        )?;
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
         // streamed chunk costs a boxed future and a waker registration on every

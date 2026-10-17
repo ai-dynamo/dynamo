@@ -42,6 +42,64 @@ async fn aggregated_generation_streams_delta_then_terminal() {
 }
 
 #[tokio::test]
+async fn advertised_image_media_reaches_openengine_and_uses_expanded_usage() {
+    let service = FakeTrtllm::default();
+    service.supports_multimodal.store(true, Ordering::SeqCst);
+    service.advertises_image.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    add_images(&mut req, ["data:image/png;base64,aW1hZ2U="]);
+    let outputs = collect(&engine, req).await;
+    let usage = outputs
+        .last()
+        .and_then(|output| output.completion_usage.as_ref())
+        .expect("terminal engine usage");
+    assert_eq!(usage.prompt_tokens, 67, "3 text tokens + 64 image tokens");
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(
+        sent.stopping.as_ref().expect("stopping").max_tokens,
+        None,
+        "the expanded image prompt budget belongs to TensorRT-LLM"
+    );
+    assert_eq!(sent.media.len(), 1);
+    assert_eq!(sent.media[0].modality, pb::Modality::Image as i32);
+    assert!(matches!(
+        sent.media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:image/png")
+    ));
+}
+
+#[tokio::test]
+async fn both_multimodal_capability_signals_are_required() {
+    for (coarse, image) in [(true, false), (false, true)] {
+        let service = FakeTrtllm::default();
+        service.supports_multimodal.store(coarse, Ordering::SeqCst);
+        service.advertises_image.store(image, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine(&server.endpoint, 1);
+        engine.start(0).await.expect("start");
+
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        let context = dynamo_backend_common::testing::mock_context();
+        let result = engine
+            .generate(req, GenerateContext::new(context, None))
+            .await;
+        assert!(
+            result.is_err(),
+            "capabilities ({coarse}, {image}) must fail closed"
+        );
+        assert!(server.service.requests.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeTrtllm::default();
     service.reject.store(true, Ordering::SeqCst);
@@ -382,6 +440,64 @@ async fn a_configured_context_length_survives_a_server_without_control() {
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(8192)
+    );
+
+    let mut image_request = request();
+    add_images(&mut image_request, ["https://example.com/image.png"]);
+    let error = match engine
+        .generate(
+            image_request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+    {
+        Ok(_) => panic!("a server without capability discovery must reject images"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise image support")
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        1,
+        "a definitive UNIMPLEMENTED response must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn image_request_retries_transient_capability_discovery() {
+    let service = FakeTrtllm::default();
+    service.unavailable_model_info.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
+    engine.start(0).await.expect("start with configured window");
+
+    server
+        .service
+        .unavailable_model_info
+        .store(false, Ordering::SeqCst);
+    server
+        .service
+        .supports_multimodal
+        .store(true, Ordering::SeqCst);
+    server
+        .service
+        .advertises_image
+        .store(true, Ordering::SeqCst);
+    let mut image_request = request();
+    add_images(&mut image_request, ["https://example.com/image.png"]);
+
+    let output = collect(&engine, image_request).await;
+    assert_eq!(
+        output.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        2,
+        "the image request must retry the transient startup failure once"
     );
 }
 
