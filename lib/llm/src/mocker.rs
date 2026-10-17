@@ -642,9 +642,20 @@ impl MockerExecutionContext {
                         replay_port,
                         dp_rank,
                         args.block_size as u32,
+                        args.runtime.kv_state_agent,
+                        args.runtime.zmq_kv_events_topic.clone().unwrap_or_default(),
                     )
                     .await
                     {
+                        // The external KV state agent consumes the raw stream;
+                        // a local relay would publish every event twice.
+                        Ok(sink) if args.runtime.kv_state_agent => (
+                            KvEventPublishers::new(
+                                None,
+                                Some(Arc::new(sink) as Arc<dyn RawKvEventSink>),
+                            ),
+                            None,
+                        ),
                         Ok(sink) => {
                             let source_config = Some(KvEventSourceConfig::Zmq {
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
@@ -824,6 +835,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
+        if let Some(kv_hint) = &request.kv_hint {
+            // Mocker workers have no KV transfer path; hints are observed only.
+            tracing::debug!(request_id = ctx.id(), ?kv_hint, "Ignoring router KV hint");
+        }
 
         // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {

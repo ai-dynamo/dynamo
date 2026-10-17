@@ -12,6 +12,7 @@ from dynamo.common.configuration.groups.router_args import (
     add_worker_router_arguments,
 )
 from dynamo.common.configuration.utils import Deprecated
+from dynamo.common.kv_state_agent import validate_advertise_host
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -561,6 +562,56 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
     )
     parser.add_argument(
+        "--kv-state-agent",
+        action="store_true",
+        default=False,
+        help="Publish KV events through an external KV state agent "
+        "(python -m dynamo.kv_state_agent) instead of an in-process relay. Host-pinned "
+        "events are tagged KVCR-owned, so the router indexes them under a CacheOwner per "
+        "worker DP rank. Requires --zmq-kv-events-ports and --num-host-blocks.",
+    )
+    parser.add_argument(
+        "--kv-state-agent-router-hints",
+        action="store_true",
+        default=False,
+        help="With --kv-state-agent, advertise router-hint capability and a placeholder "
+        "source control endpoint per CacheOwner so the router runs its hinted lower-tier "
+        "lookup. The mocker ignores the hints it receives.",
+    )
+    parser.add_argument(
+        "--kv-state-agent-raw-host",
+        type=str,
+        default=None,
+        help="With --kv-state-agent, the connectable host the KV state agent dials for "
+        "this process's raw KV event streams, as dynamo_state_agent.raw_advertise_host "
+        "for vLLM workers. Required with --kv-state-agent.",
+    )
+    parser.add_argument(
+        "--kv-state-agent-cache-slot",
+        type=int,
+        default=None,
+        help="With --kv-state-agent, the first CacheOwner slot of this process: worker i's "
+        "DP rank r owns slot (this + i * data-parallel-size + r), as KVCR_CACHE_SLOT in the "
+        "vLLM KVCR manifests. Give each mocker process a disjoint range. Required with "
+        "--kv-state-agent.",
+    )
+    parser.add_argument(
+        "--kv-state-endpoint",
+        type=str,
+        default=os.environ.get("DYN_KV_STATE_ENDPOINT"),
+        help="Endpoint identity that owns this worker's KV event and recovery state. "
+        "Defaults to the serving endpoint.",
+    )
+    parser.add_argument(
+        "--kv-transfer-island-size",
+        type=int,
+        default=None,
+        help="Split this process's workers into KV-transfer islands of this many "
+        "workers: worker i's value for DYN_KV_TRANSFER_DOMAIN gets the suffix "
+        "-{i // N}, so one mocker process can stand for several islands. Requires "
+        "DYN_TOPOLOGY_ENABLED.",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -732,6 +783,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
+
+    if args.kv_transfer_island_size is not None and args.kv_transfer_island_size < 1:
+        raise ValueError("--kv-transfer-island-size must be positive")
+
+    if args.kv_state_agent:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--kv-state-agent requires --zmq-kv-events-ports")
+        # An --extra-engine-args file carries its own native_host_offload.
+        if args.num_host_blocks is None and args.extra_engine_args is None:
+            raise ValueError("--kv-state-agent requires --num-host-blocks")
+        if args.kv_state_agent_raw_host is None:
+            raise ValueError("--kv-state-agent requires --kv-state-agent-raw-host")
+        validate_advertise_host(args.kv_state_agent_raw_host)
+        if args.kv_state_agent_cache_slot is None or args.kv_state_agent_cache_slot < 0:
+            raise ValueError(
+                "--kv-state-agent requires a non-negative --kv-state-agent-cache-slot"
+            )
+    else:
+        for flag, given in (
+            ("--kv-state-agent-router-hints", args.kv_state_agent_router_hints),
+            ("--kv-state-agent-raw-host", args.kv_state_agent_raw_host is not None),
+            ("--kv-state-agent-cache-slot", args.kv_state_agent_cache_slot is not None),
+        ):
+            if given:
+                raise ValueError(f"{flag} requires --kv-state-agent")
 
     # Set endpoint default based on worker type if not explicitly provided
     if args.endpoint is None:

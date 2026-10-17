@@ -5,7 +5,6 @@
 
 use super::*;
 use aisimulate_core::engine::PassStartEffects;
-use dynamo_kv_router::protocols::StorageTier;
 
 #[derive(Clone)]
 pub(super) struct RankDispatch {
@@ -485,11 +484,8 @@ impl RankDispatch {
             .iter()
             .map(|event| (event.event.clone(), event.storage_tier))
             .collect();
-        // The vLLM wire format needs each block's token IDs, which AISimulate
-        // does not carry for G2 residency; those events use only the event sink.
-        raw_events.retain(|event| {
-            event.storage_tier == StorageTier::Device || event.block_token_ids.is_some()
-        });
+        // AISimulate carries no token IDs for G2 residency; the raw sink
+        // recovers them from the blocks' earlier G1 stores.
         if let Err(error) = self
             .kv_event_publishers
             .publish_event_sink_batch_only(normal_events)

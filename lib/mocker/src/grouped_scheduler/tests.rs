@@ -239,10 +239,11 @@ async fn two_rank_handles_share_one_group_boundary_and_publish_rank_effects() {
 }
 
 /// Encodes every raw batch with the vLLM ZMQ wire encoder, which requires each
-/// stored block's token IDs.
+/// stored block's token IDs, and records each wire store's medium and tokens.
 #[derive(Default)]
 struct ZmqEncodingSink {
-    tiers: StdMutex<Vec<StorageTier>>,
+    block_tokens: StdMutex<crate::services::zmq_events::ResidentBlockTokens>,
+    stores: StdMutex<Vec<(Option<String>, Vec<u32>)>>,
 }
 
 impl RawKvEventSink for ZmqEncodingSink {
@@ -251,9 +252,27 @@ impl RawKvEventSink for ZmqEncodingSink {
     }
 
     fn publish_batch(&self, events: Vec<RawKvEvent>) -> Result<()> {
-        crate::services::zmq_events::encode_event_batch(&events, 4, 0)?;
-        let mut tiers = self.tiers.lock().unwrap();
-        tiers.extend(events.iter().map(|event| event.storage_tier));
+        let mut block_tokens = self.block_tokens.lock().unwrap();
+        let Some(payload) = crate::services::zmq_events::encode_event_batch(
+            &events,
+            &mut block_tokens,
+            4,
+            0,
+            false,
+        )?
+        else {
+            return Ok(());
+        };
+        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload)?;
+        let mut stores = self.stores.lock().unwrap();
+        for event in batch.events {
+            if let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored {
+                medium, token_ids, ..
+            } = event
+            {
+                stores.push((medium, token_ids));
+            }
+        }
         Ok(())
     }
 }
@@ -367,10 +386,10 @@ async fn native_host_offload_restore_wakes_idle_engine_and_publishes_g1_residenc
         ["stored", "removed", "stored"]
     );
     assert_eq!(seed_residency(StorageTier::HostPinned), ["stored"]);
-    // G2 residency carries no token IDs, so only G1 events reach the vLLM wire.
-    let zmq_tiers = zmq.tiers.lock().unwrap();
-    assert!(!zmq_tiers.is_empty());
-    assert!(zmq_tiers.iter().all(|tier| *tier == StorageTier::Device));
+    // G2 residency reaches the vLLM wire with token IDs recovered from G1.
+    let wire_stores = zmq.stores.lock().unwrap();
+    assert!(wire_stores.contains(&(None, vec![1, 2, 3, 4])));
+    assert!(wire_stores.contains(&(Some("CPU_PINNED".to_string()), vec![1, 2, 3, 4])));
 }
 
 #[tokio::test(start_paused = true)]
