@@ -14,7 +14,6 @@ use std::sync::{
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum_server::accept::Accept;
 use futures::task::AtomicWaker;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -88,6 +87,12 @@ pub(super) struct ConnectionService<S> {
     deadline: ConnectionDeadline,
 }
 
+impl<S> ConnectionService<S> {
+    pub(super) fn new(inner: S, deadline: ConnectionDeadline) -> Self {
+        Self { inner, deadline }
+    }
+}
+
 impl<S, B> tower::Service<axum::http::Request<B>> for ConnectionService<S>
 where
     S: tower::Service<axum::http::Request<B>>,
@@ -106,54 +111,6 @@ where
     }
 }
 
-#[derive(Clone)]
-pub(super) struct WriteTimeoutAcceptor<A> {
-    inner: A,
-    timeout: Duration,
-}
-
-impl<A> WriteTimeoutAcceptor<A> {
-    pub(super) fn new(inner: A, timeout: Duration) -> Self {
-        Self { inner, timeout }
-    }
-}
-
-impl<A, I, S> Accept<I, S> for WriteTimeoutAcceptor<A>
-where
-    A: Accept<I, S>,
-    A::Future: Send + 'static,
-    A::Stream: Send + 'static,
-    A::Service: Send + 'static,
-{
-    type Stream = WriteTimeoutIo<A::Stream>;
-    type Service = ConnectionService<A::Service>;
-    type Future = Pin<Box<dyn Future<Output = io::Result<(Self::Stream, Self::Service)>> + Send>>;
-
-    fn accept(&self, stream: I, service: S) -> Self::Future {
-        let accepted = self.inner.accept(stream, service);
-        let timeout = self.timeout;
-        Box::pin(async move {
-            let (inner, service) = accepted.await?;
-            let deadline = ConnectionDeadline::default();
-            Ok((
-                WriteTimeoutIo {
-                    inner,
-                    timeout,
-                    stalled: None,
-                    is_write_pending: false,
-                    expired: false,
-                    connection_deadline: deadline.clone(),
-                    transfer_timer: None,
-                },
-                ConnectionService {
-                    inner: service,
-                    deadline,
-                },
-            ))
-        })
-    }
-}
-
 pub(super) struct WriteTimeoutIo<I> {
     inner: I,
     timeout: Duration,
@@ -165,6 +122,22 @@ pub(super) struct WriteTimeoutIo<I> {
 }
 
 impl<I> WriteTimeoutIo<I> {
+    pub(super) fn new(
+        inner: I,
+        timeout: Duration,
+        connection_deadline: ConnectionDeadline,
+    ) -> Self {
+        Self {
+            inner,
+            timeout,
+            stalled: None,
+            is_write_pending: false,
+            expired: false,
+            connection_deadline,
+            transfer_timer: None,
+        }
+    }
+
     fn check_timeout(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
         if let Some(deadline) = self.connection_deadline.next(cx) {
             let timer = self
@@ -282,6 +255,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<I> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::server::{Handle, serve};
     use super::*;
     use axum::{
         Router,
@@ -385,7 +359,7 @@ mod tests {
     }
 
     // Actual HTTP and TLS connections with a client that stops consuming data.
-    // Runs the same acceptor used by the frontend, without GPU/model infrastructure.
+    // Runs the same accept loop used by the frontend, without GPU/model infrastructure.
     #[tokio::test]
     async fn stalled_download_is_bounded_for_http_and_https() {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -393,7 +367,7 @@ mod tests {
                 for shutdown in [false, true] {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                     let addr = listener.local_addr().unwrap();
-                    let handle = axum_server::Handle::new();
+                    let handle = Handle::default();
                     let idle = if shutdown {
                         Duration::from_secs(30)
                     } else {
@@ -402,7 +376,7 @@ mod tests {
                     let upstream_listener =
                         tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                     let upstream_addr = upstream_listener.local_addr().unwrap();
-                    let upstream_handle = axum_server::Handle::new();
+                    let upstream_handle = Handle::default();
                     let dropped = std::sync::Arc::new(tokio::sync::Notify::new());
                     let body_dropped = dropped.clone();
                     let upstream_router = Router::new().route(
@@ -419,11 +393,13 @@ mod tests {
                         }),
                     );
                     let upstream = TestServer {
-                        task: tokio::spawn(
-                            axum_server::from_tcp(upstream_listener.into_std().unwrap())
-                                .handle(upstream_handle.clone())
-                                .serve(upstream_router.into_make_service()),
-                        ),
+                        task: tokio::spawn(serve(
+                            upstream_listener,
+                            None,
+                            upstream_router,
+                            Duration::from_secs(30),
+                            upstream_handle.clone(),
+                        )),
                         handle: upstream_handle,
                     };
                     let (_, router) = super::super::batch_proxy::router(
@@ -454,15 +430,14 @@ mod tests {
                                 .into(),
                             )
                             .unwrap();
-                        let config = axum_server::tls_rustls::RustlsConfig::from_config(
-                            std::sync::Arc::new(config),
-                        );
-                        let server =
-                            axum_server::from_tcp_rustls(listener.into_std().unwrap(), config)
-                                .map(|inner| WriteTimeoutAcceptor::new(inner, idle))
-                                .handle(handle.clone())
-                                .serve(router.into_make_service());
-                        task = tokio::spawn(server);
+                        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+                        task = tokio::spawn(serve(
+                            listener,
+                            Some(acceptor),
+                            router,
+                            idle,
+                            handle.clone(),
+                        ));
                         let mut roots = rustls::RootCertStore::empty();
                         roots.add(cert.cert.der().clone()).unwrap();
                         let config = rustls::ClientConfig::builder_with_provider(provider)
@@ -483,11 +458,7 @@ mod tests {
                                 .unwrap(),
                         );
                     } else {
-                        let server = axum_server::from_tcp(listener.into_std().unwrap())
-                            .map(|inner| WriteTimeoutAcceptor::new(inner, idle))
-                            .handle(handle.clone())
-                            .serve(router.into_make_service());
-                        task = tokio::spawn(server);
+                        task = tokio::spawn(serve(listener, None, router, idle, handle.clone()));
                         client = Box::new(tokio::net::TcpStream::connect(addr).await.unwrap());
                     }
                     let mut frontend = TestServer {
@@ -550,7 +521,7 @@ mod tests {
                 let addr = listener.local_addr().unwrap();
                 let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let upstream_addr = upstream_listener.local_addr().unwrap();
-                let upstream_handle = axum_server::Handle::new();
+                let upstream_handle = Handle::default();
                 let dropped = Arc::new(tokio::sync::Notify::new());
                 let body_dropped = dropped.clone();
                 let upstream_router = Router::new().route("/v1/files/file-1/content", get(move || {
@@ -564,15 +535,15 @@ mod tests {
                     }
                 }));
                 let upstream = TestServer {
-                    task: tokio::spawn(axum_server::from_tcp(upstream_listener.into_std().unwrap())
-                        .handle(upstream_handle.clone()).serve(upstream_router.into_make_service())),
+                    task: tokio::spawn(serve(upstream_listener, None, upstream_router,
+                        Duration::from_secs(30), upstream_handle.clone())),
                     handle: upstream_handle,
                 };
                 let (_, proxy) = super::super::batch_proxy::router(
                     &format!("http://{upstream_addr}"), None, None, 1024, 1024,
                     tokio_util::sync::CancellationToken::new(),
                 ).unwrap();
-                let handle = axum_server::Handle::new();
+                let handle = Handle::default();
                 let idle = Duration::from_secs(30);
                 let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
                 let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5))
@@ -582,14 +553,10 @@ mod tests {
                         .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
                         .with_single_cert(vec![cert.cert.der().clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into()).unwrap();
                     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-                    let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config));
-                    tokio::spawn(axum_server::from_tcp_rustls(listener.into_std().unwrap(), config)
-                        .map(|inner| WriteTimeoutAcceptor::new(inner, idle)).handle(handle.clone())
-                        .serve(proxy.into_make_service()))
+                    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+                    tokio::spawn(serve(listener, Some(acceptor), proxy, idle, handle.clone()))
                 } else {
-                    tokio::spawn(axum_server::from_tcp(listener.into_std().unwrap())
-                        .map(|inner| WriteTimeoutAcceptor::new(inner, idle)).handle(handle.clone())
-                        .serve(proxy.into_make_service()))
+                    tokio::spawn(serve(listener, None, proxy, idle, handle.clone()))
                 };
                 let mut frontend = TestServer { handle: handle.clone(), task };
                 let client = if is_tls { client.build().unwrap() } else { client.http2_prior_knowledge().build().unwrap() };
@@ -612,7 +579,7 @@ mod tests {
     }
 
     struct TestServer {
-        handle: axum_server::Handle,
+        handle: Handle,
         task: tokio::task::JoinHandle<io::Result<()>>,
     }
 

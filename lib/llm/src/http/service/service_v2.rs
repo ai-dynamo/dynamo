@@ -29,7 +29,6 @@ use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_me
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
-use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
@@ -938,7 +937,7 @@ impl HttpService {
         &self,
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
-        server_handle: Option<axum_server::Handle>,
+        server_handle: Option<super::server::Handle>,
     ) -> Result<()> {
         if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
@@ -977,26 +976,25 @@ impl HttpService {
             )
             .context("Failed to create TLS config")?;
             server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            let config = RustlsConfig::from_config(Arc::new(server_config));
+            let tls = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 
             let handle = server_handle.unwrap_or_default();
-            let std_listener = bind_listener(addr)
-                .and_then(|l| l.into_std())
-                .map_err(|e| {
-                    tracing::error!(
-                        protocol = %protocol,
-                        address = %address,
-                        error = %e,
-                        "Failed to bind server to address"
-                    );
-                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
-                })?;
-            let server = axum_server::from_tcp_rustls(std_listener, config)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
-                .handle(handle.clone())
-                .serve(router.into_make_service());
+            let listener = bind_listener(addr).map_err(|e| {
+                tracing::error!(
+                    protocol = %protocol,
+                    address = %address,
+                    error = %e,
+                    "Failed to bind server to address"
+                );
+                anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
+            })?;
+            let server = super::server::serve(
+                listener,
+                Some(tls),
+                router,
+                write_idle_timeout(),
+                handle.clone(),
+            );
 
             let server = async {
                 tokio::pin!(server);
@@ -1075,19 +1073,14 @@ impl HttpService {
                 }
             };
 
-            let std_listener = listener.into_std()?;
             self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             let handle = server_handle.unwrap_or_default();
-            let server = axum_server::from_tcp(std_listener)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
-                .handle(handle.clone())
-                .serve(router.into_make_service());
+            let server =
+                super::server::serve(listener, None, router, write_idle_timeout(), handle.clone());
             tokio::pin!(server);
             tokio::select! {
                 result = &mut server => {
@@ -1880,7 +1873,7 @@ mod tests {
             .build()
             .unwrap();
         let cancel = CancellationToken::new();
-        let tls_handle = axum_server::Handle::new();
+        let tls_handle = super::super::server::Handle::default();
         let server_handle = tls_handle.clone();
         let server_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
@@ -2810,7 +2803,7 @@ mod tests {
                     let cancel = CancellationToken::new();
                     let _guard = cancel.clone().drop_guard();
                     let server_cancel = cancel.clone();
-                    let handle = axum_server::Handle::new();
+                    let handle = super::super::server::Handle::default();
                     let server_handle = handle.clone();
                     let listener = if is_tls {
                         None

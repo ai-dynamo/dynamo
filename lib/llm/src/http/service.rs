@@ -22,6 +22,7 @@ mod anthropic;
 mod batch_proxy;
 pub mod metadata;
 mod openai;
+mod server;
 mod write_timeout;
 
 pub mod busy_threshold;
