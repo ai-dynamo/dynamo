@@ -141,6 +141,39 @@ pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, 
     result
 }
 
+/// Names of ready regular containers and ready native sidecars in a Pod.
+///
+/// Native sidecars must be declared as init containers with `restartPolicy: Always`.
+/// Ordinary init containers are excluded even when their status reports ready.
+/// These are discovery candidates; readiness alone does not establish that a
+/// container has registered a Dynamo worker.
+pub fn ready_container_names(pod: &Pod) -> impl Iterator<Item = &str> {
+    let status = pod.status.as_ref();
+    let regular = status
+        .and_then(|s| s.container_statuses.as_ref())
+        .into_iter()
+        .flatten();
+    let sidecars = status
+        .and_then(|s| s.init_container_statuses.as_ref())
+        .into_iter()
+        .flatten()
+        .filter(move |status| {
+            pod.spec
+                .as_ref()
+                .and_then(|s| s.init_containers.as_ref())
+                .into_iter()
+                .flatten()
+                .any(|container| {
+                    container.name == status.name
+                        && container.restart_policy.as_deref() == Some("Always")
+                })
+        });
+    regular
+        .chain(sidecars)
+        .filter(|status| status.ready)
+        .map(|status| status.name.as_str())
+}
+
 /// Extract (instance_id, cr_name, pod_uid) tuples from a Pod for each ready container.
 ///
 /// Skips pods without `metadata.uid` — never falls back to name-only identity.
@@ -158,20 +191,9 @@ pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String)> 
         }
     };
 
-    let container_statuses = match pod
-        .status
-        .as_ref()
-        .and_then(|s| s.container_statuses.as_ref())
-    {
-        Some(statuses) => statuses,
-        None => return vec![],
-    };
-
-    container_statuses
-        .iter()
-        .filter(|cs| cs.ready)
-        .map(|cs| {
-            let target = KubeDiscoveryTarget::Container(pod_name.to_string(), cs.name.clone());
+    ready_container_names(pod)
+        .map(|name| {
+            let target = KubeDiscoveryTarget::Container(pod_name.to_string(), name.to_string());
             (target.instance_id(), target.cr_name(), pod_uid.clone())
         })
         .collect()
@@ -259,6 +281,88 @@ impl PodInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_sidecar_discovery_tracks_readiness_and_identity() {
+        use k8s_openapi::api::core::v1::{Container, ContainerStatus, PodSpec, PodStatus};
+
+        let mut pod = Pod::default();
+        pod.metadata.name = Some("worker-0".into());
+        pod.metadata.uid = Some("uid-0".into());
+        pod.spec = Some(PodSpec {
+            init_containers: Some(vec![
+                Container {
+                    name: "dynamo".into(),
+                    restart_policy: Some("Always".into()),
+                    ..Default::default()
+                },
+                Container {
+                    name: "setup".into(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        });
+        pod.status = Some(PodStatus {
+            // The engine need not have started for the sidecar to be ready.
+            init_container_statuses: Some(
+                ["dynamo", "setup", "unknown"]
+                    .into_iter()
+                    .map(|name| ContainerStatus {
+                        name: name.into(),
+                        ready: true,
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        let target = KubeDiscoveryTarget::Container("worker-0".into(), "dynamo".into());
+        assert_eq!(
+            extract_ready_containers(&pod),
+            vec![(
+                hash_container_name("worker-0", "dynamo"),
+                target.cr_name(),
+                "uid-0".into()
+            )]
+        );
+
+        pod.status
+            .as_mut()
+            .unwrap()
+            .init_container_statuses
+            .as_mut()
+            .unwrap()[0]
+            .ready = false;
+        assert!(extract_ready_containers(&pod).is_empty());
+        pod.status
+            .as_mut()
+            .unwrap()
+            .init_container_statuses
+            .as_mut()
+            .unwrap()[0]
+            .ready = true;
+        assert_eq!(extract_ready_containers(&pod).len(), 1);
+
+        pod.status.as_mut().unwrap().container_statuses = Some(vec![ContainerStatus {
+            name: "main".into(),
+            ready: true,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            ready_container_names(&pod).collect::<Vec<_>>(),
+            vec!["main", "dynamo"]
+        );
+        pod.spec = None;
+        assert_eq!(
+            ready_container_names(&pod).collect::<Vec<_>>(),
+            vec!["main"]
+        );
+        pod.metadata.uid = None;
+        assert!(extract_ready_containers(&pod).is_empty());
+        pod.status = None;
+        assert!(ready_container_names(&pod).next().is_none());
+    }
 
     #[test]
     fn test_pod_mode_backward_compat() {
