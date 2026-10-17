@@ -40,8 +40,10 @@ comment, or open pull requests unless the user asks.
   `cherry-pick:rc(n+1)`, the build it first ships in.
 - Set the issue's **Releases** field to the target release (for example
   `Dynamo v1.6.0`). Without it the pick does not appear on that release's
-  cherry-pick board. For more than one release line, add each release and
-  open one release PR per branch.
+  cherry-pick board.
+- `cherry-pick:rcN` is single-select, so an issue records one landing RC. An
+  issue may carry several release PRs only when they all land in the same RC.
+  See Edge Cases for the split rules.
 - The issue can live in any Linear team that carries the cherry-pick labels.
   A team without them uses DYN.
 
@@ -132,7 +134,10 @@ following the internal steps above.
 |---|---|
 | A pick is reverted | `cherry-pick:rcN` no longer holds. Return to `cherry-pick:requested` and open a fresh release PR; the re-land gets a new `rcN`. |
 | Several main PRs, one release PR | Attach the shared release PR to every issue and list each main PR in its title or body. |
-| Same fix, two releases on different RCs | Use one issue per release line, so each carries its own Releases entry and `rcN`. |
+| Same fix, two release lines, same RC | Add each release to the Releases field and open one release PR per branch, all on one issue. One approval covers them. |
+| Same fix, two release lines, different RCs | Use one issue per release line, so each carries its own Releases entry and `rcN`. |
+| Two release PRs on one branch, same RC | Attach both to the issue (a pick split in two, or a pick plus its prerequisite). Merge both before setting `rcN`. |
+| A second release PR after the first landed | Open a new issue for the follow-up, linked to the first. The landed issue keeps its `rcN`. |
 
 ## Related
 
