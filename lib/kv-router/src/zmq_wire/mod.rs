@@ -184,18 +184,21 @@ impl ZmqEventNormalizer {
         //    path so their salted namespaces still propagate.
         //  - Disk / External (STORAGE) are hash-only lower-tier events with no
         //    extra_keys/cache_namespace, so they must not mutate per-group
-        //    metadata or the salted-namespace chain and are outside the SW/SSM
-        //    group filter's semantics; bypass straight to conversion, which keeps
-        //    them (no event id is wasted).
+        //    metadata or the salted-namespace chain for framework events. KVCR
+        //    still needs group classification before the conversion bypass.
         //  - Unrecognized media (e.g. vLLM 0.26.0 FS/OBJ) fail closed here so the
         //    listener records an intentional filter. Bypassing to conversion,
         //    which drops them, would instead accept the event, burn a
         //    next_event_id, and leave an id gap the event processor mistakes for
         //    an engine drop -- the same trap the locality gate above avoids.
+        let mut lower_tier = false;
         if let Some(m) = raw.medium() {
             match StorageTier::from_kv_medium(m) {
                 Some(StorageTier::Device | StorageTier::HostPinned) => {}
-                Some(_) => return Ok(raw),
+                Some(_) if matches!(raw.ownership(), Ok(KvEventOwnership::Framework)) => {
+                    return Ok(raw);
+                }
+                Some(_) => lower_tier = true,
                 None => return Err(ZmqEventFilterReason::UnknownMedium),
             }
         }
@@ -207,7 +210,9 @@ impl ZmqEventNormalizer {
         if let Some(reason) = self.filter_reason(metadata, worker.dp_rank) {
             return Err(reason);
         }
-        self.propagate_cache_namespace(&mut raw, worker)?;
+        if !lower_tier {
+            self.propagate_cache_namespace(&mut raw, worker)?;
+        }
         Ok(raw)
     }
 
